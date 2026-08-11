@@ -164,6 +164,7 @@ if TYPE_CHECKING:
     import structlog
     from agno.agent import Agent
 
+    from mindroom.approval_continuation import ApprovalContinuation
     from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.config.main import Config
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
@@ -997,6 +998,14 @@ class AgentBot:
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
+
+    async def resume_approval_continuation(self, continuation: ApprovalContinuation) -> None:
+        """Resume one durable paused run through this bot's response serializer."""
+        await self._response_runner.resume_approval_continuation(continuation)
+
+    async def fail_approval_continuation(self, continuation: ApprovalContinuation, reason: str) -> None:
+        """Make one continuation visibly terminal when its owner disappeared."""
+        await self._response_runner.fail_approval_continuation(continuation, reason)
 
     async def _emit_reaction_received_hooks(
         self,

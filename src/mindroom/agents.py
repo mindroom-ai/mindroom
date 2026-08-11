@@ -35,7 +35,7 @@ from mindroom.runtime_resolution import (
     resolve_private_requester_scope_root,
 )
 from mindroom.timing import timed, timed_block
-from mindroom.tool_approval import tool_requires_approval_for_openai_compat
+from mindroom.tool_approval import tool_may_require_approval, tool_requires_approval_for_openai_compat
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     default_worker_routed_tools,
@@ -1300,6 +1300,14 @@ def _prune_toolkit_functions(
     return toolkit if toolkit.functions or toolkit.async_functions else None
 
 
+def _mark_toolkit_approval_requirements(toolkit: Toolkit, config: Config) -> None:
+    """Move potentially gated calls onto Agno's persisted confirmation boundary."""
+    functions = {**toolkit.functions, **toolkit.async_functions}
+    for function in functions.values():
+        if tool_may_require_approval(config, function.name):
+            function.requires_confirmation = True
+
+
 @timed("system_prompt_assembly.agent_create.dynamic_tool_selection")
 def _resolve_agent_dynamic_tool_selection(
     *,
@@ -1518,6 +1526,7 @@ def _assemble_agent_toolkits(
             if toolkit:
                 toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
             if toolkit:
+                _mark_toolkit_approval_requirements(toolkit, config)
                 toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
                 tools.append(toolkit)
                 target_names = (

@@ -33,6 +33,7 @@ from mindroom.tool_approval import (
     ToolApprovalCall,
     ToolApprovalScriptError,
     ToolCallWorkflowOrigin,
+    native_approval_continuation_active,
     request_tool_approval_for_call,
 )
 from mindroom.tool_system.runtime_context import (
@@ -461,6 +462,8 @@ async def _maybe_block_for_tool_approval(
     tool_name: str,
     workflow_origin: ToolCallWorkflowOrigin | None,
 ) -> str | None:
+    if native_approval_continuation_active():
+        return None
     if resolved_context.config is None or resolved_context.runtime_paths is None:
         return None
 

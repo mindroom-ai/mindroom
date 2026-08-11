@@ -38,12 +38,16 @@ from mindroom.constants import (
 )
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.logging_config import get_logger
+from mindroom.streaming import StreamingLifecycleSuspensionError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
     from contextlib import AbstractContextManager
 
     from agno.models.response import ToolExecution
+    from agno.run.agent import RunOutput
+    from agno.run.requirement import RunRequirement
+    from agno.run.team import TeamRunOutput
 
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.history.runtime import ScopeSessionContext
@@ -62,6 +66,8 @@ __all__ = [
     "EmptyRunDiscard",
     "ExcludedAttempt",
     "HandledAttempt",
+    "PausedAttempt",
+    "ResponsePausedForApproval",
     "ResponseTurnContext",
     "StandaloneReplaySnapshot",
     "StreamAttemptResolution",
@@ -70,6 +76,7 @@ __all__ = [
     "TurnRunState",
     "TurnSinks",
     "build_matrix_run_metadata",
+    "paused_attempt_from_response",
     "run_blocking_response_turn",
     "stream_response_turn",
 ]
@@ -294,12 +301,61 @@ class ExcludedAttempt:
 
 
 @dataclass(frozen=True)
+class PausedAttempt:
+    """One Agno run durably paused before approval-gated tool execution."""
+
+    session_id: str
+    run_id: str
+    tools: tuple[ToolExecution, ...]
+    requirements: tuple[RunRequirement, ...] = ()
+
+
+class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N818
+    """Leave the live response turn while its persisted Agno run awaits approval."""
+
+    def __init__(self, paused: PausedAttempt) -> None:
+        super().__init__(f"Run {paused.run_id} is waiting for tool approval")
+        self.paused = paused
+
+
+def paused_attempt_from_response(
+    response: RunOutput | TeamRunOutput,
+    *,
+    fallback_session_id: str | None,
+    fallback_run_id: str | None,
+) -> PausedAttempt | None:
+    """Extract confirmation requirements from one persisted paused Agno run."""
+    if response.status is not RunStatus.paused:
+        return None
+    requirements = tuple(requirement for requirement in response.requirements or () if requirement.needs_confirmation)
+    tools = [tool for tool in response.tools or () if tool.requires_confirmation]
+    known_call_ids = {tool.tool_call_id for tool in tools}
+    for requirement in requirements:
+        tool = requirement.tool_execution
+        if tool is not None and tool.tool_call_id not in known_call_ids:
+            tools.append(tool)
+            known_call_ids.add(tool.tool_call_id)
+    if not tools:
+        return None
+    session_id = response.session_id or fallback_session_id
+    run_id = response.run_id or fallback_run_id
+    if session_id is None or run_id is None:
+        return None
+    return PausedAttempt(
+        session_id=session_id,
+        run_id=run_id,
+        tools=tuple(tools),
+        requirements=requirements,
+    )
+
+
+@dataclass(frozen=True)
 class HandledAttempt:
     """One streaming error whose user-facing text was already emitted."""
 
 
-BlockingAttemptResolution = CompletedAttempt | ExcludedAttempt
-StreamAttemptResolution = CompletedAttempt | ExcludedAttempt | HandledAttempt
+BlockingAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt
+StreamAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt | HandledAttempt
 
 
 @dataclass(frozen=True)
@@ -607,6 +663,8 @@ async def run_blocking_response_turn(
             use_recorder_state=True,
         )
         raise
+    except ResponsePausedForApproval:
+        raise
     except Exception as e:
         _record_turn_excluded_fallback(
             ctx,
@@ -639,6 +697,8 @@ def _settle_blocking_attempt(
     # The blocking envelope publishes run metadata before recording, and only
     # for attempts that end the turn: a discarded empty run's or a superseded
     # continuation attempt's payload must not ride out on a later resolution.
+    if isinstance(resolution, PausedAttempt):
+        raise ResponsePausedForApproval(resolution)
     if isinstance(resolution, ExcludedAttempt):
         _publish_run_metadata(sinks, resolution.metadata_content)
         run_metadata = _interrupted_run_metadata(ctx, sinks, run)
@@ -815,6 +875,8 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         yield item
                     if resolution is None:
                         _raise_missing_stream_resolution(ctx.entity_label)
+                    if isinstance(resolution, PausedAttempt):
+                        raise ResponsePausedForApproval(resolution)
                     if isinstance(resolution, HandledAttempt):
                         _record_turn_excluded_fallback(
                             ctx,
@@ -888,6 +950,8 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
             original_status=RunStatus.cancelled,
             use_recorder_state=False,
         )
+        raise
+    except ResponsePausedForApproval:
         raise
     except Exception as e:
         _record_turn_excluded_fallback(

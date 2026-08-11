@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import nio
 import pytest
+from agno.models.response import ToolExecution
 from agno.session.agent import AgentSession
 
 from mindroom.bot import AgentBot
@@ -63,6 +64,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     _with_matrix_message_target,
 )
+from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
@@ -2641,3 +2643,54 @@ class TestAgentBot(AgentBotTestBase):
             resolution = await task
 
         assert _handled_response_event_id(resolution) == "$response"
+
+    @pytest.mark.asyncio
+    async def test_paused_approval_releases_conversation_for_the_next_turn(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A persisted approval pause must finish the live lifecycle instead of holding its lock."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        target = request_envelope(
+            room_id="!test:localhost",
+            reply_to_event_id="$event",
+            thread_id="$thread",
+            prompt="Run it",
+            user_id="@alice:localhost",
+            agent_name=bot.agent_name,
+        )
+        request = ResponseRequest(
+            prompt="Run it",
+            thread_history=[],
+            user_id="@alice:localhost",
+            response_envelope=target,
+        )
+        pause = ResponsePausedForApproval(
+            PausedAttempt(
+                session_id=target.target.session_id,
+                run_id="run-1",
+                tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={}),),
+            ),
+        )
+        waiting = FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$waiting",
+            is_visible_response=True,
+            final_visible_body="Waiting for approval",
+        )
+
+        with (
+            patch.object(ResponseRunner, "_run_cancellable_response", new=AsyncMock(side_effect=pause)),
+            patch.object(ResponseRunner, "_suspend_for_approval", new=AsyncMock(return_value=waiting)) as suspend,
+            patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+            patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
+        ):
+            assert await bot._response_runner.generate_response(request) == "$waiting"
+            assert not bot._response_runner.has_active_response_for_target(target.target)
+            assert await bot._response_runner.generate_response(request) == "$waiting"
+
+        assert suspend.await_count == 2

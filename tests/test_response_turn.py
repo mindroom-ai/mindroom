@@ -6,12 +6,15 @@ import asyncio
 import contextlib
 import json
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
+from agno.run.requirement import RunRequirement
 
+from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.response_turn import (
     AttemptResolved,
@@ -196,6 +199,111 @@ def _blocking_adapter(
         unexpected_error_text=unexpected_error_text,
         persist_standalone_replay=_persist if with_standalone_replay else None,
     )
+
+
+@pytest.mark.asyncio
+async def test_blocking_paused_attempt_escapes_without_recording_terminal_interruption() -> None:
+    """Treating an approval pause as an error would settle the source before it can resume."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="dangerous",
+        tool_args={"value": 1},
+        requires_confirmation=True,
+    )
+
+    async def paused_attempt(
+        _run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> object:
+        return response_turn_module.PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+        )
+
+    with pytest.raises(response_turn_module.ResponsePausedForApproval) as raised:
+        await run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, paused_attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        )
+
+    assert raised.value.paused.tools == (tool,)
+    assert recorder.outcome == "pending"
+    assert log.closed == 1
+
+
+def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -> None:
+    """Dropping the member requirement would evaluate and resume a team call under the wrong agent."""
+    tool = ToolExecution(
+        tool_call_id="call-member",
+        tool_name="dangerous",
+        tool_args={"value": 1},
+        requires_confirmation=True,
+    )
+    requirement = RunRequirement(tool)
+    requirement.member_agent_id = "member-id"
+    requirement.member_agent_name = "researcher"
+    requirement.member_run_id = "member-run"
+    response = SimpleNamespace(
+        status=RunStatus.paused,
+        session_id="team-session",
+        run_id="team-run",
+        tools=[],
+        requirements=[requirement],
+    )
+
+    paused = response_turn_module.paused_attempt_from_response(
+        response,
+        fallback_session_id="fallback-session",
+        fallback_run_id="fallback-run",
+    )
+
+    assert paused is not None
+    assert paused.tools == (tool,)
+    assert paused.requirements == (requirement,)
+    assert paused.requirements[0].member_agent_name == "researcher"
+
+
+@pytest.mark.asyncio
+async def test_streaming_paused_attempt_escapes_without_recording_terminal_interruption() -> None:
+    """Streaming must release the response lifecycle at the same persisted pause boundary."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    tool = ToolExecution(
+        tool_call_id="call-stream",
+        tool_name="dangerous",
+        tool_args={"value": 1},
+        requires_confirmation=True,
+    )
+    paused = response_turn_module.PausedAttempt(
+        session_id="session-1",
+        run_id="run-stream",
+        tools=(tool,),
+    )
+
+    async def paused_attempt(
+        _run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(paused)
+
+    with pytest.raises(response_turn_module.ResponsePausedForApproval) as raised:
+        await _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(log, paused_attempt),
+                TurnSinks(turn_recorder=cast("Any", recorder)),
+                continuation=_continuation(),
+            ),
+        )
+
+    assert raised.value.paused.run_id == "run-stream"
+    assert recorder.outcome == "pending"
+    assert log.closed == 1
 
 
 def _streaming_adapter(

@@ -23,6 +23,7 @@ from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 
+from mindroom import agents as agents_module
 from mindroom import prompts
 from mindroom.agent_storage import get_agent_runtime_state_dbs
 from mindroom.agents import (
@@ -3134,6 +3135,33 @@ def test_tool_function_filter_prunes_resolved_functions() -> None:
     assert filtered is toolkit
     assert set(toolkit.functions) == {"safe"}
     assert toolkit.async_functions == {}
+
+
+def test_mark_toolkit_approval_requirements_only_pauses_potentially_gated_calls() -> None:
+    """Removing native confirmation marking would put approval back inside the live tool hook."""
+    config = Config.model_validate(
+        {
+            "tool_approval": {
+                "default": "auto_approve",
+                "rules": [
+                    {"match": "dangerous", "action": "require_approval"},
+                    {"match": "safe", "action": "auto_approve"},
+                ],
+            },
+        },
+    )
+    toolkit = Toolkit(
+        name="approval-test",
+        tools=[
+            Function(name="dangerous", entrypoint=lambda: None),
+            Function(name="safe", entrypoint=lambda: None),
+        ],
+    )
+
+    agents_module._mark_toolkit_approval_requirements(toolkit, config)
+
+    assert toolkit.functions["dangerous"].requires_confirmation is True
+    assert toolkit.functions["safe"].requires_confirmation is not True
 
 
 @pytest.mark.asyncio

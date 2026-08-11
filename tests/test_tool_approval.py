@@ -294,6 +294,94 @@ async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_detached_approval_card_resolves_without_live_waiter(tmp_path: Path) -> None:
+    """Reintroducing a waiter would keep the response coroutine alive for the approval timeout."""
+    cards = FakeApprovalCards()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    decision_handler = AsyncMock(return_value=None)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        detached_decision_handler=decision_handler,
+    )
+
+    sent = await store.create_detached_approval(
+        approval_id="approval-1",
+        continuation_id="continuation-1",
+        tool_call_id="call-1",
+        tool_name="dangerous",
+        arguments={"value": 1},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=30,
+    )
+
+    assert sent == SentApprovalEvent("$approval")
+    assert not store.has_active_in_memory_approval_card("$approval")
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="approved",
+        reason=None,
+    )
+
+    assert result.resolved is True
+    decision_handler.assert_awaited_once_with("continuation-1", "call-1", "approved", None)
+
+
+@pytest.mark.asyncio
+async def test_detached_approval_expiry_resolves_continuation_without_waiter(tmp_path: Path) -> None:
+    """Expiry must wake the durable continuation even though no response coroutine is waiting."""
+    cards = FakeApprovalCards()
+    decision_handler = AsyncMock(return_value=None)
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        detached_decision_handler=decision_handler,
+    )
+
+    await store.create_detached_approval(
+        approval_id="approval-1",
+        continuation_id="continuation-1",
+        tool_call_id="call-1",
+        tool_name="dangerous",
+        arguments={},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=0,
+    )
+    for _attempt in range(20):
+        if decision_handler.await_count:
+            break
+        await asyncio.sleep(0.01)
+
+    decision_handler.assert_awaited_once_with(
+        "continuation-1",
+        "call-1",
+        "expired",
+        "Tool approval request timed out.",
+    )
+    assert editor.await_args.args[2]["status"] == "expired"
+
+
+@pytest.mark.asyncio
 async def test_request_approval_carries_workflow_provenance_through_resolution(tmp_path: Path) -> None:
     """Dynamic Workflow participant cards must name the workflow and participant, pending and resolved."""
     runtime_paths = test_runtime_paths(tmp_path)

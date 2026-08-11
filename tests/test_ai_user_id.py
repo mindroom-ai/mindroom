@@ -73,6 +73,7 @@ from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.response_runner import (
     prepare_memory_and_model_context,
 )
+from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     get_tool_runtime_context,
@@ -1192,6 +1193,49 @@ class TestUserIdPassthrough:
         assert persisted_run.metadata["mindroom_original_status"] == "paused"
         assert persisted_run.messages is not None
         assert "turn paused before completion" in str(persisted_run.messages[-1].content)
+
+    @pytest.mark.asyncio
+    async def test_ai_response_surfaces_native_confirmation_pause_without_replay_settlement(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Converting a confirmation pause to text would keep approval inside the completed turn."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        paused_tool = ToolExecution(
+            tool_call_id="call-1",
+            tool_name="dangerous",
+            tool_args={"value": 1},
+            requires_confirmation=True,
+        )
+        paused_run = RunOutput(
+            run_id="run-paused",
+            agent_id="general",
+            session_id="session1",
+            content="Approval required",
+            tools=[paused_tool],
+            status=RunStatus.paused,
+        )
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai_runtime.cached_agent_run", new_callable=AsyncMock, return_value=paused_run),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            with pytest.raises(ResponsePausedForApproval) as raised:
+                await ai_response(
+                    make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
+                    prompt="Run the action",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                )
+
+        assert raised.value.paused.tools == (paused_tool,)
+        assert storage.session is None
 
     @pytest.mark.asyncio
     async def test_ai_response_cancelled_run_uses_only_latest_assistant_partial_text(

@@ -86,6 +86,7 @@ from mindroom.response_turn import (
     TurnPartialSnapshot,
     TurnSinks,
     build_matrix_run_metadata,
+    paused_attempt_from_response,
     run_blocking_response_turn,
     stream_response_turn,
 )
@@ -1586,6 +1587,13 @@ async def ai_response(  # noqa: C901
             )
 
         if response.status in (RunStatus.cancelled, RunStatus.error, RunStatus.paused):
+            paused_attempt = paused_attempt_from_response(
+                response,
+                fallback_session_id=session_id,
+                fallback_run_id=attempt.attempt_run_id,
+            )
+            if paused_attempt is not None:
+                return paused_attempt
             partial_text = _extract_interrupted_partial_text(
                 response.content,
                 messages=response.messages,

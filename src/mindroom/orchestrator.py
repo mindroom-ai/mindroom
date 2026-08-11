@@ -292,6 +292,9 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
             cards_provider=self._approval_cards,
+            entity_configured=lambda name: (
+                self.config is not None and (name in self.config.agents or name in self.config.teams)
+            ),
         )
         self._startup_maintenance = StartupMaintenanceController(
             recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (

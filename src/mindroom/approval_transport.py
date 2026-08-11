@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import nio
 
+from mindroom.approval_continuation import ApprovalContinuation, ApprovalContinuationStore, ApprovalDecision
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
@@ -25,6 +26,7 @@ from mindroom.tool_approval import (
     SentApprovalEvent,
     ToolApprovalTransportError,
     expire_orphaned_approval_cards_on_startup,
+    expire_suspended_tool_approval,
     initialize_approval_runtime,
 )
 
@@ -63,6 +65,10 @@ class _ApprovalTransportBot(Protocol):
     ) -> str | None:
         """Return the latest event id for one Matrix thread when known."""
         ...
+
+    async def resume_approval_continuation(self, continuation: ApprovalContinuation) -> None: ...
+
+    async def fail_approval_continuation(self, continuation: ApprovalContinuation, reason: str) -> None: ...
 
 
 def _approval_relation_agent_name(content: dict[str, Any], *, fallback: str) -> str:
@@ -123,10 +129,12 @@ class ApprovalMatrixTransport:
     runtime_paths: RuntimePaths
     bot_provider: Callable[[str], _ApprovalTransportBot | None]
     cards_provider: Callable[[], ApprovalView | None]
+    entity_configured: Callable[[str], bool] | None = None
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_done: bool = field(default=False, init=False, repr=False)
+    _continuations_recovered: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _startup_cleanup_retry: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _startup_cleanup_retry_delay: float = field(
@@ -134,6 +142,13 @@ class ApprovalMatrixTransport:
         init=False,
         repr=False,
     )
+    _continuations: ApprovalContinuationStore = field(init=False, repr=False)
+    _continuation_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
+    _expiry_tasks: dict[tuple[str, str], asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Open the shared durable continuation coordinator."""
+        self._continuations = ApprovalContinuationStore(self.runtime_paths.storage_root)
 
     def capture_runtime_loop(self) -> None:
         """Remember the runtime loop that owns Matrix client I/O."""
@@ -156,7 +171,103 @@ class ApprovalMatrixTransport:
             transport_sender=self.transport_sender_id,
             sending_device=self.transport_device_id,
             locate_card=self.locate_approval_card,
+            detached_decision_handler=self._handle_continuation_decision,
         )
+
+    async def _handle_continuation_decision(
+        self,
+        approval_id: str,
+        tool_call_id: str,
+        status: str,
+        reason: str | None,
+    ) -> None:
+        decision = ApprovalDecision(status)
+        continuation = await asyncio.to_thread(
+            self._continuations.resolve_call,
+            approval_id,
+            tool_call_id,
+            decision,
+            reason=reason,
+        )
+        expiry = self._expiry_tasks.pop((approval_id, tool_call_id), None)
+        if expiry is not None and expiry is not asyncio.current_task():
+            expiry.cancel()
+        if continuation is not None and continuation.state == "ready":
+            self._schedule_continuation(continuation)
+
+    def _schedule_continuation(self, continuation: ApprovalContinuation) -> None:
+        if any(
+            not task.done() and task.get_name() == f"approval-continuation-{continuation.approval_id}"
+            for task in self._continuation_tasks
+        ):
+            return
+        task = asyncio.create_task(
+            self._dispatch_continuation(continuation.approval_id),
+            name=f"approval-continuation-{continuation.approval_id}",
+        )
+        self._continuation_tasks.add(task)
+        task.add_done_callback(self._continuation_tasks.discard)
+
+    async def _dispatch_continuation(self, approval_id: str) -> None:
+        while True:
+            continuation = await asyncio.to_thread(self._continuations.get, approval_id)
+            if continuation is None or continuation.state != "ready":
+                return
+            bot = self.bot_provider(continuation.entity_name)
+            if bot is not None and bot.running:
+                await bot.resume_approval_continuation(continuation)
+                await asyncio.sleep(0)
+                continue
+            if self.entity_configured is None or self.entity_configured(continuation.entity_name):
+                await asyncio.sleep(0.25)
+                continue
+            reason = f"Requesting agent '{continuation.entity_name}' is no longer available."
+            fallback = self.bot_provider(ROUTER_AGENT_NAME)
+            if fallback is not None and fallback.running:
+                await fallback.fail_approval_continuation(continuation, reason)
+            else:
+                await asyncio.to_thread(self._continuations.fail, approval_id, reason)
+            return
+
+    def _schedule_expiry(self, continuation: ApprovalContinuation) -> None:
+        for call in continuation.calls:
+            key = (continuation.approval_id, call.tool_call_id)
+            if call.decision is not None or call.card_event_id is None or key in self._expiry_tasks:
+                continue
+
+            async def expire(
+                approval_id: str = continuation.approval_id,
+                tool_call_id: str = call.tool_call_id,
+                room_id: str = continuation.room_id,
+                card_event_id: str = call.card_event_id,
+                expires_at: str = call.expires_at,
+            ) -> None:
+                delay = max(
+                    0.0,
+                    (datetime.fromisoformat(expires_at).astimezone(UTC) - datetime.now(UTC)).total_seconds(),
+                )
+                await asyncio.sleep(delay)
+                await expire_suspended_tool_approval(room_id, card_event_id)
+                self._expiry_tasks.pop((approval_id, tool_call_id), None)
+
+            self._expiry_tasks[key] = asyncio.create_task(
+                expire(),
+                name=f"approval-expiry-{continuation.approval_id}-{call.tool_call_id}",
+            )
+
+    async def _recover_continuations(self) -> None:
+        for continuation in await asyncio.to_thread(self._continuations.recoverable):
+            if continuation.state == "pending":
+                self._schedule_expiry(continuation)
+            elif continuation.state == "ready":
+                self._schedule_continuation(continuation)
+            else:
+                reason = "Tool approval continuation was interrupted after it was claimed; it was not replayed."
+                bot = self.bot_provider(continuation.entity_name) or self.bot_provider(ROUTER_AGENT_NAME)
+                if bot is not None and bot.running:
+                    await bot.fail_approval_continuation(continuation, reason)
+                else:
+                    await asyncio.to_thread(self._continuations.fail, continuation.approval_id, reason)
 
     async def _run_on_runtime_loop(
         self,
@@ -451,6 +562,7 @@ class ApprovalMatrixTransport:
         self._startup_router_ready_for_cleanup = False
         self._startup_runtime_support_ready_for_cleanup = False
         self._startup_cleanup_done = False
+        self._continuations_recovered = False
         self._startup_cleanup_retry_delay = _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS
         retry = self._startup_cleanup_retry
         self._startup_cleanup_retry = None
@@ -465,11 +577,16 @@ class ApprovalMatrixTransport:
         """
         retry = self._startup_cleanup_retry
         self._startup_cleanup_retry = None
-        if retry is None or retry.done():
-            return
-        retry.cancel()
-        with suppress(asyncio.CancelledError):
-            await retry
+        tasks: list[asyncio.Task[None]] = [*self._continuation_tasks, *self._expiry_tasks.values()]
+        if retry is not None and not retry.done():
+            retry.cancel()
+            tasks.append(retry)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._continuation_tasks.clear()
+        self._expiry_tasks.clear()
 
     async def mark_startup_runtime_support_ready(self) -> None:
         """Record that approval runtime support can now perform startup cleanup."""
@@ -505,6 +622,9 @@ class ApprovalMatrixTransport:
                 or not self._startup_runtime_support_ready_for_cleanup
             ):
                 return
+            if not self._continuations_recovered:
+                await self._recover_continuations()
+                self._continuations_recovered = True
             if not await self._discard_orphaned_approval_cards_on_startup():
                 self._schedule_startup_cleanup_retry()
                 return

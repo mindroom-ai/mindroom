@@ -43,6 +43,7 @@ SendingDeviceProvider = Callable[[], str | None]
 # says the question could not be put, which is a different fact and must not be
 # mistaken for the first.
 ApprovalCardLocator = Callable[[str, str, str], Awaitable[str | None]]
+DetachedApprovalDecisionHandler = Callable[[str, str, _ApprovalStatus, str | None], Awaitable[None]]
 
 _STARTUP_DISCARD_SCAN_PAGE = 256
 # How long shutdown waits on work it does not own. Every such wait is on a
@@ -363,6 +364,7 @@ class _ApprovalManager:
         transport_sender: TransportSenderProvider | None = None,
         sending_device: SendingDeviceProvider | None = None,
         locate_card: ApprovalCardLocator | None = None,
+        detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
         self._send_event = sender
@@ -372,6 +374,7 @@ class _ApprovalManager:
         self._transport_sender = transport_sender
         self._sending_device = sending_device
         self._locate_card = locate_card
+        self._detached_decision_handler = detached_decision_handler
         self._live_lock = threading.RLock()
         self._pending_by_card_event: dict[str, _LiveApprovalWaiter] = {}
         self._resolving_card_event_ids: set[str] = set()
@@ -382,6 +385,7 @@ class _ApprovalManager:
         # Recovery that outlived the request that started it, held so it is
         # not garbage collected mid-flight.
         self._detached_card_writes: set[_DetachedCardWrite] = set()
+        self._detached_expiry_tasks: dict[str, asyncio.Task[None]] = {}
         self._shutdown_reason: str | None = None
 
     async def request_approval(  # noqa: C901, PLR0911
@@ -481,6 +485,81 @@ class _ApprovalManager:
         finally:
             with self._live_lock:
                 self._pending_by_card_event.pop(waiter.card_event_id, None)
+
+    async def create_detached_approval(
+        self,
+        *,
+        approval_id: str,
+        continuation_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        room_id: str,
+        requester_id: str,
+        approver_user_id: str,
+        timeout_seconds: float,
+        agent_name: str | None = None,
+        thread_id: str | None = None,
+    ) -> SentApprovalEvent | None:
+        """Send one durable approval card without allocating a waiter future."""
+        if self._send_event is None or self._current_shutdown_reason() is not None:
+            return None
+        requested_at = _utcnow()
+        expires_at = requested_at + timedelta(seconds=max(timeout_seconds, 0.0))
+        event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
+        full_arguments = (
+            await asyncio.to_thread(_build_full_event_arguments, arguments) if arguments_truncated else None
+        )
+        content = self._pending_event_content(
+            approval_id=approval_id,
+            tool_name=tool_name,
+            arguments=event_arguments,
+            arguments_truncated=arguments_truncated,
+            full_arguments=full_arguments,
+            agent_name=agent_name,
+            thread_id=thread_id,
+            requester_id=requester_id,
+            approver_user_id=approver_user_id,
+            requested_at=requested_at,
+            expires_at=expires_at,
+            status="pending",
+        )
+        content["continuation_id"] = continuation_id
+        content["tool_call_id"] = tool_call_id
+        transaction_id = _approval_transaction_id(approval_id)
+        claimed_card = self._claimed_card_body(content=content, requested_at=requested_at)
+        if not await self._claim_card(room_id=room_id, transaction_id=transaction_id, card=claimed_card):
+            return None
+        sent_event = await self._mark_attempted_then_send(
+            room_id=room_id,
+            thread_id=thread_id,
+            content=content,
+            transaction_id=transaction_id,
+        )
+        if sent_event is None:
+            await self._forget_card(transaction_id)
+            return None
+        if self._cards is not None:
+            await self._cards.acknowledge_approval_card(
+                transaction_id=transaction_id,
+                card_event_id=sent_event.event_id,
+                card=_sent_card_body(claimed_card, sent_event),
+            )
+        expiry_task = asyncio.create_task(
+            self._expire_detached_after(
+                room_id=room_id,
+                card_event_id=sent_event.event_id,
+                expires_at=expires_at,
+            ),
+            name=f"approval-expiry-{approval_id}",
+        )
+        self._detached_expiry_tasks[sent_event.event_id] = expiry_task
+        expiry_task.add_done_callback(lambda _task: self._detached_expiry_tasks.pop(sent_event.event_id, None))
+        return sent_event
+
+    async def _expire_detached_after(self, *, room_id: str, card_event_id: str, expires_at: datetime) -> None:
+        await asyncio.sleep(max(0.0, (expires_at - _utcnow()).total_seconds()))
+        await self.expire_detached_card(room_id=room_id, card_event_id=card_event_id)
 
     async def discard_pending_on_startup(self) -> ApprovalStartupSweep:
         """Settle every router-authored card this bot restarted holding.
@@ -583,6 +662,9 @@ class _ApprovalManager:
             return None
         if identified.card.resolution is not None:
             return await self._redeliver_recorded_resolution(pending, identified.card)
+        content = identified.card.card.get("content")
+        if isinstance(content, dict) and isinstance(content.get("continuation_id"), str):
+            return None
         result = await self._discard_matrix_only_card(
             pending=pending,
             transaction_id=identified.card.transaction_id,
@@ -639,13 +721,80 @@ class _ApprovalManager:
             return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
         if before_consume is not None:
             await before_consume()
-        pending, transaction_id = recovered
+        pending, transaction_id, stored = recovered
+        content = stored.card.get("content")
+        continuation_id = content.get("continuation_id") if isinstance(content, dict) else None
+        tool_call_id = content.get("tool_call_id") if isinstance(content, dict) else None
+        if isinstance(continuation_id, str) and isinstance(tool_call_id, str):
+            resolved_status, resolved_reason, resolution_was_truncated = self._normalized_resolution_request(
+                pending,
+                status=status,
+                reason=reason,
+            )
+            if self._detached_decision_handler is None:
+                return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
+            await self._detached_decision_handler(
+                continuation_id,
+                tool_call_id,
+                resolved_status,
+                resolved_reason,
+            )
+            expiry_task = self._detached_expiry_tasks.pop(card_event_id, None)
+            if expiry_task is not None:
+                expiry_task.cancel()
+            outcome = await self._emit_resolution(
+                pending,
+                transaction_id=transaction_id,
+                status=resolved_status,
+                reason=resolved_reason,
+                resolved_by=sender_id,
+            )
+            return ApprovalActionResult(
+                consumed=True,
+                resolved=outcome is _ResolutionOutcome.DELIVERED,
+                error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON if resolution_was_truncated else None,
+                thread_id=pending.thread_id,
+                card_event_id=card_event_id,
+            )
         return await self._discard_matrix_only_card(
             pending=pending,
             transaction_id=transaction_id,
             reason=_DETACHED_REQUEST_REASON,
             resolved_by=sender_id,
         )
+
+    async def expire_detached_card(self, *, room_id: str, card_event_id: str) -> bool:
+        """Expire one recovered continuation card without a live waiter."""
+        recovered = await self._recovered_pending_approval_for_card(
+            room_id=room_id,
+            card_event_id=card_event_id,
+        )
+        if recovered is None:
+            return False
+        pending, transaction_id, stored = recovered
+        content = stored.card.get("content")
+        continuation_id = content.get("continuation_id") if isinstance(content, dict) else None
+        tool_call_id = content.get("tool_call_id") if isinstance(content, dict) else None
+        if (
+            not isinstance(continuation_id, str)
+            or not isinstance(tool_call_id, str)
+            or self._detached_decision_handler is None
+        ):
+            return False
+        await self._detached_decision_handler(
+            continuation_id,
+            tool_call_id,
+            "expired",
+            _DEFAULT_TIMEOUT_REASON,
+        )
+        outcome = await self._emit_resolution(
+            pending,
+            transaction_id=transaction_id,
+            status="expired",
+            reason=_DEFAULT_TIMEOUT_REASON,
+            resolved_by=None,
+        )
+        return outcome is not _ResolutionOutcome.UNRECORDED
 
     async def handle_live_approval_id_response(
         self,
@@ -717,6 +866,7 @@ class _ApprovalManager:
         transport_sender: TransportSenderProvider | None = None,
         sending_device: SendingDeviceProvider | None = None,
         locate_card: ApprovalCardLocator | None = None,
+        detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
     ) -> None:
         """Update Matrix transport hooks for an existing runtime manager."""
         if sender is not None:
@@ -733,6 +883,8 @@ class _ApprovalManager:
             self._sending_device = sending_device
         if locate_card is not None:
             self._locate_card = locate_card
+        if detached_decision_handler is not None:
+            self._detached_decision_handler = detached_decision_handler
 
     def _current_shutdown_reason(self) -> str | None:
         with self._live_lock:
@@ -1227,7 +1379,7 @@ class _ApprovalManager:
         *,
         room_id: str,
         card_event_id: str,
-    ) -> tuple[PendingApproval, str] | None:
+    ) -> tuple[PendingApproval, str, StoredApprovalCard] | None:
         """Return one clicked card and the row key that will retire it.
 
         The transaction comes back with the card because that is what the row
@@ -1250,7 +1402,7 @@ class _ApprovalManager:
             transport_sender=transport_sender,
             expected_card_event_id=card_event_id,
         )
-        return None if pending is None else (pending, stored.transaction_id)
+        return None if pending is None else (pending, stored.transaction_id, stored)
 
     def _trusted_pending_from_card_event(
         self,
@@ -1631,6 +1783,12 @@ class _ApprovalManager:
         with self._live_lock:
             self._shutdown_reason = reason
             waiters = list(self._pending_by_card_event.values())
+            expiry_tasks = tuple(self._detached_expiry_tasks.values())
+            self._detached_expiry_tasks.clear()
+        for task in expiry_tasks:
+            task.cancel()
+        if expiry_tasks:
+            await asyncio.gather(*expiry_tasks, return_exceptions=True)
         for waiter in waiters:
             decision = self._new_decision(status="expired", reason=reason, resolved_by=None)
             claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
@@ -2119,6 +2277,7 @@ def initialize_approval_store(
     transport_sender: TransportSenderProvider | None = None,
     sending_device: SendingDeviceProvider | None = None,
     locate_card: ApprovalCardLocator | None = None,
+    detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
 ) -> _ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
@@ -2132,6 +2291,7 @@ def initialize_approval_store(
             transport_sender=transport_sender,
             sending_device=sending_device,
             locate_card=locate_card,
+            detached_decision_handler=detached_decision_handler,
         )
         return _MANAGER
 
@@ -2148,6 +2308,7 @@ def initialize_approval_store(
         transport_sender=transport_sender,
         sending_device=sending_device,
         locate_card=locate_card,
+        detached_decision_handler=detached_decision_handler,
     )
     return _MANAGER
 
