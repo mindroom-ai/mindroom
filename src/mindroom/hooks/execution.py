@@ -25,6 +25,7 @@ from .context import (
     ReactionReceivedContext,
     ResponseDraft,
     RoomMemberJoinedContext,
+    RoomMemberLeftContext,
     ScheduleFiredContext,
     SessionHookContext,
     SystemEnrichContext,
@@ -68,7 +69,10 @@ def _scope_agent_name(context: _HookExecutionContext) -> str | None:
             agent_name = context.target_entity_name
         elif isinstance(context, AgentLifecycleContext):
             agent_name = context.entity_name
-        elif isinstance(context, CompactionHookContext | SessionHookContext | RoomMemberJoinedContext):
+        elif isinstance(
+            context,
+            CompactionHookContext | SessionHookContext | RoomMemberJoinedContext | RoomMemberLeftContext,
+        ):
             agent_name = context.agent_name
     return agent_name
 
@@ -79,7 +83,10 @@ def _scope_room_ids(context: _HookExecutionContext) -> tuple[str, ...]:  # noqa:
     envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
         return (envelope.room_id,)
-    if isinstance(context, ScheduleFiredContext | ReactionReceivedContext | RoomMemberJoinedContext):
+    if isinstance(
+        context,
+        ScheduleFiredContext | ReactionReceivedContext | RoomMemberJoinedContext | RoomMemberLeftContext,
+    ):
         return (context.room_id,)
     if isinstance(context, AgentLifecycleContext):
         return context.rooms
