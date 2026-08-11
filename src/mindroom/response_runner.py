@@ -969,12 +969,17 @@ class ResponseRunner:
 
     async def _fail_approval_card_creation(self, approval_id: str, *, room_id: str, reason: str) -> None:
         """Fail a partially published approval set and terminalize every delivered card."""
-        failed = self._approval_continuations.fail(approval_id, reason)
-        if failed is None:
+        continuation = self._approval_continuations.get(approval_id)
+        if continuation is None:
             return
-        for call in failed.calls:
-            if call.card_event_id is not None and not call.decision_recorded:
-                await expire_suspended_tool_approval(room_id, call.card_event_id)
+        for call in continuation.calls:
+            if (
+                call.card_event_id is not None
+                and not call.decision_recorded
+                and not await expire_suspended_tool_approval(room_id, call.card_event_id)
+            ):
+                return
+        self._approval_continuations.fail(approval_id, reason)
 
     async def resume_approval_continuation(self, continuation: ApprovalContinuation) -> None:
         """Claim one ready continuation and run it through the conversation serializer."""
