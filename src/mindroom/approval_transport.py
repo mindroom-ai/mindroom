@@ -279,7 +279,13 @@ class ApprovalMatrixTransport:
                         "Tool approval card was not delivered before the restart.",
                     )
                     continue
-                self._schedule_expiry(recovered)
+                for call in recovered.calls:
+                    if call.decision is not None and not call.decision_recorded and call.card_event_id is not None:
+                        await expire_suspended_tool_approval(recovered.room_id, call.card_event_id)
+                refreshed = await asyncio.to_thread(self._continuations.get, recovered.approval_id)
+                if refreshed is None or refreshed.state != "pending":
+                    continue
+                self._schedule_expiry(refreshed)
             elif continuation.state == "ready":
                 self._schedule_continuation(continuation)
             else:
