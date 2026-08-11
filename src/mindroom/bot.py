@@ -190,7 +190,7 @@ _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
 # forces a limited-sync gap backfill. This only widens the timeline window; it
 # leaves every other section at server defaults so no event type is filtered
 # out.
-_SYNC_TIMELINE_LIMIT = 50
+_SYNC_TIMELINE_LIMIT = 5000
 _SYNC_FILTER: dict[str, object] = {"room": {"timeline": {"limit": _SYNC_TIMELINE_LIMIT}}}
 
 

@@ -856,7 +856,7 @@ def test_recovery_cliff_fault_shape_exceeds_one_live_window_and_one_recovery_pum
             timeline_limit=100,
             recovery_max_pages=10,
             recovery_page_size=50,
-            recovery_max_events=2_000,
+            recovery_max_events=100_000,
             context_event_count=601,
             root_count=100,
         )
@@ -876,11 +876,13 @@ def test_recovery_cliff_fault_shape_accepts_the_recovery_cap_and_refuses_the_fir
             encoding="utf-8",
         )
 
-        shape = recovery_cliff_fault_shape(stack.config_path, root_count=1_499)
+        baseline = recovery_cliff_fault_shape(stack.config_path, root_count=1)
+        capacity_root_count = baseline.recovery_max_events - baseline.context_event_count + baseline.timeline_limit
+        shape = recovery_cliff_fault_shape(stack.config_path, root_count=capacity_root_count)
         assert shape.context_event_count + shape.root_count - shape.timeline_limit == shape.recovery_max_events
 
         with pytest.raises(ValueError, match="exceeds nio's configured room recovery cap"):
-            recovery_cliff_fault_shape(stack.config_path, root_count=1_500)
+            recovery_cliff_fault_shape(stack.config_path, root_count=capacity_root_count + 1)
     finally:
         stack.close()
 
