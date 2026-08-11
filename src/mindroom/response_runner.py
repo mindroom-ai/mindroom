@@ -1025,7 +1025,17 @@ class ResponseRunner:
             reply_to_event_id=None,
             session_id=continuation.session_id,
         )
-        await self._edit_continuation_response(continuation, target=target, text=reason)
+        if self.deps.agent_name == continuation.entity_name:
+            await self._edit_continuation_response(continuation, target=target, text=reason)
+        else:
+            await self.deps.delivery_gateway.send_text(
+                SendTextRequest(
+                    target=target,
+                    response_text=reason,
+                    delivery_turn_id=continuation.source_event_ids[0],
+                    delivery_stage=DeliveryStage.FINAL,
+                ),
+            )
         self._approval_continuations.fail(continuation.approval_id, reason)
 
     async def _continue_entity_call(

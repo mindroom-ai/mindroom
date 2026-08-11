@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -72,6 +73,52 @@ def test_continuation_store_commits_first_call_decision_and_one_claim(tmp_path: 
     assert acknowledged.state == "ready"
     assert store.claim("approval-1", "worker-1") is not None
     assert store.claim("approval-1", "worker-2") is None
+
+
+def test_distinct_store_handles_serialize_pending_context_updates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Card attachment and a decision must not overwrite each other through separate store handles."""
+    card_store = ApprovalContinuationStore(tmp_path)
+    decision_store = ApprovalContinuationStore(tmp_path)
+    card_store.create(_continuation())
+    card_read = threading.Event()
+    allow_card_write = threading.Event()
+    decision_done = threading.Event()
+    original_get = card_store.get
+
+    def blocking_get(approval_id: str) -> ApprovalContinuation | None:
+        current = original_get(approval_id)
+        if not card_read.is_set():
+            card_read.set()
+            assert allow_card_write.wait(timeout=5)
+        return current
+
+    monkeypatch.setattr(card_store, "get", blocking_get)
+    card_thread = threading.Thread(
+        target=card_store.attach_card,
+        args=("approval-1", "call-1", "$card"),
+    )
+
+    def resolve() -> None:
+        decision_store.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+        decision_done.set()
+
+    decision_thread = threading.Thread(target=resolve)
+    card_thread.start()
+    assert card_read.wait(timeout=5)
+    decision_thread.start()
+    interleaved = decision_done.wait(timeout=0.1)
+    allow_card_write.set()
+    card_thread.join(timeout=5)
+    decision_thread.join(timeout=5)
+
+    assert not interleaved
+    persisted = card_store.get("approval-1")
+    assert persisted is not None
+    assert persisted.calls[0].card_event_id == "$card"
+    assert persisted.calls[0].decision is ApprovalDecision.APPROVED
 
 
 def test_continuation_store_recovers_pending_and_claimed_without_copying_arguments(tmp_path: Path) -> None:

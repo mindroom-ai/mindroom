@@ -884,6 +884,46 @@ async def test_partial_approval_card_failure_terminalizes_delivered_cards(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_router_failure_uses_terminal_notice_instead_of_cross_sender_edit(tmp_path: Path) -> None:
+    """Matrix ignores replacement events when the router did not author the original response."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-removed",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="removed-agent",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$agent-waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="removed-agent",
+                expires_at="2026-08-12T00:00:00+00:00",
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+    )
+    runner._approval_continuations.create(continuation)
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$terminal")) as send,
+        patch.object(runner, "_edit_continuation_response", new=AsyncMock()) as edit,
+    ):
+        await runner.fail_approval_continuation(continuation, "Agent removed")
+
+    edit.assert_not_awaited()
+    request = send.await_args.args[0]
+    assert request.response_text == "Agent removed"
+    assert request.delivery_turn_id == "$source"
+    assert request.delivery_stage is response_runner.DeliveryStage.FINAL
+
+
+@pytest.mark.asyncio
 async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_side_effects(tmp_path: Path) -> None:
     """The runner keeps full history until execution preparation builds model context."""
     bot = _bot(tmp_path)

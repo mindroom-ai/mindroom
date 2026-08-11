@@ -25,6 +25,16 @@ class ApprovalDecision(StrEnum):
 
 type _ApprovalContinuationState = Literal["pending", "ready", "claimed", "completed", "failed"]
 
+_STORE_LOCKS_GUARD = threading.Lock()
+_STORE_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _store_lock(storage_root: Path) -> threading.RLock:
+    """Return the process-wide coordinator for one continuation database."""
+    key = str((storage_root / "tracking").resolve())
+    with _STORE_LOCKS_GUARD:
+        return _STORE_LOCKS.setdefault(key, threading.RLock())
+
 
 @dataclass(frozen=True, slots=True)
 class ApprovalCall:
@@ -148,7 +158,7 @@ class ApprovalContinuationStore:
             subdir="tracking",
             session_table="tool_approval_continuation_sessions",
         )
-        self._lock = threading.RLock()
+        self._lock = _store_lock(storage_root)
 
     def create(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
         """Create one durable continuation."""
