@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -127,6 +127,37 @@ def test_continuation_store_owns_source_before_outer_turn_settlement(tmp_path: P
 
     assert store.for_source_event("$source") == continuation
     assert store.for_source_event("$unrelated") is None
+
+
+def test_recovery_pages_through_every_continuation(tmp_path: Path) -> None:
+    """Startup recovery must not silently strand rows beyond Agno's first result page."""
+    store = ApprovalContinuationStore(tmp_path)
+    template = _continuation()
+    rows = [
+        {
+            "id": f"approval-{index}",
+            "run_id": template.run_id,
+            "session_id": template.session_id,
+            "status": "pending",
+            "context": template._to_context(),
+        }
+        for index in range(101)
+    ]
+    db = MagicMock()
+
+    def get_approvals(*, status: str, page: int, **_kwargs: object) -> tuple[list[dict[str, object]], int]:
+        if status != "pending":
+            return [], 0
+        start = (page - 1) * 100
+        return rows[start : start + 100], len(rows)
+
+    db.get_approvals.side_effect = get_approvals
+    store._db = db
+
+    recovered = store.recoverable()
+
+    assert len(recovered) == 101
+    assert db.get_approvals.call_count == 4
 
 
 @pytest.mark.asyncio

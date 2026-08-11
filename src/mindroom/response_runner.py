@@ -95,6 +95,7 @@ from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_approval import (
     ToolApprovalCall,
     evaluate_tool_approval,
+    expire_suspended_tool_approval,
     native_approval_continuation,
     send_suspended_tool_approval,
 )
@@ -831,7 +832,7 @@ class ResponseRunner:
             )
             if sent is None:
                 msg = "Approval card creation failed"
-                self._approval_continuations.fail(approval_id, msg)
+                await self._fail_approval_card_creation(approval_id, room_id=target.room_id, reason=msg)
                 raise RuntimeError(msg)
             self._approval_continuations.attach_card(approval_id, tool_call_id, sent.event_id)
         return FinalDeliveryOutcome(
@@ -959,12 +960,21 @@ class ResponseRunner:
             )
             if sent is None:
                 msg = "Chained approval card creation failed"
-                self._approval_continuations.fail(advanced.approval_id, msg)
+                await self._fail_approval_card_creation(advanced.approval_id, room_id=target.room_id, reason=msg)
                 raise RuntimeError(msg)
             attached = self._approval_continuations.attach_card(advanced.approval_id, tool_call_id, sent.event_id)
             if attached is not None:
                 advanced = attached
         return advanced, waiting_text
+
+    async def _fail_approval_card_creation(self, approval_id: str, *, room_id: str, reason: str) -> None:
+        """Fail a partially published approval set and terminalize every delivered card."""
+        failed = self._approval_continuations.fail(approval_id, reason)
+        if failed is None:
+            return
+        for call in failed.calls:
+            if call.card_event_id is not None and not call.decision_recorded:
+                await expire_suspended_tool_approval(room_id, call.card_event_id)
 
     async def resume_approval_continuation(self, continuation: ApprovalContinuation) -> None:
         """Claim one ready continuation and run it through the conversation serializer."""
@@ -1121,7 +1131,7 @@ class ResponseRunner:
             async def continue_run() -> RunOutput:
                 with native_approval_continuation():
                     result = agent.acontinue_run(
-                        run_response=persisted,
+                        run_id=continuation.run_id,
                         updated_tools=updated_tools,
                         session_id=continuation.session_id,
                         user_id=continuation.requester_id,
@@ -1406,17 +1416,6 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
         """Admit one response before lifecycle locking or visible placeholder work."""
-        owned = await asyncio.to_thread(
-            self._approval_continuations.for_source_event,
-            request.response_envelope.source_event_id,
-        )
-        if owned is not None:
-            self.deps.logger.info(
-                "response_source_owned_by_approval_continuation",
-                source_event_id=request.response_envelope.source_event_id,
-                approval_id=owned.approval_id,
-            )
-            return owned.response_event_id
         admission_deferred = False
         while not self._admission_gate.admit():
             if not admission_deferred:
@@ -1443,7 +1442,12 @@ class ResponseRunner:
                     response_envelope=request.response_envelope,
                     queued_notice_reservation=request.queued_notice_reservation,
                     pipeline_timing=request.pipeline_timing,
-                    locked_operation=lambda target: locked_operation(target, early_placeholder),
+                    locked_operation=lambda target: self._run_owned_or_locked_response(
+                        request,
+                        target=target,
+                        early_placeholder=early_placeholder,
+                        locked_operation=locked_operation,
+                    ),
                     signal_queued_message=request.sync_restart_retry_source_event_id is None,
                 )
             except asyncio.CancelledError as error:
@@ -1475,6 +1479,28 @@ class ResponseRunner:
         finally:
             self._in_flight_response_count -= 1
             self._admission_gate.release()
+
+    async def _run_owned_or_locked_response(
+        self,
+        request: ResponseRequest,
+        *,
+        target: MessageTarget,
+        early_placeholder: _EarlyPlaceholderState,
+        locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
+    ) -> str | None:
+        """Adopt a durable approval handoff after entering normal turn serialization."""
+        owned = await asyncio.to_thread(
+            self._approval_continuations.for_source_event,
+            request.response_envelope.source_event_id,
+        )
+        if owned is not None:
+            self.deps.logger.info(
+                "response_source_owned_by_approval_continuation",
+                source_event_id=request.response_envelope.source_event_id,
+                approval_id=owned.approval_id,
+            )
+            return owned.response_event_id
+        return await locked_operation(target, early_placeholder)
 
     async def _finalize_early_placeholder_cancellation(
         self,

@@ -837,6 +837,53 @@ async def test_approval_chain_keeps_second_pause_in_same_guarded_continuation(tm
 
 
 @pytest.mark.asyncio
+async def test_partial_approval_card_failure_terminalizes_delivered_cards(tmp_path: Path) -> None:
+    """If a later card cannot be sent, an earlier card must not survive clickable after failure."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-partial",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="first",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+                card_event_id="$card-1",
+            ),
+            ApprovalCall(
+                tool_call_id="call-2",
+                tool_name="second",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+    )
+    runner._approval_continuations.create(continuation)
+
+    with patch("mindroom.response_runner.expire_suspended_tool_approval", new=AsyncMock()) as expire:
+        await runner._fail_approval_card_creation(
+            continuation.approval_id,
+            room_id=continuation.room_id,
+            reason="second card failed",
+        )
+
+    failed = runner._approval_continuations.get(continuation.approval_id)
+    assert failed is not None
+    assert failed.state == "failed"
+    expire.assert_awaited_once_with(continuation.room_id, "$card-1")
+
+
+@pytest.mark.asyncio
 async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_side_effects(tmp_path: Path) -> None:
     """The runner keeps full history until execution preparation builds model context."""
     bot = _bot(tmp_path)

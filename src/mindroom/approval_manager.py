@@ -763,18 +763,24 @@ class _ApprovalManager:
                 resolved_status,
                 resolved_reason,
             )
-            expiry_task = self._detached_expiry_tasks.pop(card_event_id, None)
-            if expiry_task is not None:
-                expiry_task.cancel()
             outcome = await self._emit_resolution(
                 pending,
                 transaction_id=transaction_id,
                 status=committed_status,
                 reason=committed_reason,
                 resolved_by=sender_id if committed_status == resolved_status else None,
+                after_recorded=(
+                    lambda: (
+                        self._detached_decision_ready(continuation_id, tool_call_id)
+                        if self._detached_decision_ready is not None
+                        else None
+                    )
+                ),
             )
-            if outcome is not _ResolutionOutcome.UNRECORDED and self._detached_decision_ready is not None:
-                await self._detached_decision_ready(continuation_id, tool_call_id)
+            if outcome is not _ResolutionOutcome.UNRECORDED:
+                expiry_task = self._detached_expiry_tasks.pop(card_event_id, None)
+                if expiry_task is not None:
+                    expiry_task.cancel()
             return ApprovalActionResult(
                 consumed=True,
                 resolved=outcome is _ResolutionOutcome.DELIVERED,
@@ -819,9 +825,14 @@ class _ApprovalManager:
             status=committed_status,
             reason=committed_reason,
             resolved_by=None,
+            after_recorded=(
+                lambda: (
+                    self._detached_decision_ready(continuation_id, tool_call_id)
+                    if self._detached_decision_ready is not None
+                    else None
+                )
+            ),
         )
-        if outcome is not _ResolutionOutcome.UNRECORDED and self._detached_decision_ready is not None:
-            await self._detached_decision_ready(continuation_id, tool_call_id)
         return outcome is not _ResolutionOutcome.UNRECORDED
 
     async def handle_live_approval_id_response(
@@ -1301,6 +1312,7 @@ class _ApprovalManager:
         status: _ApprovalStatus,
         reason: str | None,
         resolved_by: str | None,
+        after_recorded: Callable[[], Awaitable[None] | None] | None = None,
     ) -> _ResolutionOutcome:
         if self._edit_event is None:
             return _ResolutionOutcome.UNRECORDED
@@ -1318,6 +1330,10 @@ class _ApprovalManager:
         # shows -- possibly an approval whose tool has already run.
         if not await self._record_resolution(pending.card_event_id, resolution):
             return _ResolutionOutcome.UNRECORDED
+        if after_recorded is not None:
+            recorded_callback = after_recorded()
+            if recorded_callback is not None:
+                await recorded_callback
         if await self._deliver_resolution(pending, resolution, transaction_id):
             return _ResolutionOutcome.DELIVERED
         return _ResolutionOutcome.RECORDED

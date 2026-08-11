@@ -1883,7 +1883,7 @@ async def continue_paused_team_run(
         if not isinstance(persisted, TeamRunOutput) or persisted.status is not RunStatus.paused:
             msg = f"Paused team run {run_id!r} is no longer available"
             raise RuntimeError(msg)
-        requirements = list(persisted.requirements or ())
+        requirements = [requirement for requirement in persisted.requirements or () if requirement.needs_confirmation]
         persisted_ids = {
             requirement.tool_execution.tool_call_id
             for requirement in requirements
@@ -1894,7 +1894,9 @@ async def continue_paused_team_run(
             raise RuntimeError(msg)
         for requirement in requirements:
             if requirement.tool_execution is not None:
-                approved = decisions[requirement.tool_execution.tool_call_id]
+                tool_call_id = requirement.tool_execution.tool_call_id
+                assert tool_call_id is not None
+                approved = decisions[tool_call_id]
                 if approved:
                     requirement.confirm()
                 else:

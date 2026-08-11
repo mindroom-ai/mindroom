@@ -190,9 +190,6 @@ class ApprovalMatrixTransport:
             decision,
             reason=reason,
         )
-        expiry = self._expiry_tasks.pop((approval_id, tool_call_id), None)
-        if expiry is not None and expiry is not asyncio.current_task():
-            expiry.cancel()
         if continuation is None:
             return status, reason
         call = next((call for call in continuation.calls if call.tool_call_id == tool_call_id), None)
@@ -202,6 +199,9 @@ class ApprovalMatrixTransport:
 
     async def _handle_continuation_decision_ready(self, approval_id: str, tool_call_id: str) -> None:
         continuation = await asyncio.to_thread(self._continuations.acknowledge_call, approval_id, tool_call_id)
+        expiry = self._expiry_tasks.pop((approval_id, tool_call_id), None)
+        if expiry is not None and expiry is not asyncio.current_task():
+            expiry.cancel()
         if continuation is not None and continuation.state == "ready":
             self._schedule_continuation(continuation)
 
@@ -269,15 +269,17 @@ class ApprovalMatrixTransport:
                 name=f"approval-expiry-{continuation.approval_id}-{call.tool_call_id}",
             )
 
-    async def _recover_continuations(self) -> None:
+    async def _recover_continuations(self) -> bool:
+        complete = True
         for continuation in await asyncio.to_thread(self._continuations.recoverable):
             if continuation.state == "pending":
                 recovered = await self._attach_recovered_cards(continuation)
                 if any(not call.decision_recorded and call.card_event_id is None for call in recovered.calls):
-                    await self._fail_recovered_continuation(
+                    settled = await self._fail_recovered_continuation(
                         recovered,
                         "Tool approval card was not delivered before the restart.",
                     )
+                    complete = settled and complete
                     continue
                 for call in recovered.calls:
                     if call.decision is not None and not call.decision_recorded and call.card_event_id is not None:
@@ -289,10 +291,12 @@ class ApprovalMatrixTransport:
             elif continuation.state == "ready":
                 self._schedule_continuation(continuation)
             else:
-                await self._fail_recovered_continuation(
+                settled = await self._fail_recovered_continuation(
                     continuation,
                     "Tool approval continuation was interrupted after it was claimed; it was not replayed.",
                 )
+                complete = settled and complete
+        return complete
 
     async def _attach_recovered_cards(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
         """Repair the crash window between durable card delivery and continuation attachment."""
@@ -328,16 +332,20 @@ class ApprovalMatrixTransport:
                     missing_ids.discard(tool_call_id)
         return continuation
 
-    async def _fail_recovered_continuation(self, continuation: ApprovalContinuation, reason: str) -> None:
+    async def _fail_recovered_continuation(self, continuation: ApprovalContinuation, reason: str) -> bool:
         """Terminalize one continuation and edit its waiting response when possible."""
-        failed = await asyncio.to_thread(self._continuations.fail, continuation.approval_id, reason)
+        entity_bot = self.bot_provider(continuation.entity_name)
+        router_bot = self.bot_provider(ROUTER_AGENT_NAME)
+        bot = entity_bot if entity_bot is not None and entity_bot.running else router_bot
+        if bot is None or not bot.running:
+            return False
+        await bot.fail_approval_continuation(continuation, reason)
+        failed = await asyncio.to_thread(self._continuations.get, continuation.approval_id)
         terminal = failed or continuation
         for call in terminal.calls:
             if not call.decision_recorded and call.card_event_id is not None:
                 await expire_suspended_tool_approval(terminal.room_id, call.card_event_id)
-        bot = self.bot_provider(terminal.entity_name) or self.bot_provider(ROUTER_AGENT_NAME)
-        if bot is not None and bot.running:
-            await bot.fail_approval_continuation(terminal, reason)
+        return True
 
     async def _run_on_runtime_loop(
         self,
@@ -696,7 +704,9 @@ class ApprovalMatrixTransport:
                 self._schedule_startup_cleanup_retry()
                 return
             if not self._continuations_recovered:
-                await self._recover_continuations()
+                if not await self._recover_continuations():
+                    self._schedule_startup_cleanup_retry()
+                    return
                 self._continuations_recovered = True
             self._startup_cleanup_done = True
             self._retire_startup_cleanup_retry()

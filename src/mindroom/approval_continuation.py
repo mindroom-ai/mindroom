@@ -352,6 +352,16 @@ class ApprovalContinuationStore:
         """Return continuations that startup must recover or settle."""
         records: list[ApprovalContinuation] = []
         for state in ("pending", "ready", "claimed"):
-            rows, _total = self._db.get_approvals(status=state, approval_type="mindroom", limit=1000)
-            records.extend(ApprovalContinuation._from_row(row) for row in rows)
+            page = 1
+            while True:
+                rows, total = self._db.get_approvals(
+                    status=state,
+                    approval_type="mindroom",
+                    limit=100,
+                    page=page,
+                )
+                records.extend(ApprovalContinuation._from_row(row) for row in rows)
+                if page * 100 >= total:
+                    break
+                page += 1
         return tuple(records)

@@ -300,7 +300,12 @@ async def test_detached_approval_card_resolves_without_live_waiter(tmp_path: Pat
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
     decision_handler = AsyncMock(return_value=("approved", None))
-    decision_ready = AsyncMock()
+
+    async def acknowledge_ready(_continuation_id: str, _tool_call_id: str) -> None:
+        assert cards.resolutions["$approval"]["status"] == "approved"
+        assert cards.rows
+
+    decision_ready = AsyncMock(side_effect=acknowledge_ready)
     store = initialize_approval_store(
         test_runtime_paths(tmp_path),
         sender=sender,
