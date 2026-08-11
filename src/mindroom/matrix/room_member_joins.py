@@ -186,6 +186,9 @@ def room_member_left_from_event(
         return None
     if event.sender != event.state_key:
         return None
+    prev_content = event.prev_content
+    if prev_content is None:
+        return None
 
     user_id = _human_room_member_user_id(event, config=config, runtime_paths=runtime_paths)
     if user_id is None:
@@ -196,8 +199,8 @@ def room_member_left_from_event(
         event_id=event.event_id,
         user_id=user_id,
         sender_id=event.sender,
-        display_name=_optional_string(event.content, "displayname"),
-        avatar_url=_optional_string(event.content, "avatar_url"),
+        display_name=_optional_string(prev_content, "displayname"),
+        avatar_url=_optional_string(prev_content, "avatar_url"),
         membership=event.membership,
         prev_membership=event.prev_membership,
     )

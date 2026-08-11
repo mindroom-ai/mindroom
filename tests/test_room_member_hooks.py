@@ -82,6 +82,8 @@ def _room_member_event(
     prev_membership: str | None = "leave",
     display_name: str | None = "Alice",
     avatar_url: str | None = "mxc://localhost/alice",
+    prev_display_name: str | None = None,
+    prev_avatar_url: str | None = None,
 ) -> nio.RoomMemberEvent:
     content: dict[str, object] = {"membership": membership}
     if display_name is not None:
@@ -97,7 +99,12 @@ def _room_member_event(
         "content": content,
     }
     if prev_membership is not None:
-        raw_event["unsigned"] = {"prev_content": {"membership": prev_membership}}
+        prev_content: dict[str, object] = {"membership": prev_membership}
+        if prev_display_name is not None:
+            prev_content["displayname"] = prev_display_name
+        if prev_avatar_url is not None:
+            prev_content["avatar_url"] = prev_avatar_url
+        raw_event["unsigned"] = {"prev_content": prev_content}
     event = nio.RoomMemberEvent.from_dict(raw_event)
     assert isinstance(event, nio.RoomMemberEvent)
     return event
@@ -254,6 +261,10 @@ async def test_router_emits_room_member_left_for_human_self_leave(tmp_path: Path
             event_id="$leave1",
             membership="leave",
             prev_membership="join",
+            display_name=None,
+            avatar_url=None,
+            prev_display_name="Alice",
+            prev_avatar_url="mxc://localhost/alice",
         ),
     )
 
