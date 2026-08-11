@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -30,19 +30,24 @@ from mindroom.coalescing_batch import (
     RequesterCoalescingOwner,
     build_coalesced_batch,
     coalesced_prompt,
-    tagged_coalesced_prompt,
 )
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY
+from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import build_dispatch_handoff
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.edit_regenerator import EditRegenerator, EditRegeneratorDeps, _Edit, _Mailbox
 from mindroom.handled_turns import (
     TurnRecord,
     TurnRecordCodec,
 )
+from mindroom.history.types import HistoryScope
+from mindroom.message_target import MessageTarget
 from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.timestamp_formatting import format_timestamp_ms
+from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import TurnStore, TurnStoreDeps
-from tests.conftest import make_pending_event
+from tests.conftest import make_pending_event, request_envelope
 
 if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore
@@ -126,25 +131,73 @@ async def _persist_and_reload(journal_store: EventJournalStore, record: TurnReco
     return reloaded
 
 
-def _regeneration_prompt(record: TurnRecord) -> str:
-    """Rebuild the model-facing prompt the way ``EditRegenerator._build_request`` does."""
+async def _regeneration_prompt(record: TurnRecord) -> str:
+    """Return the model-facing prompt from the real edit-regeneration seam."""
     prompt_map = dict(record.source_event_prompts or {})
-    prompt_parts = [prompt_map.get(source_event_id) for source_event_id in record.replay_source_event_ids]
-    assert all(part is not None for part in prompt_parts)
-    typed_parts = [part for part in prompt_parts if part is not None]
-    if not record.is_coalesced:
-        return typed_parts[-1]
-    prompt = coalesced_prompt(typed_parts)
-    if record.source_event_metadata is not None:
-        tagged_prompt = tagged_coalesced_prompt(
-            list(record.replay_source_event_ids),
-            prompt_map,
-            dict(record.source_event_metadata),
+    source_event_id = record.replay_source_event_ids[-1]
+    body = prompt_map[source_event_id]
+    target = MessageTarget.resolve(_ROOM_ID, _THREAD_ID, record.anchor_event_id)
+    replay_record = canonicalize_turn_record(
+        record,
+        response_event_id="$response",
+        response_owner=_AGENT_NAME,
+        requester_id=_REQUESTER,
+        history_scope=HistoryScope(kind="agent", scope_id=_AGENT_NAME),
+        conversation_target=target,
+    )
+    context = MessageContext(
+        am_i_mentioned=True,
+        is_thread=True,
+        thread_id=_THREAD_ID,
+        thread_history=(),
+        mentioned_agents=[],
+        has_non_agent_mentions=False,
+    )
+    envelope = request_envelope(
+        room_id=_ROOM_ID,
+        reply_to_event_id=source_event_id,
+        thread_id=_THREAD_ID,
+        prompt=body,
+        user_id=_REQUESTER,
+        target=target,
+        agent_name=_AGENT_NAME,
+    )
+    turn_store = MagicMock(spec=TurnStore)
+    turn_store.load_turn = AsyncMock(return_value=replay_record)
+    turn_store.build_run_metadata.return_value = {}
+    regenerator = EditRegenerator(
+        EditRegeneratorDeps(
+            runtime=MagicMock(),
+            runtime_paths=MagicMock(),
+            agent_name=_AGENT_NAME,
+            resolver=MagicMock(),
+            turn_store=turn_store,
+            ingress_hook_runner=MagicMock(),
+            generate_response=AsyncMock(),
+            wait_for_turn_settled=AsyncMock(),
+            receipt_order=AsyncMock(return_value=1),
+            interrupted_turn_rooms=InterruptedTurnRooms(),
             timestamp_formatter=_timestamp_formatter,
-        )
-        if tagged_prompt is not None:
-            return tagged_prompt
-    return prompt
+        ),
+    )
+    request, _record, _applied = await regenerator._build_request(
+        nio.MatrixRoom(room_id=_ROOM_ID, own_user_id="@agent:localhost"),
+        _Mailbox(
+            pending={
+                source_event_id: _Edit(
+                    original_event_id=source_event_id,
+                    body=body,
+                    context=context,
+                    envelope=envelope,
+                    revision=(1, "$same-body-edit"),
+                    receipt_order=1,
+                    suppressed=False,
+                ),
+            },
+        ),
+    )
+    assert request is not None
+    return request.prompt
 
 
 @pytest.mark.asyncio
@@ -251,7 +304,7 @@ async def test_coalesced_batch_replay_prompt_is_byte_identical_to_live_merged_pr
         metadata = reloaded.source_event_metadata[event_id]
         assert metadata.sender == _REQUESTER
         assert metadata.timestamp_ms == float(timestamp_ms)
-    replay_prompt = _regeneration_prompt(reloaded)
+    replay_prompt = await _regeneration_prompt(reloaded)
     assert replay_prompt.encode("utf-8") == live_prompt.encode("utf-8")
 
 
@@ -283,12 +336,13 @@ async def test_coalesced_batch_unstructured_replay_fallback_matches_live_prompt(
         reloaded.source_event_ids,
         source_event_prompts=dict(reloaded.source_event_prompts),
     )
-    replay_prompt = _regeneration_prompt(metadata_less)
+    replay_prompt = await _regeneration_prompt(metadata_less)
     assert replay_prompt == coalesced_prompt(bodies)
     assert replay_prompt.encode("utf-8") == live_prompt.encode("utf-8")
 
 
-def test_run_metadata_projection_preserves_replay_prompt_bytes() -> None:
+@pytest.mark.asyncio
+async def test_run_metadata_projection_preserves_replay_prompt_bytes() -> None:
     """The Agno run-metadata projection keeps the coalesced replay prompt byte-stable."""
     bodies = [
         "First part with **markdown**",
@@ -317,5 +371,5 @@ def test_run_metadata_projection_preserves_replay_prompt_bytes() -> None:
 
     assert recovered is not None
     assert dict(recovered.source_event_prompts or {}) == dict(zip(event_ids, bodies, strict=True))
-    replay_prompt = _regeneration_prompt(recovered)
+    replay_prompt = await _regeneration_prompt(recovered)
     assert replay_prompt.encode("utf-8") == live_prompt.encode("utf-8")

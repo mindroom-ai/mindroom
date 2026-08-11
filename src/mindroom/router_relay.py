@@ -17,6 +17,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
 )
 from mindroom.delivery_gateway import SendTextRequest
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, content_owns_per_fire_thread_root
 from mindroom.handled_turns import TurnRecord
@@ -222,8 +223,11 @@ async def _router_handoff_with_attachments(
 ) -> dict[str, Any]:
     """Register routed media and return handoff metadata with attachment IDs."""
     routed_media_events = list(media_events)
-    if not routed_media_events and is_matrix_media_dispatch_event(event):
-        routed_media_events.append(event)
+    if not routed_media_events:
+        if isinstance(event, PreparedIngress) and event.raw_event is not None:
+            routed_media_events.append(event.raw_event)
+        elif is_matrix_media_dispatch_event(event):
+            routed_media_events.append(event)
     if not routed_media_events:
         return extra_content
     routed_attachment_ids = merge_attachment_ids(

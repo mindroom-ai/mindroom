@@ -19,6 +19,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_handoff import prepare_media_ingress
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
@@ -437,7 +438,7 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._turn_controller._execute_router_relay(
                 room=room,
-                event=event,
+                event=prepare_media_ingress(event),
                 thread_history=[],
                 thread_id=None,
                 message="[Attached image]",

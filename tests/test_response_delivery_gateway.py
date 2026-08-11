@@ -1719,7 +1719,7 @@ class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
         send_started = asyncio.Event()
         finish_send = asyncio.Event()
 
-        async def send(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        async def send(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
             send_started.set()
             await finish_send.wait()
             return DeliveredMatrixEvent("$answer", {"body": "the answer"})
