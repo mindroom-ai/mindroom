@@ -69,6 +69,10 @@ class _BoundHookMatrixAdmin:
         """Join one local user through the Synapse-compatible admin API."""
         if not self.client.access_token:
             return False
+        # Tuwunel's Synapse-compatible endpoint performs the join on the
+        # user's behalf, but still enforces the room's join rules.  Restore an
+        # invite first so a user who left an invite-only room can rejoin.
+        await invite_to_room(self.client, room_id, user_id)
         path = f"/_synapse/admin/v1/join/{quote(room_id, safe='')}"
         response = await self.client.send(
             "POST",

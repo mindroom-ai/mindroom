@@ -247,7 +247,7 @@ async def test_hook_matrix_admin_kick_user_returns_false_on_error(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_hook_matrix_admin_force_join_user_calls_synapse_admin_api(tmp_path: Path) -> None:
-    """Force-join should use the authenticated Synapse-compatible admin endpoint."""
+    """Force-join should invite first so Tuwunel can join a private room."""
     module = _matrix_admin_module()
     client = AsyncMock(spec=nio.AsyncClient)
     client.homeserver = "http://localhost:8008"
@@ -257,7 +257,10 @@ async def test_hook_matrix_admin_force_join_user_calls_synapse_admin_api(tmp_pat
 
     admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
 
-    assert await admin.force_join_user("!personal:localhost", "@user:localhost") is True
+    with patch.object(module, "invite_to_room", new=AsyncMock(return_value=True)) as mock_invite:
+        assert await admin.force_join_user("!personal:localhost", "@user:localhost") is True
+
+    mock_invite.assert_awaited_once_with(client, "!personal:localhost", "@user:localhost")
     client.send.assert_awaited_once_with(
         "POST",
         "/_synapse/admin/v1/join/%21personal%3Alocalhost",
