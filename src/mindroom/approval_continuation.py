@@ -23,7 +23,7 @@ class ApprovalDecision(StrEnum):
     EXPIRED = "expired"
 
 
-type ApprovalContinuationState = Literal["pending", "ready", "claimed", "completed", "failed"]
+type _ApprovalContinuationState = Literal["pending", "ready", "claimed", "completed", "failed"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,13 +81,13 @@ class ApprovalContinuation:
     calls: tuple[ApprovalCall, ...]
     execution_identity: dict[str, object]
     source_event_ids: tuple[str, ...]
-    state: ApprovalContinuationState = "pending"
+    state: _ApprovalContinuationState = "pending"
     claimant_id: str | None = None
     failure_reason: str | None = None
     team_member_names: tuple[str, ...] = ()
     team_mode: str | None = None
 
-    def to_context(self) -> dict[str, object]:
+    def _to_context(self) -> dict[str, object]:
         """Serialize the continuation into Agno approval context."""
         return {
             "version": 1,
@@ -107,7 +107,7 @@ class ApprovalContinuation:
         }
 
     @classmethod
-    def from_row(cls, row: dict[str, Any]) -> ApprovalContinuation:
+    def _from_row(cls, row: dict[str, Any]) -> ApprovalContinuation:
         """Restore one continuation from an Agno approval row."""
         context = cast("dict[str, object]", row["context"])
         raw_calls = cast("list[dict[str, object]]", context["calls"])
@@ -124,7 +124,7 @@ class ApprovalContinuation:
             calls=tuple(ApprovalCall.from_dict(call) for call in raw_calls),
             execution_identity=cast("dict[str, object]", context["execution_identity"]),
             source_event_ids=tuple(cast("list[str]", context["source_event_ids"])),
-            state=cast("ApprovalContinuationState", row["status"]),
+            state=cast("_ApprovalContinuationState", row["status"]),
             claimant_id=cast("str | None", context.get("claimant_id")),
             failure_reason=cast("str | None", context.get("failure_reason")),
             team_member_names=tuple(cast("list[str]", context.get("team_member_names", []))),
@@ -159,7 +159,7 @@ class ApprovalContinuationStore:
                 "tool_name": first_call.tool_name,
                 "source_name": continuation.entity_name,
                 "user_id": continuation.requester_id,
-                "context": continuation.to_context(),
+                "context": continuation._to_context(),
                 "run_status": "PAUSED",
             },
         )
@@ -168,7 +168,7 @@ class ApprovalContinuationStore:
     def get(self, approval_id: str) -> ApprovalContinuation | None:
         """Return one continuation by ID."""
         row = self._db.get_approval(approval_id)
-        return None if row is None else ApprovalContinuation.from_row(row)
+        return None if row is None else ApprovalContinuation._from_row(row)
 
     def resolve_call(
         self,
@@ -193,7 +193,7 @@ class ApprovalContinuationStore:
                     calls.append(call)
             if not matched:
                 return current
-            state: ApprovalContinuationState = (
+            state: _ApprovalContinuationState = (
                 "ready" if all(call.decision is not None for call in calls) else "pending"
             )
             updated = replace(current, calls=tuple(calls), state=state)
@@ -201,9 +201,9 @@ class ApprovalContinuationStore:
                 approval_id,
                 expected_status="pending",
                 status=state,
-                context=updated.to_context(),
+                context=updated._to_context(),
             )
-            return self.get(approval_id) if row is None else ApprovalContinuation.from_row(row)
+            return self.get(approval_id) if row is None else ApprovalContinuation._from_row(row)
 
     def attach_card(self, approval_id: str, tool_call_id: str, card_event_id: str) -> ApprovalContinuation | None:
         """Record the Matrix card that owns one still-pending call."""
@@ -220,9 +220,9 @@ class ApprovalContinuationStore:
                 approval_id,
                 expected_status="pending",
                 status="pending",
-                context=updated.to_context(),
+                context=updated._to_context(),
             )
-            return self.get(approval_id) if row is None else ApprovalContinuation.from_row(row)
+            return self.get(approval_id) if row is None else ApprovalContinuation._from_row(row)
 
     def claim(self, approval_id: str, claimant_id: str) -> ApprovalContinuation | None:
         """Claim one ready continuation exactly once."""
@@ -235,9 +235,9 @@ class ApprovalContinuationStore:
                 approval_id,
                 expected_status="ready",
                 status="claimed",
-                context=claimed.to_context(),
+                context=claimed._to_context(),
             )
-            return None if row is None else ApprovalContinuation.from_row(row)
+            return None if row is None else ApprovalContinuation._from_row(row)
 
     def complete(self, approval_id: str, claimant_id: str) -> ApprovalContinuation | None:
         """Mark the claimant's continuation complete."""
@@ -250,10 +250,10 @@ class ApprovalContinuationStore:
                 approval_id,
                 expected_status="claimed",
                 status="completed",
-                context=completed.to_context(),
+                context=completed._to_context(),
                 run_status="COMPLETED",
             )
-            return None if row is None else ApprovalContinuation.from_row(row)
+            return None if row is None else ApprovalContinuation._from_row(row)
 
     def fail(self, approval_id: str, reason: str) -> ApprovalContinuation | None:
         """Make a nonterminal continuation permanently failed."""
@@ -266,15 +266,15 @@ class ApprovalContinuationStore:
                 approval_id,
                 expected_status=current.state,
                 status="failed",
-                context=failed.to_context(),
+                context=failed._to_context(),
                 run_status="ERROR",
             )
-            return None if row is None else ApprovalContinuation.from_row(row)
+            return None if row is None else ApprovalContinuation._from_row(row)
 
     def recoverable(self) -> tuple[ApprovalContinuation, ...]:
         """Return continuations that startup must recover or settle."""
         records: list[ApprovalContinuation] = []
         for state in ("pending", "ready", "claimed"):
             rows, _total = self._db.get_approvals(status=state, approval_type="mindroom", limit=1000)
-            records.extend(ApprovalContinuation.from_row(row) for row in rows)
+            records.extend(ApprovalContinuation._from_row(row) for row in rows)
         return tuple(records)

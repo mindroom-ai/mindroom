@@ -81,7 +81,7 @@ def test_continuation_store_recovers_pending_and_claimed_without_copying_argumen
     assert len(recovered) == 1
     assert recovered[0].state == "claimed"
     assert recovered[0].calls[0].tool_call_id == "call-1"
-    assert "arguments" not in recovered[0].to_context()
+    assert "arguments" not in recovered[0]._to_context()
 
 
 @pytest.mark.asyncio
