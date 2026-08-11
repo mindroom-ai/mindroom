@@ -12,7 +12,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credential_policy import credential_service_policy
+from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY, credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import (
@@ -291,6 +291,7 @@ async def test_mcp_oauth_provider_discovers_metadata_and_registers_public_client
         "token_endpoint_auth_method": "none",
         "_source": "oauth_dynamic_client_registration",
         "_oauth_provider": "mcp_demo",
+        RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
     }
 
 

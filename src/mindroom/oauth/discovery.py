@@ -10,6 +10,7 @@ from urllib.parse import ParseResult, urlparse, urlunparse
 
 import httpx
 
+from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRuntimeEndpoints
 from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
@@ -38,8 +39,8 @@ class OAuthDiscoveryConfig:
     token_url: str | None = None
     registration_url: str | None = None
     dynamic_client_registration: bool = True
-    token_endpoint_auth_method: _TokenEndpointAuthMethod = "none"  # noqa: S105
-    pkce_code_challenge_method: Literal["S256"] | None = "S256"
+    token_endpoint_auth_method: _TokenEndpointAuthMethod = "client_secret_post"  # noqa: S105
+    pkce_code_challenge_method: Literal["S256"] | None = None
     allow_insecure_env: str = "MINDROOM_OAUTH_ALLOW_INSECURE_DISCOVERY"
     allow_private_env: str = "MINDROOM_OAUTH_ALLOW_PRIVATE_DISCOVERY"
     error_label: str = "OAuth"
@@ -147,7 +148,7 @@ async def _authorization_server(
 ) -> str | None:
     if config.authorization_server:
         return config.authorization_server.strip()
-    for metadata_url in _protected_resource_metadata_urls(config.resource):
+    for metadata_url in _protected_resource_metadata_urls(config.resource.strip()):
         metadata = await _fetch_json(client, metadata_url, config, runtime_paths, optional=True)
         if metadata is None:
             continue
@@ -165,7 +166,7 @@ async def _authorization_metadata(
     runtime_paths: RuntimePaths,
 ) -> dict[str, Any]:
     authorization_server = await _authorization_server(client, config, runtime_paths)
-    metadata_base = authorization_server or _url_origin(urlparse(config.resource))
+    metadata_base = authorization_server or _url_origin(urlparse(config.resource.strip()))
     for metadata_url in _authorization_server_metadata_urls(metadata_base):
         metadata = await _fetch_json(client, metadata_url, config, runtime_paths, optional=True)
         if metadata is not None:
@@ -215,9 +216,18 @@ async def _discover_metadata(
     config: OAuthDiscoveryConfig,
     runtime_paths: RuntimePaths,
 ) -> _DiscoveredOAuthMetadata:
+    if config.discovery == "auto":
+        resource = config.resource.strip()
+        parsed_resource = urlparse(resource)
+        if not resource or not parsed_resource.scheme or not parsed_resource.netloc:
+            msg = f"{config.error_label} auto discovery requires a protected-resource URL"
+            raise OAuthProviderError(msg)
+        await _validate_url(resource, config, runtime_paths)
+
     key = _cache_key(config, runtime_paths)
     cached = _DISCOVERY_CACHE.get(key)
     if cached is not None and cached.expires_at > time.time():
+        await _validate_metadata(cached.metadata, config, runtime_paths)
         return cached.metadata
 
     if config.discovery == "manual":
@@ -293,6 +303,7 @@ def _stored_registration(
         "redirect_uri": provider.default_redirect_uri(runtime_paths),
         "_source": _DYNAMIC_CLIENT_SOURCE,
         "_oauth_provider": provider.id,
+        RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
     }
     if isinstance(client_secret, str) and client_secret.strip():
         stored["client_secret"] = client_secret.strip()
@@ -337,7 +348,7 @@ async def _register_client(
         if not isinstance(registration, dict):
             msg = f"{config.error_label} dynamic client registration response is not a JSON object"
             raise OAuthProviderError(msg)
-        service = provider.client_config_services[0]
+        service = provider.all_client_config_services[0]
         get_runtime_credentials_manager(runtime_paths).save_credentials(
             service,
             _stored_registration(provider, runtime_paths, registration),
@@ -350,6 +361,12 @@ def oauth_runtime_bootstrapper(
     """Build a provider bootstrapper using OAuth discovery and optional DCR."""
 
     async def bootstrap(provider: OAuthProvider, runtime_paths: RuntimePaths) -> OAuthRuntimeEndpoints:
+        if config.token_endpoint_auth_method != provider.token_endpoint_auth_method:
+            msg = f"{config.error_label} token endpoint auth method must match the OAuth provider"
+            raise OAuthProviderError(msg)
+        if config.pkce_code_challenge_method != provider.pkce_code_challenge_method:
+            msg = f"{config.error_label} PKCE method must match the OAuth provider"
+            raise OAuthProviderError(msg)
         metadata = await _discover_metadata(config, runtime_paths)
         await _register_client(provider, config, metadata, runtime_paths)
         return OAuthRuntimeEndpoints(
