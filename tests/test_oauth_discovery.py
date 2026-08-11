@@ -238,6 +238,48 @@ async def test_dynamic_registration_supports_shared_only_client_config(
 
 
 @pytest.mark.asyncio
+async def test_dynamic_registration_refuses_dedicated_worker_storage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OAuth app clients must be provisioned in the primary runtime."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_PUBLIC_URL": "https://mindroom.example.test",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-a",
+        },
+    )
+    _CloudflareDiscoveryClient.posts = []
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _CloudflareDiscoveryClient)
+    provider = OAuthProvider(
+        id="worker_example",
+        display_name="Worker Example",
+        authorization_url="",
+        token_url="",
+        scopes=(),
+        allow_empty_scopes=True,
+        credential_service="worker_example_oauth",
+        shared_client_config_services=("worker_example_oauth_client",),
+        token_endpoint_auth_method="none",  # noqa: S106
+        pkce_code_challenge_method="S256",
+        runtime_bootstrapper=oauth_runtime_bootstrapper(
+            OAuthDiscoveryConfig(
+                resource="https://superset.example.test",
+                token_endpoint_auth_method="none",  # noqa: S106
+                pkce_code_challenge_method="S256",
+            ),
+        ),
+    )
+
+    with pytest.raises(OAuthProviderError, match="primary runtime"):
+        await provider.runtime_endpoints(runtime_paths)
+
+    assert _CloudflareDiscoveryClient.posts == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("discovery_config", "error"),
     [

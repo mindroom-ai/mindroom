@@ -332,6 +332,10 @@ async def _register_client(
     async with lock:
         if provider.client_config_resolution(runtime_paths) is not None:
             return
+        credentials_manager = get_runtime_credentials_manager(runtime_paths)
+        if credentials_manager.current_worker_key is not None:
+            msg = f"{config.error_label} dynamic client registration must run in the primary runtime"
+            raise OAuthProviderError(msg)
         await _validate_url(metadata.registration_url, config, runtime_paths)
         try:
             async with httpx.AsyncClient(timeout=_DISCOVERY_TIMEOUT_SECONDS, follow_redirects=False) as client:
@@ -349,7 +353,7 @@ async def _register_client(
             msg = f"{config.error_label} dynamic client registration response is not a JSON object"
             raise OAuthProviderError(msg)
         service = provider.all_client_config_services[0]
-        get_runtime_credentials_manager(runtime_paths).save_credentials(
+        credentials_manager.save_credentials(
             service,
             _stored_registration(provider, runtime_paths, registration),
         )
