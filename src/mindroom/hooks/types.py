@@ -133,6 +133,9 @@ class HookMatrixAdmin(Protocol):
     async def invite_user(self, room_id: str, user_id: str) -> bool:
         """Invite one user into one room."""
 
+    async def force_join_user(self, room_id: str, user_id: str) -> bool:
+        """Join one local user to one room through the homeserver admin API."""
+
     async def kick_user(self, room_id: str, user_id: str, *, reason: str | None = None) -> bool:
         """Kick one joined user from one room."""
 
