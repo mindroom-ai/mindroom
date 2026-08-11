@@ -47,6 +47,7 @@ DetachedApprovalDecisionHandler = Callable[
     [str, str, _ApprovalStatus, str | None],
     Awaitable[tuple[_ApprovalStatus, str | None]],
 ]
+DetachedApprovalDecisionReadyHandler = Callable[[str, str], Awaitable[None]]
 
 _STARTUP_DISCARD_SCAN_PAGE = 256
 # How long shutdown waits on work it does not own. Every such wait is on a
@@ -368,6 +369,7 @@ class _ApprovalManager:
         sending_device: SendingDeviceProvider | None = None,
         locate_card: ApprovalCardLocator | None = None,
         detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
+        detached_decision_ready: DetachedApprovalDecisionReadyHandler | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
         self._send_event = sender
@@ -378,6 +380,7 @@ class _ApprovalManager:
         self._sending_device = sending_device
         self._locate_card = locate_card
         self._detached_decision_handler = detached_decision_handler
+        self._detached_decision_ready = detached_decision_ready
         self._live_lock = threading.RLock()
         self._pending_by_card_event: dict[str, _LiveApprovalWaiter] = {}
         self._resolving_card_event_ids: set[str] = set()
@@ -664,6 +667,24 @@ class _ApprovalManager:
             )
             return None
         if identified.card.resolution is not None:
+            content = identified.card.card.get("content")
+            continuation_id = content.get("continuation_id") if isinstance(content, dict) else None
+            tool_call_id = content.get("tool_call_id") if isinstance(content, dict) else None
+            recorded_status = identified.card.resolution.get("status")
+            if (
+                isinstance(continuation_id, str)
+                and isinstance(tool_call_id, str)
+                and recorded_status in ("approved", "denied", "expired")
+                and self._detached_decision_handler is not None
+            ):
+                await self._detached_decision_handler(
+                    continuation_id,
+                    tool_call_id,
+                    recorded_status,
+                    cast("str | None", identified.card.resolution.get("resolution_reason")),
+                )
+                if self._detached_decision_ready is not None:
+                    await self._detached_decision_ready(continuation_id, tool_call_id)
             return await self._redeliver_recorded_resolution(pending, identified.card)
         content = identified.card.card.get("content")
         if isinstance(content, dict) and isinstance(content.get("continuation_id"), str):
@@ -752,6 +773,8 @@ class _ApprovalManager:
                 reason=committed_reason,
                 resolved_by=sender_id if committed_status == resolved_status else None,
             )
+            if outcome is not _ResolutionOutcome.UNRECORDED and self._detached_decision_ready is not None:
+                await self._detached_decision_ready(continuation_id, tool_call_id)
             return ApprovalActionResult(
                 consumed=True,
                 resolved=outcome is _ResolutionOutcome.DELIVERED,
@@ -797,6 +820,8 @@ class _ApprovalManager:
             reason=committed_reason,
             resolved_by=None,
         )
+        if outcome is not _ResolutionOutcome.UNRECORDED and self._detached_decision_ready is not None:
+            await self._detached_decision_ready(continuation_id, tool_call_id)
         return outcome is not _ResolutionOutcome.UNRECORDED
 
     async def handle_live_approval_id_response(
@@ -870,6 +895,7 @@ class _ApprovalManager:
         sending_device: SendingDeviceProvider | None = None,
         locate_card: ApprovalCardLocator | None = None,
         detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
+        detached_decision_ready: DetachedApprovalDecisionReadyHandler | None = None,
     ) -> None:
         """Update Matrix transport hooks for an existing runtime manager."""
         if sender is not None:
@@ -888,6 +914,8 @@ class _ApprovalManager:
             self._locate_card = locate_card
         if detached_decision_handler is not None:
             self._detached_decision_handler = detached_decision_handler
+        if detached_decision_ready is not None:
+            self._detached_decision_ready = detached_decision_ready
 
     def _current_shutdown_reason(self) -> str | None:
         with self._live_lock:
@@ -2281,6 +2309,7 @@ def initialize_approval_store(
     sending_device: SendingDeviceProvider | None = None,
     locate_card: ApprovalCardLocator | None = None,
     detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
+    detached_decision_ready: DetachedApprovalDecisionReadyHandler | None = None,
 ) -> _ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
@@ -2295,6 +2324,7 @@ def initialize_approval_store(
             sending_device=sending_device,
             locate_card=locate_card,
             detached_decision_handler=detached_decision_handler,
+            detached_decision_ready=detached_decision_ready,
         )
         return _MANAGER
 
@@ -2312,6 +2342,7 @@ def initialize_approval_store(
         sending_device=sending_device,
         locate_card=locate_card,
         detached_decision_handler=detached_decision_handler,
+        detached_decision_ready=detached_decision_ready,
     )
     return _MANAGER
 

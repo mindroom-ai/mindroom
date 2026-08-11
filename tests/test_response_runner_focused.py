@@ -14,9 +14,11 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from agno.models.response import ToolExecution
 
 from mindroom import background_tasks as background_tasks_module
 from mindroom import response_runner
+from mindroom.approval_continuation import ApprovalCall, ApprovalContinuation
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
@@ -48,6 +50,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     prepare_memory_and_model_context,
 )
+from mindroom.response_turn import PausedAttempt
 from mindroom.stop import StopManager
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
@@ -707,6 +710,130 @@ async def test_early_placeholder_failure_preserves_non_preparation_error_cause(t
     assert exc_info.value.placeholder_event_id == "$placeholder"
     assert exc_info.value.__cause__ is proximate_error
     assert exc_info.value.__cause__.__cause__ is underlying_error
+
+
+@pytest.mark.asyncio
+async def test_replayed_source_adopts_durable_approval_continuation(tmp_path: Path) -> None:
+    """A crash after suspension persistence must not execute the inbound source a second time."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target())
+    continuation = ApprovalContinuation(
+        approval_id="approval-replay",
+        run_id="run-paused",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id=request.room_id,
+        thread_id=request.thread_id,
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=(request.response_envelope.source_event_id,),
+    )
+    runner._approval_continuations.create(continuation)
+    locked_operation = AsyncMock(return_value="$duplicate")
+
+    event_id = await runner._run_locked_response_lifecycle(
+        request,
+        response_kind="agent",
+        locked_operation=locked_operation,
+    )
+
+    assert event_id == "$waiting"
+    locked_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_approval_chain_keeps_second_pause_in_same_guarded_continuation(tmp_path: Path) -> None:
+    """A second Agno pause must advance the claimed row instead of becoming a terminal failure."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-chain",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="first",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.APPROVED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    runner._approval_continuations.create(continuation)
+    claimed = runner._approval_continuations.claim(continuation.approval_id, "worker")
+    assert claimed is not None
+    next_tool = ToolExecution(
+        tool_call_id="call-2",
+        tool_name="second",
+        tool_args={},
+        requires_confirmation=True,
+    )
+    paused = PausedAttempt(session_id="session-1", run_id="run-2", tools=(next_tool,))
+
+    async def advance(
+        current: ApprovalContinuation,
+        next_pause: PausedAttempt,
+        *,
+        target: MessageTarget,
+        claimant_id: str,
+    ) -> tuple[ApprovalContinuation, str]:
+        del target
+        advanced = runner._approval_continuations.advance_pause(
+            current.approval_id,
+            claimant_id,
+            run_id=next_pause.run_id,
+            session_id=next_pause.session_id,
+            calls=(
+                ApprovalCall(
+                    tool_call_id="call-2",
+                    tool_name="second",
+                    invoking_agent="general",
+                    expires_at="2026-08-12T01:00:00+00:00",
+                    decision=response_runner.ContinuationDecision.APPROVED,
+                    decision_recorded=True,
+                ),
+            ),
+        )
+        assert advanced is not None
+        return advanced, "Waiting for approval: `second`"
+
+    with (
+        patch.object(runner, "_continue_entity_call", new=AsyncMock(side_effect=[paused, "done"])),
+        patch.object(runner, "_advance_approval_pause", new=AsyncMock(side_effect=advance)),
+        patch.object(runner, "_edit_continuation_response", new=AsyncMock(return_value=True)),
+    ):
+        text, terminal = await runner._run_approval_chain(
+            claimed,
+            target=_target(),
+            claimant_id="worker",
+        )
+
+    settled = runner._approval_continuations.get(continuation.approval_id)
+    assert text == "done"
+    assert terminal is True
+    assert settled is not None
+    assert settled.state == "completed"
+    assert settled.generation == 1
 
 
 @pytest.mark.asyncio

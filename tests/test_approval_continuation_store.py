@@ -49,6 +49,7 @@ def _continuation() -> ApprovalContinuation:
                 invoking_agent="analyst",
                 expires_at="2026-08-12T00:00:00+00:00",
                 decision=ApprovalDecision.APPROVED,
+                decision_recorded=True,
             ),
         ),
     )
@@ -61,11 +62,14 @@ def test_continuation_store_commits_first_call_decision_and_one_claim(tmp_path: 
 
     resolved = store.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
     duplicate = store.resolve_call("approval-1", "call-1", ApprovalDecision.DENIED)
+    acknowledged = store.acknowledge_call("approval-1", "call-1")
 
     assert resolved is not None
-    assert resolved.state == "ready"
+    assert resolved.state == "pending"
     assert duplicate is not None
     assert duplicate.calls[0].decision is ApprovalDecision.APPROVED
+    assert acknowledged is not None
+    assert acknowledged.state == "ready"
     assert store.claim("approval-1", "worker-1") is not None
     assert store.claim("approval-1", "worker-2") is None
 
@@ -75,6 +79,7 @@ def test_continuation_store_recovers_pending_and_claimed_without_copying_argumen
     store = ApprovalContinuationStore(tmp_path)
     store.create(_continuation())
     store.resolve_call("approval-1", "call-1", ApprovalDecision.DENIED)
+    store.acknowledge_call("approval-1", "call-1")
     store.claim("approval-1", "worker-1")
 
     recovered = ApprovalContinuationStore(tmp_path).recoverable()
@@ -83,6 +88,45 @@ def test_continuation_store_recovers_pending_and_claimed_without_copying_argumen
     assert recovered[0].state == "claimed"
     assert recovered[0].calls[0].tool_call_id == "call-1"
     assert "arguments" not in recovered[0]._to_context()
+
+
+def test_claimed_continuation_atomically_advances_to_next_pause(tmp_path: Path) -> None:
+    """A second gated tool replaces the claimed run without a crash window between rows."""
+    store = ApprovalContinuationStore(tmp_path)
+    store.create(_continuation())
+    store.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    store.acknowledge_call("approval-1", "call-1")
+    assert store.claim("approval-1", "worker-1") is not None
+    next_call = ApprovalCall(
+        tool_call_id="call-next",
+        tool_name="dangerous_again",
+        invoking_agent="researcher",
+        expires_at="2026-08-12T01:00:00+00:00",
+    )
+
+    advanced = store.advance_pause(
+        "approval-1",
+        "worker-1",
+        run_id="run-2",
+        session_id="session-1",
+        calls=(next_call,),
+    )
+
+    assert advanced is not None
+    assert advanced.state == "pending"
+    assert advanced.run_id == "run-2"
+    assert advanced.generation == 1
+    assert advanced.calls == (next_call,)
+
+
+def test_continuation_store_owns_source_before_outer_turn_settlement(tmp_path: Path) -> None:
+    """A replay after durable suspension must adopt the continuation instead of running the tool turn again."""
+    store = ApprovalContinuationStore(tmp_path)
+    continuation = _continuation()
+    store.create(continuation)
+
+    assert store.for_source_event("$source") == continuation
+    assert store.for_source_event("$unrelated") is None
 
 
 @pytest.mark.asyncio
@@ -149,6 +193,7 @@ async def test_duplicate_decision_waits_through_reload_gap_and_resumes_once(tmp_
         transport._handle_continuation_decision("approval-1", "call-1", "approved", None),
         transport._handle_continuation_decision("approval-1", "call-1", "denied", "duplicate"),
     )
+    await transport._handle_continuation_decision_ready("approval-1", "call-1")
     await asyncio.sleep(0.3)
 
     async def resume(continuation: ApprovalContinuation) -> None:

@@ -37,6 +37,7 @@ class ApprovalCall:
     card_event_id: str | None = None
     decision: ApprovalDecision | None = None
     reason: str | None = None
+    decision_recorded: bool = False
 
     def to_dict(self) -> dict[str, object]:
         """Serialize this call into Agno approval context."""
@@ -48,6 +49,7 @@ class ApprovalCall:
             "card_event_id": self.card_event_id,
             "decision": self.decision.value if self.decision is not None else None,
             "reason": self.reason,
+            "decision_recorded": self.decision_recorded,
         }
 
     @classmethod
@@ -62,6 +64,7 @@ class ApprovalCall:
             card_event_id=cast("str | None", value.get("card_event_id")),
             decision=ApprovalDecision(cast("str", decision)) if decision is not None else None,
             reason=cast("str | None", value.get("reason")),
+            decision_recorded=bool(value.get("decision_recorded", False)),
         )
 
 
@@ -86,6 +89,7 @@ class ApprovalContinuation:
     failure_reason: str | None = None
     team_member_names: tuple[str, ...] = ()
     team_mode: str | None = None
+    generation: int = 0
 
     def _to_context(self) -> dict[str, object]:
         """Serialize the continuation into Agno approval context."""
@@ -104,6 +108,7 @@ class ApprovalContinuation:
             "failure_reason": self.failure_reason,
             "team_member_names": list(self.team_member_names),
             "team_mode": self.team_mode,
+            "generation": self.generation,
         }
 
     @classmethod
@@ -129,6 +134,7 @@ class ApprovalContinuation:
             failure_reason=cast("str | None", context.get("failure_reason")),
             team_member_names=tuple(cast("list[str]", context.get("team_member_names", []))),
             team_mode=cast("str | None", context.get("team_mode")),
+            generation=cast("int", context.get("generation", 0)),
         )
 
 
@@ -193,9 +199,7 @@ class ApprovalContinuationStore:
                     calls.append(call)
             if not matched:
                 return current
-            state: _ApprovalContinuationState = (
-                "ready" if all(call.decision is not None for call in calls) else "pending"
-            )
+            state: _ApprovalContinuationState = "pending"
             updated = replace(current, calls=tuple(calls), state=state)
             row = self._db.update_approval(
                 approval_id,
@@ -204,6 +208,43 @@ class ApprovalContinuationStore:
                 context=updated._to_context(),
             )
             return self.get(approval_id) if row is None else ApprovalContinuation._from_row(row)
+
+    def acknowledge_call(self, approval_id: str, tool_call_id: str) -> ApprovalContinuation | None:
+        """Record that the winning decision is durable in the approval-card journal."""
+        with self._lock:
+            current = self.get(approval_id)
+            if current is None or current.state != "pending":
+                return current
+            calls = tuple(
+                replace(call, decision_recorded=True)
+                if call.tool_call_id == tool_call_id and call.decision is not None
+                else call
+                for call in current.calls
+            )
+            state: _ApprovalContinuationState = (
+                "ready" if all(call.decision is not None and call.decision_recorded for call in calls) else "pending"
+            )
+            updated = replace(current, calls=calls, state=state)
+            row = self._db.update_approval(
+                approval_id,
+                expected_status="pending",
+                status=state,
+                context=updated._to_context(),
+            )
+            return self.get(approval_id) if row is None else ApprovalContinuation._from_row(row)
+
+    def for_source_event(self, source_event_id: str) -> ApprovalContinuation | None:
+        """Return the continuation that durably owns one inbound journal source."""
+        page = 1
+        while True:
+            rows, total = self._db.get_approvals(approval_type="mindroom", limit=100, page=page)
+            for row in rows:
+                continuation = ApprovalContinuation._from_row(row)
+                if source_event_id in continuation.source_event_ids:
+                    return continuation
+            if page * 100 >= total:
+                return None
+            page += 1
 
     def attach_card(self, approval_id: str, tool_call_id: str, card_event_id: str) -> ApprovalContinuation | None:
         """Record the Matrix card that owns one still-pending call."""
@@ -252,6 +293,42 @@ class ApprovalContinuationStore:
                 status="completed",
                 context=completed._to_context(),
                 run_status="COMPLETED",
+            )
+            return None if row is None else ApprovalContinuation._from_row(row)
+
+    def advance_pause(
+        self,
+        approval_id: str,
+        claimant_id: str,
+        *,
+        run_id: str,
+        session_id: str,
+        calls: tuple[ApprovalCall, ...],
+    ) -> ApprovalContinuation | None:
+        """Atomically replace one claimed run with its next approval pause."""
+        with self._lock:
+            current = self.get(approval_id)
+            if current is None or current.state != "claimed" or current.claimant_id != claimant_id:
+                return None
+            state: _ApprovalContinuationState = (
+                "ready" if all(call.decision is not None and call.decision_recorded for call in calls) else "pending"
+            )
+            advanced = replace(
+                current,
+                run_id=run_id,
+                session_id=session_id,
+                calls=calls,
+                state=state,
+                claimant_id=None,
+                generation=current.generation + 1,
+            )
+            row = self._db.update_approval(
+                approval_id,
+                expected_status="claimed",
+                status=state,
+                run_id=run_id,
+                session_id=session_id,
+                context=advanced._to_context(),
             )
             return None if row is None else ApprovalContinuation._from_row(row)
 

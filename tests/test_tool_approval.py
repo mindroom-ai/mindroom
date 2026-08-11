@@ -300,6 +300,7 @@ async def test_detached_approval_card_resolves_without_live_waiter(tmp_path: Pat
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
     decision_handler = AsyncMock(return_value=("approved", None))
+    decision_ready = AsyncMock()
     store = initialize_approval_store(
         test_runtime_paths(tmp_path),
         sender=sender,
@@ -308,6 +309,7 @@ async def test_detached_approval_card_resolves_without_live_waiter(tmp_path: Pat
         transport_sender=lambda: "@mindroom_router:localhost",
         sending_device=lambda: CLAIMING_DEVICE_ID,
         detached_decision_handler=decision_handler,
+        detached_decision_ready=decision_ready,
     )
 
     sent = await store.create_detached_approval(
@@ -336,6 +338,7 @@ async def test_detached_approval_card_resolves_without_live_waiter(tmp_path: Pat
 
     assert result.resolved is True
     decision_handler.assert_awaited_once_with("continuation-1", "call-1", "approved", None)
+    decision_ready.assert_awaited_once_with("continuation-1", "call-1")
 
 
 @pytest.mark.asyncio

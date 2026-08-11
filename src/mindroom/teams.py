@@ -86,6 +86,7 @@ from mindroom.response_turn import (
     DynamicContinuationRunState,
     ExcludedAttempt,
     HandledAttempt,
+    PausedAttempt,
     ResponseTurnContext,
     StreamingTurnAdapter,
     TurnPartialSnapshot,
@@ -1836,7 +1837,7 @@ async def continue_paused_team_run(
     model_name: str,
     decisions: dict[str, bool],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-) -> str:
+) -> str | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run."""
     members = await asyncio.to_thread(
         materialize_exact_team_members,
@@ -1911,6 +1912,13 @@ async def continue_paused_team_run(
         if not isinstance(continued, TeamRunOutput):
             msg = "Team continuation returned an unexpected result"
             raise TypeError(msg)
+        paused = paused_attempt_from_response(
+            continued,
+            fallback_session_id=session_id,
+            fallback_run_id=run_id,
+        )
+        if paused is not None:
+            return paused
         if continued.status is not RunStatus.completed:
             raise RuntimeError(str(continued.content or "Team continuation did not complete"))
         return _format_terminal_team_response(continued, team_display_names=members.display_names)
