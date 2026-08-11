@@ -224,6 +224,26 @@ def projected_event(
     return projected
 
 
+def ingestion_event_views(
+    *, room_id: str, source: Mapping[str, object], self_sender: str  # noqa: COM812
+) -> tuple[InboundEvent, ProjectedEvent | None]:
+    """Convert canonical Matrix input through the existing admission rules."""
+    message = "Unsupported ingestion event"
+    parsed = parse_matrix_media_event_source(source)
+    if parsed is None:
+        parsed = nio.Event.parse_event(dict(source))
+    if not isinstance(parsed, nio.Event):
+        raise TypeError(message)
+    kind = _event_kind(parsed)
+    if kind is None or kind in (EventKind.ROOM_LIFECYCLE, EventKind.DECRYPTION_FAILURE):
+        raise ValueError(message)
+    event_class = _event_class_for(nio.TimelineEventProvenance.LIVE, parsed)
+    return (
+        inbound_event(room_id, parsed, kind, event_class),
+        projected_event(room_id, parsed, kind, self_sender=self_sender),
+    )
+
+
 def parse_journal_event(stored: JournalEvent) -> nio.Event:
     """Rebuild one typed nio event from its stored replay payload."""
     source = dict(stored.source)

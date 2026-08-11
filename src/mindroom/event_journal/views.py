@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         EventKind,
         HydrationCoverage,
         InboundEvent,
+        IngestionBatchAdmission,
         JournalEvent,
         OutboxDelivery,
         PendingPage,
@@ -55,6 +56,14 @@ class AdmissionView(Protocol):
         projected: ProjectedEvent | None = None,
     ) -> AdmissionResult:
         """Admit one event and update the projection in a single transaction."""
+        ...
+
+
+class IngestionBatchAdmissionView(Protocol):
+    """Admitting one authenticated nio batch, and nothing else."""
+
+    async def admit_ingestion_batch(self, admission: IngestionBatchAdmission) -> AdmissionResult:  # fmt: skip
+        """Persist one event, projection, receipt, and frontier atomically."""
         ...
 
 

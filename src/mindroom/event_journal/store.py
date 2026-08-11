@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         EventKind,
         HydrationCoverage,
         InboundEvent,
+        IngestionBatchAdmission,
         JournalEvent,
         OutboxDelivery,
         PendingPage,
@@ -106,6 +107,15 @@ class PrincipalStore:
         """Admit one event and update the projection in a single transaction."""
         return await self._backend.write(
             lambda transaction: journal.admit(transaction, self._principal_id, event, projected),
+        )
+
+    async def admit_ingestion_batch(
+        self,
+        admission: IngestionBatchAdmission,
+    ) -> AdmissionResult:
+        """Atomically persist one authenticated nio ingestion record."""
+        return await self._backend.write(
+            lambda tx: journal.admit_ingestion_batch(tx, self._principal_id, admission),
         )
 
     async def pending(

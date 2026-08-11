@@ -10,9 +10,20 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from uuid import UUID
 
+    from .projection import ProjectedEvent
+
 
 class IngestionConsumerBindingError(RuntimeError):
     """The durable consumer identity disagrees with a requested binding."""
+
+
+class IngestionBatchValidationError(RuntimeError): ...  # noqa: D101
+
+
+class IngestionBatchIntegrityError(RuntimeError): ...  # noqa: D101
+
+
+class IngestionBatchSequenceError(RuntimeError): ...  # noqa: D101
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +150,18 @@ class InboundEvent:
     sender: str
     origin_server_ts: int
     source: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionBatchAdmission:  # noqa: D101
+    schema_version: int
+    consumer_generation: UUID
+    stream_id: UUID
+    sequence: int
+    sha256: bytes
+    membership_epoch: int
+    event: InboundEvent
+    projected: ProjectedEvent | None
 
 
 @dataclass(frozen=True, slots=True)

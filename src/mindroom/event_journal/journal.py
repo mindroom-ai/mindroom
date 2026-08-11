@@ -13,8 +13,10 @@ noticed.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from mindroom.history_recovery import (
     HistoryRecoveryOutcome,
@@ -32,6 +34,12 @@ from .models import (
     DepartureSource,
     EventClass,
     EventKind,
+    InboundEvent,
+    IngestionBatchAdmission,
+    IngestionBatchIntegrityError,
+    IngestionBatchSequenceError,
+    IngestionBatchValidationError,
+    IngestionConsumerBindingError,
     JournalEvent,
     PendingPage,
     SemanticConsumer,
@@ -41,7 +49,6 @@ from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
     from .backend import Row, Transaction
-    from .models import InboundEvent
 
 logger = get_logger(__name__)
 
@@ -52,6 +59,90 @@ _JOURNAL_COLUMNS = """
 # Successful repair is hidden from callers but retained as the revision carrier,
 # so a later gap cannot reuse the identity of an old in-flight walk.
 _REPAIRED_RECOVERY_STATE = "repaired"
+
+
+def _validate_ingestion_batch_admission(admission: object) -> None:
+    invalid = IngestionBatchValidationError("Invalid ingestion batch admission")
+    if type(admission) is not IngestionBatchAdmission:
+        raise invalid
+
+    def require(condition: object) -> None:
+        if not condition:
+            raise invalid
+
+    item = admission
+    e = item.event
+    schema, sequence, epoch = item.schema_version, item.sequence, item.membership_epoch
+    require(type(schema) is type(sequence) is type(epoch) is int)
+    require(schema == 1 and 0 <= sequence <= 2**63 - 2 and epoch >= 0)
+    require(type(item.consumer_generation) is type(item.stream_id) is UUID)
+    require(type(item.sha256) is bytes and len(item.sha256) == 32)
+    require(type(e) is InboundEvent)
+    require(all(type(v) is str and v for v in (e.event_id, e.room_id, e.sender)))
+    require(e.thread_id is None or (type(e.thread_id) is str and bool(e.thread_id)))
+    require(type(e.kind) is EventKind and type(e.event_class) is EventClass)
+    require(e.kind not in (EventKind.ROOM_LIFECYCLE, EventKind.DECRYPTION_FAILURE))
+    require(type(e.origin_server_ts) is int and isinstance(e.source, Mapping))
+    p = item.projected
+    if p is None:
+        return
+    require(type(p) is ProjectedEvent and isinstance(p.content, Mapping))
+    require(all(type(v) is str for v in (p.event_id, p.room_id, p.sender)))
+    require(type(p.thread_id) is type(e.thread_id) and type(p.origin_server_ts) is int)
+    require(p.event_id == e.event_id and p.room_id == e.room_id)
+    require(p.thread_id == e.thread_id and p.sender == e.sender)
+    require(p.origin_server_ts == e.origin_server_ts)
+    relations = p.replaces_event_id, p.redacts_event_id
+    require(all(v is None or (type(v) is str and v) for v in relations))
+
+
+def admit_ingestion_batch(  # noqa: C901 - explicit ordered protocol classifier
+    transaction: Transaction,
+    principal_id: str,
+    admission: IngestionBatchAdmission,
+) -> AdmissionResult:
+    """Atomically claim and persist one authenticated ingestion record."""
+    _validate_ingestion_batch_admission(admission)
+    generation, stream = str(admission.consumer_generation), str(admission.stream_id)
+    row = transaction.fetchone("UPDATE matrix_sync_consumers SET next_sequence = next_sequence + 1 WHERE principal_id = ? AND consumer_generation = ? AND stream_id = ? AND next_sequence = ? AND next_sequence < 9223372036854775807 RETURNING consumer_generation, stream_id, next_sequence", (principal_id, generation, stream, admission.sequence))  # fmt: skip
+    if row is None:
+        state = transaction.fetchone("SELECT c.consumer_generation AS c_generation, c.stream_id AS c_stream, c.next_sequence AS c_next, r.schema_version AS r_schema, r.batch_sha256 AS r_sha256, r.event_id AS r_event_id FROM matrix_sync_consumers AS c LEFT JOIN matrix_ingestion_receipts AS r ON r.principal_id = c.principal_id AND r.consumer_generation = c.consumer_generation AND r.stream_id = c.stream_id AND r.sequence = ? WHERE c.principal_id = ?", (admission.sequence, principal_id))  # fmt: skip
+        if state is None:
+            raise IngestionConsumerBindingError
+        owner = state["c_generation"], state["c_stream"]
+        if tuple(map(type, owner)) != (str, str) or owner != (generation, stream):
+            raise IngestionConsumerBindingError
+        frontier = state["c_next"]
+        if type(frontier) is not int or not 0 <= frontier <= 2**63 - 1:
+            raise IngestionBatchIntegrityError
+        if admission.sequence == frontier - 1:
+            receipt = state["r_schema"], state["r_sha256"], state["r_event_id"]
+            expected = 1, admission.sha256.hex(), admission.event.event_id
+            if tuple(map(type, receipt)) != (int, str, str) or receipt != expected:
+                raise IngestionBatchIntegrityError
+            return AdmissionResult.DUPLICATE
+        if admission.sequence < frontier - 1 or admission.sequence > frontier:
+            raise IngestionBatchSequenceError
+        raise IngestionBatchIntegrityError
+    owner = row["consumer_generation"], row["stream_id"]
+    if not all(type(value) is str for value in owner) or owner != (generation, stream):
+        raise IngestionConsumerBindingError
+    next_sequence = row["next_sequence"]
+    if type(next_sequence) is not int or next_sequence != admission.sequence + 1:
+        raise IngestionBatchIntegrityError
+    membership = transaction.fetchone("INSERT INTO room_membership (principal_id, room_id, membership_epoch) VALUES (?, ?, 0) ON CONFLICT (principal_id, room_id) DO UPDATE SET membership_epoch = room_membership.membership_epoch RETURNING membership_epoch", (principal_id, admission.event.room_id))  # fmt: skip
+    epoch = None if membership is None else membership["membership_epoch"]
+    if type(epoch) is not int:
+        raise IngestionBatchIntegrityError
+    if epoch != admission.membership_epoch:
+        raise IngestionBatchValidationError
+    if (
+        admit(transaction, principal_id, admission.event, admission.projected)
+        is not AdmissionResult.ADMITTED
+    ):
+        raise IngestionBatchIntegrityError
+    transaction.execute("INSERT INTO matrix_ingestion_receipts (principal_id, consumer_generation, stream_id, sequence, schema_version, batch_sha256, event_id) VALUES (?, ?, ?, ?, 1, ?, ?)", (principal_id, generation, stream, admission.sequence, admission.sha256.hex(), admission.event.event_id))  # fmt: skip
+    return AdmissionResult.ADMITTED
 
 
 def store_generation(transaction: Transaction, *, new_generation: str) -> str:
