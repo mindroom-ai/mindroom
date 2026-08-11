@@ -336,3 +336,44 @@ async def test_recovered_partial_card_set_remains_recoverable_until_card_is_term
     assert recoverable is not None
     assert recoverable.state == "pending"
     bot.fail_approval_continuation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_removed_owner_waits_for_router_before_retiring_ready_continuation(tmp_path: Path) -> None:
+    """A temporarily absent router must not lose visible terminal settlement for a removed owner."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    bots: dict[str, object] = {}
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda name: cast("Any", bots.get(name)),
+        cards_provider=lambda: None,
+        entity_configured=lambda _name: False,
+    )
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    ready = transport._continuations.acknowledge_call("approval-1", "call-1")
+    assert ready is not None
+    assert ready.state == "ready"
+
+    dispatch = asyncio.create_task(transport._dispatch_continuation("approval-1"))
+    await asyncio.sleep(0.3)
+    still_ready = transport._continuations.get("approval-1")
+    assert still_ready is not None
+    assert still_ready.state == "ready"
+
+    async def fail(owned: ApprovalContinuation, reason: str) -> None:
+        transport._continuations.fail(owned.approval_id, reason)
+
+    fail_mock = AsyncMock(side_effect=fail)
+    bots["router"] = SimpleNamespace(running=True, fail_approval_continuation=fail_mock)
+    await asyncio.wait_for(dispatch, timeout=2)
+
+    failed = transport._continuations.get("approval-1")
+    assert failed is not None
+    assert failed.state == "failed"
+    fail_mock.assert_awaited_once()

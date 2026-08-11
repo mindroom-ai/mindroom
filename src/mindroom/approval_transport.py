@@ -235,9 +235,8 @@ class ApprovalMatrixTransport:
             fallback = self.bot_provider(ROUTER_AGENT_NAME)
             if fallback is not None and fallback.running:
                 await fallback.fail_approval_continuation(continuation, reason)
-            else:
-                await asyncio.to_thread(self._continuations.fail, approval_id, reason)
-            return
+                return
+            await asyncio.sleep(0.25)
 
     def _schedule_expiry(self, continuation: ApprovalContinuation) -> None:
         for call in continuation.calls:
