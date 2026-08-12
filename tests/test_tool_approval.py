@@ -4077,6 +4077,79 @@ async def test_startup_discard_that_never_reached_matrix_stays_recoverable(
 
 
 @pytest.mark.asyncio
+async def test_startup_sweep_landing_inside_a_live_claim_leaves_it_alone(tmp_path: Path) -> None:
+    """A sweep that runs between a claim's commit and its return must not take the row.
+
+    The claim is committed before the send it belongs to exists, so for that
+    window there is nothing in memory saying the row is spoken for. A sweep
+    reading it then sees exactly what a dead process leaves -- claimed, never
+    attempted -- and used to delete it, stranding the caller on an approval
+    whose durable card no longer existed.
+    """
+    sweeps: list[ApprovalStartupSweep] = []
+
+    class SweepingDuringClaimCards(FakeApprovalCards):
+        """A card store that runs a startup sweep from inside the claim write."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.manager: _ApprovalManager | None = None
+
+        async def claim_approval_card(
+            self,
+            *,
+            room_id: str,
+            transaction_id: str,
+            card: Mapping[str, Any],
+        ) -> None:
+            await super().claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
+            assert self.manager is not None
+            sweeps.append(await self.manager.discard_pending_on_startup())
+
+    cards = SweepingDuringClaimCards()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    cards.manager = store
+
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="create_event",
+            arguments={"summary": "standup"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    assert sweeps, "the sweep never ran inside the claim, so this proves nothing"
+    assert all(sweep == ApprovalStartupSweep(discarded=0, failed=0) for sweep in sweeps)
+    assert cards.rows, "the sweep deleted the claim it landed inside"
+    assert sender.await_count == 1
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    decision = await task
+
+    assert result.resolved is True
+    assert decision.status == "approved"
+
+
+@pytest.mark.asyncio
 async def test_discard_pending_on_startup_skips_other_routers_cards(tmp_path: Path) -> None:
     cards = FakeApprovalCards()
     await cards.store_card("$approval", "!room:localhost", _approval_card(sender="@other_router:localhost"))

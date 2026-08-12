@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import Future, InvalidStateError
@@ -379,6 +380,12 @@ class _ApprovalManager:
         self._cancelled_card_event_ids = _BoundedCardEventIds(_MAX_REMEMBERED_TERMINAL_CARD_IDS)
         self._active_approval_sends: set[_ActiveApprovalSend] = set()
         self._post_cancel_cleanup_tasks: set[_PostCancelCleanupTask] = set()
+        # Rows claimed from here on belong to this process, whether or not the
+        # send that owns one has registered itself yet. Taken at construction
+        # rather than at the sweep, because the sweep is armed by startup gates
+        # that can be minutes late, and every claim made while waiting for them
+        # would otherwise look like one a dead process left behind.
+        self._sweep_horizon_ns = time.time_ns()
         # Recovery that outlived the request that started it, held so it is
         # not garbage collected mid-flight.
         self._detached_card_writes: set[_DetachedCardWrite] = set()
@@ -541,6 +548,20 @@ class _ApprovalManager:
         concerned and retrying would reach the same answer, so counting it as
         owed would keep the sweep asking forever.
         """
+        if claimed.created_at_ns >= self._sweep_horizon_ns:
+            # Claimed after this process started, so it is this process's to
+            # finish. The in-flight check below cannot see it yet: a claim is
+            # committed before the send it belongs to registers, and a sweep
+            # landing in that window would read a live claim as an abandoned
+            # one and delete the row out from under the caller still building
+            # its card. Nothing is owed here -- the owner settles it or fails
+            # on its own path -- so this is not counted as a failure either.
+            logger.debug(
+                "approval_startup_card_skipped_claimed_after_start",
+                room_id=room_id,
+                transaction_id=claimed.transaction_id,
+            )
+            return None
         if self._send_is_in_flight(claimed.transaction_id):
             # A row whose send has not come back is indistinguishable, from
             # here, from one a dead process abandoned: claimed, no event id,

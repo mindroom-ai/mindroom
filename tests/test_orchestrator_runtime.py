@@ -1808,6 +1808,49 @@ class TestMultiAgentOrchestrator:
         assert expire_orphaned_approval_cards_on_startup.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_a_startup_discard_that_never_finishes_gives_up_loudly(self, tmp_path: Path) -> None:
+        """A sweep that keeps coming up short must stop asking.
+
+        Retrying is for a pass that failed on something transient. A row that
+        survives every attempt is not that, and a sweep that keeps returning
+        for it re-reads every room on a timer for the rest of the process's
+        life -- each pass another chance to mistake work in progress for
+        wreckage. What is owed is left for the next restart and said out loud.
+        """
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.config.tool_approval.timeout_days = 7.0
+        orchestrator.config.tool_approval.rules = []
+
+        bot = MagicMock()
+        bot.agent_name = "router"
+        bot.running = True
+        bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        orchestrator.agent_bots = {"router": bot}
+
+        with (
+            patch("mindroom.approval_transport._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
+            patch("mindroom.approval_transport._STARTUP_CLEANUP_MAX_ATTEMPTS", 3),
+            patch(
+                "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
+                new=AsyncMock(return_value=ApprovalStartupSweep(discarded=0, failed=1)),
+            ) as expire_orphaned_approval_cards_on_startup,
+        ):
+            orchestrator._approval_transport.reset_startup_cleanup_gate()
+            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+            await orchestrator.handle_bot_ready(bot)
+
+            await _await_until(lambda: expire_orphaned_approval_cards_on_startup.await_count == 3)
+
+            # Nothing is waiting to try a fourth time, and a gate firing again
+            # does not restart the loop either.
+            assert _retry_tasks() == []
+            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+
+        await orchestrator._approval_transport.cancel_startup_cleanup_retry()
+        assert expire_orphaned_approval_cards_on_startup.await_count == 3
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "stop_retrying",
         [

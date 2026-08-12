@@ -44,6 +44,13 @@ _TApprovalTransportResult = TypeVar("_TApprovalTransportResult")
 # failure would leave answered cards clickable until the next restart.
 _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS = 1.0
 _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
+# How many times a sweep may come up short before it stops asking. A card that
+# survives this many passes is not waiting on anything transient, and a sweep
+# that keeps retrying it runs forever: it re-reads every room on a timer for
+# the rest of the process's life, and each pass is another chance to mistake
+# work in progress for wreckage. Giving up loudly leaves the owed rows for the
+# next restart, which is where they came from.
+_STARTUP_CLEANUP_MAX_ATTEMPTS = 10
 
 
 class _ApprovalTransportBot(Protocol):
@@ -134,6 +141,7 @@ class ApprovalMatrixTransport:
         init=False,
         repr=False,
     )
+    _startup_cleanup_attempts: int = field(default=0, init=False, repr=False)
 
     def capture_runtime_loop(self) -> None:
         """Remember the runtime loop that owns Matrix client I/O."""
@@ -452,6 +460,7 @@ class ApprovalMatrixTransport:
         self._startup_runtime_support_ready_for_cleanup = False
         self._startup_cleanup_done = False
         self._startup_cleanup_retry_delay = _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS
+        self._startup_cleanup_attempts = 0
         retry = self._startup_cleanup_retry
         self._startup_cleanup_retry = None
         if retry is not None:
@@ -505,7 +514,16 @@ class ApprovalMatrixTransport:
                 or not self._startup_runtime_support_ready_for_cleanup
             ):
                 return
+            self._startup_cleanup_attempts += 1
             if not await self._discard_orphaned_approval_cards_on_startup():
+                if self._startup_cleanup_attempts >= _STARTUP_CLEANUP_MAX_ATTEMPTS:
+                    logger.warning(
+                        "approval_startup_sweep_abandoned",
+                        attempts=self._startup_cleanup_attempts,
+                    )
+                    self._startup_cleanup_done = True
+                    self._retire_startup_cleanup_retry()
+                    return
                 self._schedule_startup_cleanup_retry()
                 return
             self._startup_cleanup_done = True
