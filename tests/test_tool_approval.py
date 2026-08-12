@@ -4234,6 +4234,75 @@ async def test_startup_sweep_landing_inside_a_live_claim_leaves_it_alone(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_a_request_publishing_a_claim_counts_as_live_work(tmp_path: Path) -> None:
+    """Runtime replacement must not step over a claim being published.
+
+    ``has_live_work`` is what a fresh runtime asks before it swaps the manager
+    out. A request between its claim write and its send holds a durable row
+    that only it can settle, so a swap there leaves the row owned by nobody --
+    exactly the state the startup sweep is entitled to act on.
+    """
+    live_work: list[bool] = []
+
+    class ObservingCards(FakeApprovalCards):
+        """A card store that asks the manager what it thinks during the claim."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.manager: _ApprovalManager | None = None
+
+        async def claim_approval_card(
+            self,
+            *,
+            room_id: str,
+            transaction_id: str,
+            card: Mapping[str, Any],
+        ) -> None:
+            await super().claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
+            assert self.manager is not None
+            live_work.append(self.manager.has_live_work())
+
+    cards = ObservingCards()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    cards.manager = store
+    assert store.has_live_work() is False
+
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="create_event",
+            arguments={"summary": "standup"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    assert live_work == [True]
+
+    await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    await task
+
+    assert store.has_live_work() is False
+
+
+@pytest.mark.asyncio
 async def test_a_live_claim_is_protected_by_ownership_not_by_its_timestamp(tmp_path: Path) -> None:
     """What protects a claim being published is a hold, not when it was written.
 

@@ -1887,12 +1887,21 @@ class _ApprovalManager:
         return self._runtime_storage_root == storage_root
 
     def has_live_work(self) -> bool:
-        """Return whether live approvals or cancelled-send cleanup are still active."""
+        """Return whether live approvals or cancelled-send cleanup are still active.
+
+        A request publishing a transaction counts, and so does a detached
+        write still finishing one. Both hold a durable row that only they can
+        settle, and a replacement manager taking over while either is in
+        flight leaves that row with no owner anywhere -- which is the same
+        state a sweep is entitled to act on.
+        """
         with self._live_lock:
             has_waiters = bool(self._pending_by_card_event or self._resolving_card_event_ids)
             has_active_sends = bool(self._active_approval_sends)
             has_cleanup_tasks = bool(self._post_cancel_cleanup_tasks)
-        return has_waiters or has_active_sends or has_cleanup_tasks
+            has_publishing = bool(self._claiming_transaction_ids)
+            has_detached_writes = bool(self._detached_card_writes)
+        return has_waiters or has_active_sends or has_cleanup_tasks or has_publishing or has_detached_writes
 
     def _send_is_in_flight(self, transaction_id: str) -> bool:
         """Return whether this row is still owned by a send that has not come back.
