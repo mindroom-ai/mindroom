@@ -156,16 +156,7 @@ def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
         return event
     stripped_content = dict(content)
     stripped_content.pop("m.relates_to", None)
-    stripped_source = {**event.source, "content": stripped_content}
-    if isinstance(event, PreparedIngress):
-        return replace(event, source=stripped_source)
-    return PreparedIngress(
-        sender=event.sender,
-        event_id=event.event_id,
-        body=event.body,
-        source=stripped_source,
-        server_timestamp=event.server_timestamp,
-    )
+    return replace(event, source={**event.source, "content": stripped_content})
 
 
 def _scheduled_history_budget_for_dispatch(
@@ -364,7 +355,7 @@ class TurnController:
         return _PromptIngressReservationOwner(
             gate=self.deps.coalescing_gate,
             slot=self.deps.coalescing_gate.enter_lane(
-                ReceiptLaneKey(room_id=room.room_id, physical_sender_id=requester_user_id),
+                ReceiptLaneKey(room_id=room.room_id, sender_id=requester_user_id),
                 receipt_time=receipt_time,
             ),
         )

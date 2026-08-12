@@ -149,8 +149,8 @@ Receipt ordering, batching, and response serialization use three different ident
 
 - Physical sender: the Matrix user ID that physically sent the event.
 - Effective requester: the trusted user ID the turn is attributed to after ingress validation; trusted-relay promotion can make it differ from the physical sender.
-- Receipt lane: the per-(room, physical sender) FIFO in `ingress_lanes.py`, keyed by `ReceiptLaneKey`, that preserves receipt order while asynchronous readiness (voice STT, media downloads) resolves.
-- Batching owner: the `CoalescingOwner` inside `CoalescingKey`, built only through `derive_coalescing_key` (or `requester_coalescing_key` for the common requester case); the gate in `coalescing.py` merges only same-owner messages into one batch, and a busy conversation reroutes admissions to an `ActiveFollowUpCoalescingOwner` key so follow-ups batch behind the active response.
+- Receipt lane: the per-(room, effective requester) FIFO in `ingress_lanes.py`, keyed by `ReceiptLaneKey`, that preserves receipt order while asynchronous readiness (voice STT, media downloads) resolves.
+- Batching owner: the `CoalescingOwner` inside `CoalescingKey`, built through `requester_coalescing_key` or `active_follow_up_coalescing_key`; the gate in `coalescing.py` merges only same-owner messages into one batch, and a busy conversation reroutes admissions to an `ActiveFollowUpCoalescingOwner` key so follow-ups batch behind the active response.
 - Delivery target: `MessageTarget`, the authoritative identity for where a response is sent; the response-lifecycle lock that serializes visible responses derives from it as `ResponseLifecycleKey` via `MessageTarget.lifecycle_key`.
 
 ### Prepared ingress
@@ -160,7 +160,6 @@ Ordinary text is normalized exactly once at admission, before the coalescing gat
 Per-source evidence travels as named frozen fields on the value: effective requester, source kind, policy source kind, hook source, message depth, trust evidence, discovery alias, and the recovery flag.
 Raw Matrix media events are wrapped at enqueue with their caption as body and the protocol object retained on `raw_event` for attachment registration and media planning.
 `PendingEvent` carries one `PreparedIngress` plus only queue-local state (enqueue timing and opaque dispatch metadata); the busy-reroute policy stamp is a `dataclasses.replace` on the frozen value.
-Synthetic interactive-selection and edit-regeneration inputs construct prepared values without a live nio event.
 
 ### Durable turn and callback states
 
@@ -300,11 +299,11 @@ Ingress (`TurnController` and `text_ingress_dispatch`) builds an immutable `Resp
 The runner acquires the lifecycle lock, refreshes thread history, then calls `ResponsePayloadPreparer.prepare` as a first-class execution step to assemble the final payload, run enrichment hooks, and log startup latency.
 The old `prepare_after_lock` callback that ran payload building back inside `TurnController` is deleted; data crosses the seam as values, not closures.
 
-Ordering identities are named types now: `ReceiptLaneKey` for receipt lanes, the `CoalescingOwner` union (with `derive_coalescing_key`) for batching, and `ResponseLifecycleKey` (via `MessageTarget.lifecycle_key`) for response serialization; no synthetic requester string or bare tuple crosses these boundaries.
+Ordering identities are named types now: `ReceiptLaneKey` for receipt lanes, the `CoalescingOwner` union for batching, and `ResponseLifecycleKey` (via `MessageTarget.lifecycle_key`) for response serialization; no synthetic requester string or bare tuple crosses these boundaries.
 Ordinary ingress is normalized once at admission into the canonical `PreparedIngress`, which also owns the per-source evidence that used to travel in mutable parallel fields.
 `DeliveryGateway` is the sole constructor of `FinalDeliveryOutcome`, translates typed Matrix delivery failures (`MatrixDeliveryFailure`) into its failure vocabulary, and the delivery types own cancellation provenance (`resolved_cancel_source`) and final event-ID precedence.
 Agent and team outer settlement share extracted helpers for blocking cancellation, failed-turn persistence, delivery timing, and streamed finalization; the shared blocking and streaming drivers are unchanged.
-The router relay lives in `router_relay.py` behind `RouterRelayDeps`.
+The router relay lives in `router_relay.py` behind the narrow `_RouterRelaySupport` protocol.
 
 ## Next Simplification Work
 

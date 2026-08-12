@@ -127,11 +127,11 @@ def _gate(
 
 
 def test_receipt_lane_key_derives_only_for_requester_owners() -> None:
-    """Requester owners map to their physical sender lane; follow-up owners have no lane."""
+    """Requester owners map to their receipt lane; follow-up owners have no lane."""
     assert ReceiptLaneKey.for_coalescing_owner(
         "!room:localhost",
         RequesterCoalescingOwner("@user:localhost"),
-    ) == ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost")
+    ) == ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost")
     assert ReceiptLaneKey.for_coalescing_owner("!room:localhost", ActiveFollowUpCoalescingOwner()) is None
 
 
@@ -145,7 +145,7 @@ async def test_unready_lane_slot_does_not_delay_other_senders_or_rooms() -> None
         await blocked_voice.wait()
         return _ready(_plain_event("$voice", "voice", 1_000_000), source_kind=VOICE_SOURCE_KIND)
 
-    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@alice:localhost"))
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@alice:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@alice:localhost")),
@@ -154,7 +154,7 @@ async def test_unready_lane_slot_does_not_delay_other_senders_or_rooms() -> None
         ready_task=asyncio.create_task(never_ready()),
     )
 
-    bob_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@bob:localhost"))
+    bob_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@bob:localhost"))
     gate.submit_lane_slot(
         bob_slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@bob:localhost")),
@@ -162,7 +162,7 @@ async def test_unready_lane_slot_does_not_delay_other_senders_or_rooms() -> None
         source_kind="message",
         ready_result=_ready(_plain_event("$bob", "from bob", 1_000_100)),
     )
-    other_room_slot = gate.enter_lane(ReceiptLaneKey(room_id="!other:localhost", physical_sender_id="@alice:localhost"))
+    other_room_slot = gate.enter_lane(ReceiptLaneKey(room_id="!other:localhost", sender_id="@alice:localhost"))
     gate.submit_lane_slot(
         other_room_slot,
         key=CoalescingKey("!other:localhost", "$elsewhere", RequesterCoalescingOwner("@alice:localhost")),
@@ -255,7 +255,7 @@ async def test_straggler_follow_up_logs_missed_combined_turn() -> None:
         await release_ready.wait()
         return _ready(_plain_event("$late", "late follow-up", 1_000_000))
 
-    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
     gate.submit_lane_slot(
         slot,
         key=key,
@@ -296,7 +296,7 @@ async def test_follow_up_delivered_while_still_busy_is_not_logged_as_missed() ->
     )
     key = CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost"))
 
-    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
     with patch("mindroom.coalescing.logger") as logger_mock:
         gate.submit_lane_slot(
             slot,
@@ -407,7 +407,7 @@ async def test_enter_lane_during_bounded_drain_returns_closed_slot() -> None:
 
     drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=0.05))
     await asyncio.sleep(0)
-    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
     assert slot.closed
     with pytest.raises(IngressAdmissionClosedError):
         gate.submit_lane_slot(
@@ -510,7 +510,7 @@ async def test_failed_lane_readiness_does_not_block_later_same_sender_work() -> 
         msg = "stt failed"
         raise RuntimeError(msg)
 
-    failed_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    failed_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
     gate.submit_lane_slot(
         failed_slot,
         key=key,
@@ -518,7 +518,7 @@ async def test_failed_lane_readiness_does_not_block_later_same_sender_work() -> 
         source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(failing_ready()),
     )
-    text_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    text_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
     gate.submit_lane_slot(
         text_slot,
         key=key,
@@ -552,7 +552,7 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
         return None
 
     source_event_id = "$ignored-media"
-    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
     gate.submit_lane_slot(
         slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
@@ -616,7 +616,7 @@ async def test_failed_ignored_source_settlement_returns_source_to_retry_owner() 
     async def ignored_ready() -> None:
         return None
 
-    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
     gate.submit_lane_slot(
         slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
@@ -1106,7 +1106,7 @@ async def test_edit_and_reaction_slots_settle_before_their_execution_finishes(tm
 async def test_lane_worker_failure_at_wait_phase_does_not_poison_lane() -> None:
     """A failure while waiting on the head slot settles it and keeps the lane serving."""
     gate, batches = _gate(debounce_seconds=0.0)
-    poisoned_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    poisoned_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
 
     async def failing_wait() -> None:
         msg = "wait phase failed"
@@ -1125,7 +1125,7 @@ async def test_lane_worker_failure_at_wait_phase_does_not_poison_lane() -> None:
             ready_result=_ready(_plain_event("$poisoned", "lost", 1_000_000)),
         )
 
-    next_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    next_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
     gate.submit_lane_slot(
         next_slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
@@ -1312,8 +1312,8 @@ async def test_cancelled_lane_worker_settles_remaining_slots() -> None:
         await blocked.wait()
         return _ready(_plain_event("$blocked", "blocked", 1_000_000))
 
-    first_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
-    second_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    first_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
+    second_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
     gate.submit_lane_slot(
         first_slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
@@ -1322,7 +1322,7 @@ async def test_cancelled_lane_worker_settles_remaining_slots() -> None:
         ready_task=asyncio.create_task(never_ready()),
     )
 
-    worker = gate.lanes._workers[ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost")]
+    worker = gate.lanes._workers[ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost")]
     worker.cancel()
     await asyncio.gather(worker, return_exceptions=True)
     await asyncio.sleep(0)
@@ -1367,7 +1367,7 @@ async def test_abandoned_slot_does_not_deliver_after_late_readiness() -> None:
             await asyncio.Event().wait()
         return ReadyPendingEvent(pending_event=pending)
 
-    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
     gate.submit_lane_slot(
         slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),

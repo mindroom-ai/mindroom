@@ -5,11 +5,9 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, NamedTuple
 
 from .attachment_ids import merge_attachment_ids
-from .attachments import parse_attachment_ids_from_event_source
-from .constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY, VOICE_TRANSCRIPT_KEY
 from .dispatch_handoff import (
     DispatchIngressMetadata,
     DispatchPayloadMetadata,
@@ -18,6 +16,7 @@ from .dispatch_handoff import (
     PreparedIngress,
     dispatch_prompt_for_event,
     event_content_dict,
+    payload_metadata_from_source,
 )
 from .dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -51,7 +50,7 @@ type CoalescingOwner = RequesterCoalescingOwner | ActiveFollowUpCoalescingOwner
 
 
 class CoalescingKey(NamedTuple):
-    """Physical coalescing scope for one owner in one room or thread."""
+    """Batching scope for one owner in one room or thread."""
 
     room_id: str
     thread_id: str | None
@@ -111,10 +110,6 @@ class PreparedTurn:
     current_prompt_is_structured: bool
     media_events: tuple[MediaDispatchEvent, ...]
     dispatch_metadata: tuple[PendingDispatchMetadata, ...]
-
-
-def _pending_event_trusts_internal_payload(pending_event: PendingEvent) -> bool:
-    return pending_event.event.trust_internal_payload_metadata
 
 
 _COALESCED_MESSAGES_INTRO = (
@@ -258,58 +253,41 @@ def _render_coalesced_prompt(
     )
 
 
-def _append_mentioned_user_ids(content: dict[str, object], user_ids: list[str], seen: set[str]) -> None:
-    raw_mentions = content.get("m.mentions")
-    if not isinstance(raw_mentions, dict):
-        return
-    raw_user_ids = cast("dict[str, object]", raw_mentions).get("user_ids")
-    if not isinstance(raw_user_ids, list):
-        return
-    for user_id in raw_user_ids:
-        if isinstance(user_id, str) and user_id not in seen:
-            user_ids.append(user_id)
-            seen.add(user_id)
-
-
-def _batch_payload_metadata(
-    pending_events: list[PendingEvent],
-    *,
-    attachment_ids: tuple[str, ...],
-) -> DispatchPayloadMetadata:
-    """Collect trusted and visible payload facts once for the prepared turn."""
-    original_sender: str | None = None
-    raw_audio_fallback = False
-    voice_transcript = False
-    mentioned_user_ids: list[str] = []
-    seen_user_ids: set[str] = set()
-    formatted_bodies: list[str] = []
-    skip_mentions = False
-    inspected_content = False
-    for pending_event in pending_events:
-        content = event_content_dict(pending_event.event)
-        if content is None:
-            continue
-        inspected_content = True
-        _append_mentioned_user_ids(content, mentioned_user_ids, seen_user_ids)
-        formatted_body = content.get("formatted_body")
-        if isinstance(formatted_body, str) and formatted_body:
-            formatted_bodies.append(formatted_body)
-        if _pending_event_trusts_internal_payload(pending_event):
-            if original_sender is None:
-                content_original_sender = content.get(ORIGINAL_SENDER_KEY)
-                if isinstance(content_original_sender, str):
-                    original_sender = content_original_sender
-            raw_audio_fallback = raw_audio_fallback or content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True
-            voice_transcript = voice_transcript or content.get(VOICE_TRANSCRIPT_KEY) is True
-            skip_mentions = skip_mentions or content.get(SKIP_MENTIONS_KEY) is True
+def _batch_payload_metadata(pending_events: list[PendingEvent]) -> DispatchPayloadMetadata:
+    """Aggregate canonical per-event payload metadata for one prepared turn."""
+    event_metadata = [
+        payload_metadata_from_source(
+            pending_event.event.source,
+            trust_internal_metadata=pending_event.event.trust_internal_payload_metadata,
+        )
+        for pending_event in pending_events
+    ]
+    inspected_content = any(metadata.mentioned_user_ids is not None for metadata in event_metadata)
     return DispatchPayloadMetadata(
-        attachment_ids=attachment_ids,
-        original_sender=original_sender,
-        raw_audio_fallback=raw_audio_fallback,
-        voice_transcript=voice_transcript,
-        mentioned_user_ids=tuple(mentioned_user_ids) if inspected_content else None,
-        formatted_bodies=tuple(formatted_bodies) if inspected_content else None,
-        skip_mentions=skip_mentions if inspected_content else None,
+        attachment_ids=tuple(
+            merge_attachment_ids(*(list(metadata.attachment_ids or ()) for metadata in event_metadata)),
+        ),
+        original_sender=next(
+            (metadata.original_sender for metadata in event_metadata if metadata.original_sender is not None),
+            None,
+        ),
+        raw_audio_fallback=any(metadata.raw_audio_fallback is True for metadata in event_metadata),
+        voice_transcript=any(metadata.voice_transcript is True for metadata in event_metadata),
+        mentioned_user_ids=(
+            tuple(
+                dict.fromkeys(user_id for metadata in event_metadata for user_id in metadata.mentioned_user_ids or ()),
+            )
+            if inspected_content
+            else None
+        ),
+        formatted_bodies=(
+            tuple(body for metadata in event_metadata for body in metadata.formatted_bodies or ())
+            if inspected_content
+            else None
+        ),
+        skip_mentions=(
+            any(metadata.skip_mentions is True for metadata in event_metadata) if inspected_content else None
+        ),
     )
 
 
@@ -437,15 +415,6 @@ def build_prepared_turn(
     source_event_prompts = _batch_source_event_prompts(ordered_pending_events)
     source_event_metadata = _batch_source_event_metadata(ordered_pending_events)
     routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_event_metadata.values())))
-    attachment_ids = tuple(
-        merge_attachment_ids(
-            *(
-                parse_attachment_ids_from_event_source(pending_event.event.source)
-                for pending_event in ordered_pending_events
-                if _pending_event_trusts_internal_payload(pending_event)
-            ),
-        ),
-    )
     return PreparedTurn(
         room=primary_pending_event.room,
         event=replace(primary_pending_event.event, body=prompt_rendering.prompt),
@@ -463,10 +432,7 @@ def build_prepared_turn(
             hook_source=_batch_hook_source(ordered_pending_events),
             message_received_depth=_batch_message_received_depth(ordered_pending_events),
         ),
-        payload=_batch_payload_metadata(
-            ordered_pending_events,
-            attachment_ids=attachment_ids,
-        ),
+        payload=_batch_payload_metadata(ordered_pending_events),
         current_prompt_is_structured=prompt_rendering.is_structured,
         media_events=tuple(
             pending_event.event.raw_event

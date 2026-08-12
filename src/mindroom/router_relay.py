@@ -69,17 +69,6 @@ class _RouterRelaySupport(Protocol):
     normalizer: InboundTurnNormalizer
 
 
-def _gate_router_target_readiness(
-    orchestrator: OrchestratorRuntime | None,
-    suggested_entity: str | None,
-) -> tuple[str | None, bool]:
-    """Drop a known unready or stale router selection before relay delivery."""
-    if suggested_entity is None or orchestrator is None:
-        return suggested_entity, False
-    first_sync_complete = orchestrator.entity_first_sync_complete(suggested_entity)
-    return (suggested_entity if first_sync_complete is True else None, first_sync_complete is False)
-
-
 @dataclass(frozen=True)
 class _RouterTargetResolution:
     """One router target after its runtime readiness check."""
@@ -97,10 +86,11 @@ def _resolve_router_target(
 ) -> _RouterTargetResolution | None:
     """Resolve one target or retain recovered work until its runtime is ready."""
     selected_entity = suggested_entity
-    suggested_entity, target_starting = _gate_router_target_readiness(
-        orchestrator,
-        suggested_entity,
-    )
+    target_starting = False
+    if suggested_entity is not None and orchestrator is not None:
+        first_sync_complete = orchestrator.entity_first_sync_complete(suggested_entity)
+        suggested_entity = suggested_entity if first_sync_complete is True else None
+        target_starting = first_sync_complete is False
     if target_starting and turn_dispatch_recovery_active():
         return None
     if target_starting:

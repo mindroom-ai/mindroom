@@ -378,7 +378,7 @@ async def test_abandoned_lane_slot_releases_claim_exactly_once(
     event = _text_event("admit through abandoned lane")
 
     reservation_owner = harness.controller.reserve_prompt_ingress_order(room, _SENDER)
-    worker = harness.gate.lanes._workers.get(ReceiptLaneKey(room_id=room.room_id, physical_sender_id=_SENDER))
+    worker = harness.gate.lanes._workers.get(ReceiptLaneKey(room_id=room.room_id, sender_id=_SENDER))
     assert worker is not None
     worker.cancel()
     with pytest.raises(asyncio.CancelledError):

@@ -25,16 +25,16 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True)
 class ReceiptLaneKey:
-    """Receipt-order lane identity: one physical sender in one room."""
+    """Receipt-order lane identity: one effective requester in one room."""
 
     room_id: str
-    physical_sender_id: str
+    sender_id: str
 
     @classmethod
     def for_coalescing_owner(cls, room_id: str, owner: CoalescingOwner) -> ReceiptLaneKey | None:
-        """Return the receipt lane for one coalescing owner; follow-up owners have no lane."""
+        """Return the requester lane for one coalescing owner; follow-up owners have no lane."""
         if isinstance(owner, RequesterCoalescingOwner):
-            return cls(room_id=room_id, physical_sender_id=owner.requester_user_id)
+            return cls(room_id=room_id, sender_id=owner.requester_user_id)
         return None
 
 
@@ -71,7 +71,7 @@ class LaneSlot:
     @property
     def lane_key(self) -> ReceiptLaneKey:
         """Return this slot's receipt-lane identity."""
-        return ReceiptLaneKey(room_id=self.room_id, physical_sender_id=self.sender_id)
+        return ReceiptLaneKey(room_id=self.room_id, sender_id=self.sender_id)
 
 
 @dataclass(frozen=True)
@@ -118,7 +118,7 @@ class IngressLanes:
         """Return a pre-closed slot for ingress arriving during a bounded drain."""
         slot = LaneSlot(
             room_id=lane_key.room_id,
-            sender_id=lane_key.physical_sender_id,
+            sender_id=lane_key.sender_id,
             receipt_time=receipt_time if receipt_time is not None else time.monotonic(),
             closed=True,
             released=True,
@@ -131,7 +131,7 @@ class IngressLanes:
         """Reserve the next receipt-order position in one receipt lane."""
         slot = LaneSlot(
             room_id=lane_key.room_id,
-            sender_id=lane_key.physical_sender_id,
+            sender_id=lane_key.sender_id,
             receipt_time=receipt_time if receipt_time is not None else time.monotonic(),
         )
         self._lanes.setdefault(lane_key, deque()).append(slot)
@@ -254,7 +254,7 @@ class IngressLanes:
             return
         worker = asyncio.create_task(
             self._run_lane(lane_key),
-            name=f"ingress_lane:{lane_key.room_id}:{lane_key.physical_sender_id}",
+            name=f"ingress_lane:{lane_key.room_id}:{lane_key.sender_id}",
         )
         # Lane cleanup lives in a done callback, not the coroutine's finally:
         # a worker cancelled before its first scheduling never enters its own

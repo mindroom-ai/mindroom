@@ -3248,7 +3248,7 @@ async def test_lane_terminal_drop_returns_deferred_source_to_retry_owner(
             AsyncMock(side_effect=RuntimeError("lane delivery failed")),
         )
 
-    slot = bot._coalescing_gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id=event.sender))
+    slot = bot._coalescing_gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id=event.sender))
     bot._coalescing_gate.submit_lane_slot(
         slot,
         key=CoalescingKey(room.room_id, None, RequesterCoalescingOwner(event.sender)),
@@ -3306,7 +3306,7 @@ async def test_receive_time_gate_shutdown_drains_unresolved_admission() -> None:
         is_shutting_down=lambda: True,
     )
 
-    slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id))
     gate.submit_lane_slot(
         slot,
         key=key,
@@ -3366,7 +3366,7 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
             pending_event=make_pending_event(text_event("$waiting", "waiting"), room, source_kind="message"),
         )
 
-    waiting_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id))
+    waiting_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id))
     gate.submit_lane_slot(
         waiting_slot,
         key=key,
@@ -3386,7 +3386,7 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
             pending_event=make_pending_event(text_event("$next", "next"), room, source_kind="message"),
         )
 
-    next_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id))
+    next_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id))
     gate.submit_lane_slot(
         next_slot,
         key=key,
@@ -3416,7 +3416,7 @@ async def test_shutdown_drain_cancels_stuck_ready_task_without_cancelling_dispat
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
-    slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id))
     gate.submit_lane_slot(
         slot,
         key=key,
@@ -3447,12 +3447,12 @@ async def test_shutdown_drain_counts_self_cancelled_ready_task_as_incomplete() -
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
     unresolved_front_slot = gate.enter_lane(
-        ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id),
+        ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id),
     )
     ready_task = asyncio.create_task(cancelled_ready())
     await asyncio.gather(ready_task, return_exceptions=True)
     assert ready_task.cancelled()
-    slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id))
     gate.submit_lane_slot(
         slot,
         key=key,
@@ -3477,7 +3477,7 @@ async def test_shutdown_drain_releases_stuck_pre_admission_lane_slot() -> None:
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
-    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
 
     result = await gate.drain_all(ready_timeout_seconds=0.01)
 
@@ -3528,7 +3528,7 @@ async def test_shutdown_ready_timeout_closes_ready_result_returned_during_cancel
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
-    slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id))
     gate.submit_lane_slot(
         slot,
         key=key,
@@ -3565,7 +3565,7 @@ async def test_shutdown_timeout_reaches_already_running_ready_wait() -> None:
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
-    slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id))
     gate.submit_lane_slot(
         slot,
         key=key,
@@ -3601,7 +3601,7 @@ async def test_ready_task_self_cancellation_finishes_no_ready() -> None:
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
-    slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id))
     gate.submit_lane_slot(
         slot,
         key=key,
@@ -3626,12 +3626,12 @@ async def test_enter_lane_during_active_bounded_shutdown_returns_released_counte
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: shutting_down,
     )
-    old_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    old_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
     shutting_down = True
     drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=0.05))
     await asyncio.sleep(0)
 
-    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
 
     assert slot.closed is True
     assert slot.released is True
@@ -3666,7 +3666,7 @@ async def test_shutdown_timeout_reaches_already_running_same_window_lane_slot_wa
         is_shutting_down=lambda: shutting_down,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
-    target_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id))
+    target_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id))
 
     original_wait_for_lane_slots = gate._wait_for_lane_slots
 

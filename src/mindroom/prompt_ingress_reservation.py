@@ -104,5 +104,5 @@ class PromptIngressReservationOwner:
         than reusing a released slot, which no worker would ever deliver.
         """
         self.slot = self.gate.enter_lane(
-            ReceiptLaneKey(room_id=self.slot.room_id, physical_sender_id=self.slot.sender_id),
+            ReceiptLaneKey(room_id=self.slot.room_id, sender_id=self.slot.sender_id),
         )

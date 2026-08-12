@@ -190,7 +190,9 @@ def payload_metadata_from_source(
     mentioned_user_ids: tuple[str, ...] = ()
     mentions = content.get("m.mentions")
     if isinstance(mentions, dict):
-        mentioned_user_ids = tuple(uid for uid in mentions.get("user_ids", ()) if isinstance(uid, str))
+        user_ids = mentions.get("user_ids")
+        if isinstance(user_ids, list):
+            mentioned_user_ids = tuple(uid for uid in user_ids if isinstance(uid, str))
 
     formatted_body = content.get("formatted_body")
     formatted_bodies = (formatted_body,) if isinstance(formatted_body, str) and formatted_body else ()

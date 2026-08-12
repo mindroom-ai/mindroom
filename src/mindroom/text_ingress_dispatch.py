@@ -84,7 +84,7 @@ async def dispatch_text_message(
 ) -> None:
     """Run the normal text or command dispatch pipeline for a prepared text event."""
     turn_claim = turn.handled_turn
-    if not _try_claim_turn(controller, turn_claim):
+    if not controller.deps.turn_store.try_claim_turn(turn_claim):
         return
     claim_transferred = False
 
@@ -147,14 +147,6 @@ async def dispatch_text_message(
             controller.deps.turn_store.release_pending_turn_claim(turn_claim)
         if timing_scope_token is not None:
             timing_scope_context.reset(timing_scope_token)
-
-
-def _try_claim_turn(
-    controller: TurnController,
-    turn_claim: TurnRecord,
-) -> bool:
-    """Claim dispatch ownership."""
-    return controller.deps.turn_store.try_claim_turn(turn_claim)
 
 
 async def _prepare_text_dispatch(
