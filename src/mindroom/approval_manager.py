@@ -613,7 +613,8 @@ class _ApprovalManager:
             )
             tally.skipped_in_flight += 1
             return None
-        if self._live_waiter_for_transaction(claimed.transaction_id) is not None:
+        live_waiter = self._live_waiter_for_transaction(claimed.transaction_id)
+        if live_waiter is not None:
             # This process sent this card and is still waiting on the answer,
             # so it is live work of this one's rather than something a dead
             # process left. Keyed on the transaction, not the event: the row's
@@ -626,11 +627,20 @@ class _ApprovalManager:
             # Nothing is owed either: the waiter settles the card on a click,
             # a denial, or its own timeout. Counting it would have every
             # pending approval hold the sweep open until somebody answered.
+            if claimed.card_event_id is None:
+                # Except that a waiter cannot settle a row that does not name
+                # its event: every decision is recorded against the event id
+                # this write was meant to store, so leaving it unwritten
+                # strands the answer as surely as deleting the row would. The
+                # waiter is holding what the failed write was carrying, so
+                # finish it here rather than resend anything.
+                await self._acknowledge_card(live_waiter)
             logger.debug(
                 "approval_startup_card_skipped_live_waiter",
                 room_id=room_id,
                 transaction_id=claimed.transaction_id,
                 card_event_id=claimed.card_event_id,
+                repaired_event_id=claimed.card_event_id is None,
             )
             tally.skipped_live_waiter += 1
             return None
@@ -1033,9 +1043,15 @@ class _ApprovalManager:
                     self._cancelled_card_event_ids.discard(waiter.card_event_id)
             return
         with self._claimed_resolution(claimed_waiter.card_event_id):
-            await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
+            delivered = await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
             with self._live_lock:
-                self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
+                # Only a card the room has actually been told about is finished
+                # with. Marking one resolved on a decision that was recorded but
+                # never shown retires the only thing that would come back for it:
+                # every later pass is refused by the cleanup claim, counted owed,
+                # and the card stays visibly pending until the process restarts.
+                if delivered:
+                    self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
                 if mark_cancelled:
                     self._cancelled_card_event_ids.discard(claimed_waiter.card_event_id)
 
@@ -1060,9 +1076,15 @@ class _ApprovalManager:
         if claimed_waiter is None:
             return await self._wait_for_competing_terminal_decision(waiter)
         with self._claimed_resolution(claimed_waiter.card_event_id):
-            await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
+            delivered = await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
             with self._live_lock:
-                self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
+                # Only a card the room has actually been told about is finished
+                # with. Marking one resolved on a decision that was recorded but
+                # never shown retires the only thing that would come back for it:
+                # every later pass is refused by the cleanup claim, counted owed,
+                # and the card stays visibly pending until the process restarts.
+                if delivered:
+                    self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
             return decision
 
     async def _resolve_live_response(
@@ -1097,7 +1119,13 @@ class _ApprovalManager:
             decision = self._new_decision(status=resolved_status, reason=resolved_reason, resolved_by=resolved_by)
             delivered = await self._settle_waiter_with_terminal_edit(waiter, decision)
             with self._live_lock:
-                self._resolved_card_event_ids.add(pending.card_event_id)
+                # Only a card the room has actually been told about is finished
+                # with. Marking one resolved on a decision that was recorded but
+                # never shown retires the only thing that would come back for it:
+                # every later pass is refused by the cleanup claim, counted owed,
+                # and the card stays visibly pending until the process restarts.
+                if delivered:
+                    self._resolved_card_event_ids.add(pending.card_event_id)
                 self._cancelled_card_event_ids.discard(pending.card_event_id)
             return ApprovalActionResult(
                 consumed=True,
