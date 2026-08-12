@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -4215,10 +4216,8 @@ async def test_startup_sweep_landing_inside_a_live_claim_leaves_it_alone(tmp_pat
     assert all(sweep == ApprovalStartupSweep(discarded=0, failed=0) for sweep in sweeps)
     assert cards.rows, "the sweep deleted the claim it landed inside"
     assert sender.await_count == 1
-    # Skipped because this process owns the transaction, not because of when
-    # the row happens to be dated.
+    # Skipped because this process owns the transaction while it publishes it.
     assert [sweep.skipped_in_flight for sweep in sweeps] == [1] * len(sweeps)
-    assert all(sweep.skipped_after_start == 0 for sweep in sweeps)
     assert all(sweep.scanned == 1 for sweep in sweeps)
 
     result = await store.handle_card_response(
@@ -4235,48 +4234,14 @@ async def test_startup_sweep_landing_inside_a_live_claim_leaves_it_alone(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_a_claim_this_process_made_is_left_alone_once_its_owner_is_gone(tmp_path: Path) -> None:
-    """A row claimed after start is not the sweep's, even with nobody holding it.
+async def test_a_live_claim_is_protected_by_ownership_not_by_its_timestamp(tmp_path: Path) -> None:
+    """What protects a claim being published is a hold, not when it was written.
 
-    The publishing hold covers a claim while its request is alive. A request
-    that died between the claim and the send leaves no hold at all, and the
-    row it left is indistinguishable from a dead process's -- except for the
-    one thing that does distinguish it: it was written after this process
-    started, so no dead process can have written it.
-    """
-    cards = FakeApprovalCards()
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    # Claimed directly, so the row is dated after the manager was built and no
-    # request is holding it.
-    await cards.claim_approval_card(
-        room_id="!room:localhost",
-        transaction_id="mindroom-approval-orphaned-by-a-dead-request",
-        card=_approval_card(),
-    )
-
-    sweep = await store.discard_pending_on_startup()
-
-    assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
-    assert sweep.skipped_after_start == 1
-    assert sweep.dropped_never_attempted == 0
-    assert set(cards.rows) == {"mindroom-approval-orphaned-by-a-dead-request"}
-
-
-@pytest.mark.asyncio
-async def test_a_live_claim_survives_a_clock_that_went_backwards(tmp_path: Path) -> None:
-    """Ownership, not the timestamp, is what protects a claim being published.
-
-    The horizon reads a wall clock, and a wall clock can step backwards under
-    it. When that happens every subsequent claim dates before the horizon and
-    looks abandoned, so the guard that has to hold is the one that knows this
-    process is publishing the transaction right now.
+    Classifying by timestamp reads a wall clock, and a wall clock can step
+    backwards: after a correction every new claim dates before whatever the
+    process recorded at start and looks abandoned again. This row is dated
+    before every other row in the store and still survives, because the guard
+    that matters knows this process is publishing the transaction right now.
     """
     sweeps: list[ApprovalStartupSweep] = []
 
@@ -4310,8 +4275,9 @@ async def test_a_live_claim_survives_a_clock_that_went_backwards(tmp_path: Path)
         transport_sender=lambda: "@mindroom_router:localhost",
     )
     cards.manager = store
-    # An hour into the future, so every row this test claims dates before it.
-    store._sweep_horizon_ns += 3_600_000_000_000
+    # Dated an hour before anything else in the store, which is what a
+    # backward clock step produces and what a timestamp guard would misread.
+    cards.stamp_next_claim_ns(time.time_ns() - 3_600_000_000_000)
 
     task = asyncio.create_task(
         store.request_approval(
@@ -4326,7 +4292,6 @@ async def test_a_live_claim_survives_a_clock_that_went_backwards(tmp_path: Path)
     pending = await _wait_for_pending(store, sender=sender)
 
     assert sweeps, "the sweep never ran inside the claim, so this proves nothing"
-    assert all(sweep.skipped_after_start == 0 for sweep in sweeps), "the horizon cannot be what saved this"
     assert [sweep.skipped_in_flight for sweep in sweeps] == [1] * len(sweeps)
     assert cards.rows, "the sweep deleted a claim this process was publishing"
 

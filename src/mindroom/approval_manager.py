@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 from collections import Counter, OrderedDict
 from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import Future, InvalidStateError
@@ -277,7 +276,6 @@ class ApprovalStartupSweep:
     # because a caller comparing two sweeps is asking whether the same work
     # was settled, not whether the same rows happened to be on disk.
     scanned: int = field(default=0, compare=False)
-    skipped_after_start: int = field(default=0, compare=False)
     skipped_in_flight: int = field(default=0, compare=False)
     dropped_never_attempted: int = field(default=0, compare=False)
 
@@ -297,7 +295,6 @@ class _SweepTally:
     """
 
     scanned: int = 0
-    skipped_after_start: int = 0
     skipped_in_flight: int = 0
     dropped_never_attempted: int = 0
 
@@ -408,13 +405,6 @@ class _ApprovalManager:
         # over. Counted rather than flagged so overlapping scopes for one
         # transaction cannot have the inner one release the outer one's hold.
         self._claiming_transaction_ids: Counter[str] = Counter()
-        # Rows claimed from here on belong to this process, whether or not the
-        # send that owns one has registered itself yet. Taken at construction
-        # rather than at the sweep, because the sweep is armed by startup gates
-        # that can be minutes late, and every claim made while waiting for them
-        # would otherwise look like one a dead process left behind. Backstop
-        # for the ownership above, which is exact but cannot outlive memory.
-        self._sweep_horizon_ns = time.time_ns()
         # Recovery that outlived the request that started it, held so it is
         # not garbage collected mid-flight.
         self._detached_card_writes: set[_DetachedCardWrite] = set()
@@ -577,7 +567,6 @@ class _ApprovalManager:
             discarded=discarded,
             failed=failed,
             scanned=tally.scanned,
-            skipped_after_start=tally.skipped_after_start,
             skipped_in_flight=tally.skipped_in_flight,
             dropped_never_attempted=tally.dropped_never_attempted,
         )
@@ -619,26 +608,6 @@ class _ApprovalManager:
                 transaction_id=claimed.transaction_id,
             )
             tally.skipped_in_flight += 1
-            return None
-        if claimed.created_at_ns >= self._sweep_horizon_ns:
-            # Claimed after this process started, so it is this process's to
-            # finish. The check above cannot always see it: a claim is
-            # committed before the send that owns it registers, and a sweep
-            # landing in that window would read a live claim as an abandoned
-            # one and delete the row out from under the caller still building
-            # its card. The ownership registered around the claim closes that
-            # window exactly; this closes it again for a row whose owner is
-            # gone from memory but whose timestamp still says it was never
-            # this sweep's to take. Nothing is owed either way -- the owner
-            # settles it or fails on its own path.
-            logger.debug(
-                "approval_startup_card_skipped_claimed_after_start",
-                room_id=room_id,
-                transaction_id=claimed.transaction_id,
-                created_at_ns=claimed.created_at_ns,
-                sweep_horizon_ns=self._sweep_horizon_ns,
-            )
-            tally.skipped_after_start += 1
             return None
         identified = await self._identified_card(room_id, claimed, tally=tally)
         if identified.card is None:

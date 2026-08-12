@@ -83,6 +83,9 @@ class FakeApprovalCards:
         # work a previous process left behind, so they are stamped before any
         # clock a live manager could have read at construction.
         self._seeded_rows = 0
+        # Set by a test that needs the next claim written at a chosen time,
+        # which is how a backward clock step looks from inside the store.
+        self._next_claim_ns: int | None = None
 
     @property
     def resolutions(self) -> dict[str, dict[str, Any]]:
@@ -115,7 +118,8 @@ class FakeApprovalCards:
         if transaction_id in self.rows:
             return
         self.claimed.append(transaction_id)
-        self._last_claim_ns = max(self._last_claim_ns + 1, time.time_ns())
+        forced, self._next_claim_ns = self._next_claim_ns, None
+        self._last_claim_ns = forced if forced is not None else max(self._last_claim_ns + 1, time.time_ns())
         self.rows[transaction_id] = _StoredRow(
             room_id=room_id,
             card=dict(card),
@@ -243,6 +247,10 @@ class FakeApprovalCards:
                 transaction_id=transaction_id,
                 sending_device_id=sending_device_id,
             )
+
+    def stamp_next_claim_ns(self, created_at_ns: int) -> None:
+        """Write the next claim at a chosen time rather than at now."""
+        self._next_claim_ns = created_at_ns
 
     def _backdate_to_previous_process(self, transaction_id: str) -> None:
         """Stamp one seeded row as older than any live manager's start.

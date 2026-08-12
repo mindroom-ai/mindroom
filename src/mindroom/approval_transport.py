@@ -543,7 +543,6 @@ class ApprovalMatrixTransport:
             scanned=sweep.scanned,
             discarded=sweep.discarded,
             owed_count=sweep.failed,
-            skipped_after_start=sweep.skipped_after_start,
             skipped_in_flight=sweep.skipped_in_flight,
             dropped_never_attempted=sweep.dropped_never_attempted,
         )
