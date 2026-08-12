@@ -582,7 +582,8 @@ class MemoryAutoFlushWorker:
                 strict=False,
             )
 
-            session = _load_agent_session(
+            session = await asyncio.to_thread(
+                _load_agent_session,
                 config,
                 self.runtime_paths,
                 agent_name,
@@ -690,7 +691,8 @@ class MemoryAutoFlushWorker:
             return
 
         latest_session_updated_at: int | None = None
-        latest_session = _load_agent_session(
+        latest_session = await asyncio.to_thread(
+            _load_agent_session,
             config,
             self.runtime_paths,
             agent_name,
@@ -747,7 +749,8 @@ class MemoryAutoFlushWorker:
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> bool:
         effective_storage_path = self.storage_path
-        session = _load_agent_session(
+        session = await asyncio.to_thread(
+            _load_agent_session,
             config,
             self.runtime_paths,
             agent_name,

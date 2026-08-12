@@ -12,6 +12,7 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
+from sqlalchemy import Engine, create_engine, event
 
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -21,10 +22,15 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.session import Session
+    from sqlalchemy.engine.interfaces import DBAPIConnection
+    from sqlalchemy.pool import ConnectionPoolEntry
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+_BUSY_TIMEOUT_SECONDS = 30.0
+_BUSY_TIMEOUT_MILLISECONDS = int(_BUSY_TIMEOUT_SECONDS * 1000)
 
 __all__ = [
     "create_culture_storage",
@@ -62,6 +68,35 @@ def create_state_storage(
     )
 
 
+def _state_engine(db_file: str) -> Engine:
+    """Build the engine one agent's state database is reached through.
+
+    Agno would build this itself from a path. It is built here to say two
+    things it does not: readers may proceed while a write is in flight, and a
+    statement that finds the database locked waits rather than failing. Both
+    matter because these are the databases a response reads on its way to
+    answering, and one agent's flush must not turn another's read into an
+    error.
+    """
+    engine = create_engine(
+        f"sqlite:///{db_file}",
+        connect_args={"timeout": _BUSY_TIMEOUT_SECONDS},
+    )
+
+    @event.listens_for(engine, "connect")
+    def _set_pragmas(connection: DBAPIConnection, _record: ConnectionPoolEntry) -> None:
+        cursor = connection.cursor()
+        try:
+            # Left on the connection for its lifetime: WAL is a property of
+            # the database file, the timeout of the connection reading it.
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MILLISECONDS}")
+        finally:
+            cursor.close()
+
+    return engine
+
+
 def _create_sqlite_state_storage(
     storage_name: str,
     state_root: Path,
@@ -74,13 +109,14 @@ def _create_sqlite_state_storage(
     db_dir = state_root / subdir
     db_dir.mkdir(parents=True, exist_ok=True)
     db_file = str(db_dir / f"{storage_name}.db")
+    engine = _state_engine(db_file)
     if prompt_roles is not None:
         return _PromptSanitizingSqliteDb(
             prompt_roles=prompt_roles,
             session_table=session_table,
-            db_file=db_file,
+            db_engine=engine,
         )
-    return SqliteDb(session_table=session_table, db_file=db_file)
+    return SqliteDb(session_table=session_table, db_engine=engine)
 
 
 def create_session_storage(
@@ -135,9 +171,9 @@ class _PromptSanitizingSqliteDb(SqliteDb):
         *,
         prompt_roles: frozenset[str],
         session_table: str,
-        db_file: str,
+        db_engine: Engine,
     ) -> None:
-        super().__init__(session_table=session_table, db_file=db_file)
+        super().__init__(session_table=session_table, db_engine=db_engine)
         self._prompt_roles = prompt_roles
 
     def upsert_session(
