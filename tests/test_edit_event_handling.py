@@ -131,7 +131,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
             "_precheck_dispatch_event",
             return_value=_PrecheckedEvent(event=edit_event, requester_user_id="@user:example.com"),
         ),
-        patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
+        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
     ):
         # Process the edit event - this should not re-enter normal dispatch.
@@ -305,7 +305,7 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
                 _PrecheckedEvent(event=edit_event, requester_user_id="@user:example.com") for edit_event in edit_events
             ],
         ),
-        patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
+        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
     ):
         # Process all edit events

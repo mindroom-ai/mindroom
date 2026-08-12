@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -36,6 +36,7 @@ from mindroom.event_journal import (
 )
 from mindroom.handled_turns import TurnRecord
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.pending_event_worker import PendingEventWorker
@@ -623,9 +624,12 @@ class TestTheGatewayWiresTheHandoff:
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
         await adopt(bot, ["$cause"])
-        delivered = MagicMock(event_id="$sent", content_sent={"msgtype": "m.text", "body": "answer"})
+        delivered = DeliveredMatrixEvent(
+            event_id="$sent",
+            content_sent={"msgtype": "m.text", "body": "answer"},
+        )
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
             sent = await bot._delivery_gateway.send_text(
                 SendTextRequest(
                     target=MessageTarget.resolve(ROOM, None, "$cause"),
@@ -715,13 +719,13 @@ class _RefusesTheFirstAttempts:
         _room_id: str,
         content: dict[str, Any],
         **_kwargs: object,
-    ) -> MagicMock | None:
+    ) -> DeliveredMatrixEvent | MatrixDeliveryFailure:
         self.attempts += 1
         if self.attempts <= self.refusals:
-            return None
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "test refusal")
         event_id = f"$visible{len(self.delivered)}"
         self.delivered.append(event_id)
-        return MagicMock(event_id=event_id, content_sent=content)
+        return DeliveredMatrixEvent(event_id, content)
 
 
 async def final_row(bot: AgentBot, turn_id: str) -> OutboxDelivery | None:
@@ -756,7 +760,7 @@ class TestAFailedFinalEditLeavesOneOwner:
         await adopt(bot, ["$cause"])
         homeserver = _RefusesTheFirstAttempts()
 
-        with patch("mindroom.delivery_gateway.send_message_result", homeserver):
+        with patch("mindroom.delivery_gateway.send_message_outcome", homeserver):
             resolution = await bot._turn_controller._finalize_dispatch_failure(
                 target=MessageTarget.resolve(ROOM, None, "$cause"),
                 error=RuntimeError("boom"),
@@ -788,7 +792,7 @@ class TestAFailedFinalEditLeavesOneOwner:
         await admit(journal(bot), text_event("$cause"))
         homeserver = _RefusesTheFirstAttempts(refusals=0)
 
-        with patch("mindroom.delivery_gateway.send_message_result", homeserver):
+        with patch("mindroom.delivery_gateway.send_message_outcome", homeserver):
             resolution = await bot._turn_controller._finalize_dispatch_failure(
                 target=MessageTarget.resolve(ROOM, None, "$cause"),
                 error=RuntimeError("boom"),

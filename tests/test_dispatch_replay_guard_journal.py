@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 import structlog
 
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_replay_guard import has_newer_unresponded_journal_thread_event
 from mindroom.event_journal import EventKind, JournalEvent
 
@@ -44,9 +44,9 @@ OLDER = "$older"
 NEWER = "$newer"
 
 
-def _older_turn(*, timestamp: int | None = 1_000) -> PreparedTextEvent:
+def _older_turn(*, timestamp: int | None = 1_000) -> PreparedIngress:
     """Return the turn whose right to run is under question."""
-    return PreparedTextEvent(
+    return PreparedIngress(
         sender=ALICE,
         event_id=OLDER,
         body="the older question",
@@ -111,7 +111,7 @@ class _PendingTurns:
 async def _guard(
     pending_turns: _PendingTurns,
     *,
-    event: PreparedTextEvent | None = None,
+    event: PreparedIngress | None = None,
     handled_event_ids: Collection[str] = (),
     may_be_superseded_by_newer_requester_turn: bool = True,
     thread_id: str | None = THREAD,

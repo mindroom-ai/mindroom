@@ -2883,7 +2883,7 @@ async def test_matrix_message_edit_happy_path() -> None:
 
     with (
         patch(
-            "mindroom.matrix.client_delivery.send_message_result",
+            "mindroom.matrix.client_delivery.send_message_outcome",
             new=AsyncMock(side_effect=_deliver_edit),
         ),
         tool_runtime_context(ctx),

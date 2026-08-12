@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.cancellation import cancel_source_from_failure_reason
+
 if TYPE_CHECKING:
+    from mindroom.cancellation import CancelSource
     from mindroom.interactive import InteractiveMetadata
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -37,6 +40,13 @@ class StreamTransportOutcome:  # noqa: D101
         """Return the current streamed body snapshot used for hook and outcome decisions."""
         return self.rendered_body or ""
 
+    @property
+    def resolved_cancel_source(self) -> CancelSource | None:
+        """Resolve cancellation provenance from the persisted transport failure reason."""
+        if self.terminal_status != "cancelled":
+            return None
+        return cancel_source_from_failure_reason(self.failure_reason)
+
 
 @dataclass(frozen=True)
 class FinalDeliveryOutcome:  # noqa: D101
@@ -59,6 +69,15 @@ class FinalDeliveryOutcome:  # noqa: D101
     @property
     def final_visible_event_id(self) -> str | None:  # noqa: D102
         return self.event_id if self.is_visible_response else None
+
+    @property
+    def resolved_cancel_source(self) -> CancelSource | None:
+        """Resolve cancellation provenance: explicit provenance wins, else the persisted failure reason."""
+        if self.cancel_source is not None:
+            return self.cancel_source
+        if self.terminal_status == "cancelled":
+            return cancel_source_from_failure_reason(self.failure_reason)
+        return None
 
     @property
     def mark_handled(self) -> bool:  # noqa: D102

@@ -516,11 +516,11 @@ async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path
     target = MessageTarget.resolve("!room:localhost", None, "$reply")
     with (
         patch(
-            "mindroom.delivery_gateway.send_message_result",
+            "mindroom.delivery_gateway.send_message_outcome",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
         ) as mock_send,
         patch(
-            "mindroom.delivery_gateway.edit_message_result",
+            "mindroom.delivery_gateway.edit_message_outcome",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice-edit")),
         ) as mock_edit,
     ):

@@ -533,9 +533,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         with (
-            patch("mindroom.turn_controller.suggest_responder_for_message", AsyncMock(return_value="general")),
+            patch("mindroom.router_relay.suggest_responder_for_message", AsyncMock(return_value="general")),
             patch(
-                "mindroom.delivery_gateway.send_message_result",
+                "mindroom.delivery_gateway.send_message_outcome",
                 AsyncMock(
                     return_value=DeliveredMatrixEvent(
                         event_id="$router_response:localhost",

@@ -983,7 +983,7 @@ class TestAgentBot(AgentBotTestBase):
                 new_callable=AsyncMock,
             ) as mock_send_streaming_response,
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ) as mock_edit_message,
         ):
@@ -2210,7 +2210,7 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.response_runner.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
             ),
-            patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=record_send)),
+            patch("mindroom.delivery_gateway.send_message_outcome", new=AsyncMock(side_effect=record_send)),
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
@@ -2280,11 +2280,11 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.response_runner.ai_response", new_callable=AsyncMock, side_effect=fake_ai_response),
             patch(
-                "mindroom.delivery_gateway.send_message_result",
+                "mindroom.delivery_gateway.send_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
             ),
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
             patch.object(
@@ -2409,11 +2409,11 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.response_runner.ai_response", new_callable=AsyncMock, side_effect=fake_ai_response),
             patch(
-                "mindroom.delivery_gateway.send_message_result",
+                "mindroom.delivery_gateway.send_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
             ),
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),

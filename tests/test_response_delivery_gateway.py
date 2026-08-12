@@ -30,6 +30,7 @@ from mindroom.delivery_gateway import (
 )
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.message_target import MessageTarget
 from mindroom.response_delivery import RecoveryOutcome, ResponseDelivery
 from mindroom.streaming import PROGRESS_PLACEHOLDER
@@ -67,6 +68,11 @@ pytestmark = pytest.mark.asyncio
 
 _ROOM_ID = "!room:localhost"
 _AGENT_USER_ID = "@agent:localhost"
+
+
+def _failed_delivery() -> MatrixDeliveryFailure:
+    """Return one typed Matrix failure for delivery-path tests."""
+    return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "test delivery failure")
 
 
 def _identity(source_event_id: str = "$cause") -> ResponseIdentity:
@@ -171,9 +177,9 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        delivered = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "answer"})
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
             outcome = await gateway.deliver_final(self._final_request("answer"))
 
         assert outcome.event_id == "$sent"
@@ -193,10 +199,10 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        delivered = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "answer"})
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
         send = AsyncMock(return_value=delivered)
 
-        with patch("mindroom.delivery_gateway.send_message_result", send):
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
             await gateway.deliver_final(self._final_request("answer"))
             await gateway.deliver_final(self._final_request("answer"))
 
@@ -218,10 +224,10 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        delivered = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "first"})
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "first"})
         send = AsyncMock(return_value=delivered)
 
-        with patch("mindroom.delivery_gateway.send_message_result", send):
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
             first = await gateway.deliver_final(self._final_request("first"))
             second = await gateway.deliver_final(self._final_request("second answer entirely"))
 
@@ -243,9 +249,9 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        delivered = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "a notice"})
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "a notice"})
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
             event_id = await gateway.send_text(
                 SendTextRequest(
                     target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
@@ -269,9 +275,9 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         """
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
-        delivered = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "..."})
+        delivered = DeliveredMatrixEvent("$placeholder", {"msgtype": "m.text", "body": "..."})
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
             event_id = await gateway.send_text(
                 SendTextRequest(
                     target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
@@ -296,10 +302,10 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         """
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
-        placeholder = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "..."})
+        placeholder = DeliveredMatrixEvent("$placeholder", {"msgtype": "m.text", "body": "..."})
         send = AsyncMock(return_value=placeholder)
 
-        with patch("mindroom.delivery_gateway.send_message_result", send):
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
             await gateway.send_text(
                 SendTextRequest(
                     target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
@@ -330,9 +336,9 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        edited = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "the answer"})
+        edited = DeliveredMatrixEvent("$placeholder", {"msgtype": "m.text", "body": "the answer"})
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=edited)) as edit:
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=edited)) as edit:
             outcome = await gateway.deliver_final(
                 replace(self._final_request("the answer"), existing_event_id="$placeholder"),
             )
@@ -376,7 +382,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         request = replace(self._final_request("first answer"), existing_event_id="$placeholder")
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=_failed_delivery())):
             refused = await gateway.deliver_final(request)
         assert refused.terminal_status == "error"
         assert refused.failure_reason == "delivery_failed"
@@ -385,8 +391,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert frozen["m.new_content"]["body"] == "first answer"
         assert frozen["body"] == "* first answer"
 
-        delivered = SimpleNamespace(event_id="$placeholder", content_sent=dict(frozen))
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)) as resend:
+        delivered = DeliveredMatrixEvent("$placeholder", dict(frozen))
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)) as resend:
             await gateway.deliver_final(
                 replace(self._final_request("regenerated answer"), existing_event_id="$placeholder"),
             )
@@ -415,10 +421,10 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        edited = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "the answer"})
+        edited = DeliveredMatrixEvent("$placeholder", {"msgtype": "m.text", "body": "the answer"})
         edit = AsyncMock(return_value=edited)
 
-        with patch("mindroom.delivery_gateway.send_message_result", edit):
+        with patch("mindroom.delivery_gateway.send_message_outcome", edit):
             first = await gateway.deliver_final(
                 replace(self._final_request("the answer"), existing_event_id="$placeholder"),
             )
@@ -444,7 +450,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        edited = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "x"})
+        edited = DeliveredMatrixEvent("$placeholder", {"msgtype": "m.text", "body": "x"})
         terminal = gateway._durable_terminal_edit(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
@@ -458,7 +464,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         durable = AsyncMock(return_value=edited)
         with (
             patch("mindroom.delivery_gateway.edit_message_result", direct),
-            patch("mindroom.delivery_gateway.send_message_result", durable),
+            patch("mindroom.delivery_gateway.send_message_outcome", durable),
         ):
             # The stream ends on the placeholder, so its terminal edit is not
             # this turn's answer and must not claim the turn's final delivery.
@@ -485,14 +491,14 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         """
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
-        edited = SimpleNamespace(event_id="$streamed", content_sent={"msgtype": "m.text", "body": "streamed"})
+        edited = DeliveredMatrixEvent("$streamed", {"msgtype": "m.text", "body": "streamed"})
         terminal = gateway._durable_terminal_edit(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
         )
         assert terminal is not None
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=edited)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=edited)):
             await terminal(AsyncMock(), _ROOM_ID, "$streamed", {"body": "streamed"}, "streamed")
 
         assert list(outbox.rows) == [("$cause", "final")]
@@ -517,14 +523,14 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         """
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
-        edited = SimpleNamespace(event_id="$streamed", content_sent={"msgtype": "m.text", "body": "done"})
+        edited = DeliveredMatrixEvent("$streamed", {"msgtype": "m.text", "body": "done"})
         terminal = gateway._durable_terminal_edit(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
         )
         assert terminal is not None
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=edited)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=edited)):
             await terminal(
                 AsyncMock(),
                 _ROOM_ID,
@@ -551,14 +557,14 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         """
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
-        sent = SimpleNamespace(event_id="$streamed", content_sent={"msgtype": "m.text", "body": "streamed"})
+        sent = DeliveredMatrixEvent("$streamed", {"msgtype": "m.text", "body": "streamed"})
         terminal = gateway._durable_terminal_send(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
         )
         assert terminal is not None
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=sent)) as send:
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=sent)) as send:
             await terminal(AsyncMock(), _ROOM_ID, {"body": "streamed"}, "streamed")
 
         assert list(outbox.rows) == [("$cause", "final")]
@@ -602,7 +608,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         """
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
-        sent = SimpleNamespace(event_id="$placeholder", content_sent={"body": PROGRESS_PLACEHOLDER})
+        sent = DeliveredMatrixEvent("$placeholder", {"body": PROGRESS_PLACEHOLDER})
         terminal = gateway._durable_terminal_send(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
@@ -630,7 +636,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        edited = SimpleNamespace(event_id="$placeholder", content_sent={"body": "the answer"})
+        edited = DeliveredMatrixEvent("$placeholder", {"body": "the answer"})
 
         # A delivery that reached Matrix but whose acknowledgement was lost.
         with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock(return_value=None)):
@@ -639,7 +645,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             )
         assert outbox.rows["$cause", "final"].acknowledged_event_id is None
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=edited)) as send:
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=edited)) as send:
             recovered = await gateway.recover_deliveries()
 
         assert recovered.recovered == 1
@@ -658,10 +664,10 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway = _gateway(tmp_path, outbox)
         hooks = self._hooks()
         gateway.deps.response_hooks._apply_before_response = hooks._apply_before_response
-        placeholder = SimpleNamespace(event_id="$placeholder", content_sent={"body": PROGRESS_PLACEHOLDER})
-        answer = SimpleNamespace(event_id="$answer", content_sent={"body": "the answer"})
+        placeholder = DeliveredMatrixEvent("$placeholder", {"body": PROGRESS_PLACEHOLDER})
+        answer = DeliveredMatrixEvent("$answer", {"body": "the answer"})
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=_failed_delivery())):
             await gateway.send_text(
                 SendTextRequest(
                     target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
@@ -671,7 +677,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 ),
             )
         with patch(
-            "mindroom.delivery_gateway.send_message_result",
+            "mindroom.delivery_gateway.send_message_outcome",
             AsyncMock(side_effect=[placeholder, answer]),
         ) as send:
             outcome = await gateway.deliver_final(self._final_request("the answer"))
@@ -698,12 +704,12 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             terminal_turn_committed=terminal_committed,
         )
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        placeholder = SimpleNamespace(event_id="$placeholder", content_sent={"body": PROGRESS_PLACEHOLDER})
-        answer = SimpleNamespace(event_id="$answer", content_sent={"body": "the answer"})
+        placeholder = DeliveredMatrixEvent("$placeholder", {"body": PROGRESS_PLACEHOLDER})
+        answer = DeliveredMatrixEvent("$answer", {"body": "the answer"})
         initial_retry_started = asyncio.Event()
         release_initial_retry = asyncio.Event()
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=_failed_delivery())):
             await gateway.send_text(
                 SendTextRequest(
                     target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
@@ -725,7 +731,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 return placeholder
             return answer
 
-        with patch("mindroom.delivery_gateway.send_message_result", side_effect=send):
+        with patch("mindroom.delivery_gateway.send_message_outcome", side_effect=send):
             delivery = asyncio.create_task(gateway.deliver_final(self._final_request("the answer")))
             await asyncio.wait_for(initial_retry_started.wait(), timeout=5)
             delivery.cancel()
@@ -745,9 +751,9 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        placeholder = SimpleNamespace(event_id="$placeholder", content_sent={"body": PROGRESS_PLACEHOLDER})
+        placeholder = DeliveredMatrixEvent("$placeholder", {"body": PROGRESS_PLACEHOLDER})
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=_failed_delivery())):
             await gateway.send_text(
                 SendTextRequest(
                     target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
@@ -782,7 +788,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         outbox.acknowledge_delivery = acknowledge  # type: ignore[method-assign]
         with patch(
-            "mindroom.delivery_gateway.send_message_result",
+            "mindroom.delivery_gateway.send_message_outcome",
             AsyncMock(return_value=placeholder),
         ) as send:
             outcome = await gateway.deliver_final(self._final_request("the answer"))
@@ -825,8 +831,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             )
 
         outbox.acknowledge_delivery = acknowledge  # type: ignore[method-assign]
-        sent = SimpleNamespace(event_id="$loser", content_sent={"body": "the answer"})
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=sent)):
+        sent = DeliveredMatrixEvent("$loser", {"body": "the answer"})
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=sent)):
             outcome = await gateway.deliver_final(self._final_request("the answer"))
 
         assert outcome.terminal_status == "completed"
@@ -846,19 +852,19 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        answer = SimpleNamespace(event_id="$answer", content_sent={"body": "the answer"})
+        answer = DeliveredMatrixEvent("$answer", {"body": "the answer"})
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=_failed_delivery())):
             await gateway.deliver_final(self._final_request("the answer"))
         assert outbox.rows["$cause", "final"].acknowledged_event_id is None
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=_failed_delivery())):
             failed_pass = await gateway.recover_deliveries()
 
         assert failed_pass.failed == 1
         assert not failed_pass.complete
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=answer)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=answer)):
             retried = await gateway.recover_deliveries()
 
         assert retried.recovered == 1
@@ -885,9 +891,9 @@ class TestAnEndedMembershipStopsTheAnswer:
         gateway.deps.response_hooks._apply_before_response = (
             TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
         )
-        delivered = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "answer"})
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)) as send:
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)) as send:
             outcome = await gateway.deliver_final(TestTurnDeliveryGoesThroughTheOutbox._final_request("answer"))
 
         send.assert_not_awaited()
@@ -906,7 +912,7 @@ class TestAnEndedMembershipStopsTheAnswer:
         terminal = gateway._durable_terminal_edit("$cause", self._target())
         assert terminal is not None
 
-        with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock()) as edit:
+        with patch("mindroom.delivery_gateway.edit_message_outcome", AsyncMock()) as edit:
             delivered = await terminal(AsyncMock(), _ROOM_ID, "$placeholder", {"body": "answer"}, "answer")
 
         edit.assert_not_awaited()
@@ -957,9 +963,9 @@ class TestAnEndedMembershipStopsTheAnswer:
     async def test_a_cancellation_note_under_a_live_membership_still_lands(self, tmp_path: Path) -> None:
         """The gate must only stop the case it exists for."""
         gateway = _gateway(tmp_path, FakeOutbox())
-        edited = SimpleNamespace(event_id="$visible", content_sent={"body": "stopped"})
+        edited = DeliveredMatrixEvent("$visible", {"body": "stopped"})
 
-        with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock(return_value=edited)) as edit:
+        with patch("mindroom.delivery_gateway.edit_message_outcome", AsyncMock(return_value=edited)) as edit:
             outcome = await gateway.deliver_cancelled_visible_note(
                 CancelledVisibleNoteRequest(
                     target=self._target(),
@@ -1036,7 +1042,7 @@ class TestTheFrozenEditSpeaksOneAnswer:
         terminal = gateway._durable_terminal_edit("$cause", self._target())
         assert terminal is not None
         answer = "the whole answer"
-        delivered = SimpleNamespace(event_id="$sent", content_sent={})
+        delivered = DeliveredMatrixEvent("$sent", {})
 
         with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock(return_value=delivered)):
             await terminal(AsyncMock(), _ROOM_ID, "$placeholder", {"msgtype": "m.text", "body": answer}, answer)
@@ -1063,7 +1069,7 @@ class TestTheFrozenEditSpeaksOneAnswer:
         gateway = _gateway(tmp_path, outbox)
         terminal = gateway._durable_terminal_edit("$cause", self._target())
         assert terminal is not None
-        delivered = SimpleNamespace(event_id="$sent", content_sent={})
+        delivered = DeliveredMatrixEvent("$sent", {})
 
         with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock(return_value=delivered)):
             await terminal(
@@ -1117,9 +1123,9 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
         gateway.deps.response_hooks._apply_before_response = (
             TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
         )
-        delivered = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "answer"})
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
             await gateway.deliver_final(self._final_request("answer"))
 
         assert len(outbox.acknowledged_terminal_turns) == 1
@@ -1153,9 +1159,9 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
                 response_event_id=event_id,
             ),
         )
-        delivered = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "..."})
+        delivered = DeliveredMatrixEvent("$placeholder", {"msgtype": "m.text", "body": "..."})
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
             await gateway.send_text(
                 SendTextRequest(
                     target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
@@ -1182,9 +1188,9 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
         gateway.deps.response_hooks._apply_before_response = (
             TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
         )
-        delivered = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "answer"})
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
             outcome = await gateway.deliver_final(self._final_request("answer"))
 
         assert outcome.event_id == "$sent"
@@ -1713,12 +1719,12 @@ class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
         send_started = asyncio.Event()
         finish_send = asyncio.Event()
 
-        async def send(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        async def send(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
             send_started.set()
             await finish_send.wait()
-            return SimpleNamespace(event_id="$answer", content_sent={"body": "the answer"})
+            return DeliveredMatrixEvent("$answer", {"body": "the answer"})
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(side_effect=send)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(side_effect=send)):
             recovery = asyncio.create_task(gateway.recover_deliveries())
             await send_started.wait()
             # Started while the answer is on the wire, so it derives its record
