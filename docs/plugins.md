@@ -213,6 +213,34 @@ MindRoom stores the verifier in pending state and passes it as the fifth argumen
 For example, an Acme Drive provider can store OAuth tokens in `acme_drive_oauth` while the `acme_drive` tool settings document contains only options such as file-size limits or capability toggles.
 Tokens and client secrets must never be written to `config.yaml`, prompt files, logs, or tool responses.
 
+Providers that publish protected-resource metadata can resolve endpoints and optionally register a client lazily with the generic discovery bootstrapper:
+
+```python
+from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
+
+provider = OAuthProvider(
+    id="acme_drive",
+    display_name="Acme Drive",
+    authorization_url="",
+    token_url="",
+    scopes=("files.read",),
+    credential_service="acme_drive_oauth",
+    client_config_services=("acme_drive_oauth_client",),
+    token_endpoint_auth_method="none",
+    pkce_code_challenge_method="S256",
+    runtime_bootstrapper=oauth_runtime_bootstrapper(
+        OAuthDiscoveryConfig(
+            resource="https://api.acme.example",
+            token_endpoint_auth_method="none",
+            pkce_code_challenge_method="S256",
+        ),
+    ),
+)
+```
+
+Automatic discovery checks protected-resource metadata at the resource origin and path, then uses the advertised authorization server or falls back to authorization-server metadata at the resource origin.
+Dynamic client registration requires a provider-specific `client_config_services` entry and runs only in the primary runtime.
+
 OAuth-backed tools should set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"` in `@register_tool_with_metadata`.
 When credentials are missing, return a concise instruction containing a browser-openable URL built with `mindroom.oauth.build_oauth_connect_instruction(provider, runtime_paths, worker_target=...)`.
 The user can complete OAuth and retry the same tool request.

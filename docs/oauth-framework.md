@@ -26,6 +26,9 @@ The access layer must strip any client-supplied copies of the trusted headers be
 Plugins may declare an `oauth_module` in `mindroom.plugin.json`.
 That module exposes `register_oauth_providers(settings, runtime_paths)` and returns `OAuthProvider` objects.
 This keeps FastAPI routing and state handling in core while still letting plugin authors define provider IDs, scopes, token exchange details, optional claim validators, and tool metadata.
+Plugins can use `OAuthDiscoveryConfig` with `oauth_runtime_bootstrapper()` to resolve protected-resource and authorization-server metadata lazily and optionally register an OAuth client.
+Automatic discovery first checks protected-resource metadata at the resource origin and path, then uses the advertised authorization server or falls back to authorization-server metadata at the resource origin.
+Dynamic client registration requires a provider-specific `client_config_services` entry and stores generated client configuration only in the primary runtime.
 
 OAuth token writes always go through `resolve_request_credentials_target()` and `save_scoped_credentials()`.
 For private agents, the target worker key is derived from the authenticated requester and the agent's saved `worker_scope`, so a user-owned OAuth token lands under the same scope normal tools will read at runtime.
