@@ -1580,7 +1580,7 @@ def _open_agent_session_storage(
             return history_storage
         return agent_storage.create_state_storage(
             agent_name,
-            agent_runtime.state_root,
+            agent_runtime.session_state_root,
             subdir="sessions",
             session_table=f"{agent_name}_sessions",
         )

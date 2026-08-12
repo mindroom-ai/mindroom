@@ -46,6 +46,14 @@ _TApprovalTransportResult = TypeVar("_TApprovalTransportResult")
 # failure would leave answered cards clickable until the next restart.
 _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS = 1.0
 _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
+# How many passes may come up short before the sweep stops saying so quietly.
+# It keeps retrying past this: a pass cannot take a row that is still being
+# published, so the cost of asking again is a read, while the cost of stopping
+# is durable cleanup that no longer happens until the next restart -- and an
+# outage that outlasts any fixed budget is exactly when cleanup is owed most.
+# What changes is the volume, because a sweep still owed something this long
+# after start is not waiting on anything transient.
+_STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION = 10
 
 
 class _ApprovalTransportBot(Protocol):
@@ -145,6 +153,7 @@ class ApprovalMatrixTransport:
     _continuations: ApprovalContinuationStore = field(init=False, repr=False)
     _continuation_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _expiry_tasks: dict[tuple[str, str], asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
+    _startup_cleanup_attempts: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Open the shared durable continuation coordinator."""
@@ -643,6 +652,7 @@ class ApprovalMatrixTransport:
         self._startup_cleanup_done = False
         self._continuations_recovered = False
         self._startup_cleanup_retry_delay = _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS
+        self._startup_cleanup_attempts = 0
         retry = self._startup_cleanup_retry
         self._startup_cleanup_retry = None
         if retry is not None:
@@ -701,6 +711,7 @@ class ApprovalMatrixTransport:
                 or not self._startup_runtime_support_ready_for_cleanup
             ):
                 return
+            self._startup_cleanup_attempts += 1
             if not await self._discard_orphaned_approval_cards_on_startup():
                 self._schedule_startup_cleanup_retry()
                 return
@@ -717,12 +728,39 @@ class ApprovalMatrixTransport:
         try:
             sweep = await expire_orphaned_approval_cards_on_startup()
         except Exception as exc:
-            logger.warning("tool_approval_startup_discard_failed", error=str(exc))
+            logger.warning(
+                "tool_approval_startup_discard_failed",
+                error=str(exc),
+                attempt=self._startup_cleanup_attempts,
+                exc_info=True,
+            )
             return False
-        if sweep.discarded > 0:
-            logger.info("approval.startup_discard", discarded_count=sweep.discarded)
+        # Said unconditionally, because the healthy outcome of the guards this
+        # sweep runs under is a pass that settles nothing, and a pass that
+        # settled nothing has to be distinguishable from one that never ran.
+        logger.info(
+            "approval_startup_sweep_finished",
+            attempt=self._startup_cleanup_attempts,
+            scanned=sweep.scanned,
+            discarded=sweep.discarded,
+            owed_count=sweep.failed,
+            skipped_in_flight=sweep.skipped_in_flight,
+            skipped_live_waiter=sweep.skipped_live_waiter,
+            dropped_unrecoverable=sweep.dropped_unrecoverable,
+            kept_unusable=sweep.kept_unusable,
+            dropped_never_attempted=sweep.dropped_never_attempted,
+        )
         if not sweep.complete:
-            logger.warning("tool_approval_startup_discard_incomplete", owed_count=sweep.failed)
+            incomplete = (
+                logger.error
+                if self._startup_cleanup_attempts >= _STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION
+                else logger.warning
+            )
+            incomplete(
+                "tool_approval_startup_discard_incomplete",
+                owed_count=sweep.failed,
+                attempt=self._startup_cleanup_attempts,
+            )
         return sweep.complete
 
     def _schedule_startup_cleanup_retry(self) -> None:

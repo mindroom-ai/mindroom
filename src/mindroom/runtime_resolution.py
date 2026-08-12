@@ -11,7 +11,12 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
     resolve_private_knowledge_base_agent,
 )
-from mindroom.constants import RuntimePaths, resolve_config_relative_path, resolve_config_relative_path_preserving_leaf
+from mindroom.constants import (
+    RuntimePaths,
+    resolve_config_relative_path,
+    resolve_config_relative_path_preserving_leaf,
+    resolve_session_state_root,
+)
 from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
@@ -55,6 +60,7 @@ class ResolvedAgentRuntime:
 
     execution: ResolvedAgentExecution
     state_root: Path
+    session_state_root: Path
     workspace: ResolvedAgentWorkspace | None
     tool_base_dir: Path | None
     file_memory_root: Path | None
@@ -239,6 +245,7 @@ def resolve_agent_runtime(
     return ResolvedAgentRuntime(
         execution=resolved_execution,
         state_root=state_root,
+        session_state_root=resolve_session_state_root(state_root, runtime_paths),
         workspace=workspace,
         tool_base_dir=tool_base_dir,
         file_memory_root=file_memory_root,

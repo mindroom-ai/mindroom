@@ -70,8 +70,9 @@ class FakeApprovalCards:
         self.claimed: list[str] = []
         self.attempted: list[tuple[str, str | None]] = []
         self.acknowledged: list[tuple[str, str]] = []
-        # Stands in for the claim timestamp the real table records, which is
-        # what orders the room scan and what a page cursor is built from.
+        # Claim order, which is all the real column is used for: it sorts the
+        # room scan and half of the paging cursor. The other half is the
+        # transaction id, so ties need no breaking here.
         self._claims = 0
 
     @property

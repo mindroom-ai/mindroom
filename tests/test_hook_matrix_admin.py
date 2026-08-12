@@ -246,6 +246,48 @@ async def test_hook_matrix_admin_kick_user_returns_false_on_error(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_hook_matrix_admin_force_join_user_calls_synapse_admin_api(tmp_path: Path) -> None:
+    """Force-join should invite first so Tuwunel can join a private room."""
+    module = _matrix_admin_module()
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.access_token = TEST_PASSWORD
+    response = MagicMock(status=200)
+    client.send.return_value = response
+
+    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    with patch.object(module, "invite_to_room", new=AsyncMock(return_value=True)) as mock_invite:
+        assert await admin.force_join_user("!personal:localhost", "@user:localhost") is True
+
+    mock_invite.assert_awaited_once_with(client, "!personal:localhost", "@user:localhost")
+    client.send.assert_awaited_once_with(
+        "POST",
+        "/_synapse/admin/v1/join/%21personal%3Alocalhost",
+        data='{"user_id": "@user:localhost"}',
+        headers={
+            "Authorization": f"Bearer {TEST_PASSWORD}",
+            "Content-Type": "application/json",
+        },
+    )
+    response.release.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_hook_matrix_admin_force_join_user_fails_without_access_token(tmp_path: Path) -> None:
+    """Force-join should fail closed when no authenticated admin token exists."""
+    module = _matrix_admin_module()
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.access_token = None
+
+    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    assert await admin.force_join_user("!personal:localhost", "@user:localhost") is False
+    client.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_hook_matrix_admin_invite_user_with_config_delegates_to_raw_invite(tmp_path: Path) -> None:
     """Single-user invite should not run managed private-room reconciliation."""
     module = _matrix_admin_module()

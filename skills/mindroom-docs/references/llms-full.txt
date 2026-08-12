@@ -1014,6 +1014,7 @@ tool_approval:
 |----------|-------------|---------|
 | `MINDROOM_CONFIG_PATH` | Path to `config.yaml` | `./config.yaml` → `~/.mindroom/config.yaml` |
 | `MINDROOM_STORAGE_PATH` | Data storage directory | `mindroom_data/` next to config |
+| `MINDROOM_SESSION_STORAGE_PATH` | Dedicated root for agent and team session SQLite databases. Relative paths resolve from the config directory; learning, workspaces, and other state remain under `MINDROOM_STORAGE_PATH` | `MINDROOM_STORAGE_PATH` |
 | `MINDROOM_CONFIG_TEMPLATE` | Path to a config template. When set and `config.yaml` does not exist, MindRoom copies this template to the config path. Used in Docker containers to seed config from bundled templates | Same as config path |
 | `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` | Optional base64-encoded 32-byte key for encrypted-at-rest credential files | unset |
 | `LOG_LEVEL` | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
@@ -10939,6 +10940,7 @@ After MindRoom has a cached requester-specific catalog, the toolkit also exposes
 `discovery: auto` performs protected-resource metadata discovery from the configured `resource` or server `url`, then resolves authorization-server metadata.
 MindRoom tries `/.well-known/oauth-protected-resource` at the resource origin and at the resource path.
 It then reads the advertised authorization server and fetches OAuth authorization-server metadata.
+If the protected-resource metadata does not advertise an authorization server, MindRoom also looks for OAuth authorization-server metadata at the protected-resource origin.
 The discovered metadata supplies the authorization endpoint, token endpoint, optional registration endpoint, supported token endpoint auth methods, and supported PKCE methods.
 
 If `dynamic_client_registration` is enabled and no client config has been stored yet, MindRoom registers a public client lazily when the first OAuth flow starts.
@@ -11689,6 +11691,34 @@ MindRoom stores the verifier in pending state and passes it as the fifth argumen
 For example, an Acme Drive provider can store OAuth tokens in `acme_drive_oauth` while the `acme_drive` tool settings document contains only options such as file-size limits or capability toggles.
 Tokens and client secrets must never be written to `config.yaml`, prompt files, logs, or tool responses.
 
+Providers that publish protected-resource metadata can resolve endpoints and optionally register a client lazily with the generic discovery bootstrapper:
+
+```python
+from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
+
+provider = OAuthProvider(
+    id="acme_drive",
+    display_name="Acme Drive",
+    authorization_url="",
+    token_url="",
+    scopes=("files.read",),
+    credential_service="acme_drive_oauth",
+    client_config_services=("acme_drive_oauth_client",),
+    token_endpoint_auth_method="none",
+    pkce_code_challenge_method="S256",
+    runtime_bootstrapper=oauth_runtime_bootstrapper(
+        OAuthDiscoveryConfig(
+            resource="https://api.acme.example",
+            token_endpoint_auth_method="none",
+            pkce_code_challenge_method="S256",
+        ),
+    ),
+)
+```
+
+Automatic discovery checks protected-resource metadata at the resource origin and path, then uses the advertised authorization server or falls back to authorization-server metadata at the resource origin.
+Dynamic client registration requires a provider-specific `client_config_services` entry and runs only in the primary runtime.
+
 OAuth-backed tools should set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"` in `@register_tool_with_metadata`.
 When credentials are missing, return a concise instruction containing a browser-openable URL built with `mindroom.oauth.build_oauth_connect_instruction(provider, runtime_paths, worker_target=...)`.
 The user can complete OAuth and retry the same tool request.
@@ -12268,6 +12298,7 @@ async def block_secret_reads(ctx):
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
 | `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
 | `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router bot after a live human `m.room.member` join, excluding initial sync history, configured agents, the internal `mindroom_user`, and `bot_accounts` | None (frozen) |
+| `room:member_left` | Observer | `RoomMemberLeftContext` | On the router bot after a human's self-authored `m.room.member` transition from `join` to `leave`, excluding configured agents, the internal `mindroom_user`, and `bot_accounts` | None (frozen) |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call runs | `decline()` |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None (observer result snapshot) |
@@ -12282,6 +12313,8 @@ MindRoom does not sanitize attachments, media, tool calls, tool args, provider m
 For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation, interruption, suppression, and delivery failure recovery.
 `room:member_joined` uses at-least-once delivery because MindRoom records the durable room/user marker only after the hook completes.
 A process interruption or marker-write failure after a handler side effect can replay the same room/user pair, so handlers that create or invite resources must be idempotent.
+`room:member_left` reads `display_name` and `avatar_url` from the joined membership state that the leave replaces.
+Actionable room-lifecycle events remain pending until their callback completes, so an interruption can replay a leave before journal settlement and handlers must be idempotent.
 
 ### Default timeouts
 
@@ -12296,6 +12329,7 @@ A process interruption or marker-write failure after a handler side effect can r
 | `message:cancelled` | 3000 |
 | `reaction:received` | 500 |
 | `room:member_joined` | 3000 |
+| `room:member_left` | 3000 |
 | `schedule:fired` | 1000 |
 | `agent:started` | 5000 |
 | `agent:stopped` | 5000 |
@@ -12759,6 +12793,18 @@ RoomMemberJoinedContext(
     prev_membership: str | None,
 )
 
+RoomMemberLeftContext(
+    agent_name: str,
+    room_id: str,
+    event_id: str,
+    user_id: str,
+    sender_id: str,
+    display_name: str | None,
+    avatar_url: str | None,
+    membership: str,
+    prev_membership: str | None,
+)
+
 ToolBeforeCallContext(
     tool_name: str,
     arguments: dict[str, Any],
@@ -12941,6 +12987,9 @@ The access layer must strip any client-supplied copies of the trusted headers be
 Plugins may declare an `oauth_module` in `mindroom.plugin.json`.
 That module exposes `register_oauth_providers(settings, runtime_paths)` and returns `OAuthProvider` objects.
 This keeps FastAPI routing and state handling in core while still letting plugin authors define provider IDs, scopes, token exchange details, optional claim validators, and tool metadata.
+Plugins can use `OAuthDiscoveryConfig` with `oauth_runtime_bootstrapper()` to resolve protected-resource and authorization-server metadata lazily and optionally register an OAuth client.
+Automatic discovery first checks protected-resource metadata at the resource origin and path, then uses the advertised authorization server or falls back to authorization-server metadata at the resource origin.
+Dynamic client registration requires a provider-specific `client_config_services` entry and stores generated client configuration only in the primary runtime.
 
 OAuth token writes always go through `resolve_request_credentials_target()` and `save_scoped_credentials()`.
 For private agents, the target worker key is derived from the authenticated requester and the agent's saved `worker_scope`, so a user-owned OAuth token lands under the same scope normal tools will read at runtime.
@@ -17578,6 +17627,7 @@ Key environment variables (set in `.env` or pass directly):
 | `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
 | `MATRIX_SERVER_NAME` | Server name for federation (optional) | - |
 | `MINDROOM_STORAGE_PATH` | Data storage directory | Relative to config file |
+| `MINDROOM_SESSION_STORAGE_PATH` | Dedicated root for agent and team session SQLite databases. Mount this path separately when sessions need their own persistent volume | `MINDROOM_STORAGE_PATH` |
 | `LOG_LEVEL` | Logging level | `INFO` |
 | `MINDROOM_LOGGER_LEVELS` | Optional per-logger overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING`; set `nio.crypto:WARNING` to inspect Matrix crypto decrypt warnings | - |
 | `MINDROOM_CONFIG_PATH` | Path to config.yaml | `./config.yaml`, then `~/.mindroom/config.yaml` |
@@ -17643,9 +17693,9 @@ curl http://localhost:8765/api/health
 
 ## Data Persistence
 
-MindRoom stores data in the `mindroom_data` directory:
+MindRoom stores data in the `mindroom_data` directory by default:
 
-- `sessions/` - Per-agent conversation history (SQLite)
+- `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite), optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
 - `learning/` - Per-agent Agno Learning state (SQLite, persistent across restarts)
 - `chroma/` - ChromaDB vector store for agent/team memories
 - `knowledge_db/` - Knowledge base vector stores
@@ -17657,6 +17707,7 @@ MindRoom stores data in the `mindroom_data` directory:
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 
 Keep `tracking/` on persistent storage and include it in backups.
+When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and include it in backups too.
 Dispatch-obligation databases retain one compact terminal row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
 The retained terminal rows have no automatic retention window because deleting them weakens replay deduplication.
 Pending rows temporarily retain the full event replay payload and should represent only actively deferred or retry-owned work, not completed ignore paths.

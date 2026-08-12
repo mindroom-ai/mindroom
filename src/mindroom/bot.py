@@ -28,12 +28,14 @@ from mindroom.hooks import (
     EVENT_BOT_READY,
     EVENT_REACTION_RECEIVED,
     EVENT_ROOM_MEMBER_JOINED,
+    EVENT_ROOM_MEMBER_LEFT,
     AgentLifecycleContext,
     HookContextSupport,
     HookRegistry,
     HookRegistryState,
     ReactionReceivedContext,
     RoomMemberJoinedContext,
+    RoomMemberLeftContext,
     emit,
     send_hook_message,
 )
@@ -130,8 +132,10 @@ from .matrix.journal_ingress import event_is_live as journal_event_is_live
 from .matrix.relation_lookup import RelationLookup
 from .matrix.room_member_joins import (
     RoomMemberJoin,
+    RoomMemberLeave,
     emit_room_member_join_at_least_once,
     record_room_member_joins_seen_from_events,
+    room_member_left_from_event,
     room_member_sync_state_plan,
     room_member_sync_timeline_events,
 )
@@ -1066,6 +1070,25 @@ class AgentBot:
             prev_membership=join.prev_membership,
         )
         await emit(self.hook_registry, EVENT_ROOM_MEMBER_JOINED, context)
+
+    async def _emit_room_member_left_hooks(self, leave: RoomMemberLeave) -> None:
+        """Emit room:member_left for one live human Matrix room self-leave."""
+        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_LEFT):
+            return
+
+        context = RoomMemberLeftContext(
+            **self._hook_context_support.base_kwargs(EVENT_ROOM_MEMBER_LEFT, leave.event_id),
+            agent_name=self.agent_name,
+            room_id=leave.room_id,
+            event_id=leave.event_id,
+            user_id=leave.user_id,
+            sender_id=leave.sender_id,
+            display_name=leave.display_name,
+            avatar_url=leave.avatar_url,
+            membership=leave.membership,
+            prev_membership=leave.prev_membership,
+        )
+        await emit(self.hook_registry, EVENT_ROOM_MEMBER_LEFT, context)
 
     async def _emit_agent_lifecycle_event(
         self,
@@ -2344,9 +2367,19 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.RoomMemberEvent,
     ) -> None:
-        """Expose live human room joins to router-owned hooks."""
+        """Expose live human room joins and self-leaves to router-owned hooks."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
+        if self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_LEFT):
+            leave = room_member_left_from_event(
+                room,
+                event,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+            )
+            if leave is not None:
+                await self._emit_room_member_left_hooks(leave)
+                return
         if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
             return
 

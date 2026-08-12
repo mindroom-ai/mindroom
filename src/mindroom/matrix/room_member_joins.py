@@ -43,6 +43,20 @@ class RoomMemberJoin:
 
 
 @dataclass(frozen=True, slots=True)
+class RoomMemberLeave:
+    """One live human self-leave that should be exposed to hooks."""
+
+    room_id: str
+    event_id: str
+    user_id: str
+    sender_id: str
+    display_name: str | None
+    avatar_url: str | None
+    membership: str
+    prev_membership: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class _RoomMemberSyncPlan:
     """Classified room-member state work for one sync response."""
 
@@ -140,6 +154,16 @@ def _human_join_user_id(
     if event.membership != "join":
         return None
 
+    return _human_room_member_user_id(event, config=config, runtime_paths=runtime_paths)
+
+
+def _human_room_member_user_id(
+    event: nio.RoomMemberEvent,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return the affected human user ID for one membership event, or None."""
     user_id = event.state_key
     if (
         entity_identity_registry(config, runtime_paths).is_managed_user_id(user_id)
@@ -148,6 +172,38 @@ def _human_join_user_id(
     ):
         return None
     return user_id
+
+
+def room_member_left_from_event(
+    room: nio.MatrixRoom,
+    event: nio.RoomMemberEvent,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> RoomMemberLeave | None:
+    """Return hook payload data for one live human self-leave, or None."""
+    if event.membership != "leave" or event.prev_membership != "join":
+        return None
+    if event.sender != event.state_key:
+        return None
+    prev_content = event.prev_content
+    if prev_content is None:
+        return None
+
+    user_id = _human_room_member_user_id(event, config=config, runtime_paths=runtime_paths)
+    if user_id is None:
+        return None
+
+    return RoomMemberLeave(
+        room_id=room.room_id,
+        event_id=event.event_id,
+        user_id=user_id,
+        sender_id=event.sender,
+        display_name=_optional_string(prev_content, "displayname"),
+        avatar_url=_optional_string(prev_content, "avatar_url"),
+        membership=event.membership,
+        prev_membership=event.prev_membership,
+    )
 
 
 def record_room_member_joins_seen_from_events(

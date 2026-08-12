@@ -205,8 +205,8 @@ Matrix sync callback
 | `logging_config.py` | Structured logging setup |
 | `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |
 
-**Persistent state** lives under `mindroom_data/` (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
-- `sessions/` – Per-agent SQLite event history for Agno conversations
+**Persistent state** lives under `mindroom_data/` by default (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
+- `agents/*/sessions/` and `teams/*/sessions/` – SQLite event history for Agno conversations, optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
 - `learning/` – Per-agent Agno Learning preference data
 - `chroma/` – ChromaDB storage backing the memory system
 - `knowledge_db/` – Knowledge base vector stores for file-backed RAG
@@ -698,7 +698,7 @@ mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 mindroom run --log-level DEBUG  # Surface routing decisions, tool calls, config reloads
 ```
 
-Inspect agent traces: `mindroom_data/sessions/<agent>.db`
+Inspect agent traces under `<session-storage-root>/agents/<agent>/sessions/<agent>.db`, where the session storage root is `MINDROOM_SESSION_STORAGE_PATH` when set and `MINDROOM_STORAGE_PATH` otherwise.
 
 ## 6. Releases
 

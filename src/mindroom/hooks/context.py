@@ -591,6 +591,21 @@ class RoomMemberJoinedContext(HookContext):
 
 
 @dataclass(slots=True)
+class RoomMemberLeftContext(HookContext):
+    """Context for room:member_left hooks."""
+
+    agent_name: str
+    room_id: str
+    event_id: str
+    user_id: str
+    sender_id: str
+    display_name: str | None
+    avatar_url: str | None
+    membership: str
+    prev_membership: str | None
+
+
+@dataclass(slots=True)
 class ConfigReloadedContext(HookContext):
     """Context for config:reloaded hooks."""
 
