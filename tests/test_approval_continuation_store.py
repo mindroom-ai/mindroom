@@ -507,6 +507,54 @@ async def test_expiry_task_retries_false_outcome_until_settled(
 
 
 @pytest.mark.asyncio
+async def test_expiry_task_keeps_retrying_after_continuation_becomes_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Durable continuation readiness does not prove its Matrix card edit landed."""
+    transport = ApprovalMatrixTransport(
+        runtime_paths=RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path,
+        ),
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: None,
+    )
+    continuation = replace(
+        _continuation(),
+        calls=(
+            replace(
+                _continuation().calls[0],
+                card_event_id="$approval",
+                expires_at="2020-01-01T00:00:00+00:00",
+            ),
+        ),
+    )
+    transport._continuations.create(continuation)
+    attempts = 0
+
+    async def expire(_room_id: str, _card_event_id: str) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.EXPIRED)
+            transport._continuations.acknowledge_call("approval-1", "call-1")
+            return False
+        return True
+
+    monkeypatch.setattr("mindroom.approval_transport.expire_suspended_tool_approval", AsyncMock(side_effect=expire))
+
+    transport._schedule_expiry(continuation)
+    tasks = tuple(transport._expiry_tasks.values())
+    await asyncio.gather(*tasks)
+
+    assert attempts == 2
+    assert transport._expiry_tasks == {}
+
+
+@pytest.mark.asyncio
 async def test_transport_close_releases_continuation_store(tmp_path: Path) -> None:
     """The transport owns its SQLite handle and must release it at shutdown."""
     transport = ApprovalMatrixTransport(

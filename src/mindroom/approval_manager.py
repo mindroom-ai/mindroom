@@ -582,15 +582,83 @@ class _ApprovalManager:
         claimed_card = self._claimed_card_body(content=content, requested_at=requested_at)
         if not await self._claim_card(room_id=room_id, transaction_id=transaction_id, card=claimed_card):
             return None
-        sent_event = await self._mark_attempted_then_send(
-            room_id=room_id,
-            thread_id=thread_id,
-            content=content,
+        send_task = asyncio.ensure_future(
+            self._mark_attempted_then_send(
+                room_id=room_id,
+                thread_id=thread_id,
+                content=content,
+                transaction_id=transaction_id,
+            ),
+        )
+        active_send = _ActiveApprovalSend(
+            done_future=Future(),
+            owner_loop=asyncio.get_running_loop(),
+            send_task=send_task,
             transaction_id=transaction_id,
         )
+        with self._live_lock:
+            self._active_approval_sends.add(active_send)
+        try:
+            try:
+                sent_event = await asyncio.shield(send_task)
+            except asyncio.CancelledError:
+                cleanup_future = asyncio.run_coroutine_threadsafe(
+                    self._cleanup_cancelled_detached_send_when_event_arrives(
+                        send_task=send_task,
+                        room_id=room_id,
+                        transaction_id=transaction_id,
+                        claimed_card=claimed_card,
+                        approval_id=approval_id,
+                        continuation_id=continuation_id,
+                        tool_call_id=tool_call_id,
+                        expires_at=expires_at,
+                    ),
+                    active_send.owner_loop,
+                )
+                cleanup_task = _PostCancelCleanupTask(
+                    cleanup_future=cleanup_future,
+                    owner_loop=active_send.owner_loop,
+                    send_task=send_task,
+                    transaction_id=transaction_id,
+                )
+                with self._live_lock:
+                    self._post_cancel_cleanup_tasks.add(cleanup_task)
+                cleanup_future.add_done_callback(lambda _future: self._discard_post_cancel_cleanup_task(cleanup_task))
+                raise
+        finally:
+            with self._live_lock:
+                self._active_approval_sends.discard(active_send)
+            with suppress(InvalidStateError):
+                active_send.done_future.set_result(None)
         if sent_event is None:
             await self._forget_card(transaction_id)
             return None
+        first_attempt = self._register_sent_detached_approval(
+            room_id=room_id,
+            transaction_id=transaction_id,
+            claimed_card=claimed_card,
+            sent_event=sent_event,
+            approval_id=approval_id,
+            continuation_id=continuation_id,
+            tool_call_id=tool_call_id,
+            expires_at=expires_at,
+        )
+        await asyncio.shield(first_attempt.wait())
+        return sent_event
+
+    def _register_sent_detached_approval(
+        self,
+        *,
+        room_id: str,
+        transaction_id: str,
+        claimed_card: dict[str, Any],
+        sent_event: SentApprovalEvent,
+        approval_id: str,
+        continuation_id: str,
+        tool_call_id: str,
+        expires_at: datetime,
+    ) -> asyncio.Event:
+        """Register binding and expiry owners for one delivered detached card."""
         sent_card = _sent_card_body(claimed_card, sent_event)
         with self._live_lock:
             shutting_down = self._shutdown_reason is not None
@@ -607,7 +675,7 @@ class _ApprovalManager:
                 expiry_task.add_done_callback(
                     lambda task: self._finish_detached_expiry_task(sent_event.event_id, task),
                 )
-        first_attempt = self._schedule_detached_card_binding(
+        return self._schedule_detached_card_binding(
             room_id=room_id,
             transaction_id=transaction_id,
             card_event_id=sent_event.event_id,
@@ -616,8 +684,41 @@ class _ApprovalManager:
             tool_call_id=tool_call_id,
             expire_after_bind=shutting_down,
         )
+
+    async def _cleanup_cancelled_detached_send_when_event_arrives(
+        self,
+        *,
+        send_task: asyncio.Future[SentApprovalEvent | None],
+        room_id: str,
+        transaction_id: str,
+        claimed_card: dict[str, Any],
+        approval_id: str,
+        continuation_id: str,
+        tool_call_id: str,
+        expires_at: datetime,
+    ) -> None:
+        """Bind and expire a detached card whose sender outlived its caller."""
+        try:
+            sent_event = await asyncio.shield(send_task)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Cancelled detached approval send failed before returning an event id", exc_info=True)
+            return
+        if sent_event is None:
+            await self._forget_card(transaction_id)
+            return
+        first_attempt = self._register_sent_detached_approval(
+            room_id=room_id,
+            transaction_id=transaction_id,
+            claimed_card=claimed_card,
+            sent_event=sent_event,
+            approval_id=approval_id,
+            continuation_id=continuation_id,
+            tool_call_id=tool_call_id,
+            expires_at=expires_at,
+        )
         await asyncio.shield(first_attempt.wait())
-        return sent_event
 
     def _schedule_detached_card_binding(
         self,
@@ -759,6 +860,43 @@ class _ApprovalManager:
                 return
             await asyncio.sleep(retry_seconds)
             retry_seconds = min(retry_seconds * 2, _DETACHED_RETRY_MAX_SECONDS)
+
+    def _schedule_detached_expiry_retry(self, *, room_id: str, card_event_id: str) -> None:
+        """Move visible terminal settlement onto an immediate retry owner."""
+        current_task = asyncio.current_task()
+        with self._live_lock:
+            if self._shutdown_reason is not None:
+                return
+            existing = self._detached_expiry_tasks.get(card_event_id)
+            if existing is current_task:
+                return
+            if existing is not None:
+                existing.cancel()
+            retry_task = asyncio.create_task(
+                self._expire_detached_after(
+                    room_id=room_id,
+                    card_event_id=card_event_id,
+                    expires_at=_utcnow(),
+                ),
+                name=f"approval-expiry-retry-{card_event_id}",
+            )
+            self._detached_expiry_tasks[card_event_id] = retry_task
+            retry_task.add_done_callback(lambda task: self._finish_detached_expiry_task(card_event_id, task))
+
+    def _maintain_detached_expiry_owner(
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+        outcome: _ResolutionOutcome,
+    ) -> None:
+        if outcome is _ResolutionOutcome.DELIVERED:
+            with self._live_lock:
+                expiry_task = self._detached_expiry_tasks.pop(card_event_id, None)
+            if expiry_task is not None:
+                expiry_task.cancel()
+        elif outcome is _ResolutionOutcome.RECORDED:
+            self._schedule_detached_expiry_retry(room_id=room_id, card_event_id=card_event_id)
 
     async def discard_pending_on_startup(self) -> ApprovalStartupSweep:
         """Settle every router-authored card this bot restarted holding.
@@ -1027,11 +1165,11 @@ class _ApprovalManager:
                     )
                 ),
             )
-            if outcome is not _ResolutionOutcome.UNRECORDED:
-                with self._live_lock:
-                    expiry_task = self._detached_expiry_tasks.pop(card_event_id, None)
-                if expiry_task is not None:
-                    expiry_task.cancel()
+            self._maintain_detached_expiry_owner(
+                room_id=room_id,
+                card_event_id=card_event_id,
+                outcome=outcome,
+            )
             return ApprovalActionResult(
                 consumed=True,
                 resolved=outcome is _ResolutionOutcome.DELIVERED,

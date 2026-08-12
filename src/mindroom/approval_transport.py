@@ -239,9 +239,6 @@ class ApprovalMatrixTransport:
 
     async def _handle_continuation_decision_ready(self, approval_id: str, tool_call_id: str) -> None:
         continuation = await asyncio.to_thread(self._continuations.acknowledge_call, approval_id, tool_call_id)
-        expiry = self._expiry_tasks.pop((approval_id, tool_call_id), None)
-        if expiry is not None and expiry is not asyncio.current_task():
-            expiry.cancel()
         if continuation is not None and continuation.state == "ready":
             self._schedule_continuation(continuation)
 
@@ -360,30 +357,6 @@ class ApprovalMatrixTransport:
                         settled = False
                     if settled:
                         return
-                    try:
-                        refreshed = await asyncio.to_thread(self._continuations.get, approval_id)
-                    except Exception:
-                        logger.warning(
-                            "approval_continuation_expiry_state_retry",
-                            approval_id=approval_id,
-                            tool_call_id=tool_call_id,
-                            retry_seconds=retry_seconds,
-                            exc_info=True,
-                        )
-                    else:
-                        refreshed_call = (
-                            None
-                            if refreshed is None
-                            else next((item for item in refreshed.calls if item.tool_call_id == tool_call_id), None)
-                        )
-                        if (
-                            refreshed is None
-                            or refreshed.state != "pending"
-                            or refreshed_call is None
-                            or refreshed_call.decision_recorded
-                            or refreshed_call.card_event_id != card_event_id
-                        ):
-                            return
                     await asyncio.sleep(retry_seconds)
                     retry_seconds = min(retry_seconds * 2, _CONTINUATION_EXPIRY_MAX_RETRY_SECONDS)
 

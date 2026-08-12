@@ -478,6 +478,52 @@ async def test_detached_approval_retries_recorded_expiry_until_card_edit_lands(t
 
 
 @pytest.mark.asyncio
+async def test_detached_decision_retries_terminal_edit_without_waiting_for_deadline(tmp_path: Path) -> None:
+    """A recorded human decision must keep retry ownership when its first Matrix edit fails."""
+    cards = FakeApprovalCards()
+    editor = AsyncMock(side_effect=[False, True])
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        detached_decision_handler=AsyncMock(return_value=("approved", None)),
+        detached_decision_ready=AsyncMock(),
+    )
+    await store.create_detached_approval(
+        approval_id="approval-edit-retry",
+        continuation_id="continuation-edit-retry",
+        tool_call_id="call-edit-retry",
+        tool_name="dangerous",
+        arguments={},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=30,
+    )
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="approved",
+        reason=None,
+    )
+    for _attempt in range(100):
+        if editor.await_count == 2:
+            break
+        await asyncio.sleep(0.01)
+
+    assert result.resolved is False
+    assert editor.await_count == 2
+    assert cards.rows == {}
+
+
+@pytest.mark.asyncio
 async def test_cancelled_detached_card_bind_keeps_retry_owner(tmp_path: Path) -> None:
     """Cancellation after send must hand card binding and continuation attachment to recovery."""
     cards = FakeApprovalCards()
@@ -538,6 +584,62 @@ async def test_cancelled_detached_card_bind_keeps_retry_owner(tmp_path: Path) ->
     assert bind_attempts >= 2
     assert next(iter(cards.rows.values())).card_event_id == "$approval"
     card_ready.assert_awaited_with("continuation-bind", "call-bind", "$approval")
+    assert "$approval" in store._detached_expiry_tasks
+
+
+@pytest.mark.asyncio
+async def test_cancelled_detached_send_hands_delivered_event_to_recovery(tmp_path: Path) -> None:
+    """Cancellation during send must not strand a card whose event id arrives afterward."""
+    cards = FakeApprovalCards()
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+
+    async def sender(*_args: object) -> SentApprovalEvent:
+        send_started.set()
+        await release_send.wait()
+        return SentApprovalEvent("$approval")
+
+    card_ready = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        detached_decision_handler=AsyncMock(return_value=("expired", "expired")),
+        detached_card_ready=card_ready,
+    )
+    create = asyncio.create_task(
+        store.create_detached_approval(
+            approval_id="approval-send",
+            continuation_id="continuation-send",
+            tool_call_id="call-send",
+            tool_name="dangerous",
+            arguments={},
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    await send_started.wait()
+
+    create.cancel()
+    await asyncio.sleep(0)
+    release_send.set()
+    with pytest.raises(asyncio.CancelledError):
+        await create
+    for _attempt in range(100):
+        row = next(iter(cards.rows.values()))
+        if row.card_event_id == "$approval" and card_ready.await_count:
+            break
+        await asyncio.sleep(0.01)
+
+    assert next(iter(cards.rows.values())).card_event_id == "$approval"
+    card_ready.assert_awaited_with("continuation-send", "call-send", "$approval")
     assert "$approval" in store._detached_expiry_tasks
 
 
