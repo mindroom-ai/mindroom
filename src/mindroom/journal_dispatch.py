@@ -70,12 +70,6 @@ type _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Aw
 type _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
 type _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
 
-# Interactive reactions are the only reaction path whose response may outlive
-# its callback. Keep this dispatcher concern separate from TURN_BACKED_KINDS:
-# generic reactions must still replay before the agent fleet is released and
-# must not count as unfinished conversation turns in journal queries.
-_DEFERRABLE_KINDS = TURN_BACKED_KINDS | {EventKind.REACTION}
-
 
 @dataclass(frozen=True, slots=True)
 class JournalCallbacks:
@@ -116,6 +110,9 @@ class JournalDispatcher:
     # an event that is still in hand would parse every event twice and discard
     # the decryption state nio attached to the original.
     _live_events: dict[str, tuple[nio.MatrixRoom, nio.Event]] = field(default_factory=dict, init=False, repr=False)
+    # Reactions normally complete inline. Only one whose callback explicitly
+    # deferred has a managed response owner worth probing on later scans.
+    _deferred_reaction_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Build the worker and admission adapter this dispatcher owns."""
@@ -299,7 +296,7 @@ class JournalDispatcher:
         this replaces; a wrong "gone" costs a re-dispatch that ``TurnStore``
         then has to refuse.
         """
-        if event.kind not in _DEFERRABLE_KINDS:
+        if event.kind not in TURN_BACKED_KINDS and event.event_id not in self._deferred_reaction_ids:
             # A completing callback settles or raises. It never defers, so a
             # deferral for one of these kinds cannot exist to begin with.
             return True
@@ -333,7 +330,8 @@ class JournalDispatcher:
             # not exist yet. Live events are unaffected: their responders are
             # whatever is running now.
             return False
-        if event.kind in _DEFERRABLE_KINDS and self._has_live_owner(event.event_id):
+        has_deferrable_owner = event.kind in TURN_BACKED_KINDS or event.event_id in self._deferred_reaction_ids
+        if has_deferrable_owner and self._has_live_owner(event.event_id):
             # A coalescing batch or a running turn already holds this source
             # and will hand it back. Starting a second turn on it does not
             # answer twice, but the loser of the claim blocks until the winner
@@ -390,7 +388,13 @@ class JournalDispatcher:
             return True
         token = _RUNNING_EVENT.set(event)
         try:
-            return await binding.run(self, room, matrix_event)
+            settles = await binding.run(self, room, matrix_event)
+            if event.kind is EventKind.REACTION:
+                if settles:
+                    self._deferred_reaction_ids.discard(event.event_id)
+                else:
+                    self._deferred_reaction_ids.add(event.event_id)
+            return settles
         finally:
             _RUNNING_EVENT.reset(token)
 
@@ -430,10 +434,12 @@ class JournalDispatcher:
         the worker still lists these events as deferred to a turn that has now
         ended, and nothing else would ever clear them.
         """
+        self._deferred_reaction_ids.difference_update(event_ids)
         self._worker.release(event_ids)
 
     async def settle_intentionally_ignored_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Settle turn-backed events that produced no dispatch payload."""
+        self._deferred_reaction_ids.difference_update(event_ids)
         self._worker.release(event_ids)
         await self.store.settle_many(event_ids)
 
@@ -443,6 +449,7 @@ class JournalDispatcher:
 
     def retry_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Return several undelivered turn sources to the worker."""
+        self._deferred_reaction_ids.difference_update(event_ids)
         self._worker.release(event_ids)
         self._worker.wake()
 

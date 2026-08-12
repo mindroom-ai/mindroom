@@ -497,6 +497,7 @@ class TestAgentBot(AgentBotTestBase):
                 )
 
                 await asyncio.wait_for(message_started.wait(), timeout=0.2)
+                assert bot._journal_dispatcher.callbacks.source_has_live_owner(reaction.event_id)
                 assert reaction.event_id in await bot._journal_dispatcher.unsettled_event_ids()
         finally:
             release_selection.set()
