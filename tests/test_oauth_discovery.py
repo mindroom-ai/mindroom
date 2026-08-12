@@ -80,6 +80,8 @@ class _ResourceOriginDiscoveryClient:
 
 
 def _install_dns_rebinding(monkeypatch: pytest.MonkeyPatch, *, safe_resolutions: int) -> None:
+    # Discovery uses two safe preflight resolutions before the guarded dial;
+    # manual DCR uses three endpoint preflights plus a registration preflight.
     remaining_safe_resolutions = safe_resolutions
 
     def resolve(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
@@ -396,6 +398,7 @@ async def test_dynamic_registration_refuses_dedicated_worker_storage(
                 authorization_url="https://auth.example.test/authorize",
                 token_url="https://auth.example.test/token",  # noqa: S106
                 token_endpoint_auth_method="none",  # noqa: S106
+                pkce_code_challenge_method=None,
             ),
             "token endpoint auth method",
         ),
@@ -405,6 +408,7 @@ async def test_dynamic_registration_refuses_dedicated_worker_storage(
                 discovery="manual",
                 authorization_url="https://auth.example.test/authorize",
                 token_url="https://auth.example.test/token",  # noqa: S106
+                token_endpoint_auth_method="client_secret_post",  # noqa: S106
                 pkce_code_challenge_method="S256",
             ),
             "PKCE method",
@@ -426,6 +430,8 @@ async def test_bootstrap_rejects_provider_method_mismatch(
         scopes=("read",),
         credential_service="mismatched_oauth",
         client_config_services=("mismatched_oauth_client",),
+        token_endpoint_auth_method="client_secret_post",  # noqa: S106
+        pkce_code_challenge_method=None,
         runtime_bootstrapper=oauth_runtime_bootstrapper(discovery_config),
     )
 

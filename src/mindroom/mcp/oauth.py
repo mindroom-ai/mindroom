@@ -9,7 +9,7 @@ from mindroom.oauth.discovery import (
     OAuthDiscoveryConfig,
     oauth_runtime_bootstrapper,
 )
-from mindroom.oauth.providers import OAuthProvider, OAuthProviderError
+from mindroom.oauth.providers import OAuthProvider
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -87,7 +87,7 @@ def _oauth_discovery_config(server_config: MCPServerConfig) -> OAuthDiscoveryCon
     auth_config = server_config.auth
     if auth_config is None:
         msg = "MCP server is not OAuth-backed"
-        raise OAuthProviderError(msg)
+        raise ValueError(msg)
     return OAuthDiscoveryConfig(
         resource=auth_config.resource or server_config.url or "",
         discovery=auth_config.discovery,

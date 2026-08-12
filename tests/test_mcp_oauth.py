@@ -69,6 +69,16 @@ def test_mcp_registry_import_does_not_cycle_in_fresh_interpreter() -> None:
     )
 
 
+def test_mcp_oauth_helpers_reject_non_oauth_server_consistently() -> None:
+    """Both MCP OAuth entry points should use the same precondition error type."""
+    server_config = MCPServerConfig(transport="streamable-http", url="https://mcp.example.test")
+
+    with pytest.raises(ValueError, match="not OAuth-backed"):
+        _oauth_discovery_config(server_config)
+    with pytest.raises(ValueError, match="not OAuth-backed"):
+        mcp_oauth_provider("example", server_config)
+
+
 def _oauth_mcp_server_config() -> MCPServerConfig:
     return MCPServerConfig(
         transport="streamable-http",
