@@ -68,7 +68,7 @@ def _release_nothing(event_ids: frozenset[str]) -> None:
     del event_ids
 
 
-def _in_receipt_order(by_room: dict[str, list[JournalEvent]]) -> dict[str, list[JournalEvent]]:
+def _in_receipt_order(by_lane: dict[_LaneKey, list[JournalEvent]]) -> dict[_LaneKey, list[JournalEvent]]:
     """Put each room's collected events back into receipt order.
 
     A lane runs its list verbatim, so the list is where a room's order is
@@ -86,9 +86,9 @@ def _in_receipt_order(by_room: dict[str, list[JournalEvent]]) -> dict[str, list[
     nothing to state: these lists are near-sorted and bounded by the page
     budget, which is the case a sort is cheapest on.
     """
-    for events in by_room.values():
+    for events in by_lane.values():
         events.sort(key=lambda event: event.receipt_order)
-    return by_room
+    return by_lane
 
 
 def _assume_owner_is_live(event: JournalEvent) -> bool:
@@ -102,6 +102,18 @@ def _assume_owner_is_live(event: JournalEvent) -> bool:
     """
     del event
     return True
+
+
+# What runs in order relative to what. A room is not one conversation: each
+# thread in it is, and a turn parked on a human decision can hold its lane for
+# as long as that decision takes. Keying on the room made every thread wait for
+# whichever one was slowest, so an unanswered approval in one silenced the rest.
+_LaneKey = tuple[str, str | None]
+
+
+def _lane_key(event: JournalEvent) -> _LaneKey:
+    """Return the lane one event runs in: its thread, within its room."""
+    return (event.room_id, event.thread_id)
 
 
 @dataclass
@@ -128,22 +140,22 @@ class PendingEventWorker:
     retained_event_ids: _RetainedEventIds = _nothing_is_retained
     release_retained: _ReleaseRetained = _release_nothing
     deferral_scan_seconds: float = _DEFERRAL_SCAN_SECONDS
-    _lanes: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
+    _lanes: dict[_LaneKey, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _pump: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _retry: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _deferral_scan: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _retry_delay_seconds: float = field(default=_INITIAL_RETRY_DELAY_SECONDS, init=False, repr=False)
-    _failed_rooms: set[str] = field(default_factory=set, init=False, repr=False)
+    _failed_lanes: set[_LaneKey] = field(default_factory=set, init=False, repr=False)
     # Events handed to a turn that is still running, kept whole rather than by
     # id. They stay pending durably so a crash replays them, but dispatching
     # one again while its turn is alive would answer the same message twice --
     # and asking whether that turn still exists is a question about this set,
     # not about wherever the scan's window currently sits.
     _deferred: dict[str, JournalEvent] = field(default_factory=dict, init=False, repr=False)
-    # Rooms a pass found work for but could not dispatch, because their lane
-    # was still busy. Their lane wakes the pump when it finishes.
-    _rooms_with_more: set[str] = field(default_factory=set, init=False, repr=False)
+    # Lanes a pass found work for but could not dispatch, because that lane
+    # was still busy. The lane wakes the pump when it finishes.
+    _lanes_with_more: set[_LaneKey] = field(default_factory=set, init=False, repr=False)
     # Events a caller is running itself, off the lanes. An event is pending in
     # the store for the whole time its handler runs, so a scan that could not
     # see these would collect one and put a second handler inside it.
@@ -222,7 +234,7 @@ class PendingEventWorker:
             except asyncio.CancelledError:
                 pass
         self._lanes.clear()
-        self._rooms_with_more.clear()
+        self._lanes_with_more.clear()
 
     async def drain_once(self) -> int:
         """Run every currently pending event to completion and return the count.
@@ -251,29 +263,29 @@ class PendingEventWorker:
         drained = 0
         attempted: frozenset[str] = frozenset()
         while True:
-            by_room = await self._collect_whole_backlog()
-            if not by_room:
+            by_lane = await self._collect_whole_backlog()
+            if not by_lane:
                 return drained
-            ids = frozenset(event.event_id for events in by_room.values() for event in events)
+            ids = frozenset(event.event_id for events in by_lane.values() for event in events)
             if ids == attempted:
                 # Nothing moved: every remaining event failed or was refused.
                 # Looping again would only repeat the same failures forever.
                 return drained
             attempted = ids
             drained += len(ids)
-            await asyncio.gather(*(self._drain_room(room_id, events) for room_id, events in by_room.items()))
+            await asyncio.gather(*(self._drain_lane(key, events) for key, events in by_lane.items()))
 
-    async def _drain_room(self, room_id: str, events: list[JournalEvent]) -> None:
-        """Run one room's events, once whatever lane owns that room is done.
+    async def _drain_lane(self, key: _LaneKey, events: list[JournalEvent]) -> None:
+        """Run one lane's events, once whatever owns that lane is done.
 
         Rechecked after each wait because the pump wakes on the same lane
         completion, so the room can be claimed again before this resumes.
         Someone else's lane is waited on rather than awaited: whether that one
         was cancelled is the pump's business, and a drain must not inherit it.
         """
-        while (active := self._lanes.get(room_id)) is not None and not active.done():
+        while (active := self._lanes.get(key)) is not None and not active.done():
             await asyncio.wait([active])
-        lane = self._start_lane(room_id, events)
+        lane = self._start_lane(key, events)
         await asyncio.wait([lane])
         # This lane is the drain's own, so whatever ended it is the drain's to
         # report. A cancelled turn is not a failed one: it leaves its event
@@ -293,17 +305,17 @@ class PendingEventWorker:
                 self._schedule_retry()
 
     async def _dispatch_ready_rooms(self) -> None:
-        by_room, more_remains = await self._collect_dispatchable()
+        by_lane, more_remains = await self._collect_dispatchable()
         started = False
-        for room_id, events in by_room.items():
-            active = self._lanes.get(room_id)
+        for key, events in by_lane.items():
+            active = self._lanes.get(key)
             if active is not None and not active.done():
-                # Nothing else will look at this room again on its own, so its
-                # lane has to wake the pump when it finishes.
-                self._rooms_with_more.add(room_id)
+                # Nothing else will look at this lane again on its own, so it
+                # has to wake the pump when it finishes.
+                self._lanes_with_more.add(key)
                 continue
             started = True
-            self._start_lane(room_id, events)
+            self._start_lane(key, events)
         if started:
             self._retry_delay_seconds = _INITIAL_RETRY_DELAY_SECONDS
         if more_remains:
@@ -333,22 +345,23 @@ class PendingEventWorker:
         else:
             self._schedule_retry()
 
-    def _start_lane(self, room_id: str, events: list[JournalEvent]) -> asyncio.Task[None]:
-        """Make one room's lane, which is the only one that room may have."""
-        self._rooms_with_more.discard(room_id)
-        lane = asyncio.create_task(self._run_lane(events), name=f"pending_event_lane_{room_id}")
-        self._lanes[room_id] = lane
-        lane.add_done_callback(lambda task: self._lane_finished(room_id, task))
+    def _start_lane(self, key: _LaneKey, events: list[JournalEvent]) -> asyncio.Task[None]:
+        """Make one thread's lane, which is the only one that thread may have."""
+        self._lanes_with_more.discard(key)
+        room_id, thread_id = key
+        lane = asyncio.create_task(self._run_lane(events), name=f"pending_event_lane_{room_id}_{thread_id}")
+        self._lanes[key] = lane
+        lane.add_done_callback(lambda task: self._lane_finished(key, task))
         return lane
 
-    def _lane_finished(self, room_id: str, lane: asyncio.Task[None]) -> None:
-        if self._lanes.get(room_id) is lane:
-            del self._lanes[room_id]
+    def _lane_finished(self, key: _LaneKey, lane: asyncio.Task[None]) -> None:
+        if self._lanes.get(key) is lane:
+            del self._lanes[key]
         if lane.cancelled():
             return
-        if room_id in self._failed_rooms:
+        if key in self._failed_lanes:
             self._schedule_retry()
-        elif room_id in self._rooms_with_more:
+        elif key in self._lanes_with_more:
             self._wake.set()
         self._schedule_deferral_scan()
 
@@ -383,7 +396,7 @@ class PendingEventWorker:
         self._retry_delay_seconds = min(self._retry_delay_seconds * 2, _MAX_RETRY_DELAY_SECONDS)
         self._wake.set()
 
-    async def _collect_dispatchable(self) -> tuple[dict[str, list[JournalEvent]], bool]:
+    async def _collect_dispatchable(self) -> tuple[dict[_LaneKey, list[JournalEvent]], bool]:
         """Group pending events this worker may act on now, by room.
 
         Returns the grouping and whether the scan stopped before the end of the
@@ -411,8 +424,8 @@ class PendingEventWorker:
         pages earlier -- and a room's lane is handed that list verbatim, so a
         handler that defers rather than settling runs twice on one source.
         """
-        by_room = self._reclaim_lost_deferrals()
-        reclaimed = frozenset(event.event_id for events in by_room.values() for event in events)
+        by_lane = self._reclaim_lost_deferrals()
+        reclaimed = frozenset(event.event_id for events in by_lane.values() for event in events)
         retained = self.retained_event_ids()
         still_pending: set[str] = set(reclaimed)
         origin = self._scan_cursor
@@ -422,7 +435,7 @@ class PendingEventWorker:
             page = await self.store.pending(limit=_BATCH_SIZE, after_receipt_order=cursor)
             reached_origin = self._collect_page(
                 page,
-                by_room,
+                by_lane,
                 still_pending,
                 already_taken=reclaimed,
                 stop_after=origin if wrapped else None,
@@ -430,7 +443,7 @@ class PendingEventWorker:
             if reached_origin or (page.reached_end and wrapped):
                 self._scan_cursor = None
                 self._release_events_no_run_can_reach(retained, still_pending)
-                return _in_receipt_order(by_room), False
+                return _in_receipt_order(by_lane), False
             if not page.reached_end:
                 cursor = page.resume_after
                 continue
@@ -439,9 +452,9 @@ class PendingEventWorker:
             # of the budget goes on it rather than on another pass.
             cursor, wrapped = None, True
         self._scan_cursor = cursor
-        return _in_receipt_order(by_room), True
+        return _in_receipt_order(by_lane), True
 
-    async def _collect_whole_backlog(self) -> dict[str, list[JournalEvent]]:
+    async def _collect_whole_backlog(self) -> dict[_LaneKey, list[JournalEvent]]:
         """Group every pending event this worker may act on, front to back.
 
         What a drain asks for, and the reason it cannot borrow the pump's scan.
@@ -450,23 +463,23 @@ class PendingEventWorker:
         stops moving, and it is that loop, not one pass of it, that has to see
         every event.
         """
-        by_room = self._reclaim_lost_deferrals()
-        reclaimed = frozenset(event.event_id for events in by_room.values() for event in events)
+        by_lane = self._reclaim_lost_deferrals()
+        reclaimed = frozenset(event.event_id for events in by_lane.values() for event in events)
         retained = self.retained_event_ids()
         still_pending: set[str] = set(reclaimed)
         cursor: int | None = None
         while True:
             page = await self.store.pending(limit=_BATCH_SIZE, after_receipt_order=cursor)
-            self._collect_page(page, by_room, still_pending, already_taken=reclaimed, stop_after=None)
+            self._collect_page(page, by_lane, still_pending, already_taken=reclaimed, stop_after=None)
             if page.reached_end:
                 self._release_events_no_run_can_reach(retained, still_pending)
-                return _in_receipt_order(by_room)
+                return _in_receipt_order(by_lane)
             cursor = page.resume_after
 
     def _collect_page(
         self,
         page: Iterable[JournalEvent],
-        by_room: dict[str, list[JournalEvent]],
+        by_lane: dict[_LaneKey, list[JournalEvent]],
         still_pending: set[str],
         *,
         already_taken: frozenset[str],
@@ -493,7 +506,7 @@ class PendingEventWorker:
             if event.event_id in self._deferred:
                 # Handed to an owner the reclaim found still alive.
                 continue
-            by_room.setdefault(event.room_id, []).append(event)
+            by_lane.setdefault(_lane_key(event), []).append(event)
         return False
 
     def _release_events_no_run_can_reach(self, retained: frozenset[str], still_pending: set[str]) -> None:
@@ -517,7 +530,7 @@ class PendingEventWorker:
         self.release_retained(unreachable)
         logger.info("pending_event_live_objects_released", count=len(unreachable))
 
-    def _reclaim_lost_deferrals(self) -> dict[str, list[JournalEvent]]:
+    def _reclaim_lost_deferrals(self) -> dict[_LaneKey, list[JournalEvent]]:
         """Take back every deferral whose owner is gone, wherever it sits.
 
         Deferral is a promise that some owner will call ``release``. Nothing
@@ -533,7 +546,7 @@ class PendingEventWorker:
         behind it for as long as the overload lasts, and the outage this is
         supposed to bound then lasts exactly as long as the one it replaced.
         """
-        by_room: dict[str, list[JournalEvent]] = {}
+        by_lane: dict[_LaneKey, list[JournalEvent]] = {}
         for event in tuple(self._deferred.values()):
             if self.deferral_is_live(event):
                 continue
@@ -544,11 +557,11 @@ class PendingEventWorker:
                 kind=event.kind.value,
                 room_id=event.room_id,
             )
-            by_room.setdefault(event.room_id, []).append(event)
-        return by_room
+            by_lane.setdefault(_lane_key(event), []).append(event)
+        return by_lane
 
     async def _run_lane(self, events: list[JournalEvent]) -> None:
-        """Run one room's events in receipt order, stopping at the first failure.
+        """Run one thread's events in receipt order, stopping at the first failure.
 
         Stopping matters: if event two fails and event three still ran, the
         room's conversation would be answered out of order, and the retry of
@@ -562,7 +575,7 @@ class PendingEventWorker:
         until some unrelated event woke the pump, and then run its handler a
         second time.
         """
-        room_id = events[0].room_id if events else ""
+        key = _lane_key(events[0]) if events else ("", None)
         for event in events:
             try:
                 if not await self.store.is_pending(event.event_id):
@@ -582,6 +595,6 @@ class PendingEventWorker:
                     kind=event.kind.value,
                     room_id=event.room_id,
                 )
-                self._failed_rooms.add(room_id)
+                self._failed_lanes.add(key)
                 return
-        self._failed_rooms.discard(room_id)
+        self._failed_lanes.discard(key)

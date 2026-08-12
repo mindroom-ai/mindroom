@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -1276,6 +1277,41 @@ class TestPendingEventWorker:
 
         assert handled == ["$second", "$first"]
 
+    async def test_one_threads_parked_turn_does_not_hold_another_thread(self, alice: PrincipalStore) -> None:
+        """Threads are separate conversations and must not queue behind each other.
+
+        A turn can be parked for as long as a human takes to answer a tool
+        approval, which is days. Serialising a whole room behind that makes
+        every other conversation with the agent unanswerable for the same
+        period, which is what one production room did for 65 minutes: five
+        threads, one pending approval, and every one of them released within
+        two seconds of it being answered.
+        """
+        parked = asyncio.Event()
+        second_ran = asyncio.Event()
+
+        async def handle(event: JournalEvent) -> bool:
+            if event.event_id == "$parked":
+                parked.set()
+                await asyncio.sleep(30)
+                return True
+            second_ran.set()
+            return True
+
+        await self._admit(alice, text_event("$parked", thread_id="$thread-one", ts=1_000))
+        await self._admit(alice, text_event("$other", thread_id="$thread-two", ts=2_000))
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        drain = asyncio.create_task(worker.drain_once())
+        try:
+            async with asyncio.timeout(5):
+                await parked.wait()
+                await second_ran.wait()
+        finally:
+            drain.cancel()
+            with suppress(asyncio.CancelledError):
+                await drain
+
     async def test_a_settled_event_never_runs_again(self, alice: PrincipalStore) -> None:
         """A settled event never runs again."""
         runs = 0
@@ -1529,11 +1565,11 @@ class TestPendingEventWorker:
         await self._admit(alice, text_event("$late", ts=2_000))
         worker.wake()
         # Waited on rather than yielded to: the point of the test is that the
-        # busy room was noted as still owing work *before* its lane finished,
+        # busy lane was noted as still owing work *before* it finished,
         # because that note is the only thing that arranges the second look. A
-        # bare yield cannot fail -- a second lane over one room is impossible
+        # bare yield cannot fail -- a second lane over one thread is impossible
         # either way -- so it proved the wakeup without exercising it.
-        await _eventually(lambda: worker._rooms_with_more == {ROOM})
+        await _eventually(lambda: worker._lanes_with_more == {(ROOM, None)})
         released.set()
 
         await _eventually(lambda: handled == ["$slow", "$late"])
@@ -1739,9 +1775,9 @@ class TestPendingEventWorker:
         # One budget-limited pass parks the cursor part way through the
         # backlog; the next reads the tail, hits the end, and wraps.
         await worker._collect_dispatchable()
-        by_room, _more = await worker._collect_dispatchable()
+        by_lane, _more = await worker._collect_dispatchable()
 
-        assert [event.event_id for event in by_room[ROOM]] == ["$m0", "$m1", "$m6", "$m7"]
+        assert [event.event_id for event in by_lane[(ROOM, None)]] == ["$m0", "$m1", "$m6", "$m7"]
 
     async def test_a_lost_owner_is_noticed_without_any_further_admission(
         self,
@@ -2269,9 +2305,9 @@ class TestABoundedScanIsFair:
         worker = PendingEventWorker(store=alice, handle=_never_called)
         worker._scan_cursor = admitted[2].receipt_order
 
-        by_room, more_remains = await worker._collect_dispatchable()
+        by_lane, more_remains = await worker._collect_dispatchable()
 
-        assert [event.event_id for event in by_room[ROOM]] == ["$e0", "$e1", "$e2", "$e3", "$e4"]
+        assert [event.event_id for event in by_lane[(ROOM, None)]] == ["$e0", "$e1", "$e2", "$e3", "$e4"]
         assert not more_remains
         assert worker._scan_cursor is None
 
@@ -2298,9 +2334,9 @@ class TestABoundedScanIsFair:
         worker._deferred[admitted[0].event_id] = admitted[0]
         worker._scan_cursor = admitted[0].receipt_order
 
-        by_room, _ = await worker._collect_dispatchable()
+        by_lane, _ = await worker._collect_dispatchable()
 
-        assert [event.event_id for event in by_room[ROOM]] == ["$e0", "$e1"]
+        assert [event.event_id for event in by_lane[(ROOM, None)]] == ["$e0", "$e1"]
 
     async def test_an_object_handed_over_mid_pass_is_not_read_as_unreachable(
         self,
