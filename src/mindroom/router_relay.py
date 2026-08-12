@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.attachment_ids import merge_attachment_ids
 from mindroom.attachments import parse_attachment_ids_from_event_source
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     import nio
     from structlog.stdlib import BoundLogger
 
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delivery_gateway import DeliveryGateway
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.runtime_protocols import OrchestratorRuntime, SupportsClientConfigOrchestrator
+    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.turn_policy import TurnPolicy
     from mindroom.turn_store import TurnStore
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -52,11 +53,10 @@ _ROUTER_TARGET_UNAVAILABLE_TEXT = (
 )
 
 
-@dataclass(frozen=True)
-class RouterRelayDeps:
-    """Explicit collaborators for one router relay execution."""
+class _RouterRelaySupport(Protocol):
+    """Collaborators required by router relay execution."""
 
-    runtime: SupportsClientConfigOrchestrator
+    runtime: BotRuntimeView
     runtime_paths: RuntimePaths
     logger: BoundLogger
     agent_name: str
@@ -171,7 +171,7 @@ async def _send_router_relay_after_readiness_recheck(
 
 
 def _router_handoff_extra_content(
-    deps: RouterRelayDeps,
+    deps: _RouterRelaySupport,
     *,
     event: DispatchEvent,
     extra_content: dict[str, Any] | None,
@@ -213,7 +213,7 @@ def _router_handoff_extra_content(
 
 
 async def _router_handoff_with_attachments(
-    deps: RouterRelayDeps,
+    deps: _RouterRelaySupport,
     *,
     room_id: str,
     thread_id: str | None,
@@ -255,7 +255,7 @@ async def _router_handoff_with_attachments(
 
 
 async def execute_router_relay(
-    deps: RouterRelayDeps,
+    deps: _RouterRelaySupport,
     room: nio.MatrixRoom,
     event: DispatchEvent,
     thread_history: Sequence[ResolvedVisibleMessage],

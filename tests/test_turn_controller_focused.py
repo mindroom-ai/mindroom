@@ -1281,7 +1281,7 @@ async def test_contended_claim_does_not_strand_the_winner_in_the_senders_lane(
             task.cancel()
 
     assert outcomes == [TurnDispatchOutcome.DEFERRED, TurnDispatchOutcome.DEFERRED]
-    assert [batch.primary_event.event_id for batch in harness.gate_batches] == [event.event_id]
+    assert [batch.event.event_id for batch in harness.gate_batches] == [event.event_id]
     assert len(harness.runner.requests) == 1
     assert harness.gate.lanes.all_settled()
 

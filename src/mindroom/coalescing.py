@@ -552,7 +552,7 @@ class CoalescingGate:
     ) -> _FlushDiagnostics:
         turn = build_prepared_turn(key, pending_events, timestamp_formatter=self._timestamp_formatter)
         pending_count = len(pending_events)
-        timing_scope = event_timing_scope(turn.primary_event.event_id)
+        timing_scope = event_timing_scope(turn.event.event_id)
         return _FlushDiagnostics(
             turn=turn,
             pending_count=pending_count,

@@ -465,7 +465,7 @@ class TestAgentBot(AgentBotTestBase):
             return "$thread-root"
 
         async def dispatch_batch(batch: PreparedTurn) -> None:
-            dispatches.append(list(batch.source_event_ids))
+            dispatches.append(list(batch.handled_turn.source_event_ids))
 
         bot._coalescing_gate = CoalescingGate(
             dispatch_turn=dispatch_batch,
@@ -567,7 +567,7 @@ class TestAgentBot(AgentBotTestBase):
             return "$thread-root"
 
         async def dispatch_batch(batch: PreparedTurn) -> None:
-            dispatches.append(list(batch.source_event_ids))
+            dispatches.append(list(batch.handled_turn.source_event_ids))
 
         bot._coalescing_gate = CoalescingGate(
             dispatch_turn=dispatch_batch,
@@ -655,7 +655,7 @@ class TestAgentBot(AgentBotTestBase):
             return prepared_sidecar
 
         async def dispatch_batch(batch: PreparedTurn) -> None:
-            dispatches.append(list(batch.source_event_ids))
+            dispatches.append(list(batch.handled_turn.source_event_ids))
 
         bot._coalescing_gate = CoalescingGate(
             dispatch_turn=dispatch_batch,

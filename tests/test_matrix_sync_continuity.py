@@ -3292,7 +3292,7 @@ async def test_receive_time_gate_shutdown_drains_unresolved_admission() -> None:
     dispatched: list[list[str]] = []
 
     async def dispatch_batch(batch: object) -> None:
-        dispatched.append(list(batch.source_event_ids))
+        dispatched.append(list(batch.handled_turn.source_event_ids))
 
     async def ready_event() -> object:
         await release_ready.wait()
@@ -3349,7 +3349,7 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
         )
 
     async def dispatch_batch(batch: object) -> None:
-        dispatched.append(list(batch.source_event_ids))
+        dispatched.append(list(batch.handled_turn.source_event_ids))
 
     shutting_down = True
     gate = CoalescingGate(
@@ -3512,7 +3512,6 @@ async def test_shutdown_ready_timeout_closes_ready_result_returned_during_cancel
             kind="test",
             payload=object(),
             close=close_metadata,
-            requires_solo_batch=False,
         ),
     )
 

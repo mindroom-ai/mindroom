@@ -86,20 +86,13 @@ def _pending_text(event_id: str, body: str, *, server_timestamp: int) -> Pending
 
 
 def _handled_turn_for_batch(batch: PreparedTurn) -> TurnRecord:
-    """Mirror the TurnRecord construction in ``TurnController.handle_prepared_turn``."""
-    source_metadata = dict(batch.source_event_metadata)
-    routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_metadata.values())))
-    return TurnRecord.create(
-        batch.source_event_ids,
-        discovery_event_ids=routed_aliases,
-        source_event_prompts=dict(batch.source_event_prompts),
-        source_event_metadata=source_metadata if len(batch.source_event_ids) > 1 or routed_aliases else None,
-    )
+    """Return the durable record carried by the prepared turn."""
+    return batch.handled_turn
 
 
 def _live_prompt_for_batch(batch: PreparedTurn) -> str:
     """Return the exact prompt text the dispatch pipeline hands to the response runner."""
-    return batch.prompt
+    return batch.event.body
 
 
 async def _persist_and_reload(journal_store: EventJournalStore, record: TurnRecord) -> TurnRecord:
@@ -208,7 +201,7 @@ async def test_single_message_persisted_prompt_is_byte_identical_to_live_prompt(
     )
     live_prompt = _live_prompt_for_batch(batch)
     assert live_prompt == body
-    assert batch.source_event_prompts == {"$event1": body}
+    assert batch.handled_turn.source_event_prompts == {"$event1": body}
 
     reloaded = await _persist_and_reload(journal_store, _handled_turn_for_batch(batch))
 
@@ -282,7 +275,7 @@ async def test_coalesced_batch_replay_prompt_is_byte_identical_to_live_merged_pr
     # The persisted per-source texts are exactly the bodies the model-facing
     # merged prompt embeds.
     for event_id, body, timestamp_ms in zip(event_ids, bodies, timestamps, strict=True):
-        assert batch.source_event_prompts[event_id] == body
+        assert batch.handled_turn.source_event_prompts[event_id] == body
         embedded = render_msg_tag(
             sender=_REQUESTER,
             body=body,

@@ -102,6 +102,7 @@ from tests.conftest import (
 )
 from tests.identity_helpers import entity_ids
 from tests.threading_helpers import seed_hydrated_conversation, seed_thread_history
+from tests.turn_dispatch_helpers import dispatch_test_turn
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Sequence
@@ -689,7 +690,8 @@ class TestAgentBot(AgentBotTestBase):
                 apply_post_response_effects=AsyncMock(),
             ),
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
@@ -771,7 +773,8 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_build_payload,
             patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock()) as mock_execute,
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
@@ -844,7 +847,8 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value=True),
             ) as mock_execute_command,
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
@@ -919,7 +923,8 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value=True),
             ) as mock_execute_command,
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
@@ -1004,7 +1009,8 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
                 handled_turn=TurnRecord.create(
@@ -1129,7 +1135,8 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
                 handled_turn=coalesced_turn,
@@ -1180,7 +1187,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
@@ -1269,7 +1276,8 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value=None),
             ) as mock_prepare,
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
@@ -1618,9 +1626,8 @@ class TestAgentBot(AgentBotTestBase):
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
-            patch.object(
-                bot._turn_controller,
-                "_dispatch_text_message",
+            patch(
+                "mindroom.turn_controller.dispatch_text_message",
                 new=AsyncMock(),
             ) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
@@ -1654,7 +1661,6 @@ class TestAgentBot(AgentBotTestBase):
         metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "queued_notice_reservation")
         assert metadata.kind == "queued_notice_reservation"
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
-        assert metadata.requires_solo_batch is False
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("source_kind", ["hook", "hook_dispatch"])
@@ -1709,7 +1715,7 @@ class TestAgentBot(AgentBotTestBase):
                 "coalescing_thread_id",
                 new=AsyncMock(return_value=None),
             ),
-            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
@@ -1809,7 +1815,6 @@ class TestAgentBot(AgentBotTestBase):
         metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "queued_notice_reservation")
         assert metadata.kind == "queued_notice_reservation"
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
-        assert metadata.requires_solo_batch is False
         claim_metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "pending_turn_claim")
         assert claim_metadata.payload == turn_claim
         claim_metadata.close()
@@ -1883,7 +1888,7 @@ class TestAgentBot(AgentBotTestBase):
                 "coalescing_thread_id",
                 new=AsyncMock(return_value="$thread_root"),
             ),
-            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
@@ -1993,7 +1998,7 @@ class TestAgentBot(AgentBotTestBase):
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
-            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
@@ -2024,7 +2029,6 @@ class TestAgentBot(AgentBotTestBase):
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
-        assert metadata.requires_solo_batch is False
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_team_defers_placeholder_creation_to_coordinator(

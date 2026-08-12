@@ -102,6 +102,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.history_helpers import RecordingModel
+from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
@@ -296,7 +297,6 @@ def _queued_notice_metadata(reservation: _ReservationLike) -> tuple[PendingDispa
             kind="queued_notice_reservation",
             payload=reservation,
             close=reservation.cancel,
-            requires_solo_batch=True,
         ),
     )
 
@@ -557,14 +557,14 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
         pending_events,
     )
 
-    assert batch.source_event_ids == ("$a1", "$b1", "$a2")
+    assert batch.handled_turn.source_event_ids == ("$a1", "$b1", "$a2")
     assert batch.requester_user_id == "@alice:localhost"
-    assert batch.source_event_prompts == {
+    assert batch.handled_turn.source_event_prompts == {
         "$a1": "A first",
         "$b1": "B <context> & more",
         "$a2": "A follow-up",
     }
-    assert batch.prompt == (
+    assert batch.event.body == (
         "Messages arrived while the previous response was still running. "
         "They are in chat timeline order. Respond once to the combined context:\n\n"
         "<queued_messages>\n"
@@ -2194,7 +2194,8 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
             ),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=reservation,
@@ -2255,7 +2256,8 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
             patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=True),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=reservation,
@@ -2279,7 +2281,8 @@ async def test_reserved_follow_up_cleanup_when_hook_suppression_returns_before_d
             patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=None)),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=case.reservation,
@@ -2311,7 +2314,8 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
                 new=AsyncMock(return_value=_DispatchPlan(kind="ignore")),
             ),
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=case.reservation,
@@ -2343,7 +2347,8 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
             ),
             patch.object(bot._turn_controller, "_execute_router_relay", new=AsyncMock()) as mock_route,
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=case.reservation,
@@ -2386,7 +2391,8 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
             ),
             pytest.raises(RuntimeError, match="dispatch failed"),
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=case.reservation,
@@ -2427,7 +2433,8 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
                 new=AsyncMock(side_effect=asyncio.CancelledError),
             ),
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=case.reservation,
@@ -2466,7 +2473,8 @@ async def test_reserved_follow_up_cleanup_when_prepare_dispatch_raises(tmp_path:
             ),
             pytest.raises(RuntimeError, match="prepare failed"),
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 event,
                 "@user:localhost",
@@ -2513,9 +2521,8 @@ async def test_reserved_follow_up_cleanup_when_handle_prepared_turn_fails_before
             ],
         )
         with (
-            patch.object(
-                bot._turn_controller,
-                "_dispatch_prepared_turn",
+            patch(
+                "mindroom.turn_controller.dispatch_text_message",
                 new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
             ),
             pytest.raises(RuntimeError, match="dispatch failed"),
@@ -2591,7 +2598,10 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
             ],
         )
 
-        with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=capture_dispatch)):
+        with patch(
+            "mindroom.turn_controller.dispatch_text_message",
+            new=AsyncMock(side_effect=prepared_turn_recorder(capture_dispatch)),
+        ):
             await bot._turn_controller.handle_prepared_turn(batch)
     finally:
         pre_signal.finish_response_turn()
@@ -2655,7 +2665,10 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
             ],
         )
 
-        with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=capture_dispatch)):
+        with patch(
+            "mindroom.turn_controller.dispatch_text_message",
+            new=AsyncMock(side_effect=prepared_turn_recorder(capture_dispatch)),
+        ):
             await bot._turn_controller.handle_prepared_turn(batch)
     finally:
         queued_signal.finish_response_turn()
@@ -2816,52 +2829,6 @@ async def test_handed_off_reservation_is_cancelled_when_lock_wait_is_cancelled(t
     assert not queued_signal.has_active_response_turn()
 
 
-def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> None:
-    """Batch validation should not own cleanup for a reserved active follow-up."""
-    bot = _bot(tmp_path)
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!room:localhost"
-    target = MessageTarget.resolve(room.room_id, "$thread", "$reserved")
-    envelope = _envelope(
-        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-        source_event_id="$reserved",
-        target=target,
-    )
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = coordinator._lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
-    queued_signal.begin_response_turn()
-    reservation = None
-    try:
-        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
-        assert reservation is not None
-        with pytest.raises(ValueError, match="solo batches"):
-            build_prepared_turn(
-                CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner("@user:localhost")),
-                [
-                    make_pending_event(
-                        _prepared_text_event(event_id="$reserved"),
-                        room,
-                        source_kind=MESSAGE_SOURCE_KIND,
-                        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-                        dispatch_metadata=_queued_notice_metadata(reservation),
-                    ),
-                    make_pending_event(
-                        _prepared_text_event(event_id="$normal"),
-                        room,
-                        source_kind=MESSAGE_SOURCE_KIND,
-                    ),
-                ],
-            )
-        assert queued_signal.is_set()
-    finally:
-        if reservation is not None:
-            reservation.cancel()
-        queued_signal.finish_response_turn()
-
-    assert not queued_signal.is_set()
-
-
 @pytest.mark.asyncio
 async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) -> None:
     """Messages dropped by coalescing should not create false mid-turn notifications."""
@@ -2892,7 +2859,8 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
             new=AsyncMock(return_value=_DispatchPlan(kind="ignore")),
         ) as mock_plan,
     ):
-        await bot._turn_controller._dispatch_text_message(
+        await dispatch_test_turn(
+            bot._turn_controller,
             room,
             _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
         )

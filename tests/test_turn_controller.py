@@ -100,7 +100,6 @@ async def test_late_admit_rejection_closes_completed_ready_task_metadata_once() 
             kind="test",
             payload=object(),
             close=close_metadata,
-            requires_solo_batch=False,
         ),
     )
 
@@ -156,7 +155,6 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
             kind="test",
             payload=object(),
             close=close_metadata,
-            requires_solo_batch=False,
         ),
     )
 
@@ -500,7 +498,7 @@ async def test_on_message_passes_resolved_thread_id_to_interactive_text_response
             new_callable=AsyncMock,
             return_value=None,
         ) as mock_handle_text_response,
-        patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
+        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
     ):
         await bot._on_message(room, message_event)
         await _wait_for(lambda: mock_dispatch_text.await_count == 1)

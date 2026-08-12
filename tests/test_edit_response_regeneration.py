@@ -4107,7 +4107,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
             new_callable=AsyncMock,
             return_value=thread_history_result([], is_full_history=True),
         ),
-        patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
+        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
     ):
         await bot._on_message(room, message_event)
 

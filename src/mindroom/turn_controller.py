@@ -93,7 +93,7 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparation,
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
-from mindroom.router_relay import RouterRelayDeps, execute_router_relay
+from mindroom.router_relay import execute_router_relay
 from mindroom.teams import TeamIntent, TeamMode, select_ad_hoc_team_mode
 from mindroom.text_ingress_dispatch import dispatch_text_message
 from mindroom.thread_utils import (
@@ -218,10 +218,7 @@ def _consume_queued_notice_reservations_from_metadata(
     reservation_items = [item for item in dispatch_metadata if item.kind == _QUEUED_NOTICE_METADATA_KIND]
     for item in reservation_items:
         reservation = cast("QueuedHumanNoticeReservation", item.payload)
-        if item.target_key == target_key:
-            reservation.consume()
-        else:
-            reservation.cancel()
+        item.finish_once(reservation.consume if item.target_key == target_key else reservation.cancel)
 
 
 def _raw_voice_fallback_event(event: AudioMessageEvent, *, thread_id: str | None) -> PreparedIngress:
@@ -280,7 +277,6 @@ class _PrecheckedEvent[T]:
     requester_user_id: str
 
 
-type _PrecheckedPreparedIngress = _PrecheckedEvent[PreparedIngress]
 type _PrecheckedInboundMediaEvent = _PrecheckedEvent[MatrixMediaEvent]
 
 
@@ -862,12 +858,7 @@ class TurnController:
             requester_coalescing_key(room.room_id, coalescing_thread_id, requester_user_id),
             [pending_event],
         )
-        handled_turn = TurnRecord.create(
-            turn.source_event_ids,
-            source_event_prompts=dict(turn.source_event_prompts),
-            source_event_metadata=dict(turn.source_event_metadata) if len(turn.source_event_ids) > 1 else None,
-        )
-        await self._dispatch_prepared_turn(turn, handled_turn=handled_turn)
+        await dispatch_text_message(self, turn)
 
     async def _enqueue_for_dispatch(
         self,
@@ -1384,19 +1375,7 @@ class TurnController:
     ) -> None:
         """Run one explicit router relay through the router-relay executor."""
         await execute_router_relay(
-            RouterRelayDeps(
-                runtime=self.deps.runtime,
-                runtime_paths=self.deps.runtime_paths,
-                logger=self.deps.logger,
-                agent_name=self.deps.agent_name,
-                turn_policy=self.deps.turn_policy,
-                ingress=self.deps.ingress,
-                resolver=self.deps.resolver,
-                turn_store=self.deps.turn_store,
-                visible_responses=self.deps.visible_responses,
-                delivery_gateway=self.deps.delivery_gateway,
-                normalizer=self.deps.normalizer,
-            ),
+            self.deps,
             room,
             event,
             thread_history,
@@ -1721,32 +1700,25 @@ class TurnController:
 
     async def handle_prepared_turn(self, turn: PreparedTurn) -> None:
         """Dispatch one logical turn emitted directly by the coalescing gate."""
-        event = replace(turn.primary_event, body=turn.prompt)
+        coalescing_key = turn.ingress.coalescing_key
+        assert coalescing_key is not None
         _consume_queued_notice_reservations_from_metadata(
             turn.dispatch_metadata,
-            target_key=self._queued_notice_target_key(turn.room, event, turn.coalescing_key),
+            target_key=self._queued_notice_target_key(turn.room, turn.event, coalescing_key),
         )
-        timing_scope = event_timing_scope(event.event_id)
-        dispatch_timing = get_dispatch_pipeline_timing(event.source)
+        timing_scope = event_timing_scope(turn.event.event_id)
+        dispatch_timing = get_dispatch_pipeline_timing(turn.event.source)
         if dispatch_timing is not None:
             dispatch_timing.mark("gate_exit")
         async with self.deps.resolver.turn_lookup_scope():
             dispatch_start = time.monotonic()
-            source_metadata = dict(turn.source_event_metadata)
-            routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_metadata.values())))
-            handled_turn = TurnRecord.create(
-                turn.source_event_ids,
-                discovery_event_ids=routed_aliases,
-                source_event_prompts=dict(turn.source_event_prompts),
-                source_event_metadata=source_metadata if len(turn.source_event_ids) > 1 or routed_aliases else None,
-            )
             for item in turn.dispatch_metadata:
                 item.close_once()
-            await self._dispatch_prepared_turn(turn, handled_turn=handled_turn)
+            await dispatch_text_message(self, turn)
             emit_elapsed_timing(
                 "coalescing.handle_turn.dispatch_text_message",
                 dispatch_start,
-                source_event_count=len(turn.source_event_ids),
+                source_event_count=len(turn.handled_turn.source_event_ids),
                 timing_scope=timing_scope,
             )
 
@@ -1764,31 +1736,6 @@ class TurnController:
             reply_to_event_id=event.event_id,
             event_source=context_event.source,
         ).lifecycle_key
-
-    async def _dispatch_prepared_turn(
-        self,
-        turn: PreparedTurn,
-        *,
-        handled_turn: TurnRecord,
-    ) -> None:
-        """Dispatch one prepared logical turn through the text pipeline."""
-        event = replace(turn.primary_event, body=turn.prompt)
-        await self._dispatch_text_message(
-            turn.room,
-            event,
-            turn.requester_user_id,
-            media_events=list(turn.media_events) or None,
-            handled_turn=handled_turn,
-            ingress_metadata=DispatchIngressMetadata(
-                source_kind=turn.source_kind,
-                coalescing_key=turn.coalescing_key,
-                dispatch_policy_source_kind=turn.dispatch_policy_source_kind,
-                hook_source=turn.hook_source,
-                message_received_depth=turn.message_received_depth,
-            ),
-            payload_metadata=turn.payload,
-            current_prompt_is_structured=turn.current_prompt_is_structured,
-        )
 
     async def _claim_live_turn(
         self,
@@ -1957,44 +1904,6 @@ class TurnController:
             requester_user_id=prechecked_event.requester_user_id,
             reservation_owner=reservation_owner,
             coalescing_thread_id=ingress_thread_id,
-        )
-
-    async def _dispatch_text_message(
-        self,
-        room: nio.MatrixRoom,
-        event: PreparedIngress | _PrecheckedPreparedIngress,
-        requester_user_id: str | None = None,
-        *,
-        media_events: list[MediaDispatchEvent] | None = None,
-        handled_turn: TurnRecord | None = None,
-        queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
-        ingress_metadata: DispatchIngressMetadata | None = None,
-        payload_metadata: DispatchPayloadMetadata | None = None,
-        current_prompt_is_structured: bool = False,
-    ) -> None:
-        """Run the normal text or command dispatch pipeline for a prepared text event."""
-        raw_event: PreparedIngress
-        if isinstance(event, _PrecheckedEvent):
-            requester_user_id = event.requester_user_id
-            raw_event = cast("PreparedIngress", event.event)
-        else:
-            raw_event = event
-        if requester_user_id is None:
-            msg = "requester_user_id is required when dispatching a raw event"
-            raise TypeError(msg)
-        await dispatch_text_message(
-            self,
-            room,
-            raw_event,
-            requester_user_id,
-            command_executor=self.deps.command_executor,
-            visible_responses=self.deps.visible_responses,
-            media_events=media_events,
-            handled_turn=handled_turn,
-            queued_notice_reservation=queued_notice_reservation,
-            ingress_metadata=ingress_metadata,
-            payload_metadata=payload_metadata,
-            current_prompt_is_structured=current_prompt_is_structured,
         )
 
     async def handle_media_event(

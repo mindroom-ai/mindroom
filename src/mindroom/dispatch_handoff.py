@@ -77,16 +77,19 @@ class PendingDispatchMetadata:
     kind: str
     payload: object
     close: Callable[[], None]
-    requires_solo_batch: bool = False
     target_key: ResponseLifecycleKey | None = None
     _closed: bool = field(default=False, init=False, repr=False)
 
-    def close_once(self) -> None:
-        """Release the owned resource at most once across converging cleanup paths."""
+    def finish_once(self, finish: Callable[[], None]) -> None:
+        """Finish the owned resource at most once across converging paths."""
         if self._closed:
             return
         self._closed = True
-        self.close()
+        finish()
+
+    def close_once(self) -> None:
+        """Release the owned resource at most once across converging cleanup paths."""
+        self.finish_once(self.close)
 
 
 @dataclass(frozen=True)

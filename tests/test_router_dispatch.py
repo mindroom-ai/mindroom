@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,7 +26,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.router_relay import RouterRelayDeps, execute_router_relay
+from mindroom.router_relay import execute_router_relay
 from mindroom.teams import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
 from tests.bot_helpers import (
@@ -434,7 +435,7 @@ class TestAgentBot(AgentBotTestBase):
         delivery_gateway.send_text = AsyncMock(return_value="$route")
 
         await execute_router_relay(
-            RouterRelayDeps(
+            SimpleNamespace(
                 runtime=MagicMock(config=config, orchestrator=None),
                 runtime_paths=runtime_paths,
                 logger=MagicMock(),
