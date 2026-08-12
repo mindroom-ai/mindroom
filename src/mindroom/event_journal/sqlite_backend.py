@@ -318,26 +318,17 @@ class SqliteBackend:
         return await settled(future)
 
     def _admit(self, queued: _QueuedWrite) -> None:
-        """Put one handed-across write in the queue, or refuse it if ``close()`` got there first.
+        """Put one still-pending handed-across write in the writer queue.
 
         A write from another loop cannot be admitted or inspect the writer task
         where it is decided, so both happen here, on the writer's own loop,
-        where ``close()`` also runs. Without this the two can interleave the one
-        way that strands a caller: ``close()`` drains the queue, and the
-        admission it never saw arrives afterwards, into a queue nothing will
-        read again.
+        under the lock that lets ``close()`` claim pending handoffs first.
         """
         with self._admission_lock:
             if self._pending_admissions.pop(queued.future, None) is None:
                 return
-            if self._closed:
-                refused = True
-            else:
-                refused = False
-                queue = self._ensure_writer_task()
-                queue.put_nowait(queued)
-        if refused:
-            _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
+            queue = self._ensure_writer_task()
+            queue.put_nowait(queued)
 
     async def read[T](self, operation: Operation[T]) -> T:
         """Run one read on a WAL reader, concurrently with the writer."""
