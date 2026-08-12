@@ -127,6 +127,20 @@ def _reaction_event(key: str, event_id: str) -> nio.ReactionEvent:
     return event
 
 
+def _message_event(event_id: str) -> nio.RoomMessageText:
+    event = nio.Event.parse_event(
+        {
+            "type": "m.room.message",
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 2,
+            "content": {"msgtype": "m.text", "body": "Another thread"},
+        },
+    )
+    assert isinstance(event, nio.RoomMessageText)
+    return event
+
+
 def _install_reaction_recorder(bot: AgentBot) -> list[str]:
     """Install a real reaction hook and return its observed event IDs."""
     seen: list[str] = []
@@ -424,6 +438,69 @@ class TestAgentBot(AgentBotTestBase):
         await asyncio.wait_for(selection_started.wait(), timeout=0.5)
         await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
         assert bot._coalescing_gate.lanes.all_settled()
+
+    @pytest.mark.asyncio
+    async def test_interactive_reaction_response_does_not_hold_room_journal_lane(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A parked selection response must not delay a different root thread."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        reaction = _reaction_event("👍", "$interactive-reaction")
+        message = _message_event("$other-thread-root")
+        selection = interactive.InteractiveSelection(
+            question_event_id="$question",
+            question_text="Choose one",
+            selection_key="👍",
+            selected_label="Selected",
+            selected_value="Selected",
+            thread_id="$thread-a",
+        )
+        selection_started = asyncio.Event()
+        release_selection = asyncio.Event()
+        message_started = asyncio.Event()
+
+        async def blocked_selection(*_args: object, **_kwargs: object) -> None:
+            selection_started.set()
+            await release_selection.wait()
+
+        async def handle_other_thread(*_args: object, **_kwargs: object) -> TurnDispatchOutcome:
+            message_started.set()
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=blocked_selection)
+        monkeypatch.setattr(
+            unwrap_extracted_collaborator(bot._turn_controller),
+            "handle_text_event",
+            handle_other_thread,
+        )
+        bot._journal_dispatcher.start()
+        try:
+            with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)):
+                await bot._journal_dispatcher.admit_out_of_band(
+                    room,
+                    reaction,
+                    EventKind.REACTION,
+                    EventClass.ACTIONABLE,
+                )
+                await asyncio.wait_for(selection_started.wait(), timeout=1.0)
+                await bot._journal_dispatcher.admit_out_of_band(
+                    room,
+                    message,
+                    EventKind.MESSAGE,
+                    EventClass.ACTIONABLE,
+                )
+
+                await asyncio.wait_for(message_started.wait(), timeout=0.2)
+                assert reaction.event_id in await bot._journal_dispatcher.unsettled_event_ids()
+        finally:
+            release_selection.set()
+            await bot._journal_dispatcher.stop()
 
     @pytest.mark.asyncio
     async def test_checkmark_interactive_reaction_reserves_before_tool_approval_lookup(

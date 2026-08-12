@@ -93,6 +93,7 @@ depends_on = []
 visibility = [
     "mindroom.bot",
     "mindroom.journal_dispatch",
+    "mindroom.reaction_dispatch",
     "mindroom.turn_controller",
 ]
 
@@ -262,6 +263,7 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.commands.config_confirmation",
     "mindroom.constants",
+    "mindroom.dispatch_callback_outcome",
     "mindroom.entity_resolution",
     "mindroom.event_journal",
     "mindroom.user_stop_reconciliation",

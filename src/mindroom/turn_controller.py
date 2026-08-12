@@ -120,7 +120,7 @@ from mindroom.turn_store import record_deferred_outcome_response, record_user_st
 from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Sequence
 
     import nio
     import structlog
@@ -329,6 +329,7 @@ class TurnControllerDeps:
     visible_voice_echo: VisibleVoiceEchoLifecycle
     visible_responses: VisibleResponseReconciler
     retry_dispatch_sources: Callable[[tuple[str, ...]], None]
+    settle_dispatch_sources: Callable[[tuple[str, ...]], Awaitable[None]]
 
 
 @dataclass
@@ -1129,6 +1130,38 @@ class TurnController:
             ),
             replay_guard=replay_guard,
         )
+
+    async def start_interactive_selection(
+        self,
+        response: Coroutine[Any, Any, None],
+        *,
+        source_event_id: str,
+        thread_id: str | None,
+    ) -> None:
+        """Transfer one selection response from journal dispatch to runner ownership."""
+        response_started = asyncio.Event()
+
+        async def run_owned_response() -> None:
+            response_started.set()
+            await response
+            # Terminal delivery normally settles the discovery alias in its
+            # outbox transaction. This idempotent fallback also handles an
+            # already-terminal replay that has no new delivery to enqueue.
+            await self.deps.settle_dispatch_sources((source_event_id,))
+
+        self.deps.response_runner.track_inbox_response(
+            run_owned_response(),
+            name=f"interactive_selection_response:{source_event_id}",
+            recovery_proof_ready=lambda: (
+                thread_id is not None and self.deps.interrupted_turn_rooms.contains(source_event_id)
+            ),
+            on_failure=lambda: self.deps.retry_dispatch_sources((source_event_id,)),
+            source_event_ids=(source_event_id,),
+        )
+        # Let the owned task enter before its journal callback reports the
+        # handoff. It may then wait on its canonical per-thread response lock
+        # without holding the room-wide journal lane.
+        await response_started.wait()
 
     async def handle_interactive_selection(
         self,

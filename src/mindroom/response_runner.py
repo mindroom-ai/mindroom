@@ -473,6 +473,7 @@ class _InboxResponseOwnership:
 
     recovery_proof_ready: Callable[[], bool]
     on_failure: Callable[[], None] | None
+    source_event_ids: frozenset[str]
 
 
 @dataclass
@@ -499,15 +500,21 @@ class ResponseRunner:
         name: str,
         recovery_proof_ready: Callable[[], bool],
         on_failure: Callable[[], None] | None = None,
+        source_event_ids: tuple[str, ...] = (),
     ) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it."""
         task = asyncio.create_task(response, name=name)
         self._inbox_response_tasks[task] = _InboxResponseOwnership(
             recovery_proof_ready=recovery_proof_ready,
             on_failure=on_failure,
+            source_event_ids=frozenset(source_event_ids),
         )
         task.add_done_callback(self._finish_inbox_response_task)
         return task
+
+    def has_live_inbox_response(self, source_event_id: str) -> bool:
+        """Return whether a managed response task still owns one journal source."""
+        return any(source_event_id in ownership.source_event_ids for ownership in self._inbox_response_tasks.values())
 
     @property
     def pending_inbox_response_count(self) -> int:

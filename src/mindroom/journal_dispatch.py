@@ -6,8 +6,8 @@ work or handed it to a turn, and who is allowed to consume a reaction that
 several features could each claim.
 
 The important asymmetry is between callbacks that finish and callbacks that
-defer. A reaction is done when its handler returns. A message is not: it enters
-coalescing and a turn, which may still be running long after the callback
+defer. Most reactions finish in their handler; an interactive reaction and a
+message hand work to a response task that may still run long after the callback
 returns. So a deferring handler leaves its event pending, and the source is
 settled when its answer is durably owed to a room -- the FINAL outbox enqueue
 -- or when the turn deliberately owes no answer at all. That is why a crash
@@ -64,11 +64,17 @@ _LIFECYCLE_PAGE_SIZE = 256
 
 type _MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageFormatted], Awaitable[TurnDispatchOutcome]]
 type _MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[TurnDispatchOutcome]]
-type _ReactionCallback = Callable[[nio.MatrixRoom, nio.ReactionEvent], Awaitable[None]]
+type _ReactionCallback = Callable[[nio.MatrixRoom, nio.ReactionEvent], Awaitable[TurnDispatchOutcome]]
 type _ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
 type _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
 type _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
 type _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
+
+# Interactive reactions are the only reaction path whose response may outlive
+# its callback. Keep this dispatcher concern separate from TURN_BACKED_KINDS:
+# generic reactions must still replay before the agent fleet is released and
+# must not count as unfinished conversation turns in journal queries.
+_DEFERRABLE_KINDS = TURN_BACKED_KINDS | {EventKind.REACTION}
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,7 +299,7 @@ class JournalDispatcher:
         this replaces; a wrong "gone" costs a re-dispatch that ``TurnStore``
         then has to refuse.
         """
-        if event.kind not in TURN_BACKED_KINDS:
+        if event.kind not in _DEFERRABLE_KINDS:
             # A completing callback settles or raises. It never defers, so a
             # deferral for one of these kinds cannot exist to begin with.
             return True
@@ -327,7 +333,7 @@ class JournalDispatcher:
             # not exist yet. Live events are unaffected: their responders are
             # whatever is running now.
             return False
-        if event.kind in TURN_BACKED_KINDS and self._has_live_owner(event.event_id):
+        if event.kind in _DEFERRABLE_KINDS and self._has_live_owner(event.event_id):
             # A coalescing batch or a running turn already holds this source
             # and will hand it back. Starting a second turn on it does not
             # answer twice, but the loser of the claim blocks until the winner
@@ -533,7 +539,7 @@ def _completing(
 _BINDINGS: dict[EventKind, _Binding] = {
     EventKind.MESSAGE: _Binding(TEXTUAL_MESSAGE_EVENT_TYPE, _turn_backed(lambda c: c.on_message)),
     EventKind.MEDIA: _Binding(MATRIX_MEDIA_EVENT_TYPES, _turn_backed(lambda c: c.on_media)),
-    EventKind.REACTION: _Binding(nio.ReactionEvent, _completing(lambda c: c.on_reaction)),
+    EventKind.REACTION: _Binding(nio.ReactionEvent, _turn_backed(lambda c: c.on_reaction)),
     EventKind.APPROVAL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_approval)),
     EventKind.ROOM_LIFECYCLE: _Binding(nio.RoomMemberEvent, _completing(lambda c: c.on_room_lifecycle)),
     EventKind.REDACTION: _Binding(nio.RedactionEvent, _completing(lambda c: c.on_redaction)),

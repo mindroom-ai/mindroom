@@ -533,6 +533,7 @@ def _build_harness(
             ),
             visible_responses=visible_responses,
             retry_dispatch_sources=_retry_dispatch_sources,
+            settle_dispatch_sources=_settle_ignored_dispatch_sources,
         ),
     )
     controller_ref.append(controller)

@@ -668,7 +668,10 @@ class AgentBot:
                 on_room_lifecycle=self._on_room_member,
                 on_redaction=self._on_redaction,
                 on_decryption_failure=self._on_decryption_failure,
-                source_has_live_owner=self._coalescing_gate.has_pending_source_event,
+                source_has_live_owner=lambda event_id: (
+                    self._coalescing_gate.has_pending_source_event(event_id)
+                    or self._response_runner.has_live_inbox_response(event_id)
+                ),
                 turn_has_live_claim=self._turn_store.has_live_turn_claim,
             ),
             room_for_id=self._room_for_journal_event,
@@ -813,6 +816,7 @@ class AgentBot:
                 visible_voice_echo=self._visible_voice_echo,
                 visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
+                settle_dispatch_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
             ),
         )
         self._reaction_dispatcher = ReactionDispatcher(
@@ -829,6 +833,7 @@ class AgentBot:
                 ingress=self._ingress_validator,
                 reserve_prompt_ingress_order=self._turn_controller.reserve_prompt_ingress_order,
                 handle_interactive_selection=self._turn_controller.handle_interactive_selection,
+                start_interactive_selection=self._turn_controller.start_interactive_selection,
                 emit_reaction_received_hooks=self._emit_reaction_received_hooks,
                 config_confirmation=config_confirmation.ConfigConfirmationContext(
                     runtime=self._runtime_view,
@@ -2348,10 +2353,10 @@ class AgentBot:
         assert isinstance(event, nio.RedactionEvent)
         await self._turn_store.mark_source_redacted(event.redacts)
 
-    async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
+    async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> TurnDispatchOutcome:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
         async with self._conversation_resolver.turn_lookup_scope():
-            await self._reaction_dispatcher.dispatch(room, event)
+            return await self._reaction_dispatcher.dispatch(room, event)
 
     async def _on_room_member(
         self,

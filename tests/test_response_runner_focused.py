@@ -193,6 +193,33 @@ async def test_failed_detached_inbox_response_returns_sources_to_retry_owner() -
     on_failure.assert_called_once_with()
 
 
+@pytest.mark.asyncio
+async def test_detached_inbox_response_owns_source_until_task_finishes() -> None:
+    """Journal replay must not reclaim a source while its response task is alive."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    release_response = asyncio.Event()
+
+    async def parked_response() -> None:
+        response_started.set()
+        await release_response.wait()
+
+    response_task = runner.track_inbox_response(
+        parked_response(),
+        name="test_source_owned_inbox_response",
+        recovery_proof_ready=lambda: False,
+        source_event_ids=("$reaction",),
+    )
+
+    assert runner.has_live_inbox_response("$reaction")
+    await response_started.wait()
+    release_response.set()
+    await response_task
+    await asyncio.sleep(0)
+
+    assert not runner.has_live_inbox_response("$reaction")
+
+
 class RecordingStopManager(StopManager):
     """Real StopManager whose deferred clear is made immediate and observable."""
 
