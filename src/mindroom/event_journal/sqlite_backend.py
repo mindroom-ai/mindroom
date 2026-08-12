@@ -365,10 +365,10 @@ class SqliteBackend:
         Reads are not the writer task's to finish, so they are drained
         separately before the connections they run on are closed.
 
-        Draining the queue once is enough because ``_closed`` is raised before
-        it on the writer's loop. Every write already admitted is in the queue,
-        and every handed-across decision that runs afterwards refuses its
-        caller instead of enqueuing.
+        Draining the queue once is enough because raising ``_closed`` under the
+        admission lock also claims and refuses every pending handoff. Every
+        write already admitted is in the queue, and callbacks for claimed
+        handoffs later see that they no longer own an admission and do nothing.
         """
         with self._admission_lock:
             if self._closed:
