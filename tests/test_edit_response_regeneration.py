@@ -3906,6 +3906,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
 
         # Process the reaction event
         await dispatch_reaction_durably(bot, room, reaction_event)
+        await bot._response_runner.drain_inbox_responses()
 
         # Verify that the bot tracked the response correctly
         assert bot._turn_store.is_handled("$question:example.com")
@@ -4006,6 +4007,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         # The worker records the failure and leaves the event pending rather
         # than propagating it, so the question stays retryable.
         await dispatch_reaction_durably(bot, room, reaction_event)
+        await bot._response_runner.drain_inbox_responses()
 
         assert await bot._journal_dispatcher.store.is_pending(reaction_event.event_id)
         assert bot._turn_store.is_handled("$question:example.com") is False
@@ -4241,6 +4243,7 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
         mock_generate_response.assert_not_called()
 
         await dispatch_reaction_durably(bot, room, allowed_reaction)
+        await bot._response_runner.drain_inbox_responses()
 
     interactive._active_questions.clear()
 
