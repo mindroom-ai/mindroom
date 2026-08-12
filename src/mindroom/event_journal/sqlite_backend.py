@@ -141,6 +141,12 @@ class SqliteBackend:
     # other loop can neither enqueue onto that queue nor be woken by it
     # without being handed across deliberately.
     _writer_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
+    _admission_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _pending_admissions: dict[asyncio.Future[Any], _QueuedWrite] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
     _closed: bool = field(default=False, init=False, repr=False)
     _open_readers: list[sqlite3.Connection] = field(default_factory=list, init=False, repr=False)
     _reader_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -255,10 +261,10 @@ class SqliteBackend:
     async def write[T](self, operation: Operation[T]) -> T:
         """Queue one operation for the writer task and await its commit.
 
-        Admission is decided on the writer's loop, where it cannot race
-        ``close()``. A caller already on that loop enqueues synchronously; one
-        on another loop hands the decision across, where ``_closed`` is checked
-        again before the write enters the queue.
+        Admission is coordinated with ``close()`` under the admission lock. A
+        caller already on the writer's loop enqueues synchronously; one on
+        another loop registers its handoff before scheduling the admission
+        callback. The callback enqueues only while it still owns that handoff.
 
         That is what the queue being unbounded buys. A bounded one parked the
         producer in ``put`` instead, and ``close()`` frees a slot per entry it
@@ -276,43 +282,52 @@ class SqliteBackend:
         if self._closed:
             raise RuntimeError(_CLOSED_MESSAGE)
         caller_loop = asyncio.get_running_loop()
-        writer_loop = self._writer_loop
         future: asyncio.Future[T] = caller_loop.create_future()
         queued = _QueuedWrite(operation=operation, future=future)
         # A queue belongs to the loop that drains it. Putting to one from
         # another loop wakes its consumer through a callback scheduled on the
         # wrong loop, which arrives whenever that loop happens to run next and
         # not because anything told it to.
-        if writer_loop is None or writer_loop is caller_loop:
-            queue = self._ensure_writer_task()
-            queue.put_nowait(queued)
-        else:
+        with self._admission_lock:
+            if self._closed:
+                raise RuntimeError(_CLOSED_MESSAGE)
+            writer_loop = self._writer_loop
+            if writer_loop is None or writer_loop is caller_loop:
+                queue = self._ensure_writer_task()
+                queue.put_nowait(queued)
+            else:
+                # Shutdown must own this handoff before it is scheduled. A
+                # stopped-but-open loop accepts call_soon_threadsafe() without
+                # ever running its callback, so the callback itself cannot be
+                # the first place the write becomes visible to close().
+                self._pending_admissions[future] = queued
+        if writer_loop is not None and writer_loop is not caller_loop:
             try:
                 writer_loop.call_soon_threadsafe(self._admit, queued)
             except RuntimeError:
-                if not writer_loop.is_closed():
+                with self._admission_lock:
+                    still_pending = self._pending_admissions.pop(future, None) is not None
+                if still_pending and not writer_loop.is_closed():
                     raise
-                _deliver(future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
+                if still_pending:
+                    _deliver(future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
         # Cancelling this await must not report an outcome the writer has not
         # reached yet: the statement runs on a thread regardless, so the caller
         # learns how it ended before its cancellation propagates.
         return await settled(future)
 
     def _admit(self, queued: _QueuedWrite) -> None:
-        """Put one handed-across write in the queue, or refuse it if ``close()`` got there first.
+        """Put one still-pending handed-across write in the writer queue.
 
         A write from another loop cannot be admitted or inspect the writer task
         where it is decided, so both happen here, on the writer's own loop,
-        where ``close()`` also runs. Without this the two can interleave the one
-        way that strands a caller: ``close()`` drains the queue, and the
-        admission it never saw arrives afterwards, into a queue nothing will
-        read again.
+        under the lock that lets ``close()`` claim pending handoffs first.
         """
-        if self._closed:
-            _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
-            return
-        queue = self._ensure_writer_task()
-        queue.put_nowait(queued)
+        with self._admission_lock:
+            if self._pending_admissions.pop(queued.future, None) is None:
+                return
+            queue = self._ensure_writer_task()
+            queue.put_nowait(queued)
 
     async def read[T](self, operation: Operation[T]) -> T:
         """Run one read on a WAL reader, concurrently with the writer."""
@@ -340,14 +355,19 @@ class SqliteBackend:
         Reads are not the writer task's to finish, so they are drained
         separately before the connections they run on are closed.
 
-        Draining the queue once is enough because ``_closed`` is raised before
-        it on the writer's loop. Every write already admitted is in the queue,
-        and every handed-across decision that runs afterwards refuses its
-        caller instead of enqueuing.
+        Draining the queue once is enough because raising ``_closed`` under the
+        admission lock also claims and refuses every pending handoff. Every
+        write already admitted is in the queue, and callbacks for claimed
+        handoffs later see that they no longer own an admission and do nothing.
         """
-        if self._closed:
-            return
-        self._closed = True
+        with self._admission_lock:
+            if self._closed:
+                return
+            self._closed = True
+            pending_admissions = tuple(self._pending_admissions.values())
+            self._pending_admissions.clear()
+        for queued in pending_admissions:
+            _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
         writer_task = self._writer_task
         self._writer_task = None
         if writer_task is not None:
