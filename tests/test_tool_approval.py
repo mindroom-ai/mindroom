@@ -439,6 +439,108 @@ async def test_detached_approval_expiry_resolves_continuation_without_waiter(tmp
     assert editor.await_args.args[2]["status"] == "expired"
 
 
+@pytest.mark.asyncio
+async def test_detached_approval_retries_recorded_expiry_until_card_edit_lands(tmp_path: Path) -> None:
+    """A transient Matrix edit failure must not retire the only in-process expiry owner."""
+    cards = FakeApprovalCards()
+    editor = AsyncMock(side_effect=[False, True])
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        detached_decision_handler=AsyncMock(return_value=("expired", "Tool approval request timed out.")),
+        detached_decision_ready=AsyncMock(),
+    )
+
+    await store.create_detached_approval(
+        approval_id="approval-retry",
+        continuation_id="continuation-retry",
+        tool_call_id="call-retry",
+        tool_name="dangerous",
+        arguments={},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=0,
+    )
+    for _attempt in range(100):
+        if editor.await_count == 2:
+            break
+        await asyncio.sleep(0.01)
+
+    assert editor.await_count == 2
+    assert cards.rows == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_detached_card_bind_keeps_retry_owner(tmp_path: Path) -> None:
+    """Cancellation after send must hand card binding and continuation attachment to recovery."""
+    cards = FakeApprovalCards()
+    first_bind_started = asyncio.Event()
+    release_first_bind = asyncio.Event()
+    real_acknowledge = cards.acknowledge_approval_card
+    bind_attempts = 0
+
+    async def flaky_acknowledge(*args: object, **kwargs: object) -> object:
+        nonlocal bind_attempts
+        bind_attempts += 1
+        if bind_attempts == 1:
+            first_bind_started.set()
+            await release_first_bind.wait()
+            msg = "journal unavailable"
+            raise RuntimeError(msg)
+        return await real_acknowledge(*args, **kwargs)
+
+    cards.acknowledge_approval_card = flaky_acknowledge  # type: ignore[method-assign]
+    card_ready = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        detached_decision_handler=AsyncMock(return_value=("expired", "expired")),
+        detached_card_ready=card_ready,
+    )
+    create = asyncio.create_task(
+        store.create_detached_approval(
+            approval_id="approval-bind",
+            continuation_id="continuation-bind",
+            tool_call_id="call-bind",
+            tool_name="dangerous",
+            arguments={},
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    await first_bind_started.wait()
+
+    create.cancel()
+    release_first_bind.set()
+    with pytest.raises(asyncio.CancelledError):
+        await create
+    for _attempt in range(100):
+        row = next(iter(cards.rows.values()))
+        if row.card_event_id == "$approval" and card_ready.await_count:
+            break
+        await asyncio.sleep(0.01)
+
+    assert bind_attempts >= 2
+    assert next(iter(cards.rows.values())).card_event_id == "$approval"
+    card_ready.assert_awaited_with("continuation-bind", "call-bind", "$approval")
+    assert "$approval" in store._detached_expiry_tasks
+
+
 def test_resolution_after_deadline_is_forced_to_expired() -> None:
     """A click queued before the expiry task runs must not authorize an already-expired request."""
     event = _approval_card()

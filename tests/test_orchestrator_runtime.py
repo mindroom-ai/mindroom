@@ -2892,6 +2892,12 @@ class TestMultiAgentOrchestrator:
         async def _shutdown_approvals() -> None:
             calls.append("approvals")
 
+        async def _cancel_approval_tasks() -> None:
+            calls.append("cancel")
+
+        async def _close_approval_transport() -> None:
+            calls.append("transport")
+
         async def _stop_mcp_manager() -> None:
             calls.append("mcp")
             msg = "mcp shutdown failed"
@@ -2905,6 +2911,17 @@ class TestMultiAgentOrchestrator:
                 "mindroom.orchestrator.shutdown_approval_runtime",
                 new=AsyncMock(side_effect=_shutdown_approvals),
             ) as mock_shutdown_approvals,
+            patch.object(
+                orchestrator._approval_transport,
+                "cancel_startup_cleanup_retry",
+                new=AsyncMock(side_effect=_cancel_approval_tasks),
+            ),
+            patch.object(
+                orchestrator._approval_transport,
+                "close",
+                new=AsyncMock(side_effect=_close_approval_transport),
+                create=True,
+            ),
             patch.object(orchestrator.config_reload, "cancel", new=AsyncMock()),
             patch.object(orchestrator, "_stop_memory_auto_flush_worker", new=AsyncMock()),
             patch.object(orchestrator._knowledge_source_watcher, "shutdown", new=AsyncMock()),
@@ -2914,7 +2931,7 @@ class TestMultiAgentOrchestrator:
         ):
             await orchestrator.stop()
 
-        assert calls == ["approvals", "mcp"]
+        assert calls == ["cancel", "approvals", "transport", "mcp"]
         mock_shutdown_approvals.assert_awaited_once()
 
     @pytest.mark.asyncio

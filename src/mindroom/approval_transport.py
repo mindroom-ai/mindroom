@@ -56,6 +56,8 @@ _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
 _STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION = 10
 _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS = 0.25
 _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS = 30.0
+_CONTINUATION_EXPIRY_INITIAL_RETRY_SECONDS = 0.25
+_CONTINUATION_EXPIRY_MAX_RETRY_SECONDS = 30.0
 
 
 class _ApprovalTransportBot(Protocol):
@@ -184,7 +186,34 @@ class ApprovalMatrixTransport:
             locate_card=self.locate_approval_card,
             detached_decision_handler=self._handle_continuation_decision,
             detached_decision_ready=self._handle_continuation_decision_ready,
+            detached_card_ready=self._handle_detached_card_ready,
         )
+
+    async def _handle_detached_card_ready(
+        self,
+        approval_id: str,
+        tool_call_id: str,
+        card_event_id: str,
+    ) -> bool:
+        """Attach a delivered card even if its response coroutine was cancelled."""
+        current = await asyncio.to_thread(self._continuations.get, approval_id)
+        if current is None or current.state != "pending":
+            return True
+        call = next((call for call in current.calls if call.tool_call_id == tool_call_id), None)
+        if call is None or call.decision_recorded:
+            return True
+        if call.card_event_id is not None:
+            return call.card_event_id == card_event_id
+        attached = await asyncio.to_thread(
+            self._continuations.attach_card,
+            approval_id,
+            tool_call_id,
+            card_event_id,
+        )
+        if attached is None:
+            return False
+        attached_call = next((call for call in attached.calls if call.tool_call_id == tool_call_id), None)
+        return attached_call is not None and attached_call.card_event_id == card_event_id
 
     async def _handle_continuation_decision(
         self,
@@ -308,13 +337,55 @@ class ApprovalMatrixTransport:
                 room_id: str = continuation.room_id,
                 card_event_id: str = call.card_event_id,
                 expires_at: str = call.expires_at,
+                approval_id: str = continuation.approval_id,
+                tool_call_id: str = call.tool_call_id,
             ) -> None:
                 delay = max(
                     0.0,
                     (datetime.fromisoformat(expires_at).astimezone(UTC) - datetime.now(UTC)).total_seconds(),
                 )
                 await asyncio.sleep(delay)
-                await expire_suspended_tool_approval(room_id, card_event_id)
+                retry_seconds = _CONTINUATION_EXPIRY_INITIAL_RETRY_SECONDS
+                while True:
+                    try:
+                        settled = await expire_suspended_tool_approval(room_id, card_event_id)
+                    except Exception:
+                        logger.warning(
+                            "approval_continuation_expiry_retry",
+                            approval_id=approval_id,
+                            tool_call_id=tool_call_id,
+                            retry_seconds=retry_seconds,
+                            exc_info=True,
+                        )
+                        settled = False
+                    if settled:
+                        return
+                    try:
+                        refreshed = await asyncio.to_thread(self._continuations.get, approval_id)
+                    except Exception:
+                        logger.warning(
+                            "approval_continuation_expiry_state_retry",
+                            approval_id=approval_id,
+                            tool_call_id=tool_call_id,
+                            retry_seconds=retry_seconds,
+                            exc_info=True,
+                        )
+                    else:
+                        refreshed_call = (
+                            None
+                            if refreshed is None
+                            else next((item for item in refreshed.calls if item.tool_call_id == tool_call_id), None)
+                        )
+                        if (
+                            refreshed is None
+                            or refreshed.state != "pending"
+                            or refreshed_call is None
+                            or refreshed_call.decision_recorded
+                            or refreshed_call.card_event_id != card_event_id
+                        ):
+                            return
+                    await asyncio.sleep(retry_seconds)
+                    retry_seconds = min(retry_seconds * 2, _CONTINUATION_EXPIRY_MAX_RETRY_SECONDS)
 
             task = asyncio.create_task(
                 expire(),
@@ -745,6 +816,10 @@ class ApprovalMatrixTransport:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._continuation_tasks.clear()
         self._expiry_tasks.clear()
+
+    async def close(self) -> None:
+        """Close the transport-owned continuation-store handle."""
+        await asyncio.to_thread(self._continuations.close)
 
     async def mark_startup_runtime_support_ready(self) -> None:
         """Record that approval runtime support can now perform startup cleanup."""

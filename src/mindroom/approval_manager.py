@@ -48,6 +48,7 @@ DetachedApprovalDecisionHandler = Callable[
     Awaitable[tuple[_ApprovalStatus, str | None]],
 ]
 DetachedApprovalDecisionReadyHandler = Callable[[str, str], Awaitable[None]]
+DetachedApprovalCardReadyHandler = Callable[[str, str, str], Awaitable[bool]]
 
 _STARTUP_DISCARD_SCAN_PAGE = 256
 # How long shutdown waits on work it does not own. Every such wait is on a
@@ -77,6 +78,8 @@ _DETACHED_REQUEST_REASON = "Original tool request is no longer active."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
 _MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
+_DETACHED_RETRY_INITIAL_SECONDS = 0.25
+_DETACHED_RETRY_MAX_SECONDS = 30.0
 _SANITIZER_TRUNCATION_MARKER = "... [truncated]"
 _MANAGER: _ApprovalManager | None = None
 logger = get_logger(__name__)
@@ -363,6 +366,7 @@ class _DetachedCardWrite:
     done_future: Future[None]
     owner_loop: asyncio.AbstractEventLoop
     recovery_task: asyncio.Task[None]
+    card_event_id: str
 
 
 @dataclass(slots=True, eq=False)
@@ -397,6 +401,7 @@ class _ApprovalManager:
         locate_card: ApprovalCardLocator | None = None,
         detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
         detached_decision_ready: DetachedApprovalDecisionReadyHandler | None = None,
+        detached_card_ready: DetachedApprovalCardReadyHandler | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
         self._send_event = sender
@@ -408,6 +413,7 @@ class _ApprovalManager:
         self._locate_card = locate_card
         self._detached_decision_handler = detached_decision_handler
         self._detached_decision_ready = detached_decision_ready
+        self._detached_card_ready = detached_card_ready
         self._live_lock = threading.RLock()
         self._pending_by_card_event: dict[str, _LiveApprovalWaiter] = {}
         self._resolving_card_event_ids: set[str] = set()
@@ -585,12 +591,7 @@ class _ApprovalManager:
         if sent_event is None:
             await self._forget_card(transaction_id)
             return None
-        if self._cards is not None:
-            await self._cards.acknowledge_approval_card(
-                transaction_id=transaction_id,
-                card_event_id=sent_event.event_id,
-                card=_sent_card_body(claimed_card, sent_event),
-            )
+        sent_card = _sent_card_body(claimed_card, sent_event)
         with self._live_lock:
             shutting_down = self._shutdown_reason is not None
             if not shutting_down:
@@ -606,9 +607,122 @@ class _ApprovalManager:
                 expiry_task.add_done_callback(
                     lambda task: self._finish_detached_expiry_task(sent_event.event_id, task),
                 )
-        if shutting_down:
-            await self.expire_detached_card(room_id=room_id, card_event_id=sent_event.event_id)
+        first_attempt = self._schedule_detached_card_binding(
+            room_id=room_id,
+            transaction_id=transaction_id,
+            card_event_id=sent_event.event_id,
+            card=sent_card,
+            continuation_id=continuation_id,
+            tool_call_id=tool_call_id,
+            expire_after_bind=shutting_down,
+        )
+        await asyncio.shield(first_attempt.wait())
         return sent_event
+
+    def _schedule_detached_card_binding(
+        self,
+        *,
+        room_id: str,
+        transaction_id: str,
+        card_event_id: str,
+        card: dict[str, Any],
+        continuation_id: str,
+        tool_call_id: str,
+        expire_after_bind: bool,
+    ) -> asyncio.Event:
+        """Give post-send journal binding an owner independent of its caller."""
+        first_attempt = asyncio.Event()
+        done_future: Future[None] = Future()
+        owner_loop = asyncio.get_running_loop()
+
+        async def recover() -> None:
+            try:
+                retry_seconds = _DETACHED_RETRY_INITIAL_SECONDS
+                while True:
+                    acknowledged = await self._acknowledge_detached_card(
+                        room_id=room_id,
+                        transaction_id=transaction_id,
+                        card_event_id=card_event_id,
+                        card=card,
+                    )
+                    attached = await self._notify_detached_card_ready(
+                        continuation_id=continuation_id,
+                        tool_call_id=tool_call_id,
+                        card_event_id=card_event_id,
+                    )
+                    first_attempt.set()
+                    if acknowledged and attached:
+                        if expire_after_bind:
+                            await self.expire_detached_card(room_id=room_id, card_event_id=card_event_id)
+                        return
+                    if self._current_shutdown_reason() is not None:
+                        return
+                    await asyncio.sleep(retry_seconds)
+                    retry_seconds = min(retry_seconds * 2, _DETACHED_RETRY_MAX_SECONDS)
+            finally:
+                first_attempt.set()
+
+        recovery_task = asyncio.create_task(
+            recover(),
+            name=f"approval-card-bind-{continuation_id}-{tool_call_id}",
+        )
+        detached_write = _DetachedCardWrite(
+            done_future=done_future,
+            owner_loop=owner_loop,
+            recovery_task=recovery_task,
+            card_event_id=card_event_id,
+        )
+        with self._live_lock:
+            self._detached_card_writes.add(detached_write)
+        recovery_task.add_done_callback(lambda _future: self._discard_detached_card_write(detached_write))
+        return first_attempt
+
+    async def _acknowledge_detached_card(
+        self,
+        *,
+        room_id: str,
+        transaction_id: str,
+        card_event_id: str,
+        card: dict[str, Any],
+    ) -> bool:
+        if self._cards is None:
+            return True
+        try:
+            await self._cards.acknowledge_approval_card(
+                transaction_id=transaction_id,
+                card_event_id=card_event_id,
+                card=card,
+            )
+        except Exception:
+            logger.warning(
+                "detached_approval_card_bind_failed",
+                room_id=room_id,
+                card_event_id=card_event_id,
+                exc_info=True,
+            )
+            return False
+        return True
+
+    async def _notify_detached_card_ready(
+        self,
+        *,
+        continuation_id: str,
+        tool_call_id: str,
+        card_event_id: str,
+    ) -> bool:
+        if self._detached_card_ready is None:
+            return True
+        try:
+            return await self._detached_card_ready(continuation_id, tool_call_id, card_event_id)
+        except Exception:
+            logger.warning(
+                "detached_approval_continuation_attach_failed",
+                continuation_id=continuation_id,
+                tool_call_id=tool_call_id,
+                card_event_id=card_event_id,
+                exc_info=True,
+            )
+            return False
 
     def _finish_detached_expiry_task(self, card_event_id: str, task: asyncio.Task[None]) -> None:
         """Retire one expiry task and consume any failure it surfaced."""
@@ -628,7 +742,23 @@ class _ApprovalManager:
 
     async def _expire_detached_after(self, *, room_id: str, card_event_id: str, expires_at: datetime) -> None:
         await asyncio.sleep(max(0.0, (expires_at - _utcnow()).total_seconds()))
-        await self.expire_detached_card(room_id=room_id, card_event_id=card_event_id)
+        retry_seconds = _DETACHED_RETRY_INITIAL_SECONDS
+        while self._current_shutdown_reason() is None:
+            try:
+                settled = await self.expire_detached_card(room_id=room_id, card_event_id=card_event_id)
+            except Exception:
+                logger.warning(
+                    "detached_approval_expiry_retry",
+                    room_id=room_id,
+                    card_event_id=card_event_id,
+                    retry_seconds=retry_seconds,
+                    exc_info=True,
+                )
+                settled = False
+            if settled:
+                return
+            await asyncio.sleep(retry_seconds)
+            retry_seconds = min(retry_seconds * 2, _DETACHED_RETRY_MAX_SECONDS)
 
     async def discard_pending_on_startup(self) -> ApprovalStartupSweep:
         """Settle every router-authored card this bot restarted holding.
@@ -916,15 +1046,26 @@ class _ApprovalManager:
             resolved_by=sender_id,
         )
 
-    async def expire_detached_card(self, *, room_id: str, card_event_id: str) -> bool:
-        """Expire one recovered continuation card without a live waiter."""
-        recovered = await self._recovered_pending_approval_for_card(
-            room_id=room_id,
-            card_event_id=card_event_id,
-        )
-        if recovered is None:
+    async def expire_detached_card(self, *, room_id: str, card_event_id: str) -> bool:  # noqa: PLR0911
+        """Expire one continuation card, redelivering any recorded terminal decision."""
+        if self._cards is None:
             return False
-        pending, transaction_id, stored = recovered
+        stored = await self._cards.pending_approval_card(room_id=room_id, card_event_id=card_event_id)
+        if stored is None:
+            with self._live_lock:
+                binding = any(write.card_event_id == card_event_id for write in self._detached_card_writes)
+            return not binding
+        transport_sender = self._transport_sender_id()
+        if transport_sender is None:
+            return False
+        pending = self._trusted_pending_from_card_event(
+            stored.card,
+            room_id=room_id,
+            transport_sender=transport_sender,
+            expected_card_event_id=card_event_id,
+        )
+        if pending is None:
+            return False
         content = stored.card.get("content")
         continuation_id = content.get("continuation_id") if isinstance(content, dict) else None
         tool_call_id = content.get("tool_call_id") if isinstance(content, dict) else None
@@ -934,6 +1075,19 @@ class _ApprovalManager:
             or self._detached_decision_handler is None
         ):
             return False
+        if stored.resolution is not None:
+            recorded_status = stored.resolution.get("status")
+            if recorded_status not in ("approved", "denied", "expired"):
+                return False
+            await self._detached_decision_handler(
+                continuation_id,
+                tool_call_id,
+                recorded_status,
+                cast("str | None", stored.resolution.get("resolution_reason")),
+            )
+            if self._detached_decision_ready is not None:
+                await self._detached_decision_ready(continuation_id, tool_call_id)
+            return await self._redeliver_recorded_resolution(pending, stored)
         committed_status, committed_reason = await self._detached_decision_handler(
             continuation_id,
             tool_call_id,
@@ -942,7 +1096,7 @@ class _ApprovalManager:
         )
         outcome = await self._emit_resolution(
             pending,
-            transaction_id=transaction_id,
+            transaction_id=stored.transaction_id,
             status=committed_status,
             reason=committed_reason,
             resolved_by=None,
@@ -954,7 +1108,7 @@ class _ApprovalManager:
                 )
             ),
         )
-        return outcome is not _ResolutionOutcome.UNRECORDED
+        return outcome is _ResolutionOutcome.DELIVERED
 
     async def handle_live_approval_id_response(
         self,
@@ -1028,6 +1182,7 @@ class _ApprovalManager:
         locate_card: ApprovalCardLocator | None = None,
         detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
         detached_decision_ready: DetachedApprovalDecisionReadyHandler | None = None,
+        detached_card_ready: DetachedApprovalCardReadyHandler | None = None,
     ) -> None:
         """Update Matrix transport hooks for an existing runtime manager."""
         if sender is not None:
@@ -1044,10 +1199,25 @@ class _ApprovalManager:
             self._sending_device = sending_device
         if locate_card is not None:
             self._locate_card = locate_card
-        if detached_decision_handler is not None:
-            self._detached_decision_handler = detached_decision_handler
-        if detached_decision_ready is not None:
-            self._detached_decision_ready = detached_decision_ready
+        self._configure_detached_handlers(
+            decision_handler=detached_decision_handler,
+            decision_ready=detached_decision_ready,
+            card_ready=detached_card_ready,
+        )
+
+    def _configure_detached_handlers(
+        self,
+        *,
+        decision_handler: DetachedApprovalDecisionHandler | None,
+        decision_ready: DetachedApprovalDecisionReadyHandler | None,
+        card_ready: DetachedApprovalCardReadyHandler | None,
+    ) -> None:
+        if decision_handler is not None:
+            self._detached_decision_handler = decision_handler
+        if decision_ready is not None:
+            self._detached_decision_ready = decision_ready
+        if card_ready is not None:
+            self._detached_card_ready = card_ready
 
     def _current_shutdown_reason(self) -> str | None:
         with self._live_lock:
@@ -1207,6 +1377,7 @@ class _ApprovalManager:
             done_future=done_future,
             owner_loop=owner_loop,
             recovery_task=recovery_task,
+            card_event_id=waiter.card_event_id,
         )
         with self._live_lock:
             self._detached_card_writes.add(detached_write)
@@ -2239,7 +2410,15 @@ class _ApprovalManager:
             has_cleanup_tasks = bool(self._post_cancel_cleanup_tasks)
             has_publishing = bool(self._claiming_transaction_ids)
             has_detached_writes = bool(self._detached_card_writes)
-        return has_waiters or has_active_sends or has_cleanup_tasks or has_publishing or has_detached_writes
+            has_detached_expiries = bool(self._detached_expiry_tasks)
+        return (
+            has_waiters
+            or has_active_sends
+            or has_cleanup_tasks
+            or has_publishing
+            or has_detached_writes
+            or has_detached_expiries
+        )
 
     def _send_is_in_flight(self, transaction_id: str) -> bool:
         """Return whether this row is still owned by a send that has not come back.
@@ -2591,6 +2770,7 @@ def initialize_approval_store(
     locate_card: ApprovalCardLocator | None = None,
     detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
     detached_decision_ready: DetachedApprovalDecisionReadyHandler | None = None,
+    detached_card_ready: DetachedApprovalCardReadyHandler | None = None,
 ) -> _ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
@@ -2606,6 +2786,7 @@ def initialize_approval_store(
             locate_card=locate_card,
             detached_decision_handler=detached_decision_handler,
             detached_decision_ready=detached_decision_ready,
+            detached_card_ready=detached_card_ready,
         )
         return _MANAGER
 
@@ -2624,6 +2805,7 @@ def initialize_approval_store(
         locate_card=locate_card,
         detached_decision_handler=detached_decision_handler,
         detached_decision_ready=detached_decision_ready,
+        detached_card_ready=detached_card_ready,
     )
     return _MANAGER
 

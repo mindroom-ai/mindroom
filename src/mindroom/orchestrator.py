@@ -1931,7 +1931,10 @@ class _MultiAgentOrchestrator:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
         await self._approval_transport.cancel_startup_cleanup_retry()
-        await shutdown_approval_runtime()
+        try:
+            await shutdown_approval_runtime()
+        finally:
+            await self._approval_transport.close()
         await self.config_reload.cancel()
         owner = self._mcp_catalog_change_task_owner
         await wait_for_background_tasks(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN)

@@ -1016,6 +1016,7 @@ class ResponseRunner:
         continuation = self._approval_continuations.get(approval_id)
         if continuation is None:
             return
+        self._approval_continuations.fail(approval_id, reason)
         terminalized = await asyncio.gather(
             *(
                 expire_suspended_tool_approval(room_id, call.card_event_id)
@@ -1024,14 +1025,13 @@ class ResponseRunner:
             ),
             return_exceptions=True,
         )
-        first_error = next(
-            (result for result in terminalized if isinstance(result, BaseException)),
-            None,
-        )
-        if first_error is not None:
-            raise first_error
-        if all(result is True for result in terminalized):
-            self._approval_continuations.fail(approval_id, reason)
+        incomplete = sum(result is not True for result in terminalized)
+        if incomplete:
+            self.deps.logger.warning(
+                "approval_card_creation_cleanup_incomplete",
+                approval_id=approval_id,
+                incomplete_cards=incomplete,
+            )
 
     async def resume_approval_continuation(self, continuation: ApprovalContinuation) -> None:
         """Claim one ready continuation and run it through the conversation serializer."""

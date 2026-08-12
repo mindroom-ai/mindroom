@@ -1058,8 +1058,8 @@ async def test_partial_approval_card_failure_terminalizes_delivered_cards(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_partial_approval_card_failure_remains_recoverable_until_cards_are_terminal(tmp_path: Path) -> None:
-    """A crash while expiring an earlier card must leave the continuation in startup recovery."""
+async def test_partial_approval_card_failure_is_persisted_before_card_cleanup(tmp_path: Path) -> None:
+    """A cleanup crash must not leave the unsent approval call permanently pending."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     continuation = ApprovalContinuation(
         approval_id="approval-partial-crash",
@@ -1091,13 +1091,14 @@ async def test_partial_approval_card_failure_remains_recoverable_until_cards_are
     )
     runner._approval_continuations.create(continuation)
 
-    with (
-        patch(
-            "mindroom.response_runner.expire_suspended_tool_approval",
-            new=AsyncMock(side_effect=RuntimeError("crash before terminal edit")),
-        ),
-        pytest.raises(RuntimeError, match="crash before terminal edit"),
-    ):
+    async def failed_expiry(_room_id: str, _card_event_id: str) -> bool:
+        persisted = runner._approval_continuations.get(continuation.approval_id)
+        assert persisted is not None
+        assert persisted.state == "failed"
+        msg = "crash before terminal edit"
+        raise RuntimeError(msg)
+
+    with patch("mindroom.response_runner.expire_suspended_tool_approval", new=AsyncMock(side_effect=failed_expiry)):
         await runner._fail_approval_card_creation(
             continuation.approval_id,
             room_id=continuation.room_id,
@@ -1106,7 +1107,7 @@ async def test_partial_approval_card_failure_remains_recoverable_until_cards_are
 
     recoverable = runner._approval_continuations.get(continuation.approval_id)
     assert recoverable is not None
-    assert recoverable.state == "pending"
+    assert recoverable.state == "failed"
 
 
 @pytest.mark.asyncio
@@ -1149,7 +1150,7 @@ async def test_partial_card_failure_still_terminalizes_later_delivered_cards(tmp
     assert expire.await_count == 2
     persisted = runner._approval_continuations.get(continuation.approval_id)
     assert persisted is not None
-    assert persisted.state == "pending"
+    assert persisted.state == "failed"
 
 
 @pytest.mark.asyncio

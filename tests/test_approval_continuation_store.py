@@ -455,13 +455,73 @@ async def test_expiry_task_failure_is_retired_and_observed(
             ),
         ),
     )
-    monkeypatch.setattr(
-        "mindroom.approval_transport.expire_suspended_tool_approval",
-        AsyncMock(side_effect=RuntimeError("Matrix unavailable")),
-    )
+    expire = AsyncMock(side_effect=[RuntimeError("Matrix unavailable"), True])
+    monkeypatch.setattr("mindroom.approval_transport.expire_suspended_tool_approval", expire)
 
+    transport._continuations.create(continuation)
     transport._schedule_expiry(continuation)
     tasks = tuple(transport._expiry_tasks.values())
     await asyncio.gather(*tasks, return_exceptions=True)
 
+    assert expire.await_count == 2
     assert transport._expiry_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_expiry_task_retries_false_outcome_until_settled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A false settlement result must keep the expiry task alive for another attempt."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: None,
+    )
+    continuation = replace(
+        _continuation(),
+        calls=(
+            replace(
+                _continuation().calls[0],
+                card_event_id="$approval",
+                expires_at="2020-01-01T00:00:00+00:00",
+            ),
+        ),
+    )
+    expire = AsyncMock(side_effect=[False, True])
+    monkeypatch.setattr("mindroom.approval_transport.expire_suspended_tool_approval", expire)
+
+    transport._continuations.create(continuation)
+    transport._schedule_expiry(continuation)
+    tasks = tuple(transport._expiry_tasks.values())
+    await asyncio.gather(*tasks)
+
+    assert expire.await_count == 2
+    assert transport._expiry_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_transport_close_releases_continuation_store(tmp_path: Path) -> None:
+    """The transport owns its SQLite handle and must release it at shutdown."""
+    transport = ApprovalMatrixTransport(
+        runtime_paths=RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path,
+        ),
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: None,
+    )
+    close = MagicMock()
+    transport._continuations.close = close
+
+    await transport.close()
+
+    close.assert_called_once_with()

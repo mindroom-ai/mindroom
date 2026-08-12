@@ -23,6 +23,7 @@ from mindroom.approval_manager import (
     ApprovalDecision,
     ApprovalRoomProvider,
     ApprovalStartupSweep,
+    DetachedApprovalCardReadyHandler,
     MatrixEventEditor,
     MatrixEventSender,
     SendingDeviceProvider,
@@ -406,6 +407,7 @@ def initialize_approval_runtime(
     locate_card: ApprovalCardLocator,
     detached_decision_handler: approval_manager.DetachedApprovalDecisionHandler | None = None,
     detached_decision_ready: approval_manager.DetachedApprovalDecisionReadyHandler | None = None,
+    detached_card_ready: DetachedApprovalCardReadyHandler | None = None,
 ) -> None:
     """Initialize the approval runtime behind the public approval seam."""
     approval_manager.initialize_approval_store(
@@ -419,6 +421,7 @@ def initialize_approval_runtime(
         locate_card=locate_card,
         detached_decision_handler=detached_decision_handler,
         detached_decision_ready=detached_decision_ready,
+        detached_card_ready=detached_card_ready,
     )
 
 
