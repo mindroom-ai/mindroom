@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.event_journal.backend import Transaction
+    from mindroom.event_journal.sqlite_backend import _QueuedWrite
 
 _RETURN_TIMEOUT_SECONDS = 5.0
 
@@ -235,6 +236,66 @@ async def test_close_wakes_a_cross_loop_write_already_waiting_in_the_queue(
     await asyncio.to_thread(bridge.join, _RETURN_TIMEOUT_SECONDS)
     _assert_closed_refusal(outcome, operation_ran)
     await blocking_write
+
+
+@pytest.mark.asyncio
+async def test_close_before_foreign_writer_task_lookup_does_not_recreate_the_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A foreign write past its first check must not recreate the writer after close clears it."""
+    backend = SqliteBackend.open(tmp_path / "journal.db")
+    await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
+    writer_loop = asyncio.get_running_loop()
+    ensure_writer_task = backend._ensure_writer_task
+    call_soon_threadsafe = writer_loop.call_soon_threadsafe
+    handoff_reached = threading.Event()
+    release_foreign_ensure = threading.Event()
+    outcome: list[BaseException | None] = []
+    operation_ran = threading.Event()
+
+    def pause_foreign_ensure() -> asyncio.Queue[_QueuedWrite]:
+        if threading.current_thread().name == "ensure-race-second-loop-writer":
+            handoff_reached.set()
+            assert release_foreign_ensure.wait(_RETURN_TIMEOUT_SECONDS), "the test never released writer lookup"
+        return ensure_writer_task()
+
+    def record_admission(callback: Callable[..., object], *args: object) -> asyncio.Handle:
+        handle = call_soon_threadsafe(callback, *args)
+        if callback == backend._admit:
+            handoff_reached.set()
+        return handle
+
+    def insert_claim(transaction: Transaction) -> None:
+        operation_ran.set()
+        transaction.execute("INSERT INTO claim VALUES (1)")
+
+    def write_from_its_own_loop() -> None:
+        async def claim() -> None:
+            await backend.write(insert_claim)
+
+        try:
+            asyncio.run(claim())
+        except BaseException as error:  # the exact refusal is asserted below
+            outcome.append(error)
+        else:
+            outcome.append(None)
+
+    bridge = threading.Thread(
+        target=write_from_its_own_loop,
+        name="ensure-race-second-loop-writer",
+        daemon=True,
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(backend, "_ensure_writer_task", pause_foreign_ensure)
+        patch.setattr(writer_loop, "call_soon_threadsafe", record_admission)
+        bridge.start()
+        assert handoff_reached.wait(_RETURN_TIMEOUT_SECONDS), "the foreign write never passed its first closed check"
+        await backend.close()
+        release_foreign_ensure.set()
+
+    await asyncio.to_thread(bridge.join, _RETURN_TIMEOUT_SECONDS)
+    _assert_closed_refusal(outcome, operation_ran)
 
 
 @pytest.mark.asyncio

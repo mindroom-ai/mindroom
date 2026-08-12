@@ -275,7 +275,6 @@ class SqliteBackend:
         """
         if self._closed:
             raise RuntimeError(_CLOSED_MESSAGE)
-        queue = self._ensure_writer_task()
         caller_loop = asyncio.get_running_loop()
         writer_loop = self._writer_loop
         future: asyncio.Future[T] = caller_loop.create_future()
@@ -285,10 +284,11 @@ class SqliteBackend:
         # wrong loop, which arrives whenever that loop happens to run next and
         # not because anything told it to.
         if writer_loop is None or writer_loop is caller_loop:
+            queue = self._ensure_writer_task()
             queue.put_nowait(queued)
         else:
             try:
-                writer_loop.call_soon_threadsafe(self._admit, queue, queued)
+                writer_loop.call_soon_threadsafe(self._admit, queued)
             except RuntimeError:
                 if not writer_loop.is_closed():
                     raise
@@ -298,18 +298,20 @@ class SqliteBackend:
         # learns how it ended before its cancellation propagates.
         return await settled(future)
 
-    def _admit(self, queue: asyncio.Queue[_QueuedWrite], queued: _QueuedWrite) -> None:
+    def _admit(self, queued: _QueuedWrite) -> None:
         """Put one handed-across write in the queue, or refuse it if ``close()`` got there first.
 
-        A write from another loop cannot be admitted where it is decided, so
-        the decision is re-made here, on the writer's own loop, where
-        ``close()`` also runs. Without this the two can interleave the one way
-        that strands a caller: ``close()`` drains the queue, and the admission
-        it never saw arrives afterwards, into a queue nothing will read again.
+        A write from another loop cannot be admitted or inspect the writer task
+        where it is decided, so both happen here, on the writer's own loop,
+        where ``close()`` also runs. Without this the two can interleave the one
+        way that strands a caller: ``close()`` drains the queue, and the
+        admission it never saw arrives afterwards, into a queue nothing will
+        read again.
         """
         if self._closed:
             _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
             return
+        queue = self._ensure_writer_task()
         queue.put_nowait(queued)
 
     async def read[T](self, operation: Operation[T]) -> T:
