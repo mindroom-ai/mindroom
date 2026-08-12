@@ -574,7 +574,7 @@ class _ApprovalManager:
             dropped_never_attempted=tally.dropped_never_attempted,
         )
 
-    async def _settle_recovered_card(
+    async def _settle_recovered_card(  # noqa: PLR0911
         self,
         *,
         room_id: str,
@@ -627,14 +627,21 @@ class _ApprovalManager:
             # Nothing is owed either: the waiter settles the card on a click,
             # a denial, or its own timeout. Counting it would have every
             # pending approval hold the sweep open until somebody answered.
-            if claimed.card_event_id is None:
-                # Except that a waiter cannot settle a row that does not name
-                # its event: every decision is recorded against the event id
-                # this write was meant to store, so leaving it unwritten
-                # strands the answer as surely as deleting the row would. The
-                # waiter is holding what the failed write was carrying, so
-                # finish it here rather than resend anything.
-                await self._acknowledge_card(live_waiter)
+            if claimed.card_event_id is None and not await self._acknowledge_card(live_waiter):
+                # A waiter cannot settle a row that does not name its event:
+                # every decision is recorded against the event id this write
+                # was meant to store, so leaving it unwritten strands the
+                # answer as surely as deleting the row would. The waiter is
+                # holding what the failed write was carrying, so finish it
+                # here rather than resend anything -- and if that write fails
+                # too, the row is owed rather than done with, because nothing
+                # else will come back for it.
+                logger.warning(
+                    "approval_startup_card_repair_failed",
+                    room_id=room_id,
+                    transaction_id=claimed.transaction_id,
+                )
+                return False
             logger.debug(
                 "approval_startup_card_skipped_live_waiter",
                 room_id=room_id,
@@ -1030,7 +1037,7 @@ class _ApprovalManager:
                         self._forget_cancelled_card_event_id(waiter.card_event_id)
                     return
             pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
-            await self._emit_resolution(
+            outcome = await self._emit_resolution(
                 pending,
                 transaction_id=waiter.transaction_id,
                 status=decision.status,
@@ -1038,7 +1045,8 @@ class _ApprovalManager:
                 resolved_by=decision.resolved_by,
             )
             with self._live_lock:
-                self._resolved_card_event_ids.add(waiter.card_event_id)
+                if outcome is _ResolutionOutcome.DELIVERED:
+                    self._resolved_card_event_ids.add(waiter.card_event_id)
                 if mark_cancelled:
                     self._cancelled_card_event_ids.discard(waiter.card_event_id)
             return
@@ -1454,7 +1462,7 @@ class _ApprovalManager:
             return None
         return await self._send_event(room_id, thread_id, content, transaction_id)
 
-    async def _acknowledge_card(self, waiter: _LiveApprovalWaiter) -> None:
+    async def _acknowledge_card(self, waiter: _LiveApprovalWaiter) -> bool:
         """Point one claimed row at the Matrix event the send produced.
 
         Best effort on purpose, and the reason it can be is the claim: the row
@@ -1466,7 +1474,7 @@ class _ApprovalManager:
         write was meant to store.
         """
         if self._cards is None:
-            return
+            return False
         try:
             await self._cards.acknowledge_approval_card(
                 transaction_id=waiter.transaction_id,
@@ -1480,6 +1488,8 @@ class _ApprovalManager:
                 event_id=waiter.card_event_id,
                 exc_info=True,
             )
+            return False
+        return True
 
     async def _forget_card(self, transaction_id: str) -> None:
         """Drop one card that is finished, whether it was shown or never sent."""
@@ -1747,9 +1757,12 @@ class _ApprovalManager:
                 await self._stand_down_for_the_claim_holder(waiter)
                 continue
             with self._claimed_resolution(claimed_waiter.card_event_id):
-                await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
+                delivered = await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
                 with self._live_lock:
-                    self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
+                    # An edit that did not land during shutdown is exactly what
+                    # the next process's sweep exists to redeliver.
+                    if delivered:
+                        self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
         await self._drain_active_approval_sends()
         await self._drain_post_cancel_cleanup_tasks()
         await self._drain_detached_card_writes()

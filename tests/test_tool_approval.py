@@ -2906,6 +2906,10 @@ async def test_a_decision_the_room_never_saw_stays_redeliverable(tmp_path: Path)
 async def test_startup_sweep_leaves_a_live_approval_whose_acknowledge_failed(tmp_path: Path) -> None:
     """A live waiter over an unacknowledged row must not be resent or expired.
 
+    Reported owed rather than settled, because the repair this sweep tries
+    instead of a resend also failed here, and a row that still cannot name its
+    event has nothing that will come back for it.
+
     Pointing the row at the event its send produced is best effort: the claim
     already accounts for the card, so a failure there leaves the event id
     merely unknown. That row then reads exactly like one a dead process left
@@ -2958,8 +2962,9 @@ async def test_startup_sweep_leaves_a_live_approval_whose_acknowledge_failed(tmp
 
     sweep = await store.discard_pending_on_startup()
 
-    assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
-    assert sweep.skipped_live_waiter == 1
+    # Owed, not done with: the repair could not land either, and nothing else
+    # comes back for a row whose event id is still unwritten.
+    assert sweep == ApprovalStartupSweep(discarded=0, failed=1)
     assert sender.await_count == 1, "the sweep presented the transaction again under a live waiter"
     assert editor.await_count == 0
     assert cards.rows, "the sweep dropped the row its waiter still needs"
