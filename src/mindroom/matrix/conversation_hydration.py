@@ -291,10 +291,6 @@ class _Walk:
     correctness is completeness rather than recency has to be able to tell those
     apart instead of reading a warm marker as a whole conversation.
 
-    ``exhausted_server`` says the homeserver returned no continuation token.
-    It is independent of readability: a walk can reach the start of retained
-    history while still being unable to understand an encrypted event it saw.
-
     ``unreadable`` says the walk fetched at least one event it could not read,
     which is a different failure from either bound and has to be kept apart
     from both. A walk that stopped at a ceiling knows exactly what it skipped
@@ -311,8 +307,52 @@ class _Walk:
 
     events: tuple[ProjectedEvent, ...]
     complete: bool
-    exhausted_server: bool = False
     unreadable: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectedRoomPage:
+    """One bounded room page after transport events become journal events."""
+
+    events: tuple[ProjectedEvent, ...]
+    logical_messages: int
+    unreadable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryWalk:
+    """The terminal facts retained after a streamed recovery walk."""
+
+    exhausted_server: bool
+    unreadable: bool
+    superseded: bool = False
+
+
+def _project_room_page(
+    client: nio.AsyncClient,
+    room_id: str,
+    page: Sequence[nio.BaseEvent],
+    *,
+    self_sender: str,
+) -> _ProjectedRoomPage:
+    """Project one fetched page without retaining any preceding page."""
+    events: list[ProjectedEvent] = []
+    logical_messages = 0
+    unreadable = False
+    for event in page:
+        readable = _readable_event(client, event)
+        unreadable = unreadable or readable is None
+        projected = None if readable is None else _projected_from_event(room_id, readable, self_sender=self_sender)
+        if projected is None:
+            continue
+        events.append(projected)
+        if _is_logical_message(projected):
+            logical_messages += 1
+    return _ProjectedRoomPage(
+        events=tuple(events),
+        logical_messages=logical_messages,
+        unreadable=unreadable,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,7 +443,7 @@ class ConversationHydrator:
     # tasks rather than squeezed into their key: a recovery and the room
     # conversation are both "this room, no thread", and one of them waiting on
     # the other under a shared key is a deadlock.
-    _recoveries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
+    _recoveries: dict[str, asyncio.Task[HistoryRecoveryOutcome]] = field(default_factory=dict, init=False, repr=False)
 
     def _client(self) -> nio.AsyncClient:
         """Return the Matrix client, which only exists once the bot has logged in.
@@ -520,21 +560,21 @@ class ConversationHydrator:
             return False
         return coverage.reached_its_end or coverage.attempted_policy_rank >= self.policy
 
-    async def _shared[Key](
+    async def _shared[Key, Result](
         self,
-        running: dict[Key, asyncio.Task[None]],
+        running: dict[Key, asyncio.Task[Result]],
         key: Key,
-        start: Callable[[], Coroutine[None, None, None]],
+        start: Callable[[], Coroutine[None, None, Result]],
         *,
         name: str,
-    ) -> None:
+    ) -> Result:
         """Run one keyed piece of server work, joining whoever is already on it."""
         task = running.get(key)
         if task is None or task.done():
             task = asyncio.create_task(start(), name=name)
             running[key] = task
         try:
-            await asyncio.shield(task)
+            return await asyncio.shield(task)
         finally:
             if running.get(key) is task and task.done():
                 del running[key]
@@ -571,7 +611,7 @@ class ConversationHydrator:
             # a room the bot is no longer in the same relationship with.
             logger.info("conversation_hydration_superseded", room_id=room_id, thread_id=thread_id)
 
-    async def _repair(self, recovery: RoomHistoryRecovery) -> None:
+    async def _repair(self, recovery: RoomHistoryRecovery) -> HistoryRecoveryOutcome:
         """Walk a repairable room to server exhaustion or a configured ceiling.
 
         A room walk and not a thread walk, whichever conversation asked. The
@@ -585,6 +625,10 @@ class ConversationHydrator:
         it entirely with post-gap tail while the missing interval remains on
         the next page. The proof walk therefore continues to readable server
         exhaustion, while the raw-event and request ceilings still bound cost.
+
+        Each fetched page is projected and installed before the next request.
+        That write claims this exact recovery and membership epoch, so a retry
+        may reapply committed pages and either changing fence stops stale work.
 
         A failure here propagates. The read that triggered it fails visibly, the
         obligation stays repairable, and the next read tries again -- which is the
@@ -609,15 +653,25 @@ class ConversationHydrator:
             # is -- a later gap is a different hole and this walk was not
             # launched for it -- and the caller's loop re-reads the obligation.
             logger.info("conversation_history_recovery_already_settled", room_id=recovery.room_id)
-            return
+            return HistoryRecoveryOutcome.SUPERSEDED
         epoch = await self.store.membership_epoch(recovery.room_id)
-        walk = await self._fetch_room(recovery.room_id, require_server_exhaustion=True)
+        walk = await self._fetch_room_history_recovery(recovery, expected_membership_epoch=epoch)
+        if walk.superseded:
+            logger.info(
+                "conversation_history_recovery_settled",
+                room_id=recovery.room_id,
+                outcome=HistoryRecoveryOutcome.SUPERSEDED.value,
+                recovery_state=recovery.state.value,
+                exhausted_server=False,
+                unreadable=walk.unreadable,
+                walk_complete=False,
+            )
+            return HistoryRecoveryOutcome.SUPERSEDED
         if walk.exhausted_server and walk.unreadable:
             msg = f"Could not prove complete readable history for {recovery.room_id!r}: unreadable events remain"
             raise _HydrationError(msg)
         outcome = await self.store.settle_room_history_recovery(
             recovery,
-            events=walk.events,
             exhausted_server=walk.exhausted_server,
             attempted_policy_rank=self.policy,
             expected_membership_epoch=epoch,
@@ -634,8 +688,73 @@ class ConversationHydrator:
             recovery_state=recovery.state.value,
             exhausted_server=walk.exhausted_server,
             unreadable=walk.unreadable,
-            walk_complete=walk.complete,
+            walk_complete=walk.exhausted_server and not walk.unreadable,
         )
+        return outcome
+
+    async def _fetch_room_history_recovery(
+        self,
+        recovery: RoomHistoryRecovery,
+        *,
+        expected_membership_epoch: int,
+    ) -> _RecoveryWalk:
+        """Fetch and immediately install bounded pages for one exact recovery."""
+        logical = 0
+        fetched = 0
+        pages = 0
+        unreadable = False
+        exhausted_server = False
+        start: str | None = None
+        client = self._client()
+        while True:
+            request_limit = min(_MESSAGES_PAGE_LIMIT, max(self.max_fetched_events - fetched, 0))
+            if request_limit == 0:
+                break
+            response = await client.room_messages(
+                recovery.room_id,
+                start=start,
+                direction=nio.MessageDirection.back,
+                limit=request_limit,
+            )
+            if not isinstance(response, nio.RoomMessagesResponse):
+                msg = f"Could not fetch history for {recovery.room_id!r}: {response}"
+                raise _HydrationError(msg)
+            pages += 1
+            page = response.chunk[:request_limit]
+            fetched += len(page)
+            projected_page = _project_room_page(client, recovery.room_id, page, self_sender=self.self_sender)
+            unreadable = unreadable or projected_page.unreadable
+            logical += projected_page.logical_messages
+            installed = await self.store.install_room_history_recovery_chunk(
+                recovery,
+                events=projected_page.events,
+                expected_membership_epoch=expected_membership_epoch,
+            )
+            if not installed:
+                return _RecoveryWalk(
+                    exhausted_server=False,
+                    unreadable=unreadable,
+                    superseded=True,
+                )
+            if len(page) < len(response.chunk):
+                break
+            if not response.end:
+                exhausted_server = True
+                break
+            next_start = _advanced_room_cursor(room_id=recovery.room_id, start=start, end=response.end)
+            if fetched >= self.max_fetched_events or pages >= self.max_requests:
+                break
+            start = next_start
+        if not exhausted_server:
+            logger.warning(
+                "conversation_hydration_ceiling_reached",
+                room_id=recovery.room_id,
+                requests=pages,
+                fetched_events=fetched,
+                logical_messages=logical,
+                prompt_window_messages=self.prompt_window_messages,
+            )
+        return _RecoveryWalk(exhausted_server=exhausted_server, unreadable=unreadable)
 
     async def _fetch_thread(self, room_id: str, thread_id: str) -> _Walk:
         """Build one thread from its root and a bounded walk of its relations.
@@ -793,12 +912,7 @@ class ConversationHydrator:
             raise _HydrationError(msg) from error
         return _Walk(events=tuple(events), complete=complete, unreadable=unreadable)
 
-    async def _fetch_room(
-        self,
-        room_id: str,
-        *,
-        require_server_exhaustion: bool = False,
-    ) -> _Walk:
+    async def _fetch_room(self, room_id: str) -> _Walk:
         """Walk back until this walk's job is done, or the room runs out.
 
         A server that has run out of history answers with an empty chunk and no
@@ -810,11 +924,6 @@ class ConversationHydrator:
         history than that is hydrated once the window is full. The window is
         measured in logical messages, because that is the unit a prompt is
         built from; an edit does not add a message to it, it revises one.
-
-        Proof mode ignores the logical prompt window because a page of post-gap
-        tail can fill that window while the missing interval remains on the
-        next page. Only readable server exhaustion proves the interval covered;
-        the raw-event and request ceilings still bound its cost.
 
         There are three ways this returns, and only two of them mean the walk
         finished its job. The third is the event ceiling, which is logged rather
@@ -871,14 +980,12 @@ class ConversationHydrator:
                 return _Walk(
                     events=tuple(events),
                     complete=False,
-                    exhausted_server=False,
                     unreadable=unreadable,
                 )
-            if not require_server_exhaustion and logical >= self.prompt_window_messages:
+            if logical >= self.prompt_window_messages:
                 return _Walk(
                     events=tuple(events),
                     complete=False,
-                    exhausted_server=False,
                     unreadable=unreadable,
                 )
             # An empty page is not exhaustion. The server may filter a page down
@@ -893,7 +1000,6 @@ class ConversationHydrator:
                     # Running out of history is only completeness if the walk
                     # could read what it ran through.
                     complete=not unreadable,
-                    exhausted_server=True,
                     unreadable=unreadable,
                 )
             next_start = _advanced_room_cursor(room_id=room_id, start=start, end=response.end)
@@ -912,7 +1018,6 @@ class ConversationHydrator:
                 return _Walk(
                     events=tuple(events),
                     complete=False,
-                    exhausted_server=False,
                     unreadable=unreadable,
                 )
             start = next_start

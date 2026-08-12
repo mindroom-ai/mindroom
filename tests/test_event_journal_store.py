@@ -314,6 +314,7 @@ class _HydrationWriteShape:
     """The hydration work one real backend transaction was asked to commit."""
 
     membership_claims: int = 0
+    recovery_claims: int = 0
     projected_messages: int = 0
     hydration_markers: int = 0
     recovery_settlements: int = 0
@@ -340,9 +341,11 @@ class _HydrationWriteTransaction:
         self._inner.execute(sql, params)
 
     def fetchone(self, sql: str, params: Sequence[object] = ()) -> Mapping[str, object] | None:
-        """Run one query and record a materialized membership claim."""
+        """Run one query and record its durable fence claims."""
         if "INSERT INTO room_membership" in sql:
             self.shape.membership_claims += 1
+        if "UPDATE room_history_recovery SET state = state" in sql:
+            self.shape.recovery_claims += 1
         return self._inner.fetchone(sql, params)
 
     def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
@@ -1880,6 +1883,22 @@ class TestBoundedHydrationInstallation:
         assert max(shape.projected_messages for shape in projection_shapes) <= _HYDRATION_TRANSACTION_EVENT_LIMIT
         assert all(shape.membership_claims == 1 for shape in projection_shapes)
 
+    @staticmethod
+    async def _install_recovery_events(
+        store: PrincipalStore,
+        recovery: RoomHistoryRecovery,
+        events: tuple[ProjectedEvent, ...],
+        *,
+        expected_membership_epoch: int,
+    ) -> None:
+        """Install test recovery events through independently fenced chunks."""
+        for offset in range(0, len(events), _HYDRATION_TRANSACTION_EVENT_LIMIT):
+            assert await store.install_room_history_recovery_chunk(
+                recovery,
+                events=events[offset : offset + _HYDRATION_TRANSACTION_EVENT_LIMIT],
+                expected_membership_epoch=expected_membership_epoch,
+            )
+
     async def test_ordinary_hydration_projects_in_bounded_writes_then_publishes(
         self,
         journal_store: EventJournalStore,
@@ -1933,6 +1952,102 @@ class TestBoundedHydrationInstallation:
         ]
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
+    async def test_recovery_chunk_claims_both_fences_before_projection(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A recovery page must not enter a different gap or membership."""
+        alice = journal_store.principal("agent@alice")
+        recovery = await alice.record_room_history_recovery(ROOM)
+        assert recovery is not None
+        observed = _ObservedHydrationBackend(journal_store.backend)
+        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+        events = hydration_messages(3)
+
+        installed = await recovering.install_room_history_recovery_chunk(
+            recovery,
+            events=events,
+            expected_membership_epoch=await recovering.membership_epoch(ROOM),
+        )
+
+        assert installed
+        assert observed.write_shapes == [
+            _HydrationWriteShape(
+                membership_claims=1,
+                recovery_claims=1,
+                projected_messages=len(events),
+            ),
+        ]
+        assert not await recovering.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+        assert await recovering.room_history_recovery(ROOM) == recovery
+
+    async def test_recovery_chunk_refuses_a_superseded_exact_recovery(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A later gap must fence every remaining page of an older walk."""
+        alice = journal_store.principal("agent@alice")
+        stale = await alice.record_room_history_recovery(ROOM)
+        current = await alice.record_room_history_recovery(ROOM)
+        assert stale is not None
+        assert current is not None
+        observed = _ObservedHydrationBackend(journal_store.backend)
+        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+
+        installed = await recovering.install_room_history_recovery_chunk(
+            stale,
+            events=hydration_messages(3),
+            expected_membership_epoch=await recovering.membership_epoch(ROOM),
+        )
+
+        assert not installed
+        assert observed.write_shapes == [
+            _HydrationWriteShape(membership_claims=1, recovery_claims=1),
+        ]
+        assert await recovering.room_history_recovery(ROOM) == current
+        assert await bodies(recovering) == []
+
+    async def test_recovery_chunk_refuses_a_stale_membership_epoch(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Membership invalidation must fence projection before recovery lookup."""
+        alice = journal_store.principal("agent@alice")
+        recovery = await alice.record_room_history_recovery(ROOM)
+        assert recovery is not None
+        stale_epoch = await alice.membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        observed = _ObservedHydrationBackend(journal_store.backend)
+        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+
+        installed = await recovering.install_room_history_recovery_chunk(
+            recovery,
+            events=hydration_messages(3),
+            expected_membership_epoch=stale_epoch,
+        )
+
+        assert not installed
+        assert observed.write_shapes == [_HydrationWriteShape(membership_claims=1)]
+        assert await bodies(recovering) == []
+
+    async def test_recovery_chunk_rejects_more_than_the_transaction_bound(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Callers cannot turn the page API back into one unbounded write."""
+        recovery = await alice.record_room_history_recovery(ROOM)
+        assert recovery is not None
+
+        with pytest.raises(ValueError, match="at most 256"):
+            await alice.install_room_history_recovery_chunk(
+                recovery,
+                events=hydration_messages(_HYDRATION_TRANSACTION_EVENT_LIMIT + 1),
+                expected_membership_epoch=await alice.membership_epoch(ROOM),
+            )
+
+        assert await bodies(alice, limit=_HYDRATION_TRANSACTION_EVENT_LIMIT + 1) == []
+        assert await alice.room_history_recovery(ROOM) == recovery
+
     async def test_history_recovery_projects_in_bounded_writes_then_settles(
         self,
         journal_store: EventJournalStore,
@@ -1944,13 +2059,20 @@ class TestBoundedHydrationInstallation:
         events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
         observed = _ObservedHydrationBackend(journal_store.backend)
         recovering = EventJournalStore(backend=observed).principal("agent@alice")
+        epoch = await recovering.membership_epoch(ROOM)
+
+        await self._install_recovery_events(
+            recovering,
+            recovery,
+            events,
+            expected_membership_epoch=epoch,
+        )
 
         outcome = await recovering.settle_room_history_recovery(
             recovery,
-            events=events,
             exhausted_server=True,
             attempted_policy_rank=2,
-            expected_membership_epoch=await recovering.membership_epoch(ROOM),
+            expected_membership_epoch=epoch,
         )
 
         assert outcome is HistoryRecoveryOutcome.REPAIRED
@@ -1960,6 +2082,7 @@ class TestBoundedHydrationInstallation:
         assert final_shape.recovery_settlements == 1
         assert final_shape.projected_messages == 0
         assert final_shape.membership_claims == 1
+        assert final_shape.recovery_claims == 1
         assert await recovering.room_history_recovery(ROOM) is None
         assert await recovering.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
@@ -1980,14 +2103,14 @@ class TestBoundedHydrationInstallation:
 
         observed = _ObservedHydrationBackend(journal_store.backend, before_write=fail_second_write)
         recovering = EventJournalStore(backend=observed).principal("agent@alice")
+        epoch = await recovering.membership_epoch(ROOM)
 
         with pytest.raises(RuntimeError, match="injected failure"):
-            await recovering.settle_room_history_recovery(
+            await self._install_recovery_events(
+                recovering,
                 recovery,
-                events=events,
-                exhausted_server=True,
-                attempted_policy_rank=2,
-                expected_membership_epoch=await recovering.membership_epoch(ROOM),
+                events,
+                expected_membership_epoch=epoch,
             )
 
         assert observed.write_shapes[0].projected_messages == _HYDRATION_TRANSACTION_EVENT_LIMIT
@@ -1995,12 +2118,17 @@ class TestBoundedHydrationInstallation:
         assert await alice.conversation_hydration_coverage(room_id=ROOM, thread_id=None) is None
         assert await alice.room_history_recovery(ROOM) == recovery
 
+        await self._install_recovery_events(
+            alice,
+            recovery,
+            events,
+            expected_membership_epoch=epoch,
+        )
         outcome = await alice.settle_room_history_recovery(
             recovery,
-            events=events,
             exhausted_server=True,
             attempted_policy_rank=2,
-            expected_membership_epoch=await alice.membership_epoch(ROOM),
+            expected_membership_epoch=epoch,
         )
 
         assert outcome is HistoryRecoveryOutcome.REPAIRED
@@ -2021,7 +2149,6 @@ class TestBoundedHydrationInstallation:
 
         outcome = await recovering.settle_room_history_recovery(
             recovery,
-            events=(),
             exhausted_server=False,
             attempted_policy_rank=2,
             expected_membership_epoch=await recovering.membership_epoch(ROOM),
@@ -2029,7 +2156,7 @@ class TestBoundedHydrationInstallation:
 
         assert outcome is HistoryRecoveryOutcome.TRUNCATED
         assert observed.write_shapes == [
-            _HydrationWriteShape(membership_claims=1, hydration_markers=1),
+            _HydrationWriteShape(membership_claims=1, recovery_claims=1, hydration_markers=1),
         ]
 
     async def test_cancellation_after_a_chunk_leaves_ordinary_hydration_retryable(
@@ -2133,9 +2260,20 @@ class TestBoundedHydrationInstallation:
         recovering = EventJournalStore(backend=observed).principal("agent@alice")
         events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
 
+        installed = await recovering.install_room_history_recovery_chunk(
+            old_recovery,
+            events=events[:_HYDRATION_TRANSACTION_EVENT_LIMIT],
+            expected_membership_epoch=stale_epoch,
+        )
+        assert installed
+        refused = await recovering.install_room_history_recovery_chunk(
+            old_recovery,
+            events=events[_HYDRATION_TRANSACTION_EVENT_LIMIT:],
+            expected_membership_epoch=stale_epoch,
+        )
+        assert not refused
         outcome = await recovering.settle_room_history_recovery(
             old_recovery,
-            events=events,
             exhausted_server=True,
             attempted_policy_rank=2,
             expected_membership_epoch=stale_epoch,
@@ -2417,7 +2555,6 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
         settlement = asyncio.create_task(
             recovering.settle_room_history_recovery(
                 old_recovery,
-                events=(),
                 exhausted_server=True,
                 attempted_policy_rank=2,
                 expected_membership_epoch=await reader.membership_epoch(ROOM),
