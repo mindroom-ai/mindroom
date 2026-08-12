@@ -586,13 +586,24 @@ class _ApprovalManager:
             return None
         if identified.card.resolution is not None:
             return await self._redeliver_recorded_resolution(pending, identified.card)
-        live_waiter = self._live_waiter_for_card(pending.card_event_id)
-        if live_waiter is not None:
-            return await self._discard_live_card(
-                waiter=live_waiter,
-                reason=_STARTUP_DISCARD_REASON,
-                resolved_by=transport_sender,
+        if self._live_waiter_for_card(pending.card_event_id) is not None:
+            # This process sent this card and is still waiting on the answer.
+            # A waiter only ever gets here one way -- ``_bind_live_waiter``,
+            # reached from a fresh send -- so a card with one is not a card a
+            # dead process left, it is live work of this one's. Expiring it
+            # tells a user their request was cancelled by a restart that had
+            # already finished before they were asked to decide.
+            #
+            # Nothing is owed either: the waiter settles the card on a click,
+            # a denial, or its own timeout. Counting it would have every
+            # pending approval hold the sweep open until somebody answered.
+            logger.debug(
+                "approval_startup_card_skipped_live_waiter",
+                room_id=room_id,
+                transaction_id=identified.card.transaction_id,
+                card_event_id=identified.card.card_event_id,
             )
+            return None
         result = await self._discard_matrix_only_card(
             pending=pending,
             transaction_id=identified.card.transaction_id,
@@ -1085,25 +1096,6 @@ class _ApprovalManager:
                 thread_id=pending.thread_id,
                 card_event_id=pending.card_event_id,
             )
-
-    async def _discard_live_card(
-        self,
-        *,
-        waiter: _LiveApprovalWaiter,
-        reason: str,
-        resolved_by: str | None,
-    ) -> bool:
-        """Expire through the live waiter, returning whether its Matrix edit landed."""
-        claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
-        if claimed_waiter is None:
-            return False
-        decision = self._new_decision(status="expired", reason=reason, resolved_by=resolved_by)
-        with self._claimed_resolution(claimed_waiter.card_event_id):
-            delivered = await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
-            if delivered:
-                with self._live_lock:
-                    self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
-            return delivered
 
     async def _settle_waiter_with_terminal_edit(
         self,
