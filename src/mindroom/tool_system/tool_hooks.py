@@ -27,13 +27,12 @@ from mindroom.hooks import (
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
-from mindroom.sync_bridge_state import running_loop_is_sync_tool_bridge, sync_tool_bridge_blocked_loop
+from mindroom.sync_bridge_state import sync_tool_bridge_blocked_loop
 from mindroom.timing import elapsed_ms_since, emit_timing_event
 from mindroom.tool_approval import (
     ToolApprovalCall,
     ToolApprovalScriptError,
     ToolCallWorkflowOrigin,
-    evaluate_tool_approval,
     request_tool_approval_for_call,
 )
 from mindroom.tool_system.runtime_context import (
@@ -62,11 +61,6 @@ if TYPE_CHECKING:
         HookRoomStateQuerier,
     )
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-_SYNC_TOOL_BRIDGE_APPROVAL_REASON = (
-    "This tool needs approval, and it was called synchronously, which blocks the runtime "
-    "MindRoom would need in order to ask for one. Ask again so it runs asynchronously, or "
-    "use a tool that does not require approval."
-)
 _DECLINED_RESULT_TEMPLATE = (
     "[TOOL CALL DECLINED]\n"
     "Tool: {tool_name}\n"
@@ -460,30 +454,6 @@ async def _emit_after_call(
     await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
 
 
-async def _approval_would_be_required(
-    *,
-    resolved_context: _ResolvedToolContext,
-    args: dict[str, Any],
-    tool_name: str,
-) -> bool:
-    """Return whether policy wants an approval for one call, without asking for it."""
-    if resolved_context.config is None or resolved_context.runtime_paths is None:
-        return False
-    try:
-        requires_approval, _ = await evaluate_tool_approval(
-            resolved_context.config,
-            resolved_context.runtime_paths,
-            tool_name,
-            deepcopy(args),
-            resolved_context.agent_name,
-        )
-    except ToolApprovalScriptError:
-        # A policy that cannot be read is handled by the normal path below,
-        # which declines with its own reason.
-        return True
-    return requires_approval
-
-
 async def _maybe_block_for_tool_approval(
     *,
     resolved_context: _ResolvedToolContext,
@@ -493,24 +463,6 @@ async def _maybe_block_for_tool_approval(
 ) -> str | None:
     if resolved_context.config is None or resolved_context.runtime_paths is None:
         return None
-
-    if running_loop_is_sync_tool_bridge() and await _approval_would_be_required(
-        resolved_context=resolved_context,
-        args=args,
-        tool_name=tool_name,
-    ):
-        # This tool was called synchronously, so its async work is running on a
-        # loop of its own while the runtime loop is blocked waiting for the
-        # thread. Everything an approval needs is on the far side of that
-        # block: the event-journal writer task drains on the runtime loop, and
-        # so does Matrix I/O. Asking anyway writes a durable claim nothing can
-        # settle and parks this call behind it, holding typing and the
-        # conversation lock for as long as the process lives.
-        #
-        # Only refused when the policy actually wants an approval: everything
-        # else is free to run here, and most tools do.
-        logger.warning("approval_refused_on_sync_tool_bridge", tool_name=tool_name)
-        return _format_declined_result(tool_name, _SYNC_TOOL_BRIDGE_APPROVAL_REASON)
 
     try:
         approval_decision = await request_tool_approval_for_call(

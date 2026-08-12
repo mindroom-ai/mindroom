@@ -1914,9 +1914,9 @@ async def test_sync_tool_approval_execute_on_runtime_loop_fails_fast(tmp_path: P
     assert result.result == (
         "[TOOL CALL DECLINED]\n"
         "Tool: echo\n"
-        "Reason: This tool needs approval, and it was called synchronously, which blocks the "
-        "runtime MindRoom would need in order to ask for one. Ask again so it runs "
-        "asynchronously, or use a tool that does not require approval.\n\n"
+        "Reason: Cannot perform Matrix approval transport while synchronous FunctionCall.execute() "
+        "is blocking the MindRoom runtime loop; use FunctionCall.aexecute() or run execute() "
+        "outside the runtime event loop.\n\n"
         "Adjust your approach — try a different tool or different arguments."
     )
     client.room_send.assert_not_awaited()
