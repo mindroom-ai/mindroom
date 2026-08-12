@@ -62,6 +62,30 @@ def _assert_closed_refusal(outcome: list[BaseException | None], operation_ran: t
     assert not operation_ran.is_set()
 
 
+def _stop_test_loops(
+    writer_loop: asyncio.AbstractEventLoop,
+    writer_thread: threading.Thread,
+    bridge: threading.Thread,
+    release_handoff: threading.Event,
+) -> None:
+    """Release a paused handoff and stop every loop thread the test started."""
+    release_handoff.set()
+    if writer_thread.is_alive():
+        if bridge.is_alive():
+            bridge.join(_RETURN_TIMEOUT_SECONDS)
+        writer_loop.call_soon_threadsafe(writer_loop.stop)
+        writer_thread.join(_RETURN_TIMEOUT_SECONDS)
+    elif bridge.is_alive():
+        restart = threading.Thread(target=writer_loop.run_forever, name="restarted-writer-loop")
+        restart.start()
+        bridge.join(_RETURN_TIMEOUT_SECONDS)
+        writer_loop.call_soon_threadsafe(writer_loop.stop)
+        restart.join(_RETURN_TIMEOUT_SECONDS)
+        assert not restart.is_alive(), "cleanup could not stop the restarted writer loop"
+    assert not writer_thread.is_alive(), "cleanup could not stop the writer loop"
+    writer_loop.close()
+
+
 @pytest.mark.asyncio
 async def test_a_write_from_a_second_event_loop_comes_back(tmp_path: Path) -> None:
     """A caller on another loop must resume once its write has committed."""
@@ -298,8 +322,7 @@ async def test_close_before_foreign_writer_task_lookup_does_not_recreate_the_wri
     _assert_closed_refusal(outcome, operation_ran)
 
 
-@pytest.mark.asyncio
-async def test_close_wakes_a_handoff_scheduled_after_the_writer_loop_stops(  # noqa: PLR0915
+def test_close_wakes_a_handoff_scheduled_after_the_writer_loop_stops(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -313,10 +336,6 @@ async def test_close_wakes_a_handoff_scheduled_after_the_writer_loop_stops(  # n
     async def initialize() -> None:
         await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
         writer_ready.set()
-
-    writer_loop.call_soon_threadsafe(asyncio.create_task, initialize())
-    writer_thread.start()
-    assert writer_ready.wait(_RETURN_TIMEOUT_SECONDS), "the writer loop never initialized"
 
     handoff_reached = threading.Event()
     release_handoff = threading.Event()
@@ -351,6 +370,9 @@ async def test_close_wakes_a_handoff_scheduled_after_the_writer_loop_stops(  # n
         writer_loop.stop()
 
     try:
+        writer_loop.call_soon_threadsafe(asyncio.create_task, initialize())
+        writer_thread.start()
+        assert writer_ready.wait(_RETURN_TIMEOUT_SECONDS), "the writer loop never initialized"
         with monkeypatch.context() as patch:
             patch.setattr(writer_loop, "call_soon_threadsafe", pause_admission)
             bridge.start()
@@ -365,14 +387,7 @@ async def test_close_wakes_a_handoff_scheduled_after_the_writer_loop_stops(  # n
         assert not bridge.is_alive(), "the stopped writer loop stranded the foreign write"
         _assert_closed_refusal(outcome, operation_ran)
     finally:
-        release_handoff.set()
-        if bridge.is_alive():
-            writer_loop.call_soon(writer_loop.stop)
-            restart = threading.Thread(target=writer_loop.run_forever, name="restarted-writer-loop")
-            restart.start()
-            restart.join(_RETURN_TIMEOUT_SECONDS)
-            bridge.join(_RETURN_TIMEOUT_SECONDS)
-        writer_loop.close()
+        _stop_test_loops(writer_loop, writer_thread, bridge, release_handoff)
 
 
 @pytest.mark.asyncio
