@@ -261,10 +261,10 @@ class SqliteBackend:
     async def write[T](self, operation: Operation[T]) -> T:
         """Queue one operation for the writer task and await its commit.
 
-        Admission is decided on the writer's loop, where it cannot race
-        ``close()``. A caller already on that loop enqueues synchronously; one
-        on another loop hands the decision across, where ``_closed`` is checked
-        again before the write enters the queue.
+        Admission is coordinated with ``close()`` under the admission lock. A
+        caller already on the writer's loop enqueues synchronously; one on
+        another loop registers its handoff before scheduling the admission
+        callback. The callback enqueues only while it still owns that handoff.
 
         That is what the queue being unbounded buys. A bounded one parked the
         producer in ``put`` instead, and ``close()`` frees a slot per entry it
@@ -307,8 +307,7 @@ class SqliteBackend:
             except RuntimeError:
                 with self._admission_lock:
                     still_pending = self._pending_admissions.pop(future, None) is not None
-                    closed = self._closed
-                if still_pending and not (closed or writer_loop.is_closed()):
+                if still_pending and not writer_loop.is_closed():
                     raise
                 if still_pending:
                     _deliver(future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
