@@ -164,7 +164,7 @@ Synthetic interactive-selection and edit-regeneration inputs construct prepared 
 
 ### Durable turn and callback states
 
-An ordinary callback sits in exactly one of these states.
+An ordinary callback moves through these lifecycle phases; durable and in-process markers can coexist.
 
 - Journal pending: the durable acceptance row exists and still owns the callback work.
 - Executing in-process: `PendingEventWorker` marks one process as running the persisted callback without adding a durable running state.

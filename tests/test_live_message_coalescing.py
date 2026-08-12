@@ -340,13 +340,16 @@ async def test_duplicate_delivery_is_claimed_before_dispatch_resolution(tmp_path
         first = asyncio.create_task(
             dispatch_test_turn(controller, room, event, "@user:localhost"),
         )
-        await plan_started.wait()
-        await dispatch_test_turn(
-            controller,
-            room,
-            event,
-            "@user:localhost",
-            queued_notice_reservation=duplicate_reservation,
+        await asyncio.wait_for(plan_started.wait(), timeout=1.0)
+        await asyncio.wait_for(
+            dispatch_test_turn(
+                controller,
+                room,
+                event,
+                "@user:localhost",
+                queued_notice_reservation=duplicate_reservation,
+            ),
+            timeout=1.0,
         )
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
