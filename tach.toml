@@ -4537,6 +4537,7 @@ from = ["mindroom.tool_approval"]
 [[interfaces]]
 expose = [
     "is_loop_blocked_by_sync_tool_bridge",
+    "running_loop_is_sync_tool_bridge",
     "sync_tool_bridge_blocked_loop",
 ]
 from = ["mindroom.sync_bridge_state"]
