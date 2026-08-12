@@ -127,8 +127,8 @@ If chunking is too large, semantic indexing retries will fail with embedder 500 
 Semantic refreshes index up to 4 files concurrently by default.
 Set `MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY` to an integer from 1 through 128 to tune this process-wide limit for large corpora; invalid values fail when knowledge managers start.
 Local `sentence_transformers` embedding is serialized regardless of this limit, because torch's Metal shader caches are not thread-safe.
-Each background refresh runs in a child process that is killed after one hour.
-Set `MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS` to a positive number of seconds to widen or narrow that window for very large corpora.
+Each background refresh runs in a child process, and MindRoom terminates only refreshes that exceed the default one-hour timeout.
+Set `MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS` to a finite positive number of seconds to widen or narrow that timeout for very large corpora.
 
 ### File Type Filtering
 
