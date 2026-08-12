@@ -295,7 +295,10 @@ def _load_agent_session(
         runtime_paths,
         execution_identity=execution_identity,
     )
-    return get_agent_session(storage, session_id)
+    try:
+        return get_agent_session(storage, session_id)
+    finally:
+        storage.close()
 
 
 def _entry_priority_key(entry: _FlushSessionEntry, now: int) -> tuple[int, int]:

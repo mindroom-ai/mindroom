@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import threading
-import time
 from typing import TYPE_CHECKING
 
-import pytest
 from sqlalchemy import text
 
 from mindroom.agent_storage import create_state_storage
@@ -27,19 +24,14 @@ def _storage(tmp_path: Path) -> BaseDb:
     )
 
 
-def test_a_state_database_is_opened_for_concurrent_readers(tmp_path: Path) -> None:
-    """WAL and a wait, rather than the default of blocking readers and failing fast.
-
-    These are the databases a response reads on its way to answering. Under the
-    rollback journal a flush in progress makes those reads wait on a lock the
-    reader cannot see, and without a busy timeout a contended statement raises
-    `database is locked` instead of waiting for its turn.
-    """
+def test_a_state_database_keeps_rollback_journal_and_waits_for_locks(tmp_path: Path) -> None:
+    """Network-compatible rollback journaling retains a long lock timeout."""
     storage = _storage(tmp_path)
 
     with storage.db_engine.connect() as connection:
-        assert connection.execute(text("PRAGMA journal_mode")).scalar() == "wal"
+        assert connection.execute(text("PRAGMA journal_mode")).scalar() == "delete"
         assert connection.execute(text("PRAGMA busy_timeout")).scalar() == 30_000
+    storage.close()
 
 
 def test_a_read_waits_for_a_writer_rather_than_failing(tmp_path: Path) -> None:
@@ -51,60 +43,44 @@ def test_a_read_waits_for_a_writer_rather_than_failing(tmp_path: Path) -> None:
 
     holding = threading.Event()
     release = threading.Event()
+    reading = threading.Event()
+    finished = threading.Event()
+    result: list[int] = []
+    errors: list[Exception] = []
 
     def hold_write_lock() -> None:
         with storage.db_engine.connect() as writer:
-            writer.execute(text("BEGIN IMMEDIATE"))
+            writer.execute(text("BEGIN EXCLUSIVE"))
             writer.execute(text("INSERT INTO probe (value) VALUES ('held')"))
             holding.set()
             release.wait(timeout=5)
             writer.execute(text("COMMIT"))
 
+    def read_after_lock() -> None:
+        try:
+            reading.set()
+            with storage.db_engine.connect() as reader:
+                result.append(reader.execute(text("SELECT count(*) FROM probe")).scalar_one())
+        except Exception as error:  # pragma: no cover - asserted below
+            errors.append(error)
+        finally:
+            finished.set()
+
     holder = threading.Thread(target=hold_write_lock, name="probe-writer")
+    reader = threading.Thread(target=read_after_lock, name="probe-reader")
     holder.start()
     try:
         assert holding.wait(timeout=5)
-        with storage.db_engine.connect() as reader:
-            # Under WAL this returns the pre-write snapshot immediately rather
-            # than raising, which is the property the response path needs.
-            assert reader.execute(text("SELECT count(*) FROM probe")).scalar() == 0
+        reader.start()
+        assert reading.wait(timeout=5)
+        assert not finished.wait(timeout=0.1), "reader did not wait for the exclusive writer"
     finally:
         release.set()
         holder.join(timeout=5)
+        reader.join(timeout=5)
 
     assert not holder.is_alive()
-
-
-@pytest.mark.asyncio
-async def test_reading_a_session_does_not_hold_the_event_loop(tmp_path: Path) -> None:
-    """A slow state read must not stop everything else the loop is running.
-
-    The read is synchronous down to a SQLite statement and these databases have
-    been measured at over a second for a single row, so the loop has to stay
-    free while it happens.
-    """
-    storage = _storage(tmp_path)
-    with storage.db_engine.connect() as setup:
-        setup.execute(text("CREATE TABLE slow (value TEXT)"))
-        setup.commit()
-
-    ticks = 0
-
-    async def tick() -> None:
-        nonlocal ticks
-        while True:
-            ticks += 1
-            await asyncio.sleep(0.01)
-
-    def slow_read() -> None:
-        with storage.db_engine.connect() as connection:
-            connection.execute(text("SELECT count(*) FROM slow")).scalar()
-            time.sleep(0.3)
-
-    ticker = asyncio.create_task(tick())
-    try:
-        await asyncio.to_thread(slow_read)
-    finally:
-        ticker.cancel()
-
-    assert ticks > 5, "the loop was blocked while the state database was read"
+    assert not reader.is_alive()
+    assert errors == []
+    assert result == [1]
+    storage.close()

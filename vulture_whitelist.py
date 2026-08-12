@@ -315,7 +315,3 @@ FINAL  # unused variable (src/mindroom/event_journal/models.py)
 # Named only inside a `cast("_RoomIdEvent", event)` string literal, which
 # vulture does not resolve.
 _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
-
-# Registered by decorator, never called by name.
-_.set_pragmas  # SQLAlchemy connect listener (src/mindroom/agent_storage.py)
-_set_pragmas  # SQLAlchemy connect listener (src/mindroom/agent_storage.py)
