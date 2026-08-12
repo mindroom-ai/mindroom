@@ -17,6 +17,7 @@ from mindroom.oauth.discovery import (
     _discover_metadata,
 )
 from mindroom.oauth.providers import OAuthProviderError
+from mindroom.server_fetch_url import ServerFetchUrlError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -76,6 +77,23 @@ class _ResourceOriginDiscoveryClient:
         del headers
         self.posts.append((url, json))
         return _Response({"client_id": "registered-public-client"}, 201)
+
+
+def _install_dns_rebinding(monkeypatch: pytest.MonkeyPatch, *, safe_resolutions: int) -> None:
+    remaining_safe_resolutions = safe_resolutions
+
+    def resolve(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        nonlocal remaining_safe_resolutions
+        address = "93.184.216.34" if remaining_safe_resolutions > 0 else "10.0.0.5"
+        remaining_safe_resolutions -= 1
+        return [(0, 0, 0, "", (address, 0))]
+
+    async def unexpected_connect(*_args: object, **_kwargs: object) -> None:
+        msg = "unsafe address reached the network backend"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", resolve)
+    monkeypatch.setattr("mindroom.server_fetch_url.AnyIOBackend.connect_tcp", unexpected_connect)
 
 
 @pytest.fixture(autouse=True)
@@ -199,6 +217,21 @@ async def test_cached_endpoints_are_revalidated_before_reuse(
 
 
 @pytest.mark.asyncio
+async def test_discovery_revalidates_dns_when_connecting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery must reject a hostname that rebinds before the connection."""
+    _install_dns_rebinding(monkeypatch, safe_resolutions=2)
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+
+    with pytest.raises(OAuthProviderError, match="metadata request failed") as error:
+        await _discover_metadata(OAuthDiscoveryConfig(resource="https://resource.example.test"), runtime_paths)
+
+    assert isinstance(error.value.__cause__, ServerFetchUrlError)
+
+
+@pytest.mark.asyncio
 async def test_dynamic_registration_requires_provider_specific_client_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -236,6 +269,46 @@ async def test_dynamic_registration_requires_provider_specific_client_config(
 
     assert _ResourceOriginDiscoveryClient.posts == []
     assert get_runtime_credentials_manager(runtime_paths).load_credentials("shared_example_oauth_client") is None
+
+
+@pytest.mark.asyncio
+async def test_dynamic_registration_revalidates_dns_when_connecting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Client registration must reject a hostname that rebinds before the connection."""
+    _install_dns_rebinding(monkeypatch, safe_resolutions=4)
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
+    )
+    provider = OAuthProvider(
+        id="rebound_registration",
+        display_name="Rebound Registration",
+        authorization_url="",
+        token_url="",
+        scopes=(),
+        allow_empty_scopes=True,
+        credential_service="rebound_registration_oauth",
+        client_config_services=("rebound_registration_oauth_client",),
+        token_endpoint_auth_method="none",  # noqa: S106
+        runtime_bootstrapper=oauth_runtime_bootstrapper(
+            OAuthDiscoveryConfig(
+                resource="",
+                discovery="manual",
+                authorization_url="https://auth.example.test/authorize",
+                token_url="https://auth.example.test/token",  # noqa: S106
+                registration_url="https://auth.example.test/register",
+                token_endpoint_auth_method="none",  # noqa: S106
+            ),
+        ),
+    )
+
+    with pytest.raises(OAuthProviderError, match="dynamic client registration failed") as error:
+        await provider.runtime_endpoints(runtime_paths)
+
+    assert isinstance(error.value.__cause__, ServerFetchUrlError)
 
 
 @pytest.mark.asyncio

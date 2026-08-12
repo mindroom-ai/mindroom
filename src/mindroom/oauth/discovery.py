@@ -13,7 +13,11 @@ import httpx
 from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRuntimeEndpoints
-from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
+from mindroom.server_fetch_url import (
+    ServerFetchAsyncHTTPTransport,
+    ServerFetchUrlError,
+    validate_server_fetch_url,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -112,6 +116,16 @@ async def _validate_url(url: str, config: OAuthDiscoveryConfig, runtime_paths: R
     except ServerFetchUrlError as exc:
         msg = f"{config.error_label} discovery refused unsafe URL"
         raise OAuthProviderError(msg) from exc
+
+
+def _http_client(config: OAuthDiscoveryConfig, runtime_paths: RuntimePaths) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        timeout=_DISCOVERY_TIMEOUT_SECONDS,
+        follow_redirects=False,
+        transport=ServerFetchAsyncHTTPTransport(
+            allow_private_networks=runtime_paths.env_flag(config.allow_private_env),
+        ),
+    )
 
 
 async def _fetch_json(
@@ -261,7 +275,7 @@ async def _discover_metadata(
             token_endpoint_auth_method=config.token_endpoint_auth_method,
         )
     else:
-        async with httpx.AsyncClient(timeout=_DISCOVERY_TIMEOUT_SECONDS, follow_redirects=False) as client:
+        async with _http_client(config, runtime_paths) as client:
             discovered = await _authorization_metadata(client, config, runtime_paths)
         _validate_capabilities(config, discovered)
         authorization_url = _configured_endpoint(config.authorization_url) or _metadata_string(
@@ -359,7 +373,7 @@ async def _register_client(
             raise OAuthProviderError(msg)
         await _validate_url(metadata.registration_url, config, runtime_paths)
         try:
-            async with httpx.AsyncClient(timeout=_DISCOVERY_TIMEOUT_SECONDS, follow_redirects=False) as client:
+            async with _http_client(config, runtime_paths) as client:
                 response = await client.post(
                     metadata.registration_url,
                     json=_registration_payload(provider, runtime_paths),
