@@ -386,7 +386,13 @@ class ApprovalMatrixTransport:
     async def _recover_continuations(self) -> bool:
         complete = True
         for continuation in await asyncio.to_thread(self._continuations.recoverable):
-            if continuation.state == "pending":
+            if continuation.state == "publishing":
+                settled = await self._fail_recovered_continuation(
+                    continuation,
+                    "Tool approval response publication was interrupted; the paused run was not replayed.",
+                )
+                complete = settled and complete
+            elif continuation.state == "pending":
                 recovered = await self._attach_recovered_cards(continuation)
                 if any(not call.decision_recorded and call.card_event_id is None for call in recovered.calls):
                     settled = await self._fail_recovered_continuation(
@@ -468,7 +474,8 @@ class ApprovalMatrixTransport:
             )
             return False
         await bot.fail_approval_continuation(continuation, reason)
-        return True
+        refreshed = await asyncio.to_thread(self._continuations.get, continuation.approval_id)
+        return refreshed is not None and refreshed.state == "failed"
 
     async def _run_on_runtime_loop(
         self,

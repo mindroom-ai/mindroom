@@ -753,6 +753,70 @@ async def test_replayed_source_adopts_durable_approval_continuation(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_suspension_owns_source_before_waiting_response_delivery(tmp_path: Path) -> None:
+    """Cancellation during waiting-response delivery must not replay the paused tool turn."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target())
+    delivery_started = asyncio.Event()
+    keep_delivering = asyncio.Event()
+
+    async def deliver_waiting_response(_request: object) -> str:
+        delivery_started.set()
+        await keep_delivering.wait()
+        return "$waiting"
+
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-paused",
+        tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id=request.room_id,
+        thread_id=request.thread_id,
+        resolved_thread_id=request.response_envelope.target.resolved_thread_id,
+        session_id=paused.session_id,
+    )
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(side_effect=deliver_waiting_response)),
+        patch("mindroom.response_runner.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.response_runner.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+    ):
+        suspension = asyncio.create_task(
+            runner._suspend_for_approval(
+                paused,
+                request=request,
+                target=request.response_envelope.target,
+                progress=response_runner._DeliveryProgress(),
+                execution_identity=identity,
+                entity_kind="agent",
+            ),
+        )
+        await asyncio.wait_for(delivery_started.wait(), timeout=1.0)
+        suspension.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await suspension
+
+    owned = runner._approval_continuations.for_source_event(request.response_envelope.source_event_id)
+    assert owned is not None
+    assert owned.state == "publishing"
+    assert owned.response_event_id is None
+    locked_operation = AsyncMock(return_value="$duplicate")
+
+    event_id = await runner._run_owned_or_locked_response(
+        request,
+        target=request.response_envelope.target,
+        early_placeholder=response_runner._EarlyPlaceholderState(),
+        locked_operation=locked_operation,
+    )
+
+    assert event_id is None
+    locked_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_approval_chain_keeps_second_pause_in_same_guarded_continuation(tmp_path: Path) -> None:
     """A second Agno pause must advance the claimed row instead of becoming a terminal failure."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -1262,6 +1326,83 @@ async def test_router_failure_uses_terminal_notice_instead_of_cross_sender_edit(
     assert request.response_text == "Agent removed"
     assert request.delivery_turn_id == "$source"
     assert request.delivery_stage is response_runner.DeliveryStage.FINAL
+    failed = runner._approval_continuations.get(continuation.approval_id)
+    assert failed is not None
+    assert failed.state == "failed"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_publication_stays_owned_until_terminal_notice_is_sent(tmp_path: Path) -> None:
+    """Startup failure settlement must bind its notice before releasing replay ownership."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-publishing",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id=None,
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="publishing",
+    )
+    runner._approval_continuations.create(continuation)
+
+    with patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$terminal")):
+        await runner.fail_approval_continuation(continuation, "Publication interrupted")
+
+    failed = runner._approval_continuations.get(continuation.approval_id)
+    assert failed is not None
+    assert failed.state == "failed"
+    assert failed.response_event_id == "$terminal"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_publication_keeps_source_when_terminal_notice_fails(tmp_path: Path) -> None:
+    """A transient Matrix failure must leave startup recovery responsible for the source."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-publishing-retry",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id=None,
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="publishing",
+    )
+    runner._approval_continuations.create(continuation)
+
+    with patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value=None)):
+        await runner.fail_approval_continuation(continuation, "Publication interrupted")
+
+    owned = runner._approval_continuations.for_source_event("$source")
+    assert owned is not None
+    assert owned.state == "publishing"
+    assert owned.response_event_id is None
 
 
 @pytest.mark.asyncio

@@ -187,6 +187,25 @@ def test_continuation_store_owns_source_before_outer_turn_settlement(tmp_path: P
     assert store.for_source_event("$unrelated") is None
 
 
+def test_publishing_continuation_binds_visible_response_atomically(tmp_path: Path) -> None:
+    """The source owner must exist before delivery and become actionable only with its event ID."""
+    store = ApprovalContinuationStore(tmp_path)
+    publishing = replace(_continuation(), response_event_id=None, state="publishing")
+    store.create(publishing)
+
+    published = store.bind_response_event(
+        publishing.approval_id,
+        "$waiting",
+        state="pending",
+        calls=publishing.calls,
+    )
+
+    assert published is not None
+    assert published.state == "pending"
+    assert published.response_event_id == "$waiting"
+    assert store.for_source_event("$source") == published
+
+
 def test_terminal_continuation_releases_source_replay_ownership(tmp_path: Path) -> None:
     """Settled rows must not suppress a later legitimate delivery that reuses the source lookup."""
     store = ApprovalContinuationStore(tmp_path)
@@ -225,7 +244,7 @@ def test_recovery_pages_through_every_continuation(tmp_path: Path) -> None:
     recovered = store.recoverable()
 
     assert len(recovered) == 101
-    assert db.get_approvals.call_count == 4
+    assert db.get_approvals.call_count == 5
 
 
 @pytest.mark.asyncio

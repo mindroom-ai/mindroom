@@ -23,7 +23,8 @@ class ApprovalDecision(StrEnum):
     EXPIRED = "expired"
 
 
-type _ApprovalContinuationState = Literal["pending", "ready", "claimed", "completed", "failed"]
+type _ApprovalContinuationState = Literal["publishing", "pending", "ready", "claimed", "completed", "failed"]
+type _PublishedContinuationState = Literal["pending", "ready"]
 _PAGE_SIZE = 100
 
 _STORE_LOCKS_GUARD = threading.Lock()
@@ -91,7 +92,7 @@ class ApprovalContinuation:
     room_id: str
     thread_id: str | None
     requester_id: str
-    response_event_id: str
+    response_event_id: str | None
     calls: tuple[ApprovalCall, ...]
     execution_identity: dict[str, object]
     source_event_ids: tuple[str, ...]
@@ -138,7 +139,7 @@ class ApprovalContinuation:
             room_id=cast("str", context["room_id"]),
             thread_id=cast("str | None", context.get("thread_id")),
             requester_id=cast("str", context["requester_id"]),
-            response_event_id=cast("str", context["response_event_id"]),
+            response_event_id=cast("str | None", context["response_event_id"]),
             calls=tuple(ApprovalCall.from_dict(call) for call in raw_calls),
             execution_identity=cast("dict[str, object]", context["execution_identity"]),
             source_event_ids=tuple(cast("list[str]", context["source_event_ids"])),
@@ -189,6 +190,33 @@ class ApprovalContinuationStore:
         """Return one continuation by ID."""
         row = self._db.get_approval(approval_id)
         return None if row is None else ApprovalContinuation._from_row(row)
+
+    def bind_response_event(
+        self,
+        approval_id: str,
+        response_event_id: str,
+        *,
+        state: Literal["publishing"] | _PublishedContinuationState,
+        calls: tuple[ApprovalCall, ...] | None = None,
+    ) -> ApprovalContinuation | None:
+        """Atomically bind visible delivery and optionally publish the continuation."""
+        with self._lock:
+            current = self.get(approval_id)
+            if current is None or current.state != "publishing":
+                return current
+            published = replace(
+                current,
+                response_event_id=response_event_id,
+                calls=current.calls if calls is None else calls,
+                state=state,
+            )
+            row = self._db.update_approval(
+                approval_id,
+                expected_status="publishing",
+                status=state,
+                context=published._to_context(),
+            )
+            return self.get(approval_id) if row is None else ApprovalContinuation._from_row(row)
 
     def resolve_call(
         self,
@@ -249,7 +277,7 @@ class ApprovalContinuationStore:
 
     def for_source_event(self, source_event_id: str) -> ApprovalContinuation | None:
         """Return the continuation that durably owns one inbound journal source."""
-        for state in ("pending", "ready", "claimed"):
+        for state in ("publishing", "pending", "ready", "claimed"):
             page = 1
             while True:
                 rows, total = self._db.get_approvals(
@@ -372,7 +400,7 @@ class ApprovalContinuationStore:
     def recoverable(self) -> tuple[ApprovalContinuation, ...]:
         """Return continuations that startup must recover or settle."""
         records: list[ApprovalContinuation] = []
-        for state in ("pending", "ready", "claimed"):
+        for state in ("publishing", "pending", "ready", "claimed"):
             page = 1
             while True:
                 rows, total = self._db.get_approvals(

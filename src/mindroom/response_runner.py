@@ -713,58 +713,6 @@ class ResponseRunner:
                 msg = "Paused approval tool is missing its exact identity"
                 raise RuntimeError(msg)
             identified_tools.append((tool, tool.tool_call_id, tool.tool_name))
-        decisions: dict[str, tuple[ContinuationDecision | None, float]] = {}
-        for tool, tool_call_id, tool_name in identified_tools:
-            requires_approval, timeout_seconds = await evaluate_tool_approval(
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-                tool_name,
-                dict(tool.tool_args or {}),
-                owners.get(tool_call_id, self.deps.agent_name),
-            )
-            decisions[tool_call_id] = (
-                (
-                    None
-                    if requires_approval and approver_id is not None
-                    else ContinuationDecision.DENIED
-                    if requires_approval
-                    else ContinuationDecision.APPROVED
-                ),
-                timeout_seconds,
-            )
-
-        waiting_text = "Waiting for approval: " + ", ".join(
-            f"`{tool_name}`" for _tool, _id, tool_name in identified_tools
-        )
-        response_event_id = progress.tracked_event_id
-        delivery_kind: Literal["sent", "edited"] = "edited"
-        if response_event_id is None:
-            response_event_id = await self.deps.delivery_gateway.send_text(
-                SendTextRequest(
-                    target=target,
-                    response_text=waiting_text,
-                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
-                    delivery_turn_id=request.response_envelope.source_event_id,
-                    delivery_stage=DeliveryStage.INITIAL,
-                ),
-            )
-            delivery_kind = "sent"
-            if response_event_id is not None and request.on_visible_response is not None:
-                await request.on_visible_response(response_event_id)
-        elif not await self.deps.delivery_gateway.edit_text(
-            EditTextRequest(
-                target=target,
-                event_id=response_event_id,
-                new_text=waiting_text,
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
-            ),
-        ):
-            response_event_id = None
-        if response_event_id is None:
-            msg = "Could not publish the suspended approval response"
-            raise RuntimeError(msg)
-        progress.track_event(response_event_id)
-
         approval_id = uuid4().hex
         now = datetime.now(UTC)
         raw_source_event_ids = (
@@ -784,7 +732,7 @@ class ResponseRunner:
             if isinstance(raw_source_event_ids, list)
             else (request.response_envelope.source_event_id,)
         )
-        continuation = ApprovalContinuation(
+        publishing = ApprovalContinuation(
             approval_id=approval_id,
             run_id=paused.run_id,
             session_id=paused.session_id,
@@ -793,26 +741,117 @@ class ResponseRunner:
             room_id=target.room_id,
             thread_id=target.resolved_thread_id,
             requester_id=requester_id,
-            response_event_id=response_event_id,
+            response_event_id=progress.tracked_event_id,
             calls=tuple(
                 ApprovalCall(
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     invoking_agent=owners.get(tool_call_id, self.deps.agent_name),
-                    expires_at=(now + timedelta(seconds=decisions[tool_call_id][1])).isoformat(),
-                    decision=decisions[tool_call_id][0],
-                    decision_recorded=decisions[tool_call_id][0] is not None,
+                    expires_at=now.isoformat(),
                 )
-                for tool, tool_call_id, tool_name in identified_tools
+                for _tool, tool_call_id, tool_name in identified_tools
             ),
             execution_identity=serialize_tool_execution_identity(execution_identity),
             source_event_ids=source_event_ids,
             runtime_model_name=paused.runtime_model_name,
-            state="ready" if all(decision is not None for decision, _timeout in decisions.values()) else "pending",
+            state="publishing",
             team_member_names=team_member_names,
             team_mode=team_mode,
         )
-        self._approval_continuations.create(continuation)
+        self._approval_continuations.create(publishing)
+
+        decisions: dict[str, tuple[ContinuationDecision | None, float]] = {}
+        try:
+            for tool, tool_call_id, tool_name in identified_tools:
+                requires_approval, timeout_seconds = await evaluate_tool_approval(
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                    tool_name,
+                    dict(tool.tool_args or {}),
+                    owners.get(tool_call_id, self.deps.agent_name),
+                )
+                decisions[tool_call_id] = (
+                    (
+                        None
+                        if requires_approval and approver_id is not None
+                        else ContinuationDecision.DENIED
+                        if requires_approval
+                        else ContinuationDecision.APPROVED
+                    ),
+                    timeout_seconds,
+                )
+        except Exception as error:
+            await self.fail_approval_continuation(
+                publishing,
+                f"Approval policy evaluation failed: {error}",
+            )
+            raise
+
+        now = datetime.now(UTC)
+        calls = tuple(
+            ApprovalCall(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                invoking_agent=owners.get(tool_call_id, self.deps.agent_name),
+                expires_at=(now + timedelta(seconds=decisions[tool_call_id][1])).isoformat(),
+                decision=decisions[tool_call_id][0],
+                decision_recorded=decisions[tool_call_id][0] is not None,
+            )
+            for _tool, tool_call_id, tool_name in identified_tools
+        )
+        waiting_text = "Waiting for approval: " + ", ".join(
+            f"`{tool_name}`" for _tool, _id, tool_name in identified_tools
+        )
+        response_event_id = progress.tracked_event_id
+        delivery_kind: Literal["sent", "edited"] = "edited"
+        try:
+            if response_event_id is None:
+                response_event_id = await self.deps.delivery_gateway.send_text(
+                    SendTextRequest(
+                        target=target,
+                        response_text=waiting_text,
+                        extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+                        delivery_turn_id=request.response_envelope.source_event_id,
+                        delivery_stage=DeliveryStage.INITIAL,
+                    ),
+                )
+                delivery_kind = "sent"
+            elif not await self.deps.delivery_gateway.edit_text(
+                EditTextRequest(
+                    target=target,
+                    event_id=response_event_id,
+                    new_text=waiting_text,
+                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+                ),
+            ):
+                response_event_id = None
+        except Exception as error:
+            await self.fail_approval_continuation(
+                publishing,
+                f"Approval response publication failed: {error}",
+            )
+            raise
+        if response_event_id is None:
+            msg = "Could not publish the suspended approval response"
+            await self.fail_approval_continuation(publishing, msg)
+            raise RuntimeError(msg)
+
+        continuation_state: Literal["pending", "ready"] = (
+            "ready" if all(decision is not None for decision, _timeout in decisions.values()) else "pending"
+        )
+        continuation = self._approval_continuations.bind_response_event(
+            approval_id,
+            response_event_id,
+            state=continuation_state,
+            calls=calls,
+        )
+        if continuation is None or continuation.state != continuation_state:
+            msg = "Approval continuation lost its visible response binding"
+            raise RuntimeError(msg)
+        progress.track_event(response_event_id)
+        if delivery_kind == "sent" and request.on_visible_response is not None:
+            await request.on_visible_response(response_event_id)
+
         if continuation.state == "ready":
             claimant_id = f"inline:{uuid4().hex}"
             claimed = self._approval_continuations.claim(approval_id, claimant_id)
@@ -950,6 +989,9 @@ class ResponseRunner:
                 timeout_seconds,
             )
         waiting_text = "Waiting for approval: " + ", ".join(f"`{name}`" for _tool, _id, name in identified)
+        if current.response_event_id is None:
+            msg = "Claimed approval continuation has no visible response"
+            raise RuntimeError(msg)
         if not await self.deps.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
@@ -1080,24 +1122,73 @@ class ResponseRunner:
 
     async def fail_approval_continuation(self, continuation: ApprovalContinuation, reason: str) -> None:
         """Make an unrecoverable continuation visibly terminal."""
-        self._approval_continuations.fail(continuation.approval_id, reason)
+        current = self._approval_continuations.get(continuation.approval_id)
+        if current is None or current.state in {"completed", "failed"}:
+            return
         target = MessageTarget(
-            room_id=continuation.room_id,
-            source_thread_id=continuation.thread_id,
-            resolved_thread_id=continuation.thread_id,
+            room_id=current.room_id,
+            source_thread_id=current.thread_id,
+            resolved_thread_id=current.thread_id,
             reply_to_event_id=None,
-            session_id=continuation.session_id,
+            session_id=current.session_id,
         )
-        if self.deps.agent_name == continuation.entity_name:
-            await self._edit_continuation_response(continuation, target=target, text=reason)
-        else:
-            await self.deps.delivery_gateway.send_text(
+        if current.state != "publishing":
+            self._approval_continuations.fail(current.approval_id, reason)
+            if self.deps.agent_name == current.entity_name:
+                if not await self._edit_continuation_response(current, target=target, text=reason):
+                    self.deps.logger.warning(
+                        "approval_continuation_failure_not_delivered",
+                        approval_id=current.approval_id,
+                        response_event_id=current.response_event_id,
+                    )
+            else:
+                await self.deps.delivery_gateway.send_text(
+                    SendTextRequest(
+                        target=target,
+                        response_text=reason,
+                        delivery_turn_id=current.source_event_ids[0],
+                        delivery_stage=DeliveryStage.FINAL,
+                    ),
+                )
+            return
+        delivered = False
+        if current.response_event_id is None:
+            response_event_id = await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
                     target=target,
                     response_text=reason,
-                    delivery_turn_id=continuation.source_event_ids[0],
+                    delivery_turn_id=current.source_event_ids[0],
                     delivery_stage=DeliveryStage.FINAL,
                 ),
+            )
+            if response_event_id is not None and current.state == "publishing":
+                bound = self._approval_continuations.bind_response_event(
+                    current.approval_id,
+                    response_event_id,
+                    state="publishing",
+                )
+                delivered = bound is not None and bound.response_event_id == response_event_id
+        elif self.deps.agent_name == current.entity_name:
+            delivered = await self._edit_continuation_response(current, target=target, text=reason)
+        else:
+            delivered = (
+                await self.deps.delivery_gateway.send_text(
+                    SendTextRequest(
+                        target=target,
+                        response_text=reason,
+                        delivery_turn_id=current.source_event_ids[0],
+                        delivery_stage=DeliveryStage.FINAL,
+                    ),
+                )
+                is not None
+            )
+        if delivered:
+            self._approval_continuations.fail(current.approval_id, reason)
+        else:
+            self.deps.logger.warning(
+                "approval_continuation_failure_not_delivered",
+                approval_id=current.approval_id,
+                response_event_id=current.response_event_id,
             )
 
     async def _continue_entity_call(
@@ -1240,6 +1331,8 @@ class ResponseRunner:
         target: MessageTarget,
         text: str,
     ) -> bool:
+        if continuation.response_event_id is None:
+            return False
         return await self.deps.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
