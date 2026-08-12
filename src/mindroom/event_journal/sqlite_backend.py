@@ -287,7 +287,12 @@ class SqliteBackend:
         if writer_loop is None or writer_loop is caller_loop:
             queue.put_nowait(queued)
         else:
-            writer_loop.call_soon_threadsafe(self._admit, queue, queued)
+            try:
+                writer_loop.call_soon_threadsafe(self._admit, queue, queued)
+            except RuntimeError:
+                if not writer_loop.is_closed():
+                    raise
+                _deliver(future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
         # Cancelling this await must not report an outcome the writer has not
         # reached yet: the statement runs on a thread regardless, so the caller
         # learns how it ended before its cancellation propagates.

@@ -235,3 +235,79 @@ async def test_close_wakes_a_cross_loop_write_already_waiting_in_the_queue(
     await asyncio.to_thread(bridge.join, _RETURN_TIMEOUT_SECONDS)
     _assert_closed_refusal(outcome, operation_ran)
     await blocking_write
+
+
+@pytest.mark.asyncio
+async def test_a_closed_recorded_writer_loop_refuses_a_cross_loop_write(tmp_path: Path) -> None:
+    """A stale closed writer loop must produce the store's closure error, not leak a loop error."""
+    backend = SqliteBackend.open(tmp_path / "journal.db")
+    await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
+    writer_loop = backend._writer_loop
+    closed_loop = asyncio.new_event_loop()
+    closed_loop.close()
+    operation_ran = threading.Event()
+
+    def insert_claim(transaction: Transaction) -> None:
+        operation_ran.set()
+        transaction.execute("INSERT INTO claim VALUES (1)")
+
+    backend._writer_loop = closed_loop
+    try:
+        with pytest.raises(RuntimeError, match=r"^The event-journal store is closed$"):
+            await backend.write(insert_claim)
+    finally:
+        backend._writer_loop = writer_loop
+        await backend.close()
+
+    assert not operation_ran.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_cross_loop_write_waits_for_its_statement_to_finish(tmp_path: Path) -> None:
+    """Cancellation must wake only after the cross-loop statement releases the writer."""
+    backend = SqliteBackend.open(tmp_path / "journal.db")
+    await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
+    statement_started = threading.Event()
+    release_statement = threading.Event()
+    statement_finished = threading.Event()
+    cancellation_sent = threading.Event()
+    cancellation_returned = threading.Event()
+    outcome: list[BaseException] = []
+
+    def insert_claim(transaction: Transaction) -> None:
+        transaction.execute("INSERT INTO claim VALUES (1)")
+        statement_started.set()
+        assert release_statement.wait(_RETURN_TIMEOUT_SECONDS), "the test never released the statement"
+        statement_finished.set()
+
+    def write_from_its_own_loop() -> None:
+        async def claim() -> None:
+            writing = asyncio.create_task(backend.write(insert_claim))
+            assert await asyncio.to_thread(statement_started.wait, _RETURN_TIMEOUT_SECONDS), (
+                "the cross-loop statement never started"
+            )
+            writing.cancel()
+            cancellation_sent.set()
+            try:
+                await writing
+            except asyncio.CancelledError as error:
+                outcome.append(error)
+            finally:
+                cancellation_returned.set()
+
+        asyncio.run(claim())
+
+    bridge = threading.Thread(target=write_from_its_own_loop, name="cancelled-second-loop-writer", daemon=True)
+    bridge.start()
+    try:
+        assert await asyncio.to_thread(cancellation_sent.wait, _RETURN_TIMEOUT_SECONDS)
+        assert not cancellation_returned.is_set(), "cancellation escaped while the statement still held the writer"
+    finally:
+        release_statement.set()
+
+    await asyncio.to_thread(bridge.join, _RETURN_TIMEOUT_SECONDS)
+    assert cancellation_returned.is_set()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], asyncio.CancelledError)
+    assert statement_finished.is_set()
+    await backend.close()
