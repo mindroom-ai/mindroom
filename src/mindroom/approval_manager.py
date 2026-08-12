@@ -540,6 +540,9 @@ class _ApprovalManager:
         None is neither: the row is finished with as far as this pass is
         concerned and retrying would reach the same answer, so counting it as
         owed would keep the sweep asking forever.
+
+        A recorded resolution always wins. Otherwise a matching live waiter
+        owns the expiration; only an ownerless card uses Matrix-only cleanup.
         """
         if self._send_is_in_flight(claimed.transaction_id):
             # A row whose send has not come back is indistinguishable, from
@@ -1090,7 +1093,7 @@ class _ApprovalManager:
         reason: str,
         resolved_by: str | None,
     ) -> bool:
-        """Expire a recovered card and return its decision to the live tool call."""
+        """Expire through the live waiter, returning whether its Matrix edit landed."""
         claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
         if claimed_waiter is None:
             return False
