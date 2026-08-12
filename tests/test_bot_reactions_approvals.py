@@ -398,7 +398,10 @@ class TestAgentBot(AgentBotTestBase):
             ):
                 await _dispatch_reaction(bot, room, event)
 
+            await bot._response_runner.drain_inbox_responses()
             assert "$question" in interactive._active_questions
+            assert event.event_id in await bot._journal_dispatcher.unsettled_event_ids()
+            assert not bot._journal_dispatcher.callbacks.source_has_live_owner(event.event_id)
         finally:
             interactive._cleanup()
 
