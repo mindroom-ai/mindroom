@@ -66,6 +66,7 @@ Key environment variables (set in `.env` or pass directly):
 | `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
 | `MATRIX_SERVER_NAME` | Server name for federation (optional) | - |
 | `MINDROOM_STORAGE_PATH` | Data storage directory | Relative to config file |
+| `MINDROOM_SESSION_STORAGE_PATH` | Dedicated root for agent and team session SQLite databases. Mount this path separately when sessions need their own persistent volume | `MINDROOM_STORAGE_PATH` |
 | `LOG_LEVEL` | Logging level | `INFO` |
 | `MINDROOM_LOGGER_LEVELS` | Optional per-logger overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING`; set `nio.crypto:WARNING` to inspect Matrix crypto decrypt warnings | - |
 | `MINDROOM_CONFIG_PATH` | Path to config.yaml | `./config.yaml`, then `~/.mindroom/config.yaml` |
@@ -131,9 +132,9 @@ curl http://localhost:8765/api/health
 
 ## Data Persistence
 
-MindRoom stores data in the `mindroom_data` directory:
+MindRoom stores data in the `mindroom_data` directory by default:
 
-- `sessions/` - Per-agent conversation history (SQLite)
+- `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite), optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
 - `learning/` - Per-agent Agno Learning state (SQLite, persistent across restarts)
 - `chroma/` - ChromaDB vector store for agent/team memories
 - `knowledge_db/` - Knowledge base vector stores
@@ -145,6 +146,7 @@ MindRoom stores data in the `mindroom_data` directory:
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 
 Keep `tracking/` on persistent storage and include it in backups.
+When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and include it in backups too.
 Dispatch-obligation databases retain one compact terminal row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
 The retained terminal rows have no automatic retention window because deleting them weakens replay deduplication.
 Pending rows temporarily retain the full event replay payload and should represent only actively deferred or retry-owned work, not completed ignore paths.
