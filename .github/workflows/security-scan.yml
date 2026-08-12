@@ -24,6 +24,7 @@ jobs:
           GITLEAKS_VERSION=8.18.4
           curl --fail --location --silent --show-error \
             --retry 5 --retry-all-errors --retry-delay 2 \
+            --connect-timeout 10 --max-time 30 --retry-max-time 60 \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             --output gitleaks.tar.gz
           tar -xzf gitleaks.tar.gz gitleaks && sudo mv gitleaks /usr/local/bin/
