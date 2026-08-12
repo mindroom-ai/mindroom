@@ -807,6 +807,7 @@ class ResponseRunner:
             ),
             execution_identity=serialize_tool_execution_identity(execution_identity),
             source_event_ids=source_event_ids,
+            runtime_model_name=paused.runtime_model_name,
             state="ready" if all(decision is not None for decision, _timeout in decisions.values()) else "pending",
             team_member_names=team_member_names,
             team_mode=team_mode,
@@ -1137,7 +1138,9 @@ class ResponseRunner:
                             self.deps.runtime.config,
                             self.deps.runtime_paths,
                             thread_id=continuation.thread_id,
-                        ),
+                        )
+                        if continuation.runtime_model_name is None
+                        else continuation.runtime_model_name,
                         decisions=decisions,
                         refresh_scheduler=(
                             orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
@@ -1173,6 +1176,7 @@ class ResponseRunner:
             self.deps.runtime_paths,
             execution_identity,
             session_id=continuation.session_id,
+            active_model_name=continuation.runtime_model_name,
             dynamic_tool_continuation=True,
         )
         try:

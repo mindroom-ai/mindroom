@@ -2295,7 +2295,7 @@ async def team_response(  # noqa: C901, PLR0915
                 fallback_run_id=attempt_run_id,
             )
             if paused_attempt is not None:
-                return paused_attempt
+                return replace(paused_attempt, runtime_model_name=prepared_execution.runtime_model_name)
             original_status = response.status if isinstance(response.status, RunStatus) else RunStatus.error
             partial_text = _extract_interrupted_team_partial_text(response)
             completed_tools, interrupted_tools = _extract_cancelled_team_tool_trace(response)
@@ -3107,7 +3107,9 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         fallback_run_id=attempt_run_id,
                     )
                     if paused_attempt is not None:
-                        yield AttemptResolved(paused_attempt)
+                        yield AttemptResolved(
+                            replace(paused_attempt, runtime_model_name=prepared_execution.runtime_model_name),
+                        )
                         return
                     yield AttemptResolved(
                         ExcludedAttempt(

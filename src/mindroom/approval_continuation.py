@@ -94,6 +94,7 @@ class ApprovalContinuation:
     calls: tuple[ApprovalCall, ...]
     execution_identity: dict[str, object]
     source_event_ids: tuple[str, ...]
+    runtime_model_name: str | None = None
     state: _ApprovalContinuationState = "pending"
     claimant_id: str | None = None
     failure_reason: str | None = None
@@ -114,6 +115,7 @@ class ApprovalContinuation:
             "calls": [call.to_dict() for call in self.calls],
             "execution_identity": self.execution_identity,
             "source_event_ids": list(self.source_event_ids),
+            "runtime_model_name": self.runtime_model_name,
             "claimant_id": self.claimant_id,
             "failure_reason": self.failure_reason,
             "team_member_names": list(self.team_member_names),
@@ -139,6 +141,7 @@ class ApprovalContinuation:
             calls=tuple(ApprovalCall.from_dict(call) for call in raw_calls),
             execution_identity=cast("dict[str, object]", context["execution_identity"]),
             source_event_ids=tuple(cast("list[str]", context["source_event_ids"])),
+            runtime_model_name=cast("str | None", context.get("runtime_model_name")),
             state=cast("_ApprovalContinuationState", row["status"]),
             claimant_id=cast("str | None", context.get("claimant_id")),
             failure_reason=cast("str | None", context.get("failure_reason")),

@@ -138,6 +138,16 @@ def test_continuation_store_recovers_pending_and_claimed_without_copying_argumen
     assert "arguments" not in recovered[0]._to_context()
 
 
+def test_continuation_store_preserves_runtime_model_snapshot(tmp_path: Path) -> None:
+    """A thread-model run must resume with the model that created the persisted pause."""
+    store = ApprovalContinuationStore(tmp_path)
+    continuation = replace(_continuation(), runtime_model_name="thread-model")
+
+    store.create(continuation)
+
+    assert store.get(continuation.approval_id) == continuation
+
+
 def test_claimed_continuation_atomically_advances_to_next_pause(tmp_path: Path) -> None:
     """A second gated tool replaces the claimed run without a crash window between rows."""
     store = ApprovalContinuationStore(tmp_path)

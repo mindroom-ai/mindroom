@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from contextlib import aclosing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.db.base import SessionType
@@ -1594,7 +1594,7 @@ async def ai_response(  # noqa: C901
                 fallback_run_id=attempt.attempt_run_id,
             )
             if paused_attempt is not None:
-                return paused_attempt
+                return replace(paused_attempt, runtime_model_name=prepared_run.runtime_model_name)
             partial_text = _extract_interrupted_partial_text(
                 response.content,
                 messages=response.messages,
@@ -2139,7 +2139,9 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     fallback_run_id=attempt.attempt_run_id,
                 )
                 if paused_attempt is not None:
-                    yield AttemptResolved(paused_attempt)
+                    yield AttemptResolved(
+                        replace(paused_attempt, runtime_model_name=prepared_run.runtime_model_name),
+                    )
                     return
                 paused_metadata = _build_interrupted_metadata(
                     state,
