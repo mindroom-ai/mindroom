@@ -1061,7 +1061,12 @@ class ResponseRunner:
                     approval_id=continuation.approval_id,
                 )
                 self._approval_continuations.fail(claimed.approval_id, reason)
-                await self._edit_continuation_response(claimed, target=target, text=reason)
+                if not await self._edit_continuation_response(claimed, target=target, text=reason):
+                    self.deps.logger.warning(
+                        "approval_continuation_failure_edit_not_delivered",
+                        approval_id=claimed.approval_id,
+                        response_event_id=claimed.response_event_id,
+                    )
 
         try:
             await self._lifecycle_coordinator.run_locked_target_operation(
@@ -1105,7 +1110,9 @@ class ResponseRunner:
             continuation.execution_identity,
             error_prefix="Approval continuation execution_identity",
         )
-        assert execution_identity is not None
+        if execution_identity is None:
+            msg = f"Approval continuation {continuation.approval_id!r} has no execution identity"
+            raise RuntimeError(msg)
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             target,
             user_id=continuation.requester_id,

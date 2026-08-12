@@ -968,6 +968,77 @@ async def test_resume_failure_is_durable_before_visible_failure_edit(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_resume_failure_logs_when_visible_terminal_edit_is_not_delivered(tmp_path: Path) -> None:
+    """Operators must see when durable failure and the Matrix waiting message diverge."""
+    logger = MagicMock()
+    runner = replace_response_runner_deps(_bot(tmp_path), logger=logger)
+    continuation = ApprovalContinuation(
+        approval_id="approval-resume-edit-failure",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.APPROVED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    runner._approval_continuations.create(continuation)
+
+    with (
+        patch.object(runner, "_continue_entity_call", new=AsyncMock(side_effect=RuntimeError("resume failed"))),
+        patch.object(runner, "_edit_continuation_response", new=AsyncMock(return_value=False)),
+    ):
+        await runner.resume_approval_continuation(continuation)
+
+    logger.warning.assert_called_once_with(
+        "approval_continuation_failure_edit_not_delivered",
+        approval_id=continuation.approval_id,
+        response_event_id=continuation.response_event_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_continuation_rejects_missing_persisted_execution_identity(tmp_path: Path) -> None:
+    """Malformed durable identity must fail explicitly even when Python assertions are disabled."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-missing-identity",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="claimed",
+    )
+
+    with (
+        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=None),
+        pytest.raises(RuntimeError, match=r"approval-missing-identity.*execution identity"),
+    ):
+        await runner._continue_entity_call(continuation, target=_target())
+
+
+@pytest.mark.asyncio
 async def test_suspension_rejects_missing_requester_before_persistence(tmp_path: Path) -> None:
     """A continuation without the original session user cannot be resumed against the same Agno run."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)

@@ -324,7 +324,12 @@ async def test_running_owner_that_cannot_claim_is_polled_with_backoff(tmp_path: 
         env_path=tmp_path / ".env",
         storage_root=tmp_path,
     )
-    resume = AsyncMock()
+    resumed = asyncio.Event()
+
+    async def signal_resume(_continuation: ApprovalContinuation) -> None:
+        resumed.set()
+
+    resume = AsyncMock(side_effect=signal_resume)
     bot = SimpleNamespace(running=True, resume_approval_continuation=resume)
     transport = ApprovalMatrixTransport(
         runtime_paths=runtime_paths,
@@ -338,7 +343,8 @@ async def test_running_owner_that_cannot_claim_is_polled_with_backoff(tmp_path: 
     assert ready is not None
     transport._schedule_continuation(ready)
 
-    await asyncio.sleep(0.35)
+    await asyncio.wait_for(resumed.wait(), timeout=1)
+    await asyncio.sleep(0.1)
     await transport.cancel_startup_cleanup_retry()
 
     assert 1 <= resume.await_count <= 2
