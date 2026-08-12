@@ -278,6 +278,8 @@ class ApprovalStartupSweep:
     scanned: int = field(default=0, compare=False)
     skipped_in_flight: int = field(default=0, compare=False)
     skipped_live_waiter: int = field(default=0, compare=False)
+    dropped_unrecoverable: int = field(default=0, compare=False)
+    kept_unusable: int = field(default=0, compare=False)
     dropped_never_attempted: int = field(default=0, compare=False)
 
     @property
@@ -298,6 +300,8 @@ class _SweepTally:
     scanned: int = 0
     skipped_in_flight: int = 0
     skipped_live_waiter: int = 0
+    dropped_unrecoverable: int = 0
+    kept_unusable: int = 0
     dropped_never_attempted: int = 0
 
 
@@ -571,6 +575,8 @@ class _ApprovalManager:
             scanned=tally.scanned,
             skipped_in_flight=tally.skipped_in_flight,
             skipped_live_waiter=tally.skipped_live_waiter,
+            dropped_unrecoverable=tally.dropped_unrecoverable,
+            kept_unusable=tally.kept_unusable,
             dropped_never_attempted=tally.dropped_never_attempted,
         )
 
@@ -670,6 +676,7 @@ class _ApprovalManager:
                 transaction_id=identified.card.transaction_id,
                 card_event_id=identified.card.card_event_id,
             )
+            tally.kept_unusable += 1
             return None
         if identified.card.resolution is not None:
             return await self._redeliver_recorded_resolution(pending, identified.card)
@@ -1596,13 +1603,50 @@ class _ApprovalManager:
             await self._forget_card(stored.transaction_id)
             return _IdentifiedCard(card=None, settled=True)
         if not self._repeat_would_deduplicate(stored):
-            return await self._card_a_previous_device_left(room_id, stored)
-        return await self._card_the_frozen_transaction_recovers(room_id, stored)
+            return await self._card_a_previous_device_left(room_id, stored, tally=tally)
+        return await self._card_the_frozen_transaction_recovers(room_id, stored, tally=tally)
+
+    async def _bind_recovered_card_event(
+        self,
+        *,
+        room_id: str,
+        transaction_id: str,
+        card_event_id: str,
+        card: dict[str, Any],
+    ) -> bool:
+        """Point one recovered row at the event this pass established for it.
+
+        Reported rather than raised. The caller is one row inside a scan of
+        every approval room, and a store that fails here fails for the rest of
+        the page too: letting it out abandons every row behind this one and
+        loses the tally with them. Owed is the honest answer -- the event is
+        known but the row does not say so yet.
+        """
+        if self._cards is None:
+            return False
+        try:
+            await self._cards.acknowledge_approval_card(
+                transaction_id=transaction_id,
+                card_event_id=card_event_id,
+                card=card,
+            )
+        except Exception:
+            logger.warning(
+                "approval_startup_card_bind_failed",
+                room_id=room_id,
+                transaction_id=transaction_id,
+                card_event_id=card_event_id,
+                exc_info=True,
+            )
+            return False
+        return True
 
     async def _card_the_frozen_transaction_recovers(
         self,
         room_id: str,
         stored: StoredApprovalCard,
+        *,
+        tally: _SweepTally,
     ) -> _IdentifiedCard:
         """Present one attempted card's transaction again, from the device that used it.
 
@@ -1617,6 +1661,15 @@ class _ApprovalManager:
         if cards is None or self._send_event is None or not isinstance(content, dict):
             # No transport to ask with, or a body that is not a card. Neither
             # is something a later sweep resolves differently.
+            logger.warning(
+                "approval_startup_card_unrecoverable",
+                room_id=room_id,
+                transaction_id=stored.transaction_id,
+                has_cards=cards is not None,
+                has_transport=self._send_event is not None,
+                has_card_body=isinstance(content, dict),
+            )
+            tally.kept_unusable += 1
             return _IdentifiedCard(card=None, settled=True)
         try:
             sent_event = await self._send_event(room_id, content.get("thread_id"), content, stored.transaction_id)
@@ -1626,14 +1679,22 @@ class _ApprovalManager:
         if sent_event is None:
             return _IdentifiedCard(card=None)
         card = _sent_card_body(stored.card, sent_event)
-        await cards.acknowledge_approval_card(
+        if not await self._bind_recovered_card_event(
+            room_id=room_id,
             transaction_id=stored.transaction_id,
             card_event_id=sent_event.event_id,
             card=card,
-        )
+        ):
+            return _IdentifiedCard(card=None)
         return _IdentifiedCard(card=self._adopted_card(stored, card_event_id=sent_event.event_id, card=card))
 
-    async def _card_a_previous_device_left(self, room_id: str, stored: StoredApprovalCard) -> _IdentifiedCard:
+    async def _card_a_previous_device_left(
+        self,
+        room_id: str,
+        stored: StoredApprovalCard,
+        *,
+        tally: _SweepTally,
+    ) -> _IdentifiedCard:
         """Read the room for one attempted card whose transaction can no longer be repeated.
 
         Located by the approval id rather than the transaction: the transaction
@@ -1656,6 +1717,7 @@ class _ApprovalManager:
             # A body naming neither an approval nor a sender describes nothing
             # this pass could look for, and no later sweep reads it
             # differently, so it is retired rather than retried.
+            tally.dropped_unrecoverable += 1
             logger.warning(
                 "approval_startup_card_unidentifiable",
                 room_id=room_id,
@@ -1688,6 +1750,7 @@ class _ApprovalManager:
             )
             return _IdentifiedCard(card=None)
         if card_event_id is None:
+            tally.dropped_unrecoverable += 1
             logger.info(
                 "approval_startup_card_absent_after_device_change",
                 room_id=room_id,
@@ -1710,12 +1773,13 @@ class _ApprovalManager:
         # copy, and an expiry needs only the event id and the approval it
         # names.
         card = {**stored.card, "event_id": card_event_id}
-        if self._cards is not None:
-            await self._cards.acknowledge_approval_card(
-                transaction_id=stored.transaction_id,
-                card_event_id=card_event_id,
-                card=card,
-            )
+        if not await self._bind_recovered_card_event(
+            room_id=room_id,
+            transaction_id=stored.transaction_id,
+            card_event_id=card_event_id,
+            card=card,
+        ):
+            return _IdentifiedCard(card=None)
         return _IdentifiedCard(card=self._adopted_card(stored, card_event_id=card_event_id, card=card))
 
     @staticmethod

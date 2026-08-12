@@ -2761,6 +2761,53 @@ async def test_startup_sweep_leaves_this_process_s_own_live_approval_alone(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_a_store_failure_while_binding_owes_one_row_not_the_page(tmp_path: Path) -> None:
+    """A store that fails mid-recovery must cost one row, not the rest of the scan.
+
+    Recovery writes the event id it established back to the row. That write
+    used to be unguarded, so a store failing there raised out of the whole
+    sweep: the tally went with it, and every row behind this one in the page
+    -- and every room after it -- was never looked at. With the sweep retrying
+    on a timer, each pass aborted at the same row.
+    """
+
+    class UnbindableCards(FakeApprovalCards):
+        """A card store that refuses to record what a recovered card became."""
+
+        async def acknowledge_approval_card(
+            self,
+            *,
+            transaction_id: str,  # noqa: ARG002 - signature is the store protocol's
+            card_event_id: str,  # noqa: ARG002
+            card: Mapping[str, Any],  # noqa: ARG002
+        ) -> None:
+            msg = "acknowledge is unavailable"
+            raise RuntimeError(msg)
+
+    cards = UnbindableCards()
+    # Claimed and attempted from this device but never acknowledged, which is
+    # the row recovery presents the frozen transaction for.
+    await cards.store_unsent_card("txn-unacknowledged", "!room:localhost", _approval_card())
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        locate_card=AsyncMock(return_value=None),
+    )
+
+    sweep = await store.discard_pending_on_startup()
+
+    assert sweep == ApprovalStartupSweep(discarded=0, failed=1)
+    assert cards.rows, "the row is owed, so it must survive for the next pass"
+
+
+@pytest.mark.asyncio
 async def test_startup_sweep_repairs_the_event_id_a_failed_acknowledge_left_unwritten(tmp_path: Path) -> None:
     """Skipping a live row is not enough when the row cannot name its event.
 
