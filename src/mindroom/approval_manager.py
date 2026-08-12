@@ -277,6 +277,9 @@ class ApprovalStartupSweep:
     # was settled, not whether the same rows happened to be on disk.
     scanned: int = field(default=0, compare=False)
     skipped_in_flight: int = field(default=0, compare=False)
+    skipped_live_waiter: int = field(default=0, compare=False)
+    dropped_unrecoverable: int = field(default=0, compare=False)
+    kept_unusable: int = field(default=0, compare=False)
     dropped_never_attempted: int = field(default=0, compare=False)
 
     @property
@@ -296,6 +299,9 @@ class _SweepTally:
 
     scanned: int = 0
     skipped_in_flight: int = 0
+    skipped_live_waiter: int = 0
+    dropped_unrecoverable: int = 0
+    kept_unusable: int = 0
     dropped_never_attempted: int = 0
 
 
@@ -568,10 +574,13 @@ class _ApprovalManager:
             failed=failed,
             scanned=tally.scanned,
             skipped_in_flight=tally.skipped_in_flight,
+            skipped_live_waiter=tally.skipped_live_waiter,
+            dropped_unrecoverable=tally.dropped_unrecoverable,
+            kept_unusable=tally.kept_unusable,
             dropped_never_attempted=tally.dropped_never_attempted,
         )
 
-    async def _settle_recovered_card(
+    async def _settle_recovered_card(  # noqa: PLR0911
         self,
         *,
         room_id: str,
@@ -585,8 +594,9 @@ class _ApprovalManager:
         concerned and retrying would reach the same answer, so counting it as
         owed would keep the sweep asking forever.
 
-        A recorded resolution always wins. Otherwise a matching live waiter
-        owns the expiration; only an ownerless card uses Matrix-only cleanup.
+        A transaction this process is still publishing or still waiting on is
+        left alone. Of the rest, a recorded resolution is redelivered, and an
+        ownerless card is expired through Matrix-only cleanup.
         """
         if self._send_is_in_flight(claimed.transaction_id):
             # A row whose send has not come back is indistinguishable, from
@@ -609,6 +619,44 @@ class _ApprovalManager:
             )
             tally.skipped_in_flight += 1
             return None
+        live_waiter = self._live_waiter_for_transaction(claimed.transaction_id)
+        if live_waiter is not None:
+            # This process sent this card and is still waiting on the answer,
+            # so it is live work of this one's rather than something a dead
+            # process left. Keyed on the transaction, not the event: the row's
+            # event id is written best-effort after the send, and the state
+            # where that write failed -- a live waiter over a row that still
+            # reads unacknowledged -- is exactly the state the recovery below
+            # would resend, duplicating a card the user is already looking at
+            # and then expiring the copy out from under its waiter.
+            #
+            # Nothing is owed either: the waiter settles the card on a click,
+            # a denial, or its own timeout. Counting it would have every
+            # pending approval hold the sweep open until somebody answered.
+            if claimed.card_event_id is None and not await self._acknowledge_card(live_waiter):
+                # A waiter cannot settle a row that does not name its event:
+                # every decision is recorded against the event id this write
+                # was meant to store, so leaving it unwritten strands the
+                # answer as surely as deleting the row would. The waiter is
+                # holding what the failed write was carrying, so finish it
+                # here rather than resend anything -- and if that write fails
+                # too, the row is owed rather than done with, because nothing
+                # else will come back for it.
+                logger.warning(
+                    "approval_startup_card_repair_failed",
+                    room_id=room_id,
+                    transaction_id=claimed.transaction_id,
+                )
+                return False
+            logger.debug(
+                "approval_startup_card_skipped_live_waiter",
+                room_id=room_id,
+                transaction_id=claimed.transaction_id,
+                card_event_id=claimed.card_event_id,
+                repaired_event_id=claimed.card_event_id is None,
+            )
+            tally.skipped_live_waiter += 1
+            return None
         identified = await self._identified_card(room_id, claimed, tally=tally)
         if identified.card is None:
             return None if identified.settled else False
@@ -628,27 +676,10 @@ class _ApprovalManager:
                 transaction_id=identified.card.transaction_id,
                 card_event_id=identified.card.card_event_id,
             )
+            tally.kept_unusable += 1
             return None
         if identified.card.resolution is not None:
             return await self._redeliver_recorded_resolution(pending, identified.card)
-        if self._live_waiter_for_card(pending.card_event_id) is not None:
-            # This process sent this card and is still waiting on the answer.
-            # A waiter only ever gets here one way -- ``_bind_live_waiter``,
-            # reached from a fresh send -- so a card with one is not a card a
-            # dead process left, it is live work of this one's. Expiring it
-            # tells a user their request was cancelled by a restart that had
-            # already finished before they were asked to decide.
-            #
-            # Nothing is owed either: the waiter settles the card on a click,
-            # a denial, or its own timeout. Counting it would have every
-            # pending approval hold the sweep open until somebody answered.
-            logger.debug(
-                "approval_startup_card_skipped_live_waiter",
-                room_id=room_id,
-                transaction_id=identified.card.transaction_id,
-                card_event_id=identified.card.card_event_id,
-            )
-            return None
         result = await self._discard_matrix_only_card(
             pending=pending,
             transaction_id=identified.card.transaction_id,
@@ -1013,7 +1044,7 @@ class _ApprovalManager:
                         self._forget_cancelled_card_event_id(waiter.card_event_id)
                     return
             pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
-            await self._emit_resolution(
+            outcome = await self._emit_resolution(
                 pending,
                 transaction_id=waiter.transaction_id,
                 status=decision.status,
@@ -1021,14 +1052,21 @@ class _ApprovalManager:
                 resolved_by=decision.resolved_by,
             )
             with self._live_lock:
-                self._resolved_card_event_ids.add(waiter.card_event_id)
+                if outcome is _ResolutionOutcome.DELIVERED:
+                    self._resolved_card_event_ids.add(waiter.card_event_id)
                 if mark_cancelled:
                     self._cancelled_card_event_ids.discard(waiter.card_event_id)
             return
         with self._claimed_resolution(claimed_waiter.card_event_id):
-            await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
+            delivered = await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
             with self._live_lock:
-                self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
+                # Only a card the room has actually been told about is finished
+                # with. Marking one resolved on a decision that was recorded but
+                # never shown retires the only thing that would come back for it:
+                # every later pass is refused by the cleanup claim, counted owed,
+                # and the card stays visibly pending until the process restarts.
+                if delivered:
+                    self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
                 if mark_cancelled:
                     self._cancelled_card_event_ids.discard(claimed_waiter.card_event_id)
 
@@ -1053,9 +1091,15 @@ class _ApprovalManager:
         if claimed_waiter is None:
             return await self._wait_for_competing_terminal_decision(waiter)
         with self._claimed_resolution(claimed_waiter.card_event_id):
-            await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
+            delivered = await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
             with self._live_lock:
-                self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
+                # Only a card the room has actually been told about is finished
+                # with. Marking one resolved on a decision that was recorded but
+                # never shown retires the only thing that would come back for it:
+                # every later pass is refused by the cleanup claim, counted owed,
+                # and the card stays visibly pending until the process restarts.
+                if delivered:
+                    self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
             return decision
 
     async def _resolve_live_response(
@@ -1090,7 +1134,13 @@ class _ApprovalManager:
             decision = self._new_decision(status=resolved_status, reason=resolved_reason, resolved_by=resolved_by)
             delivered = await self._settle_waiter_with_terminal_edit(waiter, decision)
             with self._live_lock:
-                self._resolved_card_event_ids.add(pending.card_event_id)
+                # Only a card the room has actually been told about is finished
+                # with. Marking one resolved on a decision that was recorded but
+                # never shown retires the only thing that would come back for it:
+                # every later pass is refused by the cleanup claim, counted owed,
+                # and the card stays visibly pending until the process restarts.
+                if delivered:
+                    self._resolved_card_event_ids.add(pending.card_event_id)
                 self._cancelled_card_event_ids.discard(pending.card_event_id)
             return ApprovalActionResult(
                 consumed=True,
@@ -1419,18 +1469,19 @@ class _ApprovalManager:
             return None
         return await self._send_event(room_id, thread_id, content, transaction_id)
 
-    async def _acknowledge_card(self, waiter: _LiveApprovalWaiter) -> None:
+    async def _acknowledge_card(self, waiter: _LiveApprovalWaiter) -> bool:
         """Point one claimed row at the Matrix event the send produced.
 
         Best effort on purpose, and the reason it can be is the claim: the row
         already exists, so a failure here leaves a card whose event id is
-        merely unknown rather than one nothing accounts for. The next startup
-        presents the same transaction, gets the same event back, and expires
-        it. Until then the card fails closed, because every decision is
-        recorded against the event id this write was meant to store.
+        merely unknown rather than one nothing accounts for. A later startup
+        sweep leaves such a row alone while its waiter is alive, and presents
+        the same transaction again once it is not. Until then the card fails
+        closed, because every decision is recorded against the event id this
+        write was meant to store.
         """
         if self._cards is None:
-            return
+            return False
         try:
             await self._cards.acknowledge_approval_card(
                 transaction_id=waiter.transaction_id,
@@ -1444,6 +1495,8 @@ class _ApprovalManager:
                 event_id=waiter.card_event_id,
                 exc_info=True,
             )
+            return False
+        return True
 
     async def _forget_card(self, transaction_id: str) -> None:
         """Drop one card that is finished, whether it was shown or never sent."""
@@ -1550,13 +1603,50 @@ class _ApprovalManager:
             await self._forget_card(stored.transaction_id)
             return _IdentifiedCard(card=None, settled=True)
         if not self._repeat_would_deduplicate(stored):
-            return await self._card_a_previous_device_left(room_id, stored)
-        return await self._card_the_frozen_transaction_recovers(room_id, stored)
+            return await self._card_a_previous_device_left(room_id, stored, tally=tally)
+        return await self._card_the_frozen_transaction_recovers(room_id, stored, tally=tally)
+
+    async def _bind_recovered_card_event(
+        self,
+        *,
+        room_id: str,
+        transaction_id: str,
+        card_event_id: str,
+        card: dict[str, Any],
+    ) -> bool:
+        """Point one recovered row at the event this pass established for it.
+
+        Reported rather than raised. The caller is one row inside a scan of
+        every approval room, and a store that fails here fails for the rest of
+        the page too: letting it out abandons every row behind this one and
+        loses the tally with them. Owed is the honest answer -- the event is
+        known but the row does not say so yet.
+        """
+        if self._cards is None:
+            return False
+        try:
+            await self._cards.acknowledge_approval_card(
+                transaction_id=transaction_id,
+                card_event_id=card_event_id,
+                card=card,
+            )
+        except Exception:
+            logger.warning(
+                "approval_startup_card_bind_failed",
+                room_id=room_id,
+                transaction_id=transaction_id,
+                card_event_id=card_event_id,
+                exc_info=True,
+            )
+            return False
+        return True
 
     async def _card_the_frozen_transaction_recovers(
         self,
         room_id: str,
         stored: StoredApprovalCard,
+        *,
+        tally: _SweepTally,
     ) -> _IdentifiedCard:
         """Present one attempted card's transaction again, from the device that used it.
 
@@ -1571,6 +1661,15 @@ class _ApprovalManager:
         if cards is None or self._send_event is None or not isinstance(content, dict):
             # No transport to ask with, or a body that is not a card. Neither
             # is something a later sweep resolves differently.
+            logger.warning(
+                "approval_startup_card_unrecoverable",
+                room_id=room_id,
+                transaction_id=stored.transaction_id,
+                has_cards=cards is not None,
+                has_transport=self._send_event is not None,
+                has_card_body=isinstance(content, dict),
+            )
+            tally.kept_unusable += 1
             return _IdentifiedCard(card=None, settled=True)
         try:
             sent_event = await self._send_event(room_id, content.get("thread_id"), content, stored.transaction_id)
@@ -1580,14 +1679,22 @@ class _ApprovalManager:
         if sent_event is None:
             return _IdentifiedCard(card=None)
         card = _sent_card_body(stored.card, sent_event)
-        await cards.acknowledge_approval_card(
+        if not await self._bind_recovered_card_event(
+            room_id=room_id,
             transaction_id=stored.transaction_id,
             card_event_id=sent_event.event_id,
             card=card,
-        )
+        ):
+            return _IdentifiedCard(card=None)
         return _IdentifiedCard(card=self._adopted_card(stored, card_event_id=sent_event.event_id, card=card))
 
-    async def _card_a_previous_device_left(self, room_id: str, stored: StoredApprovalCard) -> _IdentifiedCard:
+    async def _card_a_previous_device_left(
+        self,
+        room_id: str,
+        stored: StoredApprovalCard,
+        *,
+        tally: _SweepTally,
+    ) -> _IdentifiedCard:
         """Read the room for one attempted card whose transaction can no longer be repeated.
 
         Located by the approval id rather than the transaction: the transaction
@@ -1610,6 +1717,7 @@ class _ApprovalManager:
             # A body naming neither an approval nor a sender describes nothing
             # this pass could look for, and no later sweep reads it
             # differently, so it is retired rather than retried.
+            tally.dropped_unrecoverable += 1
             logger.warning(
                 "approval_startup_card_unidentifiable",
                 room_id=room_id,
@@ -1642,6 +1750,7 @@ class _ApprovalManager:
             )
             return _IdentifiedCard(card=None)
         if card_event_id is None:
+            tally.dropped_unrecoverable += 1
             logger.info(
                 "approval_startup_card_absent_after_device_change",
                 room_id=room_id,
@@ -1664,12 +1773,13 @@ class _ApprovalManager:
         # copy, and an expiry needs only the event id and the approval it
         # names.
         card = {**stored.card, "event_id": card_event_id}
-        if self._cards is not None:
-            await self._cards.acknowledge_approval_card(
-                transaction_id=stored.transaction_id,
-                card_event_id=card_event_id,
-                card=card,
-            )
+        if not await self._bind_recovered_card_event(
+            room_id=room_id,
+            transaction_id=stored.transaction_id,
+            card_event_id=card_event_id,
+            card=card,
+        ):
+            return _IdentifiedCard(card=None)
         return _IdentifiedCard(card=self._adopted_card(stored, card_event_id=card_event_id, card=card))
 
     @staticmethod
@@ -1711,9 +1821,12 @@ class _ApprovalManager:
                 await self._stand_down_for_the_claim_holder(waiter)
                 continue
             with self._claimed_resolution(claimed_waiter.card_event_id):
-                await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
+                delivered = await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
                 with self._live_lock:
-                    self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
+                    # An edit that did not land during shutdown is exactly what
+                    # the next process's sweep exists to redeliver.
+                    if delivered:
+                        self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
         await self._drain_active_approval_sends()
         await self._drain_post_cancel_cleanup_tasks()
         await self._drain_detached_card_writes()
@@ -1935,6 +2048,20 @@ class _ApprovalManager:
                 self._claiming_transaction_ids[transaction_id] -= 1
                 if self._claiming_transaction_ids[transaction_id] <= 0:
                     del self._claiming_transaction_ids[transaction_id]
+
+    def _live_waiter_for_transaction(self, transaction_id: str) -> _LiveApprovalWaiter | None:
+        """Return the waiter publishing one transaction, whatever its row says.
+
+        Looked up by transaction rather than by event because the caller that
+        needs it is deciding whether a durable row is abandoned, and the row
+        that most needs the answer is the one whose event id was never
+        written.
+        """
+        with self._live_lock:
+            return next(
+                (waiter for waiter in self._pending_by_card_event.values() if waiter.transaction_id == transaction_id),
+                None,
+            )
 
     def _live_waiter_for_card(self, card_event_id: str) -> _LiveApprovalWaiter | None:
         with self._live_lock:

@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -214,6 +213,13 @@ def _approval_edit(
             "m.relates_to": {"rel_type": "m.replace", "event_id": card["event_id"]},
         },
     }
+
+
+async def _await_claim(cards: FakeApprovalCards, *, count: int = 1) -> None:
+    """Wait until this many claim rows exist, without waiting for their sends."""
+    async with asyncio.timeout(5):
+        while len(cards.rows) < count:  # noqa: ASYNC110 - the store double has nothing to signal on
+            await asyncio.sleep(0)
 
 
 async def _wait_for_pending(
@@ -2755,6 +2761,273 @@ async def test_startup_sweep_leaves_this_process_s_own_live_approval_alone(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_a_store_failure_while_binding_owes_one_row_not_the_page(tmp_path: Path) -> None:
+    """A store that fails mid-recovery must cost one row, not the rest of the scan.
+
+    Recovery writes the event id it established back to the row. That write
+    used to be unguarded, so a store failing there raised out of the whole
+    sweep: the tally went with it, and every row behind this one in the page
+    -- and every room after it -- was never looked at. With the sweep retrying
+    on a timer, each pass aborted at the same row.
+    """
+
+    class UnbindableCards(FakeApprovalCards):
+        """A card store that refuses to record what a recovered card became."""
+
+        async def acknowledge_approval_card(
+            self,
+            *,
+            transaction_id: str,  # noqa: ARG002 - signature is the store protocol's
+            card_event_id: str,  # noqa: ARG002
+            card: Mapping[str, Any],  # noqa: ARG002
+        ) -> None:
+            msg = "acknowledge is unavailable"
+            raise RuntimeError(msg)
+
+    cards = UnbindableCards()
+    # Claimed and attempted from this device but never acknowledged, which is
+    # the row recovery presents the frozen transaction for.
+    await cards.store_unsent_card("txn-unacknowledged", "!room:localhost", _approval_card())
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        locate_card=AsyncMock(return_value=None),
+    )
+
+    sweep = await store.discard_pending_on_startup()
+
+    assert sweep == ApprovalStartupSweep(discarded=0, failed=1)
+    assert cards.rows, "the row is owed, so it must survive for the next pass"
+
+
+@pytest.mark.asyncio
+async def test_startup_sweep_repairs_the_event_id_a_failed_acknowledge_left_unwritten(tmp_path: Path) -> None:
+    """Skipping a live row is not enough when the row cannot name its event.
+
+    Every decision is recorded against the event id the acknowledge was meant
+    to store, so a row still reading unacknowledged strands its answer as
+    surely as deleting it would: the user clicks, nothing matches, and the
+    card stays pending in the room. Recovery used to repair this as a side
+    effect of resending the frozen transaction. Leaving the row alone has to
+    do the repair on purpose, from what the waiter is already holding.
+    """
+
+    class FlakyAcknowledgeCards(FakeApprovalCards):
+        """A card store whose first acknowledge fails and whose second lands."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_next_acknowledge = True
+
+        async def acknowledge_approval_card(
+            self,
+            *,
+            transaction_id: str,
+            card_event_id: str,
+            card: Mapping[str, Any],
+        ) -> None:
+            if self.fail_next_acknowledge:
+                self.fail_next_acknowledge = False
+                msg = "acknowledge is unavailable"
+                raise RuntimeError(msg)
+            await super().acknowledge_approval_card(
+                transaction_id=transaction_id,
+                card_event_id=card_event_id,
+                card=card,
+            )
+
+    cards = FlakyAcknowledgeCards()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        locate_card=AsyncMock(return_value=None),
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="send_email",
+            arguments={},
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+    assert [row.card_event_id for row in cards.rows.values()] == [None], "the acknowledge must have failed"
+
+    sweep = await store.discard_pending_on_startup()
+
+    assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
+    assert sweep.skipped_live_waiter == 1
+    assert sender.await_count == 1, "the row was repaired by resending, not by writing what the waiter holds"
+    assert [row.card_event_id for row in cards.rows.values()] == ["$approval"]
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    decision = await asyncio.wait_for(task, timeout=1)
+
+    assert result.resolved is True
+    assert decision.status == "approved"
+    assert editor.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_decision_the_room_never_saw_stays_redeliverable(tmp_path: Path) -> None:
+    """A recorded decision whose edit failed must remain something a sweep retries.
+
+    The resolved set is what stops a card being answered twice, so putting an
+    id in it on a decision the room was never told about retires the only
+    thing that would come back for it. The row survives, every later pass is
+    refused by the cleanup claim and counted owed, and the card stays visibly
+    pending until the process restarts.
+    """
+    cards = FakeApprovalCards()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=False)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        locate_card=AsyncMock(return_value=None),
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="send_email",
+            arguments={},
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    decision = await asyncio.wait_for(task, timeout=1)
+
+    # Recorded, so the tool runs; not shown, so the room is still wrong.
+    assert decision.status == "approved"
+    assert result.resolved is False
+    assert cards.rows, "the row is the only remaining trace of a decision the room never saw"
+
+    editor.return_value = True
+    sweep = await store.discard_pending_on_startup()
+
+    assert sweep == ApprovalStartupSweep(discarded=1, failed=0)
+    assert editor.await_count == 2
+    assert cards.rows == {}
+
+
+@pytest.mark.asyncio
+async def test_startup_sweep_leaves_a_live_approval_whose_acknowledge_failed(tmp_path: Path) -> None:
+    """A live waiter over an unacknowledged row must not be resent or expired.
+
+    Reported owed rather than settled, because the repair this sweep tries
+    instead of a resend also failed here, and a row that still cannot name its
+    event has nothing that will come back for it.
+
+    Pointing the row at the event its send produced is best effort: the claim
+    already accounts for the card, so a failure there leaves the event id
+    merely unknown. That row then reads exactly like one a dead process left
+    mid-send -- attempted, no event id -- and recovery answers that state by
+    presenting the transaction again. Presenting it again while its waiter is
+    alive puts a second card in the room as soon as the homeserver stops
+    deduplicating the frozen transaction, and the sweep then expires the copy
+    and drops the row the user's click needs.
+    """
+
+    class UnacknowledgeableCards(FakeApprovalCards):
+        """A card store whose acknowledge write never lands."""
+
+        async def acknowledge_approval_card(
+            self,
+            *,
+            transaction_id: str,  # noqa: ARG002 - signature is the store protocol's
+            card_event_id: str,  # noqa: ARG002
+            card: Mapping[str, Any],  # noqa: ARG002
+        ) -> None:
+            msg = "acknowledge is unavailable"
+            raise RuntimeError(msg)
+
+    cards = UnacknowledgeableCards()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        locate_card=AsyncMock(return_value=None),
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="send_email",
+            arguments={},
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    await _wait_for_pending(store, sender=sender)
+    assert [row.card_event_id for row in cards.rows.values()] == [None], "the row must be unacknowledged for this test"
+
+    sweep = await store.discard_pending_on_startup()
+
+    # Owed, not done with: the repair could not land either, and nothing else
+    # comes back for a row whose event id is still unwritten.
+    assert sweep == ApprovalStartupSweep(discarded=0, failed=1)
+    assert sender.await_count == 1, "the sweep presented the transaction again under a live waiter"
+    assert editor.await_count == 0
+    assert cards.rows, "the sweep dropped the row its waiter still needs"
+    assert not task.done()
+    # The card itself still fails closed, because a decision is recorded
+    # against the event id the acknowledge was meant to store. That is the
+    # documented cost of the best-effort write, and it is not what this test
+    # is about: the point is that the sweep neither resent nor expired it.
+    assert store._live_waiter_for_transaction(next(iter(cards.rows))) is not None
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
 async def test_startup_sweep_does_not_retry_against_a_live_approval(tmp_path: Path) -> None:
     """A live approval is skipped by every pass, not retried against.
 
@@ -2765,7 +3038,7 @@ async def test_startup_sweep_does_not_retry_against_a_live_approval(tmp_path: Pa
     """
     cards = FakeApprovalCards()
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(side_effect=[False, True])
+    editor = AsyncMock(return_value=True)
     store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         sender=sender,
@@ -4237,9 +4510,14 @@ async def test_startup_sweep_landing_inside_a_live_claim_leaves_it_alone(tmp_pat
             timeout_seconds=30,
         ),
     )
+    # Checked before awaiting the pending: if the sweep took the row, the send
+    # is refused and no pending ever appears, so waiting first would report
+    # this regression as a five second hang instead of naming it.
+    await _await_claim(cards)
+    assert sweeps, "the sweep never ran inside the claim, so this proves nothing"
+    assert cards.rows, "the sweep deleted the claim it landed inside"
     pending = await _wait_for_pending(store, sender=sender)
 
-    assert sweeps, "the sweep never ran inside the claim, so this proves nothing"
     assert all(sweep == ApprovalStartupSweep(discarded=0, failed=0) for sweep in sweeps)
     assert cards.rows, "the sweep deleted the claim it landed inside"
     assert sender.await_count == 1
@@ -4327,81 +4605,6 @@ async def test_a_request_publishing_a_claim_counts_as_live_work(tmp_path: Path) 
     await task
 
     assert store.has_live_work() is False
-
-
-@pytest.mark.asyncio
-async def test_a_live_claim_is_protected_by_ownership_not_by_its_timestamp(tmp_path: Path) -> None:
-    """What protects a claim being published is a hold, not when it was written.
-
-    Classifying by timestamp reads a wall clock, and a wall clock can step
-    backwards: after a correction every new claim dates before whatever the
-    process recorded at start and looks abandoned again. This row is dated
-    before every other row in the store and still survives, because the guard
-    that matters knows this process is publishing the transaction right now.
-    """
-    sweeps: list[ApprovalStartupSweep] = []
-
-    class SweepingDuringClaimCards(FakeApprovalCards):
-        """A card store that runs a startup sweep from inside the claim write."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.manager: _ApprovalManager | None = None
-
-        async def claim_approval_card(
-            self,
-            *,
-            room_id: str,
-            transaction_id: str,
-            card: Mapping[str, Any],
-        ) -> None:
-            await super().claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
-            assert self.manager is not None
-            sweeps.append(await self.manager.discard_pending_on_startup())
-
-    cards = SweepingDuringClaimCards()
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    cards.manager = store
-    # Dated an hour before anything else in the store, which is what a
-    # backward clock step produces and what a timestamp guard would misread.
-    cards.stamp_next_claim_ns(time.time_ns() - 3_600_000_000_000)
-
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="create_event",
-            arguments={"summary": "standup"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-
-    assert sweeps, "the sweep never ran inside the claim, so this proves nothing"
-    assert [sweep.skipped_in_flight for sweep in sweeps] == [1] * len(sweeps)
-    assert cards.rows, "the sweep deleted a claim this process was publishing"
-
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = await task
-
-    assert result.resolved is True
-    assert decision.status == "approved"
 
 
 @pytest.mark.asyncio
