@@ -299,6 +299,83 @@ async def test_close_before_foreign_writer_task_lookup_does_not_recreate_the_wri
 
 
 @pytest.mark.asyncio
+async def test_close_wakes_a_handoff_scheduled_after_the_writer_loop_stops(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown must own a foreign handoff before its callback is scheduled."""
+    backend = SqliteBackend.open(tmp_path / "journal.db")
+    writer_loop = asyncio.new_event_loop()
+    writer_ready = threading.Event()
+    shutdown_finished = threading.Event()
+    writer_thread = threading.Thread(target=writer_loop.run_forever, name="writer-loop")
+
+    async def initialize() -> None:
+        await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
+        writer_ready.set()
+
+    writer_loop.call_soon_threadsafe(asyncio.create_task, initialize())
+    writer_thread.start()
+    assert writer_ready.wait(_RETURN_TIMEOUT_SECONDS), "the writer loop never initialized"
+
+    handoff_reached = threading.Event()
+    release_handoff = threading.Event()
+    call_soon_threadsafe = writer_loop.call_soon_threadsafe
+
+    def pause_admission(callback: Callable[..., object], *args: object) -> asyncio.Handle:
+        if callback == backend._admit:
+            handoff_reached.set()
+            assert release_handoff.wait(_RETURN_TIMEOUT_SECONDS), "the test never released admission"
+        return call_soon_threadsafe(callback, *args)
+
+    outcome: list[BaseException | None] = []
+    operation_ran = threading.Event()
+
+    def insert_claim(transaction: Transaction) -> None:
+        operation_ran.set()
+        transaction.execute("INSERT INTO claim VALUES (1)")
+
+    def write_from_its_own_loop() -> None:
+        try:
+            asyncio.run(backend.write(insert_claim))
+        except BaseException as error:  # the exact refusal is asserted below
+            outcome.append(error)
+        else:
+            outcome.append(None)
+
+    bridge = threading.Thread(target=write_from_its_own_loop, name="stopped-loop-writer", daemon=True)
+
+    async def close_and_stop() -> None:
+        await backend.close()
+        shutdown_finished.set()
+        writer_loop.stop()
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(writer_loop, "call_soon_threadsafe", pause_admission)
+            bridge.start()
+            assert handoff_reached.wait(_RETURN_TIMEOUT_SECONDS), "the foreign write never reached its handoff"
+            asyncio.run_coroutine_threadsafe(close_and_stop(), writer_loop)
+            assert shutdown_finished.wait(_RETURN_TIMEOUT_SECONDS), "the backend never closed"
+            writer_thread.join(_RETURN_TIMEOUT_SECONDS)
+            assert not writer_thread.is_alive(), "the writer loop never stopped"
+            release_handoff.set()
+            bridge.join(_RETURN_TIMEOUT_SECONDS)
+
+        assert not bridge.is_alive(), "the stopped writer loop stranded the foreign write"
+        _assert_closed_refusal(outcome, operation_ran)
+    finally:
+        release_handoff.set()
+        if bridge.is_alive():
+            writer_loop.call_soon(writer_loop.stop)
+            restart = threading.Thread(target=writer_loop.run_forever, name="restarted-writer-loop")
+            restart.start()
+            restart.join(_RETURN_TIMEOUT_SECONDS)
+            bridge.join(_RETURN_TIMEOUT_SECONDS)
+        writer_loop.close()
+
+
+@pytest.mark.asyncio
 async def test_a_closed_recorded_writer_loop_refuses_a_cross_loop_write(tmp_path: Path) -> None:
     """A stale closed writer loop must produce the store's closure error, not leak a loop error."""
     backend = SqliteBackend.open(tmp_path / "journal.db")
