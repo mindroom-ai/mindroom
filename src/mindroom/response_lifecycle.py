@@ -231,11 +231,10 @@ class ResponseLifecycleCoordinator:
         lifecycle_lock: asyncio.Lock,
         queued_signal: _QueuedMessageState,
         response_envelope: MessageEnvelope,
-        queued_notice_reservation: QueuedHumanNoticeReservation | None,
         signal_queued_message: bool,
     ) -> str | None:
         existing_turn = queued_signal.begin_response_turn()
-        if not signal_queued_message or queued_notice_reservation is not None:
+        if not signal_queued_message:
             return None
         if not (existing_turn or lifecycle_lock.locked()):
             return None
@@ -260,7 +259,6 @@ class ResponseLifecycleCoordinator:
         *,
         target: MessageTarget,
         response_envelope: MessageEnvelope,
-        queued_notice_reservation: QueuedHumanNoticeReservation | None,
         pipeline_timing: DispatchPipelineTiming | None,
         locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
         signal_queued_message: bool = True,
@@ -273,11 +271,9 @@ class ResponseLifecycleCoordinator:
             lifecycle_lock=lifecycle_lock,
             queued_signal=queued_signal,
             response_envelope=response_envelope,
-            queued_notice_reservation=queued_notice_reservation,
             signal_queued_message=signal_queued_message,
         )
         lock_acquired = False
-        reservation_consumed = False
         try:
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_wait_start")
@@ -286,9 +282,6 @@ class ResponseLifecycleCoordinator:
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_acquired")
             try:
-                if queued_notice_reservation is not None:
-                    queued_notice_reservation.consume()
-                    reservation_consumed = True
                 notice = self._consume_queued_human_notice(
                     notice=notice,
                     queued_signal=queued_signal,
@@ -302,8 +295,6 @@ class ResponseLifecycleCoordinator:
                 if lock_acquired:
                     lifecycle_lock.release()
         finally:
-            if queued_notice_reservation is not None and not reservation_consumed:
-                queued_notice_reservation.cancel()
             self._consume_queued_human_notice(
                 notice=notice,
                 queued_signal=queued_signal,

@@ -1644,7 +1644,17 @@ async def test_hook_dispatch_command_reply_preserves_original_envelope_metadata(
     bot._delivery_gateway.send_text = AsyncMock(return_value="$reply")
     replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
 
-    await dispatch_test_turn(bot._turn_controller, room, event, "@mindroom_router:localhost")
+    await dispatch_test_turn(
+        bot._turn_controller,
+        room,
+        event,
+        "@mindroom_router:localhost",
+        ingress_metadata=DispatchIngressMetadata(
+            source_kind="hook_dispatch",
+            hook_source="origin-plugin:message:received",
+            message_received_depth=1,
+        ),
+    )
 
     request = bot._delivery_gateway.send_text.await_args.args[0]
     assert request.target.resolved_thread_id == "$hook-dispatch-command"

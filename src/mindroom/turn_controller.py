@@ -1524,7 +1524,6 @@ class TurnController:
         dispatch_started_at: float,
         handled_turn: TurnRecord,
         matrix_run_metadata: dict[str, Any] | None = None,
-        queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
         reconcile_visible_response: bool = False,
     ) -> None:
@@ -1655,7 +1654,6 @@ class TurnController:
                     current_timestamp_ms=current_timestamp_ms,
                     current_prompt_is_structured=dispatch.current_prompt_is_structured,
                     pipeline_timing=dispatch_timing,
-                    queued_notice_reservation=queued_notice_reservation,
                     on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                     prepare_source_turn=lambda: self.deps.turn_store.prepare_pending_response_source(
                         target=dispatch.target,

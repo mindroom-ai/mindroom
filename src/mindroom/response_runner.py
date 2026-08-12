@@ -314,7 +314,6 @@ class ResponseRequest:
     prepare_source_turn: Callable[[], Coroutine[Any, Any, bool]] | None = None
     on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
-    queued_notice_reservation: QueuedHumanNoticeReservation | None = None
     on_interrupted_response_recoverable: Callable[[], None] | None = None
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], Awaitable[None]] | None = None
@@ -1002,7 +1001,6 @@ class ResponseRunner:
                 return await self._lifecycle_coordinator.run_locked_response(
                     target=resolved_target,
                     response_envelope=request.response_envelope,
-                    queued_notice_reservation=request.queued_notice_reservation,
                     pipeline_timing=request.pipeline_timing,
                     locked_operation=lambda target: locked_operation(target, early_placeholder),
                     signal_queued_message=request.sync_restart_retry_source_event_id is None,

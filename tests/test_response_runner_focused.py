@@ -1339,7 +1339,6 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
         coordinator.run_locked_response(
             target=first_envelope.target,
             response_envelope=first_envelope,
-            queued_notice_reservation=None,
             pipeline_timing=None,
             locked_operation=first_turn,
         ),
@@ -1362,6 +1361,8 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
         is None
     )
     assert queued_signal.pending_human_messages == 1
+    reservation.consume()
+    assert queued_signal.pending_human_messages == 0
 
     async def second_turn(_target: MessageTarget) -> str:
         pending_during_second_turn.append(queued_signal.pending_human_messages)
@@ -1371,7 +1372,6 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
         coordinator.run_locked_response(
             target=second_envelope.target,
             response_envelope=second_envelope,
-            queued_notice_reservation=reservation,
             pipeline_timing=None,
             locked_operation=second_turn,
         ),
@@ -1384,7 +1384,7 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
     gate.set()
     assert await asyncio.wait_for(first, timeout=2) == "first"
     assert await asyncio.wait_for(second, timeout=2) == "second"
-    # The reservation is consumed exactly when the queued request becomes the active turn.
+    # The lifecycle consumes its own waiting notice when the queued request becomes active.
     assert pending_during_second_turn == [0]
     assert queued_signal.pending_human_messages == 0
     assert not coordinator.has_active_response_for_target(first_envelope.target)
@@ -1412,7 +1412,6 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
             coordinator.run_locked_response(
                 target=second_envelope.target,
                 response_envelope=second_envelope,
-                queued_notice_reservation=None,
                 pipeline_timing=None,
                 locked_operation=queued_turn,
             ),
@@ -1422,7 +1421,6 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
         coordinator.run_locked_response(
             target=first_envelope.target,
             response_envelope=first_envelope,
-            queued_notice_reservation=None,
             pipeline_timing=None,
             locked_operation=first_turn,
         ),

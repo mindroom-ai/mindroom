@@ -418,7 +418,6 @@ async def _apply_turn_plan(
                 dispatch_started_at=prepared.dispatch_started_at,
                 handled_turn=handled_turn,
                 matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
-                queued_notice_reservation=None,
                 on_lifecycle_lock_acquired=response_started.set,
                 reconcile_visible_response=reconcile_visible_response,
             ),

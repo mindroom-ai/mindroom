@@ -23,7 +23,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from structlog.testing import capture_logs
 
-from mindroom import ai_runtime, turn_controller
+from mindroom import ai_runtime
 from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
@@ -113,6 +113,9 @@ if TYPE_CHECKING:
 
 
 class _ReservationLike(Protocol):
+    def consume(self) -> None:
+        """Consume the reserved queued-human notice."""
+
     def cancel(self) -> None:
         """Release the reserved queued-human notice."""
 
@@ -310,7 +313,7 @@ def _targeted_queued_notice_metadata(
             kind="queued_notice_reservation",
             payload=reservation,
             close=reservation.cancel,
-            target_key=(target.room_id, target.resolved_thread_id),
+            target_key=target.lifecycle_key,
         ),
     )
 
@@ -346,7 +349,6 @@ async def test_response_lifecycle_rejects_mismatched_locked_response_target(tmp_
         await lifecycle.run_locked_response(
             target=mismatched_target,
             response_envelope=envelope,
-            queued_notice_reservation=None,
             pipeline_timing=None,
             locked_operation=locked_operation,
         )
@@ -575,47 +577,43 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
     )
 
 
-def test_same_target_batch_reservation_consumes_all_pending_messages(tmp_path: Path) -> None:
-    """A coalesced target batch should consume every matching queued-human notice."""
+@pytest.mark.asyncio
+async def test_room_mode_root_batch_consumes_all_same_target_reservations(tmp_path: Path) -> None:
+    """Root events coalesced in room mode should consume every reservation for that room."""
     bot = _bot(tmp_path)
-    target = MessageTarget.resolve("!room:localhost", "$thread", "$a1")
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = coordinator._lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
-    queued_signal.begin_response_turn()
-    try:
-        first_reservation = lifecycle.reserve_waiting_human_message(
-            target=target,
-            response_envelope=_envelope(source_event_id="$a1", target=target),
-        )
-        second_reservation = lifecycle.reserve_waiting_human_message(
-            target=target,
-            response_envelope=_envelope(source_event_id="$b1", target=target),
-        )
-        assert first_reservation is not None
-        assert second_reservation is not None
-
-        turn_controller._consume_queued_notice_reservations_from_metadata(
-            (
-                PendingDispatchMetadata(
-                    kind="queued_notice_reservation",
-                    payload=first_reservation,
-                    close=first_reservation.cancel,
-                    target_key=(target.room_id, target.resolved_thread_id),
-                ),
-                PendingDispatchMetadata(
-                    kind="queued_notice_reservation",
-                    payload=second_reservation,
-                    close=second_reservation.cancel,
-                    target_key=(target.room_id, target.resolved_thread_id),
-                ),
+    bot.config.agents["general"].thread_mode = "room"
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    target = MessageTarget.resolve(room.room_id, None, "$a1", room_mode=True)
+    first_reservation = MagicMock()
+    second_reservation = MagicMock()
+    first_event = _prepared_text_event(event_id="$a1")
+    second_event = _prepared_text_event(event_id="$b1")
+    batch = build_prepared_turn(
+        CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
+        [
+            make_pending_event(
+                first_event,
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                dispatch_metadata=_targeted_queued_notice_metadata(first_reservation, target),
             ),
-            target_key=(target.room_id, target.resolved_thread_id),
-        )
+            make_pending_event(
+                second_event,
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                dispatch_metadata=_targeted_queued_notice_metadata(second_reservation, target),
+            ),
+        ],
+    )
 
-        assert queued_signal.pending_human_message_event_ids == set()
-    finally:
-        queued_signal.finish_response_turn()
+    with patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()):
+        await bot._turn_controller.handle_prepared_turn(batch)
+
+    first_reservation.consume.assert_called_once_with()
+    second_reservation.consume.assert_called_once_with()
+    first_reservation.cancel.assert_not_called()
+    second_reservation.cancel.assert_not_called()
 
 
 @contextmanager
@@ -1952,7 +1950,6 @@ async def test_reserved_human_follow_up_reaches_active_turn_before_dispatch(tmp_
         lifecycle.run_locked_response(
             target=response_target,
             response_envelope=active_envelope,
-            queued_notice_reservation=None,
             pipeline_timing=None,
             locked_operation=active_operation,
         ),
@@ -1966,12 +1963,12 @@ async def test_reserved_human_follow_up_reaches_active_turn_before_dispatch(tmp_
     assert reservation is not None
     await asyncio.wait_for(active_saw_follow_up.wait(), timeout=0.2)
     assert queued_signal.pending_human_messages == 1
+    reservation.consume()
 
     follow_up_task = asyncio.create_task(
         lifecycle.run_locked_response(
             target=response_target,
             response_envelope=follow_up_envelope,
-            queued_notice_reservation=reservation,
             pipeline_timing=None,
             locked_operation=follow_up_operation,
         ),
@@ -2012,7 +2009,6 @@ async def test_response_lifecycle_reservations_clear_individual_notices(tmp_path
         lifecycle.run_locked_response(
             target=target,
             response_envelope=active_envelope,
-            queued_notice_reservation=None,
             pipeline_timing=None,
             locked_operation=active_operation,
         ),
@@ -2035,12 +2031,14 @@ async def test_response_lifecycle_reservations_clear_individual_notices(tmp_path
         assert reservation is not None
         queued_items.append((source_event_id, envelope, reservation))
 
+    for _source_event_id, _envelope_item, reservation in queued_items:
+        reservation.consume()
+
     follow_up_tasks = [
         asyncio.create_task(
             lifecycle.run_locked_response(
                 target=target,
                 response_envelope=envelope,
-                queued_notice_reservation=reservation,
                 pipeline_timing=None,
                 locked_operation=lambda locked_target, source_event_id=source_event_id: follow_up_operation(
                     source_event_id,
@@ -2107,7 +2105,6 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
         lifecycle.run_locked_response(
             target=target,
             response_envelope=active_envelope,
-            queued_notice_reservation=None,
             pipeline_timing=None,
             locked_operation=active_operation,
         ),
@@ -2120,7 +2117,6 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
         lifecycle.run_locked_response(
             target=target,
             response_envelope=scheduled_envelope,
-            queued_notice_reservation=None,
             pipeline_timing=None,
             locked_operation=scheduled_operation,
         ),
@@ -2132,12 +2128,12 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
     assert await scheduled_task == "$scheduled-response"
     assert observed_scheduled_pending == [{"$human"}]
     assert lifecycle._get_or_create_queued_signal(target).pending_human_message_event_ids == {"$human"}
+    human_reservation.consume()
 
     assert (
         await lifecycle.run_locked_response(
             target=target,
             response_envelope=human_envelope,
-            queued_notice_reservation=human_reservation,
             pipeline_timing=None,
             locked_operation=human_operation,
         )
@@ -2782,8 +2778,8 @@ def test_managed_message_does_not_reserve_queued_human_notice(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_handed_off_reservation_is_cancelled_when_lock_wait_is_cancelled(tmp_path: Path) -> None:
-    """A reservation handed to the lifecycle should not leak if lock acquisition is cancelled."""
+async def test_lifecycle_notice_is_cancelled_when_lock_wait_is_cancelled(tmp_path: Path) -> None:
+    """A lifecycle-owned notice should not leak if lock acquisition is cancelled."""
     bot = _bot(tmp_path)
     target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
     envelope = _envelope(
@@ -2798,6 +2794,7 @@ async def test_handed_off_reservation_is_cancelled_when_lock_wait_is_cancelled(t
     reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
     assert reservation is not None
     assert queued_signal.pending_human_messages == 1
+    reservation.consume()
 
     lock = lifecycle._response_lifecycle_lock(target)
     await lock.acquire()
@@ -2811,7 +2808,6 @@ async def test_handed_off_reservation_is_cancelled_when_lock_wait_is_cancelled(t
             lifecycle.run_locked_response(
                 target=target,
                 response_envelope=envelope,
-                queued_notice_reservation=reservation,
                 pipeline_timing=None,
                 locked_operation=locked_operation,
             ),
@@ -4029,7 +4025,6 @@ async def test_response_lifecycle_finalizes_notice_after_locked_operation() -> N
     result = await lifecycle.run_locked_response(
         target=target,
         response_envelope=envelope,
-        queued_notice_reservation=None,
         pipeline_timing=None,
         locked_operation=locked_operation,
     )
@@ -4085,7 +4080,6 @@ async def test_response_lifecycle_finalizes_error_state_when_operation_raises() 
         await lifecycle.run_locked_response(
             target=target,
             response_envelope=envelope,
-            queued_notice_reservation=None,
             pipeline_timing=None,
             locked_operation=locked_operation,
         )
@@ -4283,7 +4277,6 @@ async def _persist_notice_bearing_response(tmp_path: Path) -> str:
     response_1 = await lifecycle.run_locked_response(
         target=target,
         response_envelope=envelope,
-        queued_notice_reservation=None,
         pipeline_timing=None,
         locked_operation=response_1_operation,
     )
