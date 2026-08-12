@@ -56,7 +56,6 @@ _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
 _STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION = 10
 _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS = 0.25
 _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS = 30.0
-_CONTINUATION_DISPATCH_LOG_AFTER_ATTEMPTS = 5
 
 
 class _ApprovalTransportBot(Protocol):
@@ -245,7 +244,7 @@ class ApprovalMatrixTransport:
 
     async def _dispatch_continuation(self, approval_id: str) -> None:
         retry_seconds = _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS
-        attempts = 0
+        waiting_logged = False
         while True:
             continuation = await asyncio.to_thread(self._continuations.get, approval_id)
             if continuation is None or continuation.state != "ready":
@@ -253,17 +252,29 @@ class ApprovalMatrixTransport:
             bot = self.bot_provider(continuation.entity_name)
             if bot is not None and bot.running:
                 await bot.resume_approval_continuation(continuation)
-                await asyncio.sleep(0)
+                refreshed = await asyncio.to_thread(self._continuations.get, approval_id)
+                if refreshed is None or refreshed.state != "ready":
+                    return
+                if not waiting_logged:
+                    logger.warning(
+                        "approval_continuation_resume_deferred",
+                        approval_id=approval_id,
+                        entity_name=continuation.entity_name,
+                        retry_seconds=retry_seconds,
+                    )
+                    waiting_logged = True
+                await asyncio.sleep(retry_seconds)
+                retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
                 continue
             if self.entity_configured is None or self.entity_configured(continuation.entity_name):
-                attempts += 1
-                if attempts >= _CONTINUATION_DISPATCH_LOG_AFTER_ATTEMPTS:
+                if not waiting_logged:
                     logger.warning(
                         "approval_continuation_waiting_for_owner",
                         approval_id=approval_id,
                         entity_name=continuation.entity_name,
                         retry_seconds=retry_seconds,
                     )
+                    waiting_logged = True
                 await asyncio.sleep(retry_seconds)
                 retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
                 continue
@@ -272,14 +283,14 @@ class ApprovalMatrixTransport:
             if fallback is not None and fallback.running:
                 await fallback.fail_approval_continuation(continuation, reason)
                 return
-            attempts += 1
-            if attempts >= _CONTINUATION_DISPATCH_LOG_AFTER_ATTEMPTS:
+            if not waiting_logged:
                 logger.warning(
                     "approval_continuation_waiting_for_router",
                     approval_id=approval_id,
                     entity_name=continuation.entity_name,
                     retry_seconds=retry_seconds,
                 )
+                waiting_logged = True
             await asyncio.sleep(retry_seconds)
             retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
 

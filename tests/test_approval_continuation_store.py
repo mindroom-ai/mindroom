@@ -316,6 +316,35 @@ async def test_duplicate_decision_waits_through_reload_gap_and_resumes_once(tmp_
 
 
 @pytest.mark.asyncio
+async def test_running_owner_that_cannot_claim_is_polled_with_backoff(tmp_path: Path) -> None:
+    """A stopping bot that returns without claiming must not create a tight dispatcher loop."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    resume = AsyncMock()
+    bot = SimpleNamespace(running=True, resume_approval_continuation=resume)
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda _name: cast("Any", bot),
+        cards_provider=lambda: None,
+        entity_configured=lambda _name: True,
+    )
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    ready = transport._continuations.acknowledge_call("approval-1", "call-1")
+    assert ready is not None
+    transport._schedule_continuation(ready)
+
+    await asyncio.sleep(0.35)
+    await transport.cancel_startup_cleanup_retry()
+
+    assert 1 <= resume.await_count <= 2
+
+
+@pytest.mark.asyncio
 async def test_recovered_partial_card_set_remains_recoverable_until_card_is_terminal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

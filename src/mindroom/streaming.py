@@ -1975,10 +1975,20 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             ) from exc
         except Exception as exc:
             if isinstance(exc, StreamingLifecycleSuspensionError):
-                await _shutdown_worker_progress_drain(pump, progress_task)
+                cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
                 progress_task = None
-                await _shutdown_stream_delivery(delivery_queue, delivery_task)
+                delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
                 delivery_task = None
+                if cleanup_error is not None:
+                    logger.warning(
+                        "Worker progress drain raised during suspension cleanup",
+                        error=str(cleanup_error),
+                    )
+                if delivery_cleanup_error is not None:
+                    logger.warning(
+                        "Stream delivery controller raised during suspension cleanup",
+                        error=str(delivery_cleanup_error),
+                    )
                 raise
             delivery_error = exc.error if isinstance(exc, _NonTerminalDeliveryError) else exc
             logger.exception("Streaming response failed", error=str(delivery_error))

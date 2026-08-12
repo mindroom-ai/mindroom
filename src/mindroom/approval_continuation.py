@@ -24,6 +24,7 @@ class ApprovalDecision(StrEnum):
 
 
 type _ApprovalContinuationState = Literal["pending", "ready", "claimed", "completed", "failed"]
+_PAGE_SIZE = 100
 
 _STORE_LOCKS_GUARD = threading.Lock()
 _STORE_LOCKS: dict[str, threading.RLock] = {}
@@ -254,14 +255,14 @@ class ApprovalContinuationStore:
                 rows, total = self._db.get_approvals(
                     status=state,
                     approval_type="mindroom",
-                    limit=100,
+                    limit=_PAGE_SIZE,
                     page=page,
                 )
                 for row in rows:
                     continuation = ApprovalContinuation._from_row(row)
                     if source_event_id in continuation.source_event_ids:
                         return continuation
-                if page * 100 >= total:
+                if page * _PAGE_SIZE >= total:
                     break
                 page += 1
         return None
@@ -377,11 +378,11 @@ class ApprovalContinuationStore:
                 rows, total = self._db.get_approvals(
                     status=state,
                     approval_type="mindroom",
-                    limit=100,
+                    limit=_PAGE_SIZE,
                     page=page,
                 )
                 records.extend(ApprovalContinuation._from_row(row) for row in rows)
-                if page * 100 >= total:
+                if page * _PAGE_SIZE >= total:
                     break
                 page += 1
         return tuple(records)

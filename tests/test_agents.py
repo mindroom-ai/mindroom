@@ -3205,12 +3205,16 @@ def test_tool_function_filter_prunes_resolved_functions() -> None:
 
 def test_mark_toolkit_approval_requirements_only_pauses_potentially_gated_calls() -> None:
     """Removing native confirmation marking would put approval back inside the live tool hook."""
+
+    async def dangerous_async() -> None:
+        return None
+
     config = Config.model_validate(
         {
             "tool_approval": {
                 "default": "auto_approve",
                 "rules": [
-                    {"match": "dangerous", "action": "require_approval"},
+                    {"match": "dangerous*", "action": "require_approval"},
                     {"match": "safe", "action": "auto_approve"},
                 ],
             },
@@ -3220,6 +3224,7 @@ def test_mark_toolkit_approval_requirements_only_pauses_potentially_gated_calls(
         name="approval-test",
         tools=[
             Function(name="dangerous", entrypoint=lambda: None),
+            Function(name="dangerous_async", entrypoint=dangerous_async),
             Function(name="safe", entrypoint=lambda: None),
         ],
     )
@@ -3227,6 +3232,7 @@ def test_mark_toolkit_approval_requirements_only_pauses_potentially_gated_calls(
     agents_module._mark_toolkit_approval_requirements(toolkit, config)
 
     assert toolkit.functions["dangerous"].requires_confirmation is True
+    assert toolkit.async_functions["dangerous_async"].requires_confirmation is True
     assert toolkit.functions["safe"].requires_confirmation is not True
 
 

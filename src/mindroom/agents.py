@@ -1302,8 +1302,7 @@ def _prune_toolkit_functions(
 
 def _mark_toolkit_approval_requirements(toolkit: Toolkit, config: Config) -> None:
     """Move potentially gated calls onto Agno's persisted confirmation boundary."""
-    functions = {**toolkit.functions, **toolkit.async_functions}
-    for function in functions.values():
+    for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
         if tool_may_require_approval(config, function.name):
             function.requires_confirmation = True
 

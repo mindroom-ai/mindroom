@@ -6,13 +6,13 @@ import asyncio
 import contextlib
 import json
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
+from agno.run.team import TeamRunOutput
 
 from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
@@ -248,7 +248,7 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
     requirement.member_agent_id = "member-id"
     requirement.member_agent_name = "researcher"
     requirement.member_run_id = "member-run"
-    response = SimpleNamespace(
+    response = TeamRunOutput(
         status=RunStatus.paused,
         session_id="team-session",
         run_id="team-run",
