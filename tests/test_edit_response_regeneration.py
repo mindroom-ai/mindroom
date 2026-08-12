@@ -441,7 +441,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         ),
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch(
-            "mindroom.delivery_gateway.send_message_result",
+            "mindroom.delivery_gateway.send_message_outcome",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
         ) as mock_edit,
     ):
@@ -4107,7 +4107,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
             new_callable=AsyncMock,
             return_value=thread_history_result([], is_full_history=True),
         ),
-        patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
+        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
     ):
         await bot._on_message(room, message_event)
 

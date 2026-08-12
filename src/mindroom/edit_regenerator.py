@@ -10,13 +10,13 @@ from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.handled_turns import with_user_stop
 from mindroom.hooks import hook_ingress_policy
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.response_runner import ResponseRequest
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_store import record_deferred_outcome_response, record_user_stop_terminal
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -400,19 +400,19 @@ class EditRegenerator:
 
         async def record_deferred_outcome(response_event_id: str) -> None:
             if applied:
-                await self.deps.turn_store.record_responded_turn(
-                    canonicalize_turn_record(record, response_event_id=response_event_id),
+                await record_deferred_outcome_response(
+                    self.deps.turn_store,
+                    record,
+                    response_event_id,
                 )
 
         async def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
             if applied:
-                await self.deps.turn_store.record_turn(
-                    with_user_stop(
-                        record,
-                        response_event_id,
-                        stop_receipt_order,
-                        delivery_settled=True,
-                    ),
+                await record_user_stop_terminal(
+                    self.deps.turn_store,
+                    record,
+                    response_event_id,
+                    stop_receipt_order,
                 )
 
         return record_interrupted_turn, record_deferred_outcome, record_user_stop

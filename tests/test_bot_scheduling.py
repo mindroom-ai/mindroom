@@ -11,6 +11,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -18,7 +19,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY, VOICE_PREFIX
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import DispatchIngressMetadata
-from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SCHEDULED_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import thread_history_result
@@ -48,6 +49,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.turn_dispatch_helpers import dispatch_test_turn
 
 if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
@@ -2020,9 +2022,18 @@ class TestRouterSkipsSingleAgent:
                 entity_ids(config, runtime_paths_for(config))["general"],
                 entity_ids(config, runtime_paths_for(config))["calculator"],
             ]
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@alice:localhost"),
+                ingress_metadata=DispatchIngressMetadata(
+                    source_kind=MESSAGE_SOURCE_KIND,
+                    coalescing_key=CoalescingKey(
+                        room.room_id,
+                        "$thread1",
+                        RequesterCoalescingOwner("@alice:localhost"),
+                    ),
+                ),
             )
 
         bot._turn_controller._execute_router_relay.assert_not_called()

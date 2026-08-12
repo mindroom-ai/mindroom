@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import mimetypes
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -40,6 +41,26 @@ class DeliveredMatrixEvent:
 
     event_id: str
     content_sent: dict[str, Any]
+
+
+class MatrixDeliveryFailureKind(enum.Enum):
+    """Internal classification of one Matrix delivery failure."""
+
+    ENCRYPTION_GUARD = "encryption_guard"
+    UNKNOWN_ENCRYPTION_STATE = "unknown_encryption_state"
+    SEND_EXCEPTION = "send_exception"
+    UNEXPECTED_RESPONSE = "unexpected_response"
+
+
+@dataclass(frozen=True, slots=True)
+class MatrixDeliveryFailure:
+    """One typed Matrix delivery failure."""
+
+    kind: MatrixDeliveryFailureKind
+    detail: str
+
+
+type MatrixSendOutcome = DeliveredMatrixEvent | MatrixDeliveryFailure
 
 
 def _sanitized_delivery_error_message(error: Exception) -> str:
@@ -244,13 +265,13 @@ def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operat
     )
 
 
-async def resolve_room_encryption_for_delivery(
+async def _resolve_room_encryption_outcome(
     client: nio.AsyncClient,
     room_id: str,
     *,
     operation: str,
-) -> bool | None:
-    """Return authoritative room encryption state for safe outbound preparation."""
+) -> bool | MatrixDeliveryFailure:
+    """Return room encryption state or one typed preparation failure."""
     room = cached_room(client, room_id)
     if room is not None:
         room_encrypted = bool(room.encrypted)
@@ -267,15 +288,32 @@ async def resolve_room_encryption_for_delivery(
                 operation=operation,
                 hint="Unable to determine whether the room is encrypted while nio's room cache is empty.",
             )
-            return None
+            return MatrixDeliveryFailure(
+                MatrixDeliveryFailureKind.UNKNOWN_ENCRYPTION_STATE,
+                "room encryption state unknown without a synced room cache",
+            )
 
     if room_encrypted and not _has_encrypted_delivery_support(
         client,
         room_id=room_id,
         operation=operation,
     ):
-        return None
+        return MatrixDeliveryFailure(
+            MatrixDeliveryFailureKind.ENCRYPTION_GUARD,
+            "encrypted delivery rejected by local trust policy",
+        )
     return room_encrypted
+
+
+async def resolve_room_encryption_for_delivery(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    operation: str,
+) -> bool | None:
+    """Return authoritative room encryption state for safe outbound preparation."""
+    outcome = await _resolve_room_encryption_outcome(client, room_id, operation=operation)
+    return outcome if isinstance(outcome, bool) else None
 
 
 def can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operation: str) -> bool:
@@ -308,7 +346,7 @@ async def send_room_event_result(
     return cast("nio.RoomSendResponse | nio.RoomSendError | None", response)
 
 
-async def send_message_result(
+async def send_message_outcome(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
@@ -316,23 +354,27 @@ async def send_message_result(
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
     transaction_id: str | None = None,
-) -> DeliveredMatrixEvent | None:
-    """Send a message to a Matrix room and return the exact delivered payload."""
+) -> MatrixSendOutcome:
+    """Send a message to a Matrix room and return the delivered payload or a typed failure."""
     if not _can_send_to_encrypted_room(client, room_id, operation=operation):
-        return None
+        return MatrixDeliveryFailure(
+            MatrixDeliveryFailureKind.ENCRYPTION_GUARD,
+            "encrypted delivery rejected by local trust policy",
+        )
 
     rooms = client.rooms
     cache_bypass = False
     room_encryption_override: bool | None = None
     if isinstance(rooms, Mapping):
         room = rooms.get(room_id)
-        room_encryption_override = await resolve_room_encryption_for_delivery(
+        encryption_outcome = await _resolve_room_encryption_outcome(
             client,
             room_id,
             operation=operation,
         )
-        if room_encryption_override is None:
-            return None
+        if isinstance(encryption_outcome, MatrixDeliveryFailure):
+            return encryption_outcome
+        room_encryption_override = encryption_outcome
         cache_bypass = room is None and not room_encryption_override
 
     message_type = "m.room.message"
@@ -381,7 +423,7 @@ async def send_message_result(
             outcome="error",
             error="delivery_exception",
         )
-        return None
+        return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "local delivery exception")
     if isinstance(response, nio.RoomSendResponse):
         emit_timing_event(
             "Matrix send timing",
@@ -414,7 +456,28 @@ async def send_message_result(
         error=str(response),
         cache_bypass=cache_bypass,
     )
-    return None
+    return MatrixDeliveryFailure(MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE, str(response))
+
+
+async def send_message_result(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+    *,
+    operation: str = "send_message",
+    retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
+) -> DeliveredMatrixEvent | None:
+    """Send a message to a Matrix room and return the exact delivered payload."""
+    outcome = await send_message_outcome(
+        client,
+        room_id,
+        content,
+        operation=operation,
+        retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
+    )
+    return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 
 
 def _guess_mimetype(file_path: Path) -> str:
@@ -715,6 +778,35 @@ def build_edit_event_content(
     return edit_content
 
 
+async def edit_message_outcome(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    new_content: dict[str, Any],
+    new_text: str,
+    *,
+    extra_content: dict[str, Any] | None = None,
+    retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
+) -> MatrixSendOutcome:
+    """Edit an existing Matrix message and return the delivered payload or a typed failure."""
+    edit_content = build_edit_event_content(
+        event_id=event_id,
+        new_content=new_content,
+        new_text=new_text,
+        extra_content=extra_content,
+    )
+
+    return await send_message_outcome(
+        client,
+        room_id,
+        edit_content,
+        operation="edit_message",
+        retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
+    )
+
+
 async def edit_message_result(
     client: nio.AsyncClient,
     room_id: str,
@@ -727,32 +819,33 @@ async def edit_message_result(
     transaction_id: str | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Edit an existing Matrix message and return the exact delivered payload."""
-    edit_content = build_edit_event_content(
-        event_id=event_id,
-        new_content=new_content,
-        new_text=new_text,
-        extra_content=extra_content,
-    )
-
-    return await send_message_result(
+    outcome = await edit_message_outcome(
         client,
         room_id,
-        edit_content,
-        operation="edit_message",
+        event_id,
+        new_content,
+        new_text,
+        extra_content=extra_content,
         retry_sync_recovery=retry_sync_recovery,
         transaction_id=transaction_id,
     )
+    return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 
 
 __all__ = [
     "DeliveredMatrixEvent",
+    "MatrixDeliveryFailure",
+    "MatrixDeliveryFailureKind",
+    "MatrixSendOutcome",
     "build_edit_event_content",
     "cached_room",
     "can_send_to_encrypted_room",
+    "edit_message_outcome",
     "edit_message_result",
     "resolve_room_encryption_for_delivery",
     "send_audio_message",
     "send_file_message",
+    "send_message_outcome",
     "send_message_result",
     "send_room_event_result",
     "send_runtime_encrypted_media_message",

@@ -406,7 +406,7 @@ class TestAIRouting:
         mock_event = MagicMock()
         mock_event.body = "Test message"
 
-        with patch("mindroom.turn_controller.suggest_responder_for_message") as mock_suggest:
+        with patch("mindroom.router_relay.suggest_responder_for_message") as mock_suggest:
             # Should raise AssertionError since general is not the router agent
             with pytest.raises(AssertionError):
                 await bot._turn_controller._execute_router_relay(

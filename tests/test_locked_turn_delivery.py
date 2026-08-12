@@ -10,7 +10,12 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.delivery_gateway import DeliveryGateway
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import (
+    DeliveredMatrixEvent,
+    MatrixDeliveryFailure,
+    MatrixDeliveryFailureKind,
+    MatrixSendOutcome,
+)
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress, _ResponseGenerationOutcome
 from tests.ai_user_id_helpers import (
@@ -58,7 +63,7 @@ class _FakeHomeserver:
         operation: str = "send_message",
         retry_sync_recovery: bool = False,
         transaction_id: str | None = None,
-    ) -> DeliveredMatrixEvent | None:
+    ) -> MatrixSendOutcome:
         """Accept one send, deduplicating on transaction ID like a homeserver."""
         del operation, retry_sync_recovery
         if content.get("body") == "Thinking...":
@@ -71,14 +76,16 @@ class _FakeHomeserver:
         first = not self._seen_first
         self._seen_first = True
         if first and not self._accepts_first:
-            return None
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "lost send confirmation")
         event_id = f"$event-{len(self.events)}"
         self.events.append((event_id, str(content.get("body", ""))))
         if transaction_id is not None:
             self._event_id_by_transaction[transaction_id] = event_id
         # The first send's confirmation never comes back, whether or not the
         # server kept the event.
-        return None if first else DeliveredMatrixEvent(event_id=event_id, content_sent=dict(content))
+        if first:
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "lost send confirmation")
+        return DeliveredMatrixEvent(event_id=event_id, content_sent=dict(content))
 
     def placeholders(self) -> list[str]:
         """Return every visible placeholder event this room ever accepted."""
@@ -119,7 +126,7 @@ async def test_one_turn_never_shows_two_placeholders(
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.delivery_gateway.send_message_result", new=homeserver.send),
+        patch("mindroom.delivery_gateway.send_message_outcome", new=homeserver.send),
         patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=die_before_answering)),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),

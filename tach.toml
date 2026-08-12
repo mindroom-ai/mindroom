@@ -1195,6 +1195,7 @@ depends_on = [
     "mindroom.response_runner",
     "mindroom.runtime_protocols",
     "mindroom.timestamp_formatting",
+    "mindroom.turn_store",
 ]
 
 [[modules]]
@@ -4064,20 +4065,45 @@ expose = [
 from = ["mindroom.matrix.client_session"]
 
 [[interfaces]]
+expose = [
+    "ActiveFollowUpCoalescingOwner",
+    "CoalescingKey",
+    "CoalescingOwner",
+    "PendingEvent",
+    "PreparedTurn",
+    "RequesterCoalescingOwner",
+    "TimestampFormatter",
+    "active_follow_up_coalescing_key",
+    "build_prepared_turn",
+    "close_pending_event_metadata",
+    "coalesced_prompt",
+    "coalescing_owner_log_label",
+    "is_active_follow_up_coalescing_key",
+    "requester_coalescing_key",
+    "tagged_coalesced_prompt",
+]
+from = ["mindroom.coalescing_batch"]
+
+[[interfaces]]
 expose = ["AuthenticatedToDeviceEvent"]
 from = ["mindroom.matrix.to_device"]
 
 [[interfaces]]
 expose = [
     "DeliveredMatrixEvent",
+    "MatrixDeliveryFailure",
+    "MatrixDeliveryFailureKind",
+    "MatrixSendOutcome",
     "build_edit_event_content",
     "build_threaded_edit_content",
     "can_send_to_encrypted_room",
     "cached_room",
+    "edit_message_outcome",
     "edit_message_result",
     "resolve_room_encryption_for_delivery",
     "send_audio_message",
     "send_file_message",
+    "send_message_outcome",
     "send_message_result",
     "send_room_event_result",
     "send_runtime_encrypted_media_message",

@@ -173,7 +173,7 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
         ),
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
         patch(
-            "mindroom.delivery_gateway.edit_message_result",
+            "mindroom.delivery_gateway.edit_message_outcome",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$thinking",
@@ -225,7 +225,7 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
         ),
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
         patch(
-            "mindroom.delivery_gateway.edit_message_result",
+            "mindroom.delivery_gateway.edit_message_outcome",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$thinking",

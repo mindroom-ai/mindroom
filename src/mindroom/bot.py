@@ -169,7 +169,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
 
     from mindroom.approval_continuation import ApprovalContinuation
-    from mindroom.coalescing_batch import CoalescedBatch
+    from mindroom.coalescing_batch import PreparedTurn
     from mindroom.config.main import Config
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
@@ -537,7 +537,7 @@ class AgentBot:
                 self._own_journal = self._open_own_journal()
             self._journal_store = self._own_journal.store
         self._coalescing_gate = CoalescingGate(
-            dispatch_batch=self._dispatch_coalesced_batch,
+            dispatch_turn=self._dispatch_prepared_turn,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
             is_shutting_down=lambda: self._sync_shutting_down,
             wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
@@ -2251,9 +2251,9 @@ class AgentBot:
             return client.rooms[room_id]
         return nio.MatrixRoom(room_id, self.matrix_id.full_id)
 
-    async def _dispatch_coalesced_batch(self, batch: CoalescedBatch) -> None:
-        """Delegate one flushed coalesced batch to the turn engine."""
-        await self._turn_controller.handle_coalesced_batch(batch)
+    async def _dispatch_prepared_turn(self, turn: PreparedTurn) -> None:
+        """Delegate one prepared turn to the turn engine."""
+        await self._turn_controller.handle_prepared_turn(turn)
 
     def _retry_failed_coalesced_dispatch(self, pending_events: tuple[PendingEvent, ...]) -> None:
         """Return failed gate sources to their exact durable callback owner."""

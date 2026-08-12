@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from mindroom.authorization import get_effective_sender_id_for_reply_permissions, is_authorized_sender
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
-from mindroom.dispatch_handoff import PreparedTextEvent, is_text_dispatch_event
+from mindroom.dispatch_handoff import PreparedIngress, is_text_dispatch_event
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
@@ -38,7 +38,6 @@ if TYPE_CHECKING:
         DispatchEvent,
         DispatchIngressMetadata,
         DispatchPayloadMetadata,
-        TextDispatchEvent,
     )
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
@@ -138,7 +137,7 @@ class IngressValidator:
     @staticmethod
     def event_source_kind(event: DispatchEvent, content: dict[str, Any]) -> str | None:
         """Return canonical source-kind metadata for one dispatch event."""
-        source_kind = event.source_kind_override if isinstance(event, PreparedTextEvent) else None
+        source_kind = event.source_kind_override if isinstance(event, PreparedIngress) else None
         return source_kind if source_kind is not None else source_kind_from_content(content)
 
     def trusted_human_original_sender_for_event(self, event: DispatchEvent) -> str | None:
@@ -304,7 +303,7 @@ class IngressValidator:
 
         return requester_user_id
 
-    def command_control_input(self, event: TextDispatchEvent, *, source_kind: str) -> Command | None:
+    def command_control_input(self, event: PreparedIngress, *, source_kind: str) -> Command | None:
         """Return the parsed command when one text event is a control input, not conversation."""
         if source_kind_bypasses_coalescing(source_kind):
             return None

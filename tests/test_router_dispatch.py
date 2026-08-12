@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,9 +20,13 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_handoff import prepare_media_ingress
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
+from mindroom.router_relay import execute_router_relay
 from mindroom.teams import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
 from tests.bot_helpers import (
@@ -46,8 +51,6 @@ from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from mindroom.message_target import MessageTarget
 
 
 @pytest.fixture
@@ -348,7 +351,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.turn_controller.suggest_responder_for_message",
+                "mindroom.router_relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
@@ -379,14 +382,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Router should register routed image attachments using outgoing thread scope."""
-        agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token="mock_test_token",  # noqa: S106
-        )
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -399,12 +394,8 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
-        _set_turn_store_tracker(bot, MagicMock())
-        send_response = AsyncMock(return_value="$route")
-        install_send_response_mock(bot, send_response)
-
+        runtime_paths = runtime_paths_for(config)
+        ids = entity_ids(config, runtime_paths)
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
         event = nio.RoomMessageImage.from_dict(
             {
@@ -422,32 +413,55 @@ class TestAgentBot(AgentBotTestBase):
 
         attachment_record = MagicMock()
         attachment_record.attachment_id = _attachment_id_for_event("$image_route")
+        normalizer = MagicMock()
+        normalizer.register_routed_attachment = AsyncMock(return_value=attachment_record.attachment_id)
+        turn_policy = MagicMock()
+        turn_policy.responder_candidates_for_room = AsyncMock(return_value=[ids["general"]])
+        ingress = MagicMock()
+        ingress.managed_entity_name_for_sender.side_effect = lambda sender: (
+            "general" if sender == ids["general"].full_id else None
+        )
+        ingress.sender_is_trusted_for_ingress_metadata.return_value = False
+        resolver = MagicMock()
+        resolver.build_message_target.return_value = MessageTarget.resolve(room.room_id, None, event.event_id)
+        source_turn = TurnRecord.create([event.event_id])
+        visible_responses = MagicMock()
+        visible_responses.prepare_visible_delivery_turn = AsyncMock(return_value=(source_turn, None))
+        visible_responses.record_pending_visible_response = AsyncMock()
+        turn_store = MagicMock()
+        turn_store.finalized_visible_echo_for_sources.return_value = None
+        turn_store.record_responded_turn = AsyncMock()
+        delivery_gateway = MagicMock()
+        delivery_gateway.send_text = AsyncMock(return_value="$route")
 
-        with (
-            patch(
-                "mindroom.turn_controller.suggest_responder_for_message",
-                new_callable=AsyncMock,
-                return_value="general",
+        await execute_router_relay(
+            SimpleNamespace(
+                runtime=MagicMock(config=config, orchestrator=None),
+                runtime_paths=runtime_paths,
+                logger=MagicMock(),
+                agent_name="router",
+                turn_policy=turn_policy,
+                ingress=ingress,
+                resolver=resolver,
+                turn_store=turn_store,
+                visible_responses=visible_responses,
+                delivery_gateway=delivery_gateway,
+                normalizer=normalizer,
             ),
-            patch(
-                "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
-                new_callable=AsyncMock,
-                return_value=attachment_record,
-            ) as mock_register_image,
-        ):
-            await bot._turn_controller._execute_router_relay(
-                room=room,
-                event=event,
-                thread_history=[],
-                thread_id=None,
-                message="[Attached image]",
-                requester_user_id="@user:localhost",
-                extra_content={ORIGINAL_SENDER_KEY: "@user:localhost"},
-            )
+            room=room,
+            event=prepare_media_ingress(event),
+            thread_history=[],
+            thread_id=None,
+            message="[Attached image]",
+            requester_user_id="@user:localhost",
+            extra_content={ORIGINAL_SENDER_KEY: "@user:localhost"},
+        )
 
-        mock_register_image.assert_awaited_once()
-        assert mock_register_image.await_args.kwargs["thread_id"] is None
-        sent_extra_content = send_response.await_args.kwargs["extra_content"]
+        normalizer.register_routed_attachment.assert_awaited_once()
+        assert normalizer.register_routed_attachment.await_args.kwargs["thread_id"] is None
+        delivery_request = delivery_gateway.send_text.await_args.args[0]
+        sent_extra_content = delivery_request.extra_content
+        assert sent_extra_content is not None
         assert sent_extra_content[ATTACHMENT_IDS_KEY] == [attachment_record.attachment_id]
 
     @pytest.mark.asyncio
@@ -562,7 +576,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=TeamResolution.none(),
             ),
             patch(
-                "mindroom.turn_controller.suggest_responder_for_message",
+                "mindroom.router_relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
@@ -741,7 +755,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
-                "mindroom.turn_controller.suggest_responder_for_message",
+                "mindroom.router_relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),

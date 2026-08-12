@@ -219,7 +219,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
 
     # Mock methods
     with (
-        patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
+        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
     ):
         # Process the redelivered message

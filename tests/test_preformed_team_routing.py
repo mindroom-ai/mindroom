@@ -140,7 +140,7 @@ async def test_router_does_not_route_when_preformed_team_is_mentioned(config_wit
     event = _mock_event_with_team_mention(team_user_id)
 
     # Also patch suggest_responder_for_message to detect accidental routing
-    with patch("mindroom.turn_controller.suggest_responder_for_message", new=AsyncMock(return_value="a1")):
+    with patch("mindroom.router_relay.suggest_responder_for_message", new=AsyncMock(return_value="a1")):
         await router._on_message(room, event)
 
     # Router must not send any message (i.e., must not route)
@@ -321,7 +321,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     bot.orchestrator.agent_bots = {"a1": MagicMock()}
 
     with patch(
-        "mindroom.delivery_gateway.send_message_result",
+        "mindroom.delivery_gateway.send_message_outcome",
         new=AsyncMock(
             return_value=DeliveredMatrixEvent(
                 event_id="$existing_response",

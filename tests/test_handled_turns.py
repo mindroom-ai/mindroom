@@ -921,7 +921,8 @@ class _CommittingWriteStore(TurnRecordStore):
         """Hold the write open, then let it land exactly as the real one would."""
         self.started.set()
         await self.released.wait()
-        await super().upsert(
+        await TurnRecordStore.upsert(
+            self,
             index_event_ids=index_event_ids,
             anchor_event_id=anchor_event_id,
             record_json=record_json,

@@ -37,8 +37,13 @@ from mindroom.hooks import (
 )
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
+    MatrixDeliveryFailure,
+    MatrixDeliveryFailureKind,
+    MatrixSendOutcome,
     build_edit_event_content,
+    edit_message_outcome,
     edit_message_result,
+    send_message_outcome,
     send_message_result,
 )
 from mindroom.matrix.large_messages import prepare_large_message
@@ -385,6 +390,21 @@ class DeliveryGatewayDeps:
     terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None
 
 
+_MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
+    MatrixDeliveryFailureKind.ENCRYPTION_GUARD: "encrypted delivery rejected by local trust policy",
+    MatrixDeliveryFailureKind.UNKNOWN_ENCRYPTION_STATE: "room encryption state unknown",
+    MatrixDeliveryFailureKind.SEND_EXCEPTION: "matrix delivery raised a local exception",
+    MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE: "matrix delivery returned an unexpected response",
+}
+
+
+def _matrix_delivery_failure_reason(outcome: MatrixSendOutcome) -> str:
+    """Translate one typed Matrix delivery failure into the gateway failure vocabulary."""
+    if isinstance(outcome, MatrixDeliveryFailure):
+        return f"{_MATRIX_DELIVERY_FAILURE_REASONS[outcome.kind]}: {outcome.detail}"
+    return "matrix delivery failed"
+
+
 @dataclass(frozen=True)
 class FinalizeStreamedResponseRequest:
     """Parameters for finalizing one streamed Matrix response."""
@@ -423,6 +443,36 @@ class DeliveryGateway:
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
         """Normalize CancelledError values to the canonical cancellation reason strings."""
         return cancel_failure_reason(classify_cancel_source(error))
+
+    def terminal_outcome_without_visible_event(
+        self,
+        *,
+        terminal_status: Literal["cancelled", "error"],
+        failure_reason: str,
+    ) -> FinalDeliveryOutcome:
+        """Return the terminal outcome for one turn with no visible event to finalize."""
+        return FinalDeliveryOutcome(
+            terminal_status=terminal_status,
+            event_id=None,
+            failure_reason=failure_reason,
+        )
+
+    def cancelled_terminal_outcome(
+        self,
+        outcome: FinalDeliveryOutcome,
+        *,
+        failure_reason: str,
+    ) -> FinalDeliveryOutcome:
+        """Return the cancelled derivative of one delivery outcome, preserving visible facts."""
+        return FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id=outcome.final_visible_event_id,
+            is_visible_response=outcome.final_visible_event_id is not None,
+            final_visible_body=outcome.final_visible_body,
+            failure_reason=failure_reason,
+            tool_trace=outcome.tool_trace,
+            extra_content=outcome.extra_content,
+        )
 
     async def _cleanup_completed_placeholder_only_stream(
         self,
@@ -601,17 +651,18 @@ class DeliveryGateway:
         duplicate, and leave the durable result and the room disagreeing
         forever.
         """
-        delivered = await send_message_result(
+        outcome = await send_message_outcome(
             self._client(),
             claimed.room_id,
             dict(claimed.payload),
             retry_sync_recovery=retry_sync_recovery,
             transaction_id=claimed.transaction_id,
         )
-        if delivered is None:
-            msg = f"Matrix refused delivery for turn {claimed.turn_id!r} stage {claimed.stage.value!r}"
+        if isinstance(outcome, MatrixDeliveryFailure):
+            detail = _matrix_delivery_failure_reason(outcome)
+            msg = f"Matrix refused delivery for turn {claimed.turn_id!r} stage {claimed.stage.value!r}: {detail}"
             raise _DeliveryRefusedError(msg)
-        return delivered
+        return outcome
 
     def _response_delivery(self, send: SendDelivery, *, handoff: TurnHandoff | None) -> ResponseDelivery:
         """Return the outbox writer, for a live delivery or for recovery.
@@ -729,7 +780,7 @@ class DeliveryGateway:
         request: SendTextRequest,
         room_id: str,
         content: dict[str, Any],
-    ) -> DeliveredMatrixEvent | None:
+    ) -> MatrixSendOutcome | None:
         """Send one built message, through the outbox when it belongs to a turn.
 
         A send with no turn behind it -- a voice echo, a command confirmation,
@@ -739,7 +790,7 @@ class DeliveryGateway:
         """
         client = self._client()
         if request.delivery_turn_id is None:
-            return await send_message_result(
+            return await send_message_outcome(
                 client,
                 room_id,
                 content,
@@ -826,12 +877,16 @@ class DeliveryGateway:
             )
         if request.skip_mentions:
             content[SKIP_MENTIONS_KEY] = True
-        failure_reason = "send_message_result returned None"
+        failure_reason = "durable Matrix delivery was refused"
         try:
-            delivered = await self._send_content(request, resolved_target.room_id, content)
+            outcome = await self._send_content(request, resolved_target.room_id, content)
         except SendRetryError:
             delivered = None
             failure_reason = "matrix timeline recovery still blocked the send"
+        else:
+            delivered = outcome if isinstance(outcome, DeliveredMatrixEvent) else None
+            if isinstance(outcome, MatrixDeliveryFailure):
+                failure_reason = _matrix_delivery_failure_reason(outcome)
         if delivered is not None:
             self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
             return delivered.event_id
@@ -847,7 +902,7 @@ class DeliveryGateway:
         request: EditTextRequest,
         room_id: str,
         content: dict[str, Any],
-    ) -> DeliveredMatrixEvent | None:
+    ) -> MatrixSendOutcome | None:
         """Apply one edit, through the outbox when it carries a turn's answer.
 
         Once a turn has a placeholder, its answer reaches the room as an edit
@@ -862,7 +917,7 @@ class DeliveryGateway:
         """
         client = self._client()
         if request.delivery_turn_id is None:
-            return await edit_message_result(
+            return await edit_message_outcome(
                 client,
                 room_id,
                 request.event_id,
@@ -904,7 +959,7 @@ class DeliveryGateway:
             # attempt landed, visible while the durable row says otherwise if it did
             # not. The stored envelope already is what that helper would build.
             nonlocal delivered
-            edited = await send_message_result(
+            outcome = await send_message_outcome(
                 client,
                 claimed.room_id,
                 dict(claimed.payload),
@@ -912,11 +967,12 @@ class DeliveryGateway:
                 retry_sync_recovery=request.retry_sync_recovery,
                 transaction_id=claimed.transaction_id,
             )
-            if edited is None:
-                msg = f"Matrix refused the final edit for turn {claimed.turn_id!r}"
+            if isinstance(outcome, MatrixDeliveryFailure):
+                detail = _matrix_delivery_failure_reason(outcome)
+                msg = f"Matrix refused the final edit for turn {claimed.turn_id!r}: {detail}"
                 raise _DeliveryRefusedError(msg)
-            delivered = edited
-            return edited.event_id
+            delivered = outcome
+            return outcome.event_id
 
         try:
             event_id = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver(
@@ -952,12 +1008,16 @@ class DeliveryGateway:
             extra_content=request.extra_content,
         )
 
-        failure_reason = "edit_message_result returned None"
+        failure_reason = "durable Matrix edit was refused"
         try:
-            delivered = await self._edit_content(request, target.room_id, content)
+            outcome = await self._edit_content(request, target.room_id, content)
         except SendRetryError:
             delivered = None
             failure_reason = "matrix timeline recovery still blocked the edit"
+        else:
+            delivered = outcome if isinstance(outcome, DeliveredMatrixEvent) else None
+            if isinstance(outcome, MatrixDeliveryFailure):
+                failure_reason = _matrix_delivery_failure_reason(outcome)
         if delivered is not None:
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
             return True
@@ -1282,7 +1342,8 @@ class DeliveryGateway:
                 SKIP_MENTIONS_KEY: True,
             },
         )
-        delivered = await send_message_result(self._client(), target.room_id, content)
+        outcome = await send_message_outcome(self._client(), target.room_id, content)
+        delivered = outcome if isinstance(outcome, DeliveredMatrixEvent) else None
         if delivered is not None:
             self.deps.logger.info("Sent compaction lifecycle notice", event_id=delivered.event_id, **target.log_context)
             return delivered.event_id
@@ -1370,13 +1431,14 @@ class DeliveryGateway:
                 SKIP_MENTIONS_KEY: True,
             },
         )
-        delivered = await edit_message_result(
+        outcome = await edit_message_outcome(
             self._client(),
             target.room_id,
             event_id,
             content,
             body,
         )
+        delivered = outcome if isinstance(outcome, DeliveredMatrixEvent) else None
         if delivered is not None:
             self.deps.logger.info("Edited compaction lifecycle notice", event_id=event_id, **target.log_context)
             return
@@ -1473,7 +1535,7 @@ class DeliveryGateway:
                     content,
                     retry_sync_recovery=retry_sync_recovery,
                 )
-            return await self._send_content(
+            outcome = await self._send_content(
                 SendTextRequest(
                     target=target,
                     response_text="",
@@ -1484,6 +1546,7 @@ class DeliveryGateway:
                 target.room_id,
                 content,
             )
+            return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 
         return terminal_send
 
@@ -1558,7 +1621,7 @@ class DeliveryGateway:
                     display_text,
                     retry_sync_recovery=retry_sync_recovery,
                 )
-            return await self._edit_content(
+            outcome = await self._edit_content(
                 EditTextRequest(
                     target=target,
                     event_id=event_id,
@@ -1569,6 +1632,7 @@ class DeliveryGateway:
                 target.room_id,
                 content,
             )
+            return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 
         return terminal_edit
 
@@ -1916,11 +1980,7 @@ class DeliveryGateway:
                 event_id=event_id,
                 is_visible_response=event_id is not None,
                 final_visible_body=final_visible_body,
-                cancel_source=(
-                    cancel_source_from_failure_reason(stream_outcome.failure_reason)
-                    if stream_outcome.terminal_status == "cancelled"
-                    else None
-                ),
+                cancel_source=stream_outcome.resolved_cancel_source,
                 failure_reason="stream_finalize_failed",
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,

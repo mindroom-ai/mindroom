@@ -78,6 +78,27 @@ class _FinalizedVisibleEcho:
     is_fallback: bool
 
 
+async def record_deferred_outcome_response(
+    turn_store: TurnStore,
+    record: TurnRecord,
+    response_event_id: str,
+) -> None:
+    """Record one deferred visible outcome as the terminal responded turn."""
+    await turn_store.record_responded_turn(canonicalize_turn_record(record, response_event_id=response_event_id))
+
+
+async def record_user_stop_terminal(
+    turn_store: TurnStore,
+    record: TurnRecord,
+    response_event_id: str,
+    stop_receipt_order: int,
+) -> None:
+    """Record one settled user-stop as the terminal turn for the response owner."""
+    await turn_store.record_turn(
+        with_user_stop(record, response_event_id, stop_receipt_order, delivery_settled=True),
+    )
+
+
 @dataclass
 class TurnStore:
     """Own replication, precedence, backfill, and repair for one entity's turns.

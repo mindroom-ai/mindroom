@@ -374,24 +374,36 @@ class PrincipalStore:
             lambda transaction: journal.room_history_recovery(transaction, self._principal_id, room_id),
         )
 
-    async def settle_room_history_recovery(
+    async def install_room_history_recovery_chunk(
         self,
         recovery: RoomHistoryRecovery,
         *,
         events: tuple[ProjectedEvent, ...],
+        expected_membership_epoch: int,
+    ) -> bool:
+        """Project one bounded recovery chunk only while both fences match."""
+        if len(events) > _HYDRATION_INSTALL_CHUNK_SIZE:
+            msg = f"Room history recovery chunks may contain at most {_HYDRATION_INSTALL_CHUNK_SIZE} projected events"
+            raise ValueError(msg)
+        return await self._backend.write(
+            lambda transaction: _install_room_history_recovery_chunk(
+                transaction,
+                self._principal_id,
+                recovery,
+                events=events,
+                expected_membership_epoch=expected_membership_epoch,
+            ),
+        )
+
+    async def settle_room_history_recovery(
+        self,
+        recovery: RoomHistoryRecovery,
+        *,
         exhausted_server: bool,
         attempted_policy_rank: int,
         expected_membership_epoch: int,
     ) -> HistoryRecoveryOutcome:
-        """Install a recovery in bounded writes, then publish and settle once."""
-        if not await _install_hydration_chunks(
-            self._backend,
-            self._principal_id,
-            room_id=recovery.room_id,
-            events=events,
-            expected_membership_epoch=expected_membership_epoch,
-        ):
-            return HistoryRecoveryOutcome.SUPERSEDED
+        """Publish an installed recovery and settle its exact obligation once."""
         return await self._backend.write(
             lambda transaction: _settle_history_recovery(
                 transaction,
@@ -836,6 +848,35 @@ def _settle_history_recovery(
         recovery,
         exhausted_server=exhausted_server,
     )
+
+
+def _install_room_history_recovery_chunk(
+    transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
+    principal_id: str,
+    recovery: RoomHistoryRecovery,
+    *,
+    events: tuple[ProjectedEvent, ...],
+    expected_membership_epoch: int,
+) -> bool:
+    """Project one chunk only while its membership and exact recovery stand."""
+    if not reads.claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=recovery.room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    ):
+        return False
+    if not journal.claim_room_history_recovery(transaction, principal_id, recovery):
+        return False
+    for event in events:
+        project(
+            transaction,
+            principal_id,
+            event,
+            receipt_order=0,
+            membership_epoch=expected_membership_epoch,
+        )
+    return True
 
 
 async def _install_hydration_chunks(

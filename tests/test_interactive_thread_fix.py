@@ -183,7 +183,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         patch("mindroom.response_runner.ai_response") as mock_ai_response,
         patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
         patch(
-            "mindroom.delivery_gateway.edit_message_result",
+            "mindroom.delivery_gateway.edit_message_outcome",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
         ),
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
