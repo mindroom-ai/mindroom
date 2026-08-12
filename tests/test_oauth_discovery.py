@@ -199,16 +199,17 @@ async def test_cached_endpoints_are_revalidated_before_reuse(
 
 
 @pytest.mark.asyncio
-async def test_dynamic_registration_supports_shared_only_client_config(
+async def test_dynamic_registration_requires_provider_specific_client_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """DCR should persist clients to a provider's shared service when needed."""
+    """DCR clients must not be stored in services shared by multiple providers."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
         process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
     )
+    _ResourceOriginDiscoveryClient.posts = []
     monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _ResourceOriginDiscoveryClient)
     provider = OAuthProvider(
         id="shared_example",
@@ -230,11 +231,43 @@ async def test_dynamic_registration_supports_shared_only_client_config(
         ),
     )
 
-    await provider.runtime_endpoints(runtime_paths)
+    with pytest.raises(OAuthProviderError, match="provider-specific client config service"):
+        await provider.runtime_endpoints(runtime_paths)
 
-    stored = get_runtime_credentials_manager(runtime_paths).load_credentials("shared_example_oauth_client")
-    assert stored is not None
-    assert stored["client_id"] == "registered-public-client"
+    assert _ResourceOriginDiscoveryClient.posts == []
+    assert get_runtime_credentials_manager(runtime_paths).load_credentials("shared_example_oauth_client") is None
+
+
+@pytest.mark.asyncio
+async def test_discovery_reports_the_last_candidate_fetch_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken final candidate must not be reported as absent metadata."""
+
+    class _InvalidJsonResponse(_Response):
+        def json(self) -> dict[str, Any]:
+            msg = "invalid metadata JSON"
+            raise ValueError(msg)
+
+    class _InvalidMetadataClient(_ResourceOriginDiscoveryClient):
+        async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> _Response:
+            del headers
+            if url.endswith("/.well-known/oauth-protected-resource"):
+                return _Response({}, 404)
+            return _InvalidJsonResponse({})
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={},
+    )
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _InvalidMetadataClient)
+
+    with pytest.raises(OAuthProviderError, match="metadata request failed") as error:
+        await _discover_metadata(OAuthDiscoveryConfig(resource="https://resource.example.test"), runtime_paths)
+
+    assert isinstance(error.value.__cause__, ValueError)
 
 
 @pytest.mark.asyncio
@@ -261,7 +294,7 @@ async def test_dynamic_registration_refuses_dedicated_worker_storage(
         scopes=(),
         allow_empty_scopes=True,
         credential_service="worker_example_oauth",
-        shared_client_config_services=("worker_example_oauth_client",),
+        client_config_services=("worker_example_oauth_client",),
         token_endpoint_auth_method="none",  # noqa: S106
         pkce_code_challenge_method="S256",
         runtime_bootstrapper=oauth_runtime_bootstrapper(

@@ -64,6 +64,10 @@ _DISCOVERY_CACHE: dict[tuple[object, ...], _CachedDiscovery] = {}
 _DYNAMIC_CLIENT_REGISTRATION_LOCKS: dict[str, asyncio.Lock] = {}
 
 
+class _MetadataCandidateError(OAuthProviderError):
+    """One metadata candidate existed but could not be read."""
+
+
 def _configured_endpoint(value: str | None) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else ""
 
@@ -126,13 +130,11 @@ async def _fetch_json(
         response.raise_for_status()
         payload = response.json()
     except Exception as exc:
-        if optional:
-            return None
         msg = f"{config.error_label} metadata request failed for {url}"
-        raise OAuthProviderError(msg) from exc
+        raise _MetadataCandidateError(msg) from exc
     if not isinstance(payload, dict):
         msg = f"{config.error_label} metadata at {url} is not a JSON object"
-        raise OAuthProviderError(msg)
+        raise _MetadataCandidateError(msg)
     return payload
 
 
@@ -148,15 +150,24 @@ async def _authorization_server(
 ) -> str | None:
     if config.authorization_server:
         return config.authorization_server.strip()
+    last_error: _MetadataCandidateError | None = None
+    found_metadata = False
     for metadata_url in _protected_resource_metadata_urls(config.resource.strip()):
-        metadata = await _fetch_json(client, metadata_url, config, runtime_paths, optional=True)
+        try:
+            metadata = await _fetch_json(client, metadata_url, config, runtime_paths, optional=True)
+        except _MetadataCandidateError as exc:
+            last_error = exc
+            continue
         if metadata is None:
             continue
+        found_metadata = True
         authorization_servers = metadata.get("authorization_servers")
         if isinstance(authorization_servers, list):
             for entry in authorization_servers:
                 if isinstance(entry, str) and entry.strip():
                     return entry.strip()
+    if last_error is not None and not found_metadata:
+        raise last_error
     return None
 
 
@@ -167,10 +178,17 @@ async def _authorization_metadata(
 ) -> dict[str, Any]:
     authorization_server = await _authorization_server(client, config, runtime_paths)
     metadata_base = authorization_server or _url_origin(urlparse(config.resource.strip()))
+    last_error: _MetadataCandidateError | None = None
     for metadata_url in _authorization_server_metadata_urls(metadata_base):
-        metadata = await _fetch_json(client, metadata_url, config, runtime_paths, optional=True)
+        try:
+            metadata = await _fetch_json(client, metadata_url, config, runtime_paths, optional=True)
+        except _MetadataCandidateError as exc:
+            last_error = exc
+            continue
         if metadata is not None:
             return metadata
+    if last_error is not None:
+        raise last_error
     msg = f"{config.error_label} authorization-server metadata was not found for {metadata_base}"
     raise OAuthProviderError(msg)
 
@@ -332,6 +350,9 @@ async def _register_client(
     async with lock:
         if provider.client_config_resolution(runtime_paths) is not None:
             return
+        if not provider.client_config_services:
+            msg = f"{config.error_label} dynamic client registration requires a provider-specific client config service"
+            raise OAuthProviderError(msg)
         credentials_manager = get_runtime_credentials_manager(runtime_paths)
         if credentials_manager.current_worker_key is not None:
             msg = f"{config.error_label} dynamic client registration must run in the primary runtime"
@@ -352,7 +373,7 @@ async def _register_client(
         if not isinstance(registration, dict):
             msg = f"{config.error_label} dynamic client registration response is not a JSON object"
             raise OAuthProviderError(msg)
-        service = provider.all_client_config_services[0]
+        service = provider.client_config_services[0]
         credentials_manager.save_credentials(
             service,
             _stored_registration(provider, runtime_paths, registration),
