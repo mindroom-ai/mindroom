@@ -6123,7 +6123,6 @@ def test_refresh_subprocess_timeout_reads_the_runtime_environment(tmp_path: Path
 @pytest.mark.asyncio
 async def test_invalid_refresh_timeout_is_recorded_as_failed(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A malformed watchdog setting leaves a durable failure instead of stale pending state."""
     docs_path = tmp_path / "docs"
@@ -6137,7 +6136,6 @@ async def test_invalid_refresh_timeout_is_recorded_as_failed(
     )
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge_registry.mark_published_index_stale(key, reason="test_stale")
-    monkeypatch.setenv(KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV, "invalid")
 
     with pytest.raises(ValueError, match=KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV):
         await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
