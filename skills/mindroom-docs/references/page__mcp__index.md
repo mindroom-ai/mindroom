@@ -216,6 +216,7 @@ After MindRoom has a cached requester-specific catalog, the toolkit also exposes
 `discovery: auto` performs protected-resource metadata discovery from the configured `resource` or server `url`, then resolves authorization-server metadata.
 MindRoom tries `/.well-known/oauth-protected-resource` at the resource origin and at the resource path.
 It then reads the advertised authorization server and fetches OAuth authorization-server metadata.
+If the protected-resource metadata does not advertise an authorization server, MindRoom also looks for OAuth authorization-server metadata at the protected-resource origin.
 The discovered metadata supplies the authorization endpoint, token endpoint, optional registration endpoint, supported token endpoint auth methods, and supported PKCE methods.
 
 If `dynamic_client_registration` is enabled and no client config has been stored yet, MindRoom registers a public client lazily when the first OAuth flow starts.

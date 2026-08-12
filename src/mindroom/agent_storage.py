@@ -12,6 +12,7 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
+from sqlalchemy import Engine, create_engine
 
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+_BUSY_TIMEOUT_SECONDS = 30.0
 
 __all__ = [
     "create_culture_storage",
@@ -62,6 +65,14 @@ def create_state_storage(
     )
 
 
+def _state_engine(db_file: str) -> Engine:
+    """Build an engine that waits for state-database locks before failing."""
+    return create_engine(
+        f"sqlite:///{db_file}",
+        connect_args={"timeout": _BUSY_TIMEOUT_SECONDS},
+    )
+
+
 def _create_sqlite_state_storage(
     storage_name: str,
     state_root: Path,
@@ -74,13 +85,18 @@ def _create_sqlite_state_storage(
     db_dir = state_root / subdir
     db_dir.mkdir(parents=True, exist_ok=True)
     db_file = str(db_dir / f"{storage_name}.db")
+    engine = _state_engine(db_file)
     if prompt_roles is not None:
         return _PromptSanitizingSqliteDb(
             prompt_roles=prompt_roles,
             session_table=session_table,
             db_file=db_file,
+            db_engine=engine,
         )
-    return SqliteDb(session_table=session_table, db_file=db_file)
+    # Both: the engine is what the database is reached through, and the path
+    # is what it reports itself as. Handing over an engine alone leaves
+    # ``db_file`` empty on a store that is very much file-backed.
+    return SqliteDb(session_table=session_table, db_file=db_file, db_engine=engine)
 
 
 def create_session_storage(
@@ -90,38 +106,36 @@ def create_session_storage(
     execution_identity: ToolExecutionIdentity | None,
 ) -> BaseDb:
     """Create persistent session storage for an agent."""
-    return _create_agent_state_db(
+    return _create_agent_session_db(
         agent_name,
         config,
         runtime_paths,
-        subdir="sessions",
         session_table=f"{agent_name}_sessions",
         execution_identity=execution_identity,
         prompt_roles=prompt_roles_for_history_storage(),
     )
 
 
-def _create_agent_state_db(
+def _create_agent_session_db(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,
-    subdir: str,
     session_table: str,
     prompt_roles: frozenset[str] | None = None,
 ) -> BaseDb:
-    """Create persistent storage for one agent state category."""
-    state_storage_path = resolve_agent_runtime(
+    """Create persistent session storage for one agent."""
+    session_state_root = resolve_agent_runtime(
         agent_name,
         config,
         runtime_paths,
         execution_identity=execution_identity,
-    ).state_root
+    ).session_state_root
     return create_state_storage(
         storage_name=agent_name,
-        state_root=state_storage_path,
-        subdir=subdir,
+        state_root=session_state_root,
+        subdir="sessions",
         session_table=session_table,
         prompt_roles=prompt_roles,
     )
@@ -136,8 +150,9 @@ class _PromptSanitizingSqliteDb(SqliteDb):
         prompt_roles: frozenset[str],
         session_table: str,
         db_file: str,
+        db_engine: Engine,
     ) -> None:
-        super().__init__(session_table=session_table, db_file=db_file)
+        super().__init__(session_table=session_table, db_file=db_file, db_engine=db_engine)
         self._prompt_roles = prompt_roles
 
     def upsert_session(

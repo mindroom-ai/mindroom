@@ -12,15 +12,18 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credential_policy import credential_service_policy
+from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY, credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import (
-    _DISCOVERY_CACHE,
-    _DYNAMIC_CLIENT_REGISTRATION_LOCKS,
-    _resolve_mcp_oauth_metadata,
+    _oauth_discovery_config,
     mcp_oauth_provider,
     mcp_oauth_provider_id,
+)
+from mindroom.oauth.discovery import (
+    _DISCOVERY_CACHE,
+    _DYNAMIC_CLIENT_REGISTRATION_LOCKS,
+    _discover_metadata,
 )
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
@@ -64,6 +67,16 @@ def test_mcp_registry_import_does_not_cycle_in_fresh_interpreter() -> None:
         capture_output=True,
         text=True,
     )
+
+
+def test_mcp_oauth_helpers_reject_non_oauth_server_consistently() -> None:
+    """Both MCP OAuth entry points should use the same precondition error type."""
+    server_config = MCPServerConfig(transport="streamable-http", url="https://mcp.example.test")
+
+    with pytest.raises(ValueError, match="not OAuth-backed"):
+        _oauth_discovery_config(server_config)
+    with pytest.raises(ValueError, match="not OAuth-backed"):
+        mcp_oauth_provider("example", server_config)
 
 
 def _oauth_mcp_server_config() -> MCPServerConfig:
@@ -241,7 +254,7 @@ async def test_mcp_oauth_provider_discovers_metadata_and_registers_public_client
     runtime_paths = _runtime_paths(tmp_path)
     _FakeDiscoveryClient.gets = []
     _FakeDiscoveryClient.posts = []
-    monkeypatch.setattr("mindroom.mcp.oauth.httpx.AsyncClient", _FakeDiscoveryClient)
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _FakeDiscoveryClient)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     code_verifier = provider.issue_pkce_code_verifier()
     assert code_verifier is not None
@@ -288,6 +301,7 @@ async def test_mcp_oauth_provider_discovers_metadata_and_registers_public_client
         "token_endpoint_auth_method": "none",
         "_source": "oauth_dynamic_client_registration",
         "_oauth_provider": "mcp_demo",
+        RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
     }
 
 
@@ -308,7 +322,7 @@ async def test_mcp_oauth_discovery_skips_optional_invalid_json_metadata(
 
     _FakeDiscoveryClient.gets = []
     _FakeDiscoveryClient.posts = []
-    monkeypatch.setattr("mindroom.mcp.oauth.httpx.AsyncClient", _InvalidFirstDiscoveryClient)
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _InvalidFirstDiscoveryClient)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     code_verifier = provider.issue_pkce_code_verifier()
     assert code_verifier is not None
@@ -346,11 +360,11 @@ async def test_mcp_oauth_metadata_cache_includes_runtime_discovery_policy(tmp_pa
         },
     )
 
-    metadata = await _resolve_mcp_oauth_metadata("demo", server_config, permissive_paths)
+    metadata = await _discover_metadata(_oauth_discovery_config(server_config), permissive_paths)
     assert metadata.authorization_url == "http://auth.example.test/authorize"
 
     with pytest.raises(OAuthProviderError, match="requires HTTPS URL"):
-        await _resolve_mcp_oauth_metadata("demo", server_config, strict_paths)
+        await _discover_metadata(_oauth_discovery_config(server_config), strict_paths)
 
 
 @pytest.mark.asyncio
@@ -388,7 +402,7 @@ async def test_mcp_oauth_dynamic_client_registration_is_serialized(
 
     _FakeDiscoveryClient.gets = []
     _FakeDiscoveryClient.posts = []
-    monkeypatch.setattr("mindroom.mcp.oauth.httpx.AsyncClient", _SlowRegistrationDiscoveryClient)
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _SlowRegistrationDiscoveryClient)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     first_verifier = provider.issue_pkce_code_verifier()
     second_verifier = provider.issue_pkce_code_verifier()
@@ -443,7 +457,7 @@ async def test_mcp_oauth_discovery_rejects_hostname_resolving_to_private_address
         to_thread_calls += 1
         return func(*args, **kwargs)
 
-    monkeypatch.setattr("mindroom.mcp.oauth.asyncio.to_thread", fake_to_thread)
+    monkeypatch.setattr("mindroom.oauth.discovery.asyncio.to_thread", fake_to_thread)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     code_verifier = provider.issue_pkce_code_verifier()
     assert code_verifier is not None
@@ -473,7 +487,7 @@ async def test_mcp_oauth_discovery_rejects_metadata_hostname(tmp_path: Path) -> 
     )
 
     with pytest.raises(OAuthProviderError, match="refused unsafe URL"):
-        await _resolve_mcp_oauth_metadata("demo", server_config, runtime_paths)
+        await _discover_metadata(_oauth_discovery_config(server_config), runtime_paths)
 
 
 def test_oauth_provider_allows_public_clients_without_secret_and_empty_scopes(tmp_path: Path) -> None:

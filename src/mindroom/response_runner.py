@@ -1133,14 +1133,33 @@ class ResponseRunner:
             reply_to_event_id=reply_to_event_id,
         )
 
-    def _has_queued_forced_compaction(
+    async def _has_queued_forced_compaction(
         self,
         *,
         session_id: str,
         scope: HistoryScope,
         execution_identity: ToolExecutionIdentity | None,
     ) -> bool:
-        """Return whether this scope should compact before creating a reply placeholder."""
+        """Return whether this scope should compact before creating a reply placeholder.
+
+        Read on a thread. This runs before a placeholder is sent, so every
+        turn pays for it, and the statement underneath is a row out of a
+        session database large enough to have been measured in seconds.
+        """
+        return await asyncio.to_thread(
+            self._read_queued_forced_compaction,
+            session_id=session_id,
+            scope=scope,
+            execution_identity=execution_identity,
+        )
+
+    def _read_queued_forced_compaction(
+        self,
+        *,
+        session_id: str,
+        scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> bool:
         storage = None
         try:
             storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
@@ -1393,7 +1412,7 @@ class ResponseRunner:
         if (
             placeholder_message is not None
             and request.existing_event_id is None
-            and not self._has_queued_forced_compaction(
+            and not await self._has_queued_forced_compaction(
                 session_id=resolved_target.session_id,
                 scope=history_scope,
                 execution_identity=execution_identity,

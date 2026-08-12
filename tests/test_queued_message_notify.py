@@ -1119,7 +1119,8 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
     assert not queued_signal.is_set()
 
 
-def test_forced_compaction_placeholder_check_degrades_on_storage_error(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_forced_compaction_placeholder_check_degrades_on_storage_error(tmp_path: Path) -> None:
     """Storage errors in the placeholder-ordering hint should not abort response generation."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
@@ -1130,13 +1131,56 @@ def test_forced_compaction_placeholder_check_degrades_on_storage_error(tmp_path:
         "create_storage",
         side_effect=RuntimeError("storage unavailable"),
     ):
-        result = coordinator._has_queued_forced_compaction(
+        result = await coordinator._has_queued_forced_compaction(
             session_id="session",
             scope=scope,
             execution_identity=None,
         )
 
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_forced_compaction_placeholder_check_does_not_block_event_loop(tmp_path: Path) -> None:
+    """A blocked compaction-state read must run outside the response event loop."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    scope = HistoryScope(kind="agent", scope_id="home")
+    started = threading.Event()
+    loop_advanced = threading.Event()
+    release = threading.Event()
+    observed_progress = threading.Event()
+
+    def _blocking_read(**_kwargs: object) -> bool:
+        started.set()
+        assert release.wait(timeout=5)
+        return False
+
+    def _release_after_observing_loop() -> None:
+        assert started.wait(timeout=5)
+        if loop_advanced.wait(timeout=0.5):
+            observed_progress.set()
+        release.set()
+
+    observer = threading.Thread(target=_release_after_observing_loop, name="compaction-loop-observer")
+    observer.start()
+    try:
+        with patch.object(coordinator, "_read_queued_forced_compaction", side_effect=_blocking_read):
+            task = asyncio.create_task(
+                coordinator._has_queued_forced_compaction(
+                    session_id="session",
+                    scope=scope,
+                    execution_identity=None,
+                ),
+            )
+            assert await asyncio.to_thread(started.wait, 5)
+            loop_advanced.set()
+            assert await task is False
+    finally:
+        release.set()
+        observer.join(timeout=5)
+
+    assert observed_progress.is_set(), "compaction-state read blocked the event loop"
+    assert not observer.is_alive()
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,7 @@ from mindroom.agent_storage import (
     get_agent_session,
     get_team_session,
 )
-from mindroom.constants import prompt_roles_for_history_storage
+from mindroom.constants import prompt_roles_for_history_storage, resolve_session_state_root
 from mindroom.history import agno_team_patch
 from mindroom.history.compaction import (
     compact_scope_history,
@@ -1052,7 +1052,10 @@ def create_scope_session_storage(
     storage_name = _scope_session_storage_name(scope)
     return create_state_storage(
         storage_name=storage_name,
-        state_root=_team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
+        state_root=resolve_session_state_root(
+            _team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
+            runtime_paths,
+        ),
         subdir="sessions",
         session_table=f"{storage_name}_sessions",
         prompt_roles=prompt_roles_for_history_storage(),
