@@ -2696,6 +2696,46 @@ async def test_the_sending_device_is_recorded_before_the_card_goes_out(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_startup_sweep_rejects_live_approval_and_releases_waiter(tmp_path: Path) -> None:
+    """Startup cleanup must return its rejection to a matching live tool call."""
+    cards = FakeApprovalCards()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        locate_card=AsyncMock(return_value=None),
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="send_email",
+            arguments={},
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+
+    pending = await _wait_for_pending(store, sender=sender)
+
+    sweep = await store.discard_pending_on_startup()
+    decision = await asyncio.wait_for(task, timeout=1)
+
+    assert sweep == ApprovalStartupSweep(discarded=1, failed=0)
+    assert decision.status == "expired"
+    assert decision.reason == "Bot restarted before approval — original request was cancelled."
+    assert editor.await_args.args[:2] == ("!room:localhost", pending.card_event_id)
+    assert cards.rows == {}
+
+
+@pytest.mark.asyncio
 async def test_a_sweep_landing_inside_the_attempt_write_leaves_the_send_alone(tmp_path: Path) -> None:
     """The attempt is committed inside the registered send, never ahead of it.
 
