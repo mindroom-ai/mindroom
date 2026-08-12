@@ -255,10 +255,10 @@ class SqliteBackend:
     async def write[T](self, operation: Operation[T]) -> T:
         """Queue one operation for the writer task and await its commit.
 
-        Admission is decided once, here, and the decision cannot go stale:
-        nothing suspends between reading ``_closed`` and enqueuing, so a write
-        this accepted is in the queue before any ``close()`` can begin, and
-        ``close()`` therefore sees every write it will ever have to refuse.
+        Admission is decided on the writer's loop, where it cannot race
+        ``close()``. A caller already on that loop enqueues synchronously; one
+        on another loop hands the decision across, where ``_closed`` is checked
+        again before the write enters the queue.
 
         That is what the queue being unbounded buys. A bounded one parked the
         producer in ``put`` instead, and ``close()`` frees a slot per entry it
@@ -303,7 +303,7 @@ class SqliteBackend:
         it never saw arrives afterwards, into a queue nothing will read again.
         """
         if self._closed:
-            _refuse(queued.future, RuntimeError(_CLOSED_MESSAGE))
+            _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
             return
         queue.put_nowait(queued)
 
@@ -334,9 +334,9 @@ class SqliteBackend:
         separately before the connections they run on are closed.
 
         Draining the queue once is enough because ``_closed`` is raised before
-        it and ``write`` enqueues without suspending: every write that will
-        ever be admitted is already in the queue by the time this reaches it,
-        and every write after is refused where it starts.
+        it on the writer's loop. Every write already admitted is in the queue,
+        and every handed-across decision that runs afterwards refuses its
+        caller instead of enqueuing.
         """
         if self._closed:
             return
@@ -352,8 +352,7 @@ class SqliteBackend:
         queue = self._queue
         while queue is not None and not queue.empty():
             queued = queue.get_nowait()
-            if not queued.future.done():
-                queued.future.set_exception(RuntimeError(_CLOSED_MESSAGE))
+            _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
             queue.task_done()
         await self._offload.drain()
         await asyncio.to_thread(self._writer.close)
@@ -365,7 +364,7 @@ class SqliteBackend:
 
 
 def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:
-    """Give the waiting caller the worker's own outcome, on the caller's own loop.
+    """Snapshot the worker's outcome and give it to the waiting caller.
 
     Completing a future belonging to another loop sets its result but schedules
     its callbacks with a plain ``call_soon``, which does not wake that loop. A
@@ -374,32 +373,31 @@ def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:
     in its selector with the result already sitting there, and the caller never
     resumes. Handing the completion across deliberately is what wakes it.
     """
+    if work.cancelled():
+        outcome = _WriteOutcome(cancelled=True)
+    elif (error := work.exception()) is not None:
+        outcome = _WriteOutcome(error=error)
+    else:
+        outcome = _WriteOutcome(result=work.result())
+    _deliver(future, outcome)
+
+
+def _deliver(future: asyncio.Future[Any], outcome: _WriteOutcome) -> None:
+    """Apply a plain write outcome on the caller future's own loop."""
     caller_loop = future.get_loop()
     if caller_loop is not _running_loop():
         if not caller_loop.is_closed():
             with contextlib.suppress(RuntimeError):
-                caller_loop.call_soon_threadsafe(_report, future, work)
+                caller_loop.call_soon_threadsafe(_deliver, future, outcome)
         return
     if future.done():
         return
-    if work.cancelled():
+    if outcome.cancelled:
         future.cancel()
-    elif (error := work.exception()) is not None:
-        future.set_exception(error)
+    elif outcome.error is not None:
+        future.set_exception(outcome.error)
     else:
-        future.set_result(work.result())
-
-
-def _refuse(future: asyncio.Future[Any], error: BaseException) -> None:
-    """Tell one caller its write was never admitted, on the caller's own loop."""
-    caller_loop = future.get_loop()
-    if caller_loop is not _running_loop():
-        if not caller_loop.is_closed():
-            with contextlib.suppress(RuntimeError):
-                caller_loop.call_soon_threadsafe(_refuse, future, error)
-        return
-    if not future.done():
-        future.set_exception(error)
+        future.set_result(outcome.result)
 
 
 def _running_loop() -> asyncio.AbstractEventLoop | None:
@@ -414,3 +412,10 @@ def _running_loop() -> asyncio.AbstractEventLoop | None:
 class _QueuedWrite:
     operation: Operation[Any]
     future: asyncio.Future[Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _WriteOutcome:
+    result: Any = None
+    error: BaseException | None = None
+    cancelled: bool = False

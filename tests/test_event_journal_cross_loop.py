@@ -17,18 +17,48 @@ holding whatever it was in the middle of publishing.
 from __future__ import annotations
 
 import asyncio
+import queue
 import threading
-import time
 from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.event_journal.sqlite_backend import SqliteBackend
+from mindroom.event_journal.sqlite_backend import SqliteBackend, _report
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.event_journal.backend import Transaction
+
 _RETURN_TIMEOUT_SECONDS = 5.0
+
+
+class _LoopOwnedFuture(asyncio.Future[int]):
+    """A future that rejects reads away from its owning loop."""
+
+    def _assert_owning_loop(self) -> None:
+        assert asyncio.get_running_loop() is self.get_loop()
+
+    def cancelled(self) -> bool:
+        self._assert_owning_loop()
+        return super().cancelled()
+
+    def exception(self) -> BaseException | None:
+        self._assert_owning_loop()
+        return super().exception()
+
+    def result(self) -> int:
+        self._assert_owning_loop()
+        return super().result()
+
+
+def _assert_closed_refusal(outcome: list[BaseException | None], operation_ran: threading.Event) -> None:
+    assert len(outcome) == 1
+    error = outcome[0]
+    assert isinstance(error, RuntimeError)
+    assert str(error) == "The event-journal store is closed"
+    assert not operation_ran.is_set()
 
 
 @pytest.mark.asyncio
@@ -64,16 +94,50 @@ async def test_a_write_from_a_second_event_loop_comes_back(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_a_cross_loop_write_racing_close_is_refused_not_stranded(tmp_path: Path) -> None:
+async def test_cross_loop_report_reads_work_only_on_the_writer_loop() -> None:
+    """The caller-loop handoff must contain a plain snapshot, not the writer's future."""
+    caller_future: queue.Queue[asyncio.Future[int]] = queue.Queue()
+    outcome: list[int] = []
+
+    def wait_on_its_own_loop() -> None:
+        async def wait() -> None:
+            future = asyncio.get_running_loop().create_future()
+            caller_future.put(future)
+            outcome.append(await future)
+
+        asyncio.run(wait())
+
+    caller = threading.Thread(target=wait_on_its_own_loop, name="second-loop-caller", daemon=True)
+    caller.start()
+    future = await asyncio.to_thread(caller_future.get)
+    work = _LoopOwnedFuture()
+    work.set_result(7)
+
+    _report(future, work)
+
+    await asyncio.to_thread(caller.join, _RETURN_TIMEOUT_SECONDS)
+    assert outcome == [7]
+
+
+@pytest.mark.asyncio
+async def test_a_cross_loop_write_racing_close_is_refused_not_stranded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A write admitted across loops must end, even if close() beats it to the queue."""
     backend = SqliteBackend.open(tmp_path / "journal.db")
     await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
 
     outcome: list[BaseException | None] = []
+    operation_ran = threading.Event()
+
+    def insert_claim(transaction: Transaction) -> None:
+        operation_ran.set()
+        transaction.execute("INSERT INTO claim VALUES (1)")
 
     def write_from_its_own_loop() -> None:
         async def claim() -> None:
-            await backend.write(lambda transaction: transaction.execute("INSERT INTO claim VALUES (1)"))
+            await backend.write(insert_claim)
 
         try:
             asyncio.run(claim())
@@ -83,12 +147,91 @@ async def test_a_cross_loop_write_racing_close_is_refused_not_stranded(tmp_path:
             outcome.append(None)
 
     bridge = threading.Thread(target=write_from_its_own_loop, name="second-loop-writer", daemon=True)
-    bridge.start()
-    # Blocking rather than awaiting, so this loop cannot run the admission the
-    # bridge is scheduling on it: close() then reaches the queue first, which
-    # is the race the caller must survive.
-    time.sleep(0.2)  # noqa: ASYNC251 - blocking this loop is the point of the test
+    admission_scheduled = threading.Event()
+    writer_loop = asyncio.get_running_loop()
+    call_soon_threadsafe = writer_loop.call_soon_threadsafe
+
+    def record_admission(callback: Callable[..., object], *args: object) -> asyncio.Handle:
+        handle = call_soon_threadsafe(callback, *args)
+        if callback == backend._admit:
+            admission_scheduled.set()
+        return handle
+
+    with monkeypatch.context() as patch:
+        patch.setattr(writer_loop, "call_soon_threadsafe", record_admission)
+        bridge.start()
+        # Block this loop until the bridge has passed the first closed check and
+        # scheduled admission here. The queued callback cannot run before close.
+        assert admission_scheduled.wait(_RETURN_TIMEOUT_SECONDS), "the bridge never scheduled admission"
     await backend.close()
 
     await asyncio.to_thread(bridge.join, _RETURN_TIMEOUT_SECONDS)
-    assert outcome, "the write was neither admitted nor refused, so its caller is stranded"
+    _assert_closed_refusal(outcome, operation_ran)
+
+
+@pytest.mark.asyncio
+async def test_close_wakes_a_cross_loop_write_already_waiting_in_the_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing must wake a foreign caller whose write was queued behind another write."""
+    backend = SqliteBackend.open(tmp_path / "journal.db")
+    await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
+
+    blocking_write_started = threading.Event()
+    release_blocking_write = threading.Event()
+
+    def block_writer(transaction: Transaction) -> None:
+        del transaction
+        blocking_write_started.set()
+        release_blocking_write.wait()
+
+    blocking_write = asyncio.create_task(backend.write(block_writer))
+    await asyncio.to_thread(blocking_write_started.wait)
+
+    outcome: list[BaseException | None] = []
+    operation_ran = threading.Event()
+
+    def insert_claim(transaction: Transaction) -> None:
+        operation_ran.set()
+        transaction.execute("INSERT INTO claim VALUES (1)")
+
+    def write_from_its_own_loop() -> None:
+        async def claim() -> None:
+            await backend.write(insert_claim)
+
+        try:
+            asyncio.run(claim())
+        except BaseException as error:  # the point is only that something ends the wait
+            outcome.append(error)
+        else:
+            outcome.append(None)
+
+    bridge = threading.Thread(target=write_from_its_own_loop, name="queued-second-loop-writer", daemon=True)
+    admission_completed = asyncio.Event()
+    writer_loop = asyncio.get_running_loop()
+    call_soon_threadsafe = writer_loop.call_soon_threadsafe
+
+    def record_admission(callback: Callable[..., object], *args: object) -> asyncio.Handle:
+        if callback != backend._admit:
+            return call_soon_threadsafe(callback, *args)
+
+        def admit_and_record() -> None:
+            callback(*args)
+            admission_completed.set()
+
+        return call_soon_threadsafe(admit_and_record)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(writer_loop, "call_soon_threadsafe", record_admission)
+        bridge.start()
+        await admission_completed.wait()
+
+    close = asyncio.create_task(backend.close())
+    await asyncio.sleep(0)
+    release_blocking_write.set()
+    await close
+
+    await asyncio.to_thread(bridge.join, _RETURN_TIMEOUT_SECONDS)
+    _assert_closed_refusal(outcome, operation_ran)
+    await blocking_write
