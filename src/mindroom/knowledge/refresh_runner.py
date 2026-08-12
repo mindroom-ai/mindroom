@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import signal
 import sys
@@ -96,9 +97,9 @@ class _SubprocessSessionKwargs(TypedDict, total=False):
     start_new_session: bool
 
 
-def _refresh_subprocess_timeout_seconds() -> float:
+def _refresh_subprocess_timeout_seconds(runtime_paths: RuntimePaths) -> float:
     """Return how long one refresh child may run before it is killed."""
-    raw_value = os.getenv(KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV)
+    raw_value = runtime_paths.env_value(KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV)
     if raw_value is None:
         return DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS
     try:
@@ -106,8 +107,8 @@ def _refresh_subprocess_timeout_seconds() -> float:
     except ValueError as exc:
         msg = f"{KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV} must be a number, got {raw_value!r}"
         raise ValueError(msg) from exc
-    if value <= 0:
-        msg = f"{KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV} must be greater than 0, got {value}"
+    if not math.isfinite(value) or value <= 0:
+        msg = f"{KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV} must be a finite number greater than 0, got {value}"
         raise ValueError(msg)
     return value
 
@@ -157,7 +158,11 @@ async def refresh_knowledge_binding_in_subprocess(
     env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
     # Resolved before the spawn so a malformed window rejects the refresh
     # instead of leaving a child nobody is waiting on.
-    timeout = _refresh_subprocess_timeout_seconds()
+    try:
+        timeout = _refresh_subprocess_timeout_seconds(runtime_paths)
+    except ValueError as exc:
+        await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=str(exc))
+        raise
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",

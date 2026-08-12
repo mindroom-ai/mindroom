@@ -5921,7 +5921,7 @@ async def test_wedged_subprocess_refresh_is_terminated_after_timeout(
 
     monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
     monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
-    monkeypatch.setattr(knowledge_refresh_runner, "_refresh_subprocess_timeout_seconds", lambda: 0.05)
+    monkeypatch.setattr(knowledge_refresh_runner, "_refresh_subprocess_timeout_seconds", lambda _runtime_paths: 0.05)
 
     with pytest.raises(RuntimeError, match=r"timed out after 0\.05s"):
         await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
@@ -5939,20 +5939,60 @@ async def test_wedged_subprocess_refresh_is_terminated_after_timeout(
     assert "timed out after 0.05s" in state.last_error
 
 
-def test_refresh_subprocess_timeout_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The refresh watchdog window is operator-tunable and falls back to the default."""
-    monkeypatch.delenv(KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV, raising=False)
+def test_refresh_subprocess_timeout_reads_the_runtime_environment(tmp_path: Path) -> None:
+    """The refresh watchdog resolves config-adjacent environment and rejects unsafe values."""
+    runtime_paths = test_runtime_paths(tmp_path)
     assert (
-        knowledge_refresh_runner._refresh_subprocess_timeout_seconds()
+        knowledge_refresh_runner._refresh_subprocess_timeout_seconds(runtime_paths)
         == DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS
     )
 
-    monkeypatch.setenv(KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV, "12.5")
-    assert knowledge_refresh_runner._refresh_subprocess_timeout_seconds() == 12.5
+    runtime_paths.env_path.write_text(f"{KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV}=12.5\n", encoding="utf-8")
+    configured_runtime_paths = test_runtime_paths(tmp_path)
+    assert knowledge_refresh_runner._refresh_subprocess_timeout_seconds(configured_runtime_paths) == 12.5
 
-    monkeypatch.setenv(KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV, "0")
+    for raw_value in ("0", "nan", "inf", "not-a-number"):
+        runtime_paths.env_path.write_text(
+            f"{KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV}={raw_value}\n",
+            encoding="utf-8",
+        )
+        invalid_runtime_paths = test_runtime_paths(tmp_path)
+        with pytest.raises(ValueError, match=KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV):
+            knowledge_refresh_runner._refresh_subprocess_timeout_seconds(invalid_runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_invalid_refresh_timeout_is_recorded_as_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed watchdog setting leaves a durable failure instead of stale pending state."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    base_runtime_paths = runtime_paths_for(config)
+    runtime_paths = replace(
+        base_runtime_paths,
+        env_file_values={KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV: "invalid"},
+    )
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.mark_published_index_stale(key, reason="test_stale")
+    monkeypatch.setenv(KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV, "invalid")
+
     with pytest.raises(ValueError, match=KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV):
-        knowledge_refresh_runner._refresh_subprocess_timeout_seconds()
+        await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.refresh_job == "failed"
+    assert state.reason == "refresh_failed"
+    assert state.last_error is not None
+    assert KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV in state.last_error
 
 
 @pytest.mark.asyncio
