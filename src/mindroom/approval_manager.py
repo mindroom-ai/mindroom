@@ -540,6 +540,9 @@ class _ApprovalManager:
         None is neither: the row is finished with as far as this pass is
         concerned and retrying would reach the same answer, so counting it as
         owed would keep the sweep asking forever.
+
+        A recorded resolution always wins. Otherwise a matching live waiter
+        owns the expiration; only an ownerless card uses Matrix-only cleanup.
         """
         if self._send_is_in_flight(claimed.transaction_id):
             # A row whose send has not come back is indistinguishable, from
@@ -583,6 +586,13 @@ class _ApprovalManager:
             return None
         if identified.card.resolution is not None:
             return await self._redeliver_recorded_resolution(pending, identified.card)
+        live_waiter = self._live_waiter_for_card(pending.card_event_id)
+        if live_waiter is not None:
+            return await self._discard_live_card(
+                waiter=live_waiter,
+                reason=_STARTUP_DISCARD_REASON,
+                resolved_by=transport_sender,
+            )
         result = await self._discard_matrix_only_card(
             pending=pending,
             transaction_id=identified.card.transaction_id,
@@ -1075,6 +1085,25 @@ class _ApprovalManager:
                 thread_id=pending.thread_id,
                 card_event_id=pending.card_event_id,
             )
+
+    async def _discard_live_card(
+        self,
+        *,
+        waiter: _LiveApprovalWaiter,
+        reason: str,
+        resolved_by: str | None,
+    ) -> bool:
+        """Expire through the live waiter, returning whether its Matrix edit landed."""
+        claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
+        if claimed_waiter is None:
+            return False
+        decision = self._new_decision(status="expired", reason=reason, resolved_by=resolved_by)
+        with self._claimed_resolution(claimed_waiter.card_event_id):
+            delivered = await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
+            if delivered:
+                with self._live_lock:
+                    self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
+            return delivered
 
     async def _settle_waiter_with_terminal_edit(
         self,
