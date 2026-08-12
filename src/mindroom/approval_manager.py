@@ -6,11 +6,11 @@ import asyncio
 import json
 import threading
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import Future, InvalidStateError
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -272,11 +272,34 @@ class ApprovalStartupSweep:
 
     discarded: int
     failed: int
+    # What the pass looked at and why it left things alone. Excluded from
+    # equality because they describe the walk rather than its outcome, and
+    # because a caller comparing two sweeps is asking whether the same work
+    # was settled, not whether the same rows happened to be on disk.
+    scanned: int = field(default=0, compare=False)
+    skipped_after_start: int = field(default=0, compare=False)
+    skipped_in_flight: int = field(default=0, compare=False)
+    dropped_never_attempted: int = field(default=0, compare=False)
 
     @property
     def complete(self) -> bool:
         """Return whether nothing is left for a later sweep to retry."""
         return self.failed == 0
+
+
+@dataclass(slots=True)
+class _SweepTally:
+    """Running counts for one sweep, so a finished pass can describe itself.
+
+    A pass that settled nothing because there was nothing to settle and one
+    that settled nothing because it skipped everything are the same two
+    numbers otherwise, and only one of them means the guard is doing its job.
+    """
+
+    scanned: int = 0
+    skipped_after_start: int = 0
+    skipped_in_flight: int = 0
+    dropped_never_attempted: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,11 +403,17 @@ class _ApprovalManager:
         self._cancelled_card_event_ids = _BoundedCardEventIds(_MAX_REMEMBERED_TERMINAL_CARD_IDS)
         self._active_approval_sends: set[_ActiveApprovalSend] = set()
         self._post_cancel_cleanup_tasks: set[_PostCancelCleanupTask] = set()
+        # Transactions a request is publishing, held from before the claim is
+        # written until the send that owns it has registered or the attempt is
+        # over. Counted rather than flagged so overlapping scopes for one
+        # transaction cannot have the inner one release the outer one's hold.
+        self._claiming_transaction_ids: Counter[str] = Counter()
         # Rows claimed from here on belong to this process, whether or not the
         # send that owns one has registered itself yet. Taken at construction
         # rather than at the sweep, because the sweep is armed by startup gates
         # that can be minutes late, and every claim made while waiting for them
-        # would otherwise look like one a dead process left behind.
+        # would otherwise look like one a dead process left behind. Backstop
+        # for the ownership above, which is exact but cannot outlive memory.
         self._sweep_horizon_ns = time.time_ns()
         # Recovery that outlived the request that started it, held so it is
         # not garbage collected mid-flight.
@@ -443,36 +472,44 @@ class _ApprovalManager:
 
         transaction_id = _approval_transaction_id(approval_id)
         claimed_card = self._claimed_card_body(content=content, requested_at=requested_at)
-        # Before the send, so the window a crash can land in holds a row for a
-        # card that may not exist rather than a card that no row explains. The
-        # first is settled by presenting the transaction again; the second used
-        # to be settled by nothing at all.
-        if not await self._claim_card(room_id=room_id, transaction_id=transaction_id, card=claimed_card):
-            return self._new_decision(status="expired", reason=_DEFAULT_UNRECORDABLE_CARD_REASON, resolved_by=None)
+        # Owned before the claim is written, because the write is what makes
+        # the row visible to a sweep and the send that would speak for it does
+        # not exist yet.
+        with self._publishing(transaction_id):
+            # Claimed before the send, so the window a crash can land in holds
+            # a row for a card that may not exist rather than a card that no
+            # row explains. The first is settled by presenting the transaction
+            # again; the second used to be settled by nothing at all.
+            if not await self._claim_card(room_id=room_id, transaction_id=transaction_id, card=claimed_card):
+                return self._new_decision(
+                    status="expired",
+                    reason=_DEFAULT_UNRECORDABLE_CARD_REASON,
+                    resolved_by=None,
+                )
 
-        try:
-            waiter = await self._send_and_bind_waiter(
-                room_id=room_id,
-                thread_id=thread_id,
-                content=content,
-                claimed_card=claimed_card,
-                transaction_id=transaction_id,
-                approval_id=approval_id,
-            )
-        except ToolApprovalTransportError as exc:
-            # Raised by the transport's own preconditions, so the card never
-            # reached the homeserver and the claim can be taken back.
-            await self._forget_card(transaction_id)
-            logger.info("Approval card could not be made answerable", room_id=room_id, reason=exc.reason)
-            return self._new_decision(status="expired", reason=exc.reason, resolved_by=None)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # Deliberately keeps the claim. An exception out of the send says
-            # the outcome is unknown, not that nothing was sent, and abandoning
-            # the row would strand whatever did reach the room.
-            logger.warning("Failed to send approval Matrix event", room_id=room_id, exc_info=True)
-            return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
+            try:
+                waiter = await self._send_and_bind_waiter(
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    content=content,
+                    claimed_card=claimed_card,
+                    transaction_id=transaction_id,
+                    approval_id=approval_id,
+                )
+            except ToolApprovalTransportError as exc:
+                # Raised by the transport's own preconditions, so the card
+                # never reached the homeserver and the claim can be taken back.
+                await self._forget_card(transaction_id)
+                logger.info("Approval card could not be made answerable", room_id=room_id, reason=exc.reason)
+                return self._new_decision(status="expired", reason=exc.reason, resolved_by=None)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Deliberately keeps the claim. An exception out of the send
+                # says the outcome is unknown, not that nothing was sent, and
+                # abandoning the row would strand whatever did reach the room.
+                logger.warning("Failed to send approval Matrix event", room_id=room_id, exc_info=True)
+                return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
 
         if waiter is None:
             shutdown_reason = self._current_shutdown_reason()
@@ -510,6 +547,7 @@ class _ApprovalManager:
 
         discarded = 0
         failed = 0
+        tally = _SweepTally()
         for room_id in self._configured_approval_room_ids():
             # A card whose settlement failed keeps its row deliberately, so it
             # stays inside the scan's window. Skipping it in memory is not
@@ -522,10 +560,12 @@ class _ApprovalManager:
                     break
                 cursor = (page[-1].created_at_ns, page[-1].transaction_id)
                 for claimed in page:
+                    tally.scanned += 1
                     settled = await self._settle_recovered_card(
                         room_id=room_id,
                         claimed=claimed,
                         transport_sender=transport_sender,
+                        tally=tally,
                     )
                     if settled is None:
                         continue
@@ -533,7 +573,14 @@ class _ApprovalManager:
                         discarded += 1
                     else:
                         failed += 1
-        return ApprovalStartupSweep(discarded=discarded, failed=failed)
+        return ApprovalStartupSweep(
+            discarded=discarded,
+            failed=failed,
+            scanned=tally.scanned,
+            skipped_after_start=tally.skipped_after_start,
+            skipped_in_flight=tally.skipped_in_flight,
+            dropped_never_attempted=tally.dropped_never_attempted,
+        )
 
     async def _settle_recovered_card(
         self,
@@ -541,6 +588,7 @@ class _ApprovalManager:
         room_id: str,
         claimed: StoredApprovalCard,
         transport_sender: str,
+        tally: _SweepTally,
     ) -> bool | None:
         """Settle one recovered card, or report that a later pass should try again.
 
@@ -548,20 +596,6 @@ class _ApprovalManager:
         concerned and retrying would reach the same answer, so counting it as
         owed would keep the sweep asking forever.
         """
-        if claimed.created_at_ns >= self._sweep_horizon_ns:
-            # Claimed after this process started, so it is this process's to
-            # finish. The in-flight check below cannot see it yet: a claim is
-            # committed before the send it belongs to registers, and a sweep
-            # landing in that window would read a live claim as an abandoned
-            # one and delete the row out from under the caller still building
-            # its card. Nothing is owed here -- the owner settles it or fails
-            # on its own path -- so this is not counted as a failure either.
-            logger.debug(
-                "approval_startup_card_skipped_claimed_after_start",
-                room_id=room_id,
-                transaction_id=claimed.transaction_id,
-            )
-            return None
         if self._send_is_in_flight(claimed.transaction_id):
             # A row whose send has not come back is indistinguishable, from
             # here, from one a dead process abandoned: claimed, no event id,
@@ -581,8 +615,29 @@ class _ApprovalManager:
                 room_id=room_id,
                 transaction_id=claimed.transaction_id,
             )
+            tally.skipped_in_flight += 1
             return None
-        identified = await self._identified_card(room_id, claimed)
+        if claimed.created_at_ns >= self._sweep_horizon_ns:
+            # Claimed after this process started, so it is this process's to
+            # finish. The check above cannot always see it: a claim is
+            # committed before the send that owns it registers, and a sweep
+            # landing in that window would read a live claim as an abandoned
+            # one and delete the row out from under the caller still building
+            # its card. The ownership registered around the claim closes that
+            # window exactly; this closes it again for a row whose owner is
+            # gone from memory but whose timestamp still says it was never
+            # this sweep's to take. Nothing is owed either way -- the owner
+            # settles it or fails on its own path.
+            logger.debug(
+                "approval_startup_card_skipped_claimed_after_start",
+                room_id=room_id,
+                transaction_id=claimed.transaction_id,
+                created_at_ns=claimed.created_at_ns,
+                sweep_horizon_ns=self._sweep_horizon_ns,
+            )
+            tally.skipped_after_start += 1
+            return None
+        identified = await self._identified_card(room_id, claimed, tally=tally)
         if identified.card is None:
             return None if identified.settled else False
         pending = self._trusted_pending_from_card_event(
@@ -1452,7 +1507,13 @@ class _ApprovalManager:
             return False
         return stored.sending_device_id == current
 
-    async def _identified_card(self, room_id: str, stored: StoredApprovalCard) -> _IdentifiedCard:
+    async def _identified_card(
+        self,
+        room_id: str,
+        stored: StoredApprovalCard,
+        *,
+        tally: _SweepTally,
+    ) -> _IdentifiedCard:
         """Establish which Matrix event one claimed card became, by whichever means is sound.
 
         A row with no event id is the crash window claiming turns from
@@ -1495,6 +1556,7 @@ class _ApprovalManager:
                 room_id=room_id,
                 transaction_id=stored.transaction_id,
             )
+            tally.dropped_never_attempted += 1
             await self._forget_card(stored.transaction_id)
             return _IdentifiedCard(card=None, settled=True)
         if not self._repeat_would_deduplicate(stored):
@@ -1837,18 +1899,43 @@ class _ApprovalManager:
     def _send_is_in_flight(self, transaction_id: str) -> bool:
         """Return whether this row is still owned by a send that has not come back.
 
-        Both owners count, because both end the same way: whoever holds the
-        send binds a waiter to what it returns and settles the card exactly
-        once. A cancelled requester changes which owner that is -- the send is
-        shielded and outlives the request -- and nothing else about the row.
-        Answering on the request alone would call a handed-over send finished
-        and let the sweep present its transaction a second time. This is the
-        same pair ``has_live_work`` already counts as live.
+        All three owners count, because they end the same way: whoever holds
+        the transaction settles the card exactly once. A cancelled requester
+        changes which owner that is -- the send is shielded and outlives the
+        request -- and nothing else about the row. Answering on the request
+        alone would call a handed-over send finished and let the sweep present
+        its transaction a second time.
+
+        The publishing hold is the one that covers the claim itself. A row is
+        committed before the send that owns it exists, so between those two
+        points the other two are empty and the row reads exactly like one a
+        dead process abandoned.
         """
         with self._live_lock:
-            return any(send.transaction_id == transaction_id for send in self._active_approval_sends) or any(
-                cleanup.transaction_id == transaction_id for cleanup in self._post_cancel_cleanup_tasks
+            return (
+                self._claiming_transaction_ids[transaction_id] > 0
+                or any(send.transaction_id == transaction_id for send in self._active_approval_sends)
+                or any(cleanup.transaction_id == transaction_id for cleanup in self._post_cancel_cleanup_tasks)
             )
+
+    @contextmanager
+    def _publishing(self, transaction_id: str) -> Iterator[None]:
+        """Own one transaction for as long as this request is publishing it.
+
+        Entered before the claim is written rather than after, because the
+        write is what makes the row visible and a sweep reads it the moment it
+        exists. Released once the send has registered its own hold or the
+        attempt has ended, whichever comes first.
+        """
+        with self._live_lock:
+            self._claiming_transaction_ids[transaction_id] += 1
+        try:
+            yield
+        finally:
+            with self._live_lock:
+                self._claiming_transaction_ids[transaction_id] -= 1
+                if self._claiming_transaction_ids[transaction_id] <= 0:
+                    del self._claiming_transaction_ids[transaction_id]
 
     def _live_waiter_for_card(self, card_event_id: str) -> _LiveApprovalWaiter | None:
         with self._live_lock:

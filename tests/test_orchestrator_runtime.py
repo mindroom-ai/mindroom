@@ -15,6 +15,7 @@ import httpx
 import nio
 import pytest
 import uvicorn
+from structlog.testing import capture_logs
 
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.approval_manager import (
@@ -1808,14 +1809,14 @@ class TestMultiAgentOrchestrator:
         assert expire_orphaned_approval_cards_on_startup.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_a_startup_discard_that_never_finishes_gives_up_loudly(self, tmp_path: Path) -> None:
-        """A sweep that keeps coming up short must stop asking.
+    async def test_a_startup_discard_that_keeps_coming_up_short_gets_louder(self, tmp_path: Path) -> None:
+        """A sweep still owed something long after start says so at error level.
 
-        Retrying is for a pass that failed on something transient. A row that
-        survives every attempt is not that, and a sweep that keeps returning
-        for it re-reads every room on a timer for the rest of the process's
-        life -- each pass another chance to mistake work in progress for
-        wreckage. What is owed is left for the next restart and said out loud.
+        It keeps asking, because a pass cannot take a row that is still being
+        published and the outage that outlasts a fixed budget is exactly when
+        cleanup is owed most. What changes is the volume: this far in, nothing
+        transient explains it, and the quiet warning has already been ignored
+        nine times.
         """
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
@@ -1830,25 +1831,29 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.approval_transport._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
-            patch("mindroom.approval_transport._STARTUP_CLEANUP_MAX_ATTEMPTS", 3),
+            patch("mindroom.approval_transport._STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION", 3),
             patch(
                 "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
                 new=AsyncMock(return_value=ApprovalStartupSweep(discarded=0, failed=1)),
             ) as expire_orphaned_approval_cards_on_startup,
+            capture_logs() as logs,
         ):
             orchestrator._approval_transport.reset_startup_cleanup_gate()
             await orchestrator._approval_transport.mark_startup_runtime_support_ready()
             await orchestrator.handle_bot_ready(bot)
 
-            await _await_until(lambda: expire_orphaned_approval_cards_on_startup.await_count == 3)
+            await _await_until(lambda: expire_orphaned_approval_cards_on_startup.await_count >= 4)
+            await orchestrator._approval_transport.cancel_startup_cleanup_retry()
 
-            # Nothing is waiting to try a fourth time, and a gate firing again
-            # does not restart the loop either.
-            assert _retry_tasks() == []
-            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+        incomplete = [entry for entry in logs if entry["event"] == "tool_approval_startup_discard_incomplete"]
+        assert [entry["log_level"] for entry in incomplete[:4]] == ["warning", "warning", "error", "error"]
+        assert incomplete[0]["owed_count"] == 1
 
-        await orchestrator._approval_transport.cancel_startup_cleanup_retry()
-        assert expire_orphaned_approval_cards_on_startup.await_count == 3
+        # Every pass says what it walked, including the ones that settled
+        # nothing, so a quiet sweep is not mistaken for a sweep that never ran.
+        finished = [entry for entry in logs if entry["event"] == "approval_startup_sweep_finished"]
+        assert len(finished) == len(incomplete)
+        assert finished[0]["owed_count"] == 1
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
