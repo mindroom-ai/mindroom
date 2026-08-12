@@ -27,7 +27,7 @@ _SENTENCE_TRANSFORMERS_EXTRA = "sentence_transformers"
 #: either spins forever in a cache lookup or dies with SIGSEGV. Local
 #: embedding runs one call at a time. Nothing is lost by serializing, because
 #: the work already funnels through a single GPU queue.
-_LOCAL_EMBEDDING_LOCK = threading.Lock()
+_LOCAL_EMBEDDING_LOCK = threading.RLock()
 
 
 def _default_dimensions(model: str) -> int | None:

@@ -194,32 +194,63 @@ def _probed_local_embedder(monkeypatch: pytest.MonkeyPatch, probe: _ConcurrencyP
     return create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
 
 
-def test_sentence_transformers_embedder_serializes_concurrent_embeddings(
+@pytest.mark.timeout(1)
+def test_sentence_transformers_usage_delegation_does_not_deadlock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two threads must never be inside the local torch embedder at the same time."""
+    """Agno's usage method may delegate back through the serialized embedding entry point."""
+
+    class DelegatingEmbedder:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_embedding(self, text: str) -> list[float]:
+            return [float(len(text))]
+
+        def get_embedding_and_usage(self, text: str) -> tuple[list[float], None]:
+            return self.get_embedding(text), None
+
+    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr(
+        "mindroom.embeddings.importlib.import_module",
+        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DelegatingEmbedder),
+    )
+    embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
+
+    assert embedder.get_embedding_and_usage("chunk") == ([5.0], None)
+
+
+def test_sentence_transformers_embedder_serializes_mixed_entry_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both local embedding entry points share one process-wide serialization boundary."""
     probe = _ConcurrencyProbe()
     embedder = _probed_local_embedder(monkeypatch, probe)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(embedder.get_embedding, [f"chunk {index}" for index in range(8)]))
+        futures = [
+            pool.submit(embedder.get_embedding, "one"),
+            pool.submit(embedder.get_embedding_and_usage, "two"),
+            pool.submit(embedder.get_embedding, "three"),
+            pool.submit(embedder.get_embedding_and_usage, "four"),
+            pool.submit(embedder.get_embedding, "five"),
+            pool.submit(embedder.get_embedding_and_usage, "six"),
+            pool.submit(embedder.get_embedding, "seven"),
+            pool.submit(embedder.get_embedding_and_usage, "eight"),
+        ]
+        results = [future.result() for future in futures]
 
     assert probe.max_active == 1
-    assert results == [[float(len(f"chunk {index}"))] for index in range(8)]
-
-
-def test_sentence_transformers_embedder_serializes_concurrent_usage_embeddings(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The usage-reporting entry point shares the same serialization."""
-    probe = _ConcurrencyProbe()
-    embedder = _probed_local_embedder(monkeypatch, probe)
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(embedder.get_embedding_and_usage, ["chunk"] * 8))
-
-    assert probe.max_active == 1
-    assert results == [([5.0], {"tokens": 5})] * 8
+    assert results == [
+        [3.0],
+        ([3.0], {"tokens": 3}),
+        [5.0],
+        ([4.0], {"tokens": 4}),
+        [4.0],
+        ([3.0], {"tokens": 3}),
+        [5.0],
+        ([5.0], {"tokens": 5}),
+    ]
 
 
 def test_mem0_and_knowledge_signatures_use_openai_model_defaults() -> None:
