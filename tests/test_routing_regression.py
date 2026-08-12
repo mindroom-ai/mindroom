@@ -603,7 +603,7 @@ class TestRoutingRegression:
         assert SOURCE_KIND_KEY not in content
 
         coalescing_gate = CoalescingGate(
-            dispatch_batch=lambda _: admitted_relay("$router-shutdown"),
+            dispatch_turn=lambda _: admitted_relay("$router-shutdown"),
             debounce_seconds=lambda: 0,
             is_shutting_down=lambda: False,
         )

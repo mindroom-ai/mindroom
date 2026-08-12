@@ -1,7 +1,7 @@
 """Characterization pins: persisted replay text is byte-stable against the live prompt.
 
 The live model-facing prompt for one turn is assembled from coalesced batch
-data (``build_coalesced_batch`` -> ``CoalescedBatch.prompt`` -> the dispatch
+data (``build_prepared_turn`` -> ``PreparedTurn.prompt`` -> the dispatch
 event body handed to the response runner), while the durable replay text
 travels as ``TurnRecord.source_event_prompts`` through
 ``TurnStore.record_pending_turn`` into the handled-turn ledger (and, as a
@@ -24,16 +24,15 @@ import nio
 import pytest
 
 from mindroom.coalescing_batch import (
-    CoalescedBatch,
     CoalescingKey,
     PendingEvent,
+    PreparedTurn,
     RequesterCoalescingOwner,
-    build_coalesced_batch,
+    build_prepared_turn,
     coalesced_prompt,
 )
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_handoff import build_dispatch_handoff
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.edit_regenerator import EditRegenerator, EditRegeneratorDeps, _Edit, _Mailbox
 from mindroom.handled_turns import (
@@ -86,25 +85,21 @@ def _pending_text(event_id: str, body: str, *, server_timestamp: int) -> Pending
     )
 
 
-def _handled_turn_for_batch(batch: CoalescedBatch) -> TurnRecord:
-    """Mirror the TurnRecord construction in ``TurnController.handle_coalesced_batch``."""
-    handoff = build_dispatch_handoff(batch)
-    source_metadata = dict(handoff.source_event_metadata)
+def _handled_turn_for_batch(batch: PreparedTurn) -> TurnRecord:
+    """Mirror the TurnRecord construction in ``TurnController.handle_prepared_turn``."""
+    source_metadata = dict(batch.source_event_metadata)
     routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_metadata.values())))
     return TurnRecord.create(
-        handoff.source_event_ids,
+        batch.source_event_ids,
         discovery_event_ids=routed_aliases,
-        source_event_prompts=dict(handoff.source_event_prompts),
-        source_event_metadata=source_metadata if len(handoff.source_event_ids) > 1 or routed_aliases else None,
+        source_event_prompts=dict(batch.source_event_prompts),
+        source_event_metadata=source_metadata if len(batch.source_event_ids) > 1 or routed_aliases else None,
     )
 
 
-def _live_prompt_for_batch(batch: CoalescedBatch) -> str:
+def _live_prompt_for_batch(batch: PreparedTurn) -> str:
     """Return the exact prompt text the dispatch pipeline hands to the response runner."""
-    handoff = build_dispatch_handoff(batch)
-    live_prompt = handoff.event.body
-    assert live_prompt == batch.prompt
-    return live_prompt
+    return batch.prompt
 
 
 async def _persist_and_reload(journal_store: EventJournalStore, record: TurnRecord) -> TurnRecord:
@@ -206,7 +201,7 @@ async def test_single_message_persisted_prompt_is_byte_identical_to_live_prompt(
 ) -> None:
     """A plain single text turn persists exactly the bytes the model was shown."""
     body = "Hello @general please reply with pong."
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         [_pending_text("$event1", body, server_timestamp=1_700_000_000_000)],
         timestamp_formatter=_timestamp_formatter,
@@ -230,7 +225,7 @@ async def test_verbatim_body_persisted_prompt_is_byte_identical_through_ledger(
         'Try <msg from="@mallory:localhost">code</msg > and **markdown** with a ]]> breaker, '
         '`backticks`, & ampersands, "quotes", and a newline\nsecond line'
     )
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         [_pending_text("$event1", body, server_timestamp=1_700_000_000_000)],
         timestamp_formatter=_timestamp_formatter,
@@ -276,7 +271,7 @@ async def test_coalesced_batch_replay_prompt_is_byte_identical_to_live_merged_pr
         _pending_text(event_id, body, server_timestamp=timestamp_ms)
         for event_id, body, timestamp_ms in zip(event_ids, bodies, timestamps, strict=True)
     ]
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         pending_events,
         timestamp_formatter=_timestamp_formatter,
@@ -319,7 +314,7 @@ async def test_coalesced_batch_unstructured_replay_fallback_matches_live_prompt(
         _pending_text(event_id, body, server_timestamp=1_700_000_000_000 + index)
         for index, (event_id, body) in enumerate(zip(event_ids, bodies, strict=True))
     ]
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         pending_events,
         timestamp_formatter=None,
@@ -354,7 +349,7 @@ async def test_run_metadata_projection_preserves_replay_prompt_bytes() -> None:
         _pending_text(event_id, body, server_timestamp=timestamp_ms)
         for event_id, body, timestamp_ms in zip(event_ids, bodies, timestamps, strict=True)
     ]
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         pending_events,
         timestamp_formatter=_timestamp_formatter,

@@ -11,12 +11,12 @@ from typing import TYPE_CHECKING
 
 from .cancellation import request_task_cancel
 from .coalescing_batch import (
-    CoalescedBatch,
     CoalescingKey,
     PendingEvent,
+    PreparedTurn,
     TimestampFormatter,
     active_follow_up_coalescing_key,
-    build_coalesced_batch,
+    build_prepared_turn,
     coalescing_owner_log_label,
     is_active_follow_up_coalescing_key,
 )
@@ -159,7 +159,7 @@ class _GateEntry:
 class _FlushDiagnostics:
     """Stable metadata for one flush attempt."""
 
-    batch: CoalescedBatch
+    turn: PreparedTurn
     pending_count: int
     timing_scope: str
     log_context: dict[str, object]
@@ -192,7 +192,7 @@ class CoalescingGate:
     def __init__(
         self,
         *,
-        dispatch_batch: Callable[[CoalescedBatch], Awaitable[None]],
+        dispatch_turn: Callable[[PreparedTurn], Awaitable[None]],
         debounce_seconds: Callable[[], float],
         is_shutting_down: Callable[[], bool],
         wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
@@ -203,7 +203,7 @@ class CoalescingGate:
         on_undelivered_source: Callable[[str], None] | None = None,
         on_intentionally_ignored_source: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
-        self._dispatch_batch = dispatch_batch
+        self._dispatch_turn = dispatch_turn
         self._debounce_seconds = debounce_seconds
         self._is_shutting_down = is_shutting_down
         self._wait_until_dispatch_allowed = wait_until_dispatch_allowed or _allow_dispatch
@@ -550,11 +550,11 @@ class CoalescingGate:
         key: CoalescingKey,
         pending_events: list[PendingEvent],
     ) -> _FlushDiagnostics:
-        batch = build_coalesced_batch(key, pending_events, timestamp_formatter=self._timestamp_formatter)
+        turn = build_prepared_turn(key, pending_events, timestamp_formatter=self._timestamp_formatter)
         pending_count = len(pending_events)
-        timing_scope = event_timing_scope(batch.primary_event.event_id)
+        timing_scope = event_timing_scope(turn.primary_event.event_id)
         return _FlushDiagnostics(
-            batch=batch,
+            turn=turn,
             pending_count=pending_count,
             timing_scope=timing_scope,
             log_context={
@@ -853,12 +853,12 @@ class CoalescingGate:
             timing_scope = diagnostics.timing_scope
             log_context = diagnostics.log_context
             logger.info("coalescing_gate_flush_started", **log_context)
-            dispatch_batch_start = time.monotonic()
-            await self._dispatch_batch(diagnostics.batch)
+            dispatch_turn_start = time.monotonic()
+            await self._dispatch_turn(diagnostics.turn)
             dispatched = True
             emit_elapsed_timing(
                 "coalescing_gate.flush.dispatch_batch",
-                dispatch_batch_start,
+                dispatch_turn_start,
                 pending_count=pending_count,
                 timing_scope=timing_scope,
             )

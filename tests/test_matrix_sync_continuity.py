@@ -20,7 +20,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, TeamBot, _create_best_effort_task_wrapper
 from mindroom.cancellation import request_task_cancel
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, RequesterCoalescingOwner
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent, PreparedTurn, RequesterCoalescingOwner
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -3150,7 +3150,7 @@ async def test_failed_coalesced_dispatch_returns_exact_source_to_durable_retry(t
         retried.set()
         return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
-    async def failing_dispatch(_batch: CoalescedBatch) -> None:
+    async def failing_dispatch(_batch: PreparedTurn) -> None:
         msg = "coalesced dispatch failed"
         raise RuntimeError(msg)
 
@@ -3159,7 +3159,7 @@ async def test_failed_coalesced_dispatch_returns_exact_source_to_durable_retry(t
         on_message=recovered_callback,
     )
     bot._journal_dispatcher.room_for_id = lambda _room_id: room
-    bot._coalescing_gate._dispatch_batch = failing_dispatch
+    bot._coalescing_gate._dispatch_turn = failing_dispatch
     await bot._journal_dispatcher.admit_out_of_band(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE, live=False)
 
     await bot._coalescing_gate.admit(
@@ -3301,7 +3301,7 @@ async def test_receive_time_gate_shutdown_drains_unresolved_admission() -> None:
         )
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 60.0,
         is_shutting_down=lambda: True,
     )
@@ -3353,7 +3353,7 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
 
     shutting_down = True
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 60.0,
         is_shutting_down=lambda: shutting_down,
     )
@@ -3411,7 +3411,7 @@ async def test_shutdown_drain_cancels_stuck_ready_task_without_cancelling_dispat
             cancelled.set()
 
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
@@ -3441,7 +3441,7 @@ async def test_shutdown_drain_counts_self_cancelled_ready_task_as_incomplete() -
         raise asyncio.CancelledError
 
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
@@ -3473,7 +3473,7 @@ async def test_shutdown_drain_counts_self_cancelled_ready_task_as_incomplete() -
 async def test_shutdown_drain_releases_stuck_pre_admission_lane_slot() -> None:
     """Bounded drains should release unresolved lane slots and reject late admission."""
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
@@ -3524,7 +3524,7 @@ async def test_shutdown_ready_timeout_closes_ready_result_returned_during_cancel
             return ReadyPendingEvent(pending_event=pending_event)
 
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
@@ -3561,7 +3561,7 @@ async def test_shutdown_timeout_reaches_already_running_ready_wait() -> None:
             cancelled.set()
 
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -3591,13 +3591,13 @@ async def test_ready_task_self_cancellation_finishes_no_ready() -> None:
     async def cancelled_ready() -> ReadyPendingEvent | None:
         raise asyncio.CancelledError
 
-    batches: list[CoalescedBatch] = []
+    batches: list[PreparedTurn] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         batches.append(batch)
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -3623,7 +3623,7 @@ async def test_enter_lane_during_active_bounded_shutdown_returns_released_counte
     shutting_down = False
 
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: shutting_down,
     )
@@ -3662,7 +3662,7 @@ async def test_shutdown_timeout_reaches_already_running_same_window_lane_slot_wa
     shutting_down = False
     wait_entered = asyncio.Event()
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.01,
         is_shutting_down=lambda: shutting_down,
     )
@@ -3703,14 +3703,14 @@ async def test_shutdown_in_flight_dispatch_failure_marks_drain_incomplete() -> N
     dispatch_entered = asyncio.Event()
     fail_dispatch = asyncio.Event()
 
-    async def dispatch_batch(_batch: CoalescedBatch) -> None:
+    async def dispatch_batch(_batch: PreparedTurn) -> None:
         dispatch_entered.set()
         await fail_dispatch.wait()
         message = "dispatch failed"
         raise RuntimeError(message)
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
@@ -3742,14 +3742,14 @@ async def test_shutdown_in_flight_dispatch_cancellation_marks_drain_incomplete()
     dispatch_raised_self_cancel = asyncio.Event()
     cancel_dispatch = asyncio.Event()
 
-    async def dispatch_batch(_batch: CoalescedBatch) -> None:
+    async def dispatch_batch(_batch: PreparedTurn) -> None:
         dispatch_entered.set()
         await cancel_dispatch.wait()
         dispatch_raised_self_cancel.set()
         raise asyncio.CancelledError
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )

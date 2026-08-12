@@ -29,10 +29,10 @@ from mindroom.attachments import register_local_attachment
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError
 from mindroom.coalescing_batch import (
-    CoalescedBatch,
     CoalescingKey,
+    PreparedTurn,
     RequesterCoalescingOwner,
-    build_coalesced_batch,
+    build_prepared_turn,
 )
 from mindroom.command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from mindroom.commands.parsing import CommandType, command_parser
@@ -285,7 +285,7 @@ class _Harness:
     turn_store: TurnStore
     interrupted_turn_rooms: InterruptedTurnRooms
     gate: CoalescingGate
-    gate_batches: list[CoalescedBatch]
+    gate_batches: list[PreparedTurn]
     ignored_dispatch_sources: list[tuple[str, ...]]
     retried_dispatch_sources: list[tuple[str, ...]]
 
@@ -443,13 +443,13 @@ def _build_harness(
     gateway = _RecordingDeliveryGateway()
     interrupted_turn_rooms = InterruptedTurnRooms()
     controller_ref: list[TurnController] = []
-    gate_batches: list[CoalescedBatch] = []
+    gate_batches: list[PreparedTurn] = []
     ignored_dispatch_sources: list[tuple[str, ...]] = []
     retried_dispatch_sources: list[tuple[str, ...]] = []
 
-    async def _dispatch_batch(batch: CoalescedBatch) -> None:
-        gate_batches.append(batch)
-        await controller_ref[0].handle_coalesced_batch(batch)
+    async def _dispatch_batch(turn: PreparedTurn) -> None:
+        gate_batches.append(turn)
+        await controller_ref[0].handle_prepared_turn(turn)
 
     async def _settle_ignored_dispatch_sources(source_event_ids: tuple[str, ...]) -> None:
         ignored_dispatch_sources.append(source_event_ids)
@@ -486,7 +486,7 @@ def _build_harness(
     )
 
     gate = CoalescingGate(
-        dispatch_batch=_dispatch_batch,
+        dispatch_turn=_dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -970,7 +970,7 @@ async def test_locked_coalesced_redaction_settles_every_suppressed_source(
             (relay_event_ids[1], "$human-two:localhost", "second", 1_000_001),
         )
     ]
-    batch = build_coalesced_batch(
+    turn = build_prepared_turn(
         CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER)),
         [
             make_pending_event(
@@ -996,7 +996,7 @@ async def test_locked_coalesced_redaction_settles_every_suppressed_source(
 
     monkeypatch.setattr(harness.runner, "generate_response", redact_before_locked_check)
 
-    await harness.controller.handle_coalesced_batch(batch)
+    await harness.controller.handle_prepared_turn(turn)
     await harness.runner.settle_inbox_responses()
 
     assert len(harness.runner.requests) == 1
@@ -1028,7 +1028,7 @@ async def test_coalesced_router_relays_index_every_human_source_for_edit_lookup(
             origin_server_ts=1_000_001,
         ),
     ]
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER)),
         [
             make_pending_event(
@@ -1047,7 +1047,7 @@ async def test_coalesced_router_relays_index_every_human_source_for_edit_lookup(
         ],
     )
 
-    await harness.controller.handle_coalesced_batch(batch)
+    await harness.controller.handle_prepared_turn(batch)
     await harness.runner.settle_inbox_responses()
 
     first_lookup = harness.turn_store.get_turn_record("$human-one:localhost")
@@ -1074,7 +1074,7 @@ async def test_single_router_relay_persists_human_prompt_ownership(config: Confi
         body=f"{mention} single",
         origin_server_ts=1_000_000,
     )
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER)),
         [
             make_pending_event(
@@ -1088,7 +1088,7 @@ async def test_single_router_relay_persists_human_prompt_ownership(config: Confi
         ],
     )
 
-    await harness.controller.handle_coalesced_batch(batch)
+    await harness.controller.handle_prepared_turn(batch)
     await harness.runner.settle_inbox_responses()
 
     record = harness.turn_store.get_turn_record("$human:localhost")

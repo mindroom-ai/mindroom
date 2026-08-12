@@ -168,7 +168,7 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
             return ReadyPendingEvent(pending_event=pending_event)
 
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -197,7 +197,7 @@ async def test_owner_release_settles_lane_slot_when_cancelled_during_ready_task_
         return None
 
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )

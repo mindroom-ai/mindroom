@@ -5,12 +5,13 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from .attachment_ids import merge_attachment_ids
 from .attachments import parse_attachment_ids_from_event_source
-from .constants import ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY, VOICE_TRANSCRIPT_KEY
+from .constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY, VOICE_TRANSCRIPT_KEY
 from .dispatch_handoff import (
+    DispatchPayloadMetadata,
     MediaDispatchEvent,
     PendingDispatchMetadata,
     PreparedIngress,
@@ -102,29 +103,25 @@ class PendingEvent:
 
 
 @dataclass(frozen=True)
-class CoalescedBatch:
-    """One flushed batch ready to dispatch through the text pipeline."""
+class PreparedTurn:
+    """One logical turn produced by a coalescing-gate flush."""
 
     coalescing_key: CoalescingKey
     room: nio.MatrixRoom
     primary_event: PreparedIngress
     requester_user_id: str
-    pending_events: tuple[PendingEvent, ...]
     prompt: str
     source_kind: str
     dispatch_policy_source_kind: str | None
     hook_source: str | None
     message_received_depth: int
-    attachment_ids: list[str]
-    source_event_ids: list[str]
+    payload: DispatchPayloadMetadata
+    source_event_ids: tuple[str, ...]
     source_event_prompts: dict[str, str]
     source_event_metadata: dict[str, SourceEventMetadata]
     current_prompt_is_structured: bool
-    media_events: list[MediaDispatchEvent]
-    original_sender: str | None = None
-    raw_audio_fallback: bool = False
-    voice_transcript: bool = False
-    dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
+    media_events: tuple[MediaDispatchEvent, ...]
+    dispatch_metadata: tuple[PendingDispatchMetadata, ...]
 
 
 def _pending_event_trusts_internal_payload(pending_event: PendingEvent) -> bool:
@@ -292,6 +289,49 @@ def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, boo
     return original_sender, raw_audio_fallback, voice_transcript
 
 
+def _batch_payload_metadata(
+    pending_events: list[PendingEvent],
+    *,
+    attachment_ids: tuple[str, ...],
+    original_sender: str | None,
+    raw_audio_fallback: bool,
+    voice_transcript: bool,
+) -> DispatchPayloadMetadata:
+    """Collect trusted and visible payload facts once for the prepared turn."""
+    mentioned_user_ids: list[str] = []
+    seen_user_ids: set[str] = set()
+    formatted_bodies: list[str] = []
+    skip_mentions = False
+    inspected_content = False
+    for pending_event in pending_events:
+        content = event_content_dict(pending_event.event)
+        if content is None:
+            continue
+        inspected_content = True
+        raw_mentions = content.get("m.mentions")
+        if isinstance(raw_mentions, dict):
+            raw_user_ids = cast("dict[str, object]", raw_mentions).get("user_ids")
+            if isinstance(raw_user_ids, list):
+                for user_id in raw_user_ids:
+                    if isinstance(user_id, str) and user_id not in seen_user_ids:
+                        mentioned_user_ids.append(user_id)
+                        seen_user_ids.add(user_id)
+        formatted_body = content.get("formatted_body")
+        if isinstance(formatted_body, str) and formatted_body:
+            formatted_bodies.append(formatted_body)
+        if pending_event.event.trust_internal_payload_metadata and content.get(SKIP_MENTIONS_KEY) is True:
+            skip_mentions = True
+    return DispatchPayloadMetadata(
+        attachment_ids=attachment_ids,
+        original_sender=original_sender,
+        raw_audio_fallback=raw_audio_fallback,
+        voice_transcript=voice_transcript,
+        mentioned_user_ids=tuple(mentioned_user_ids) if inspected_content else None,
+        formatted_bodies=tuple(formatted_bodies) if inspected_content else None,
+        skip_mentions=skip_mentions if inspected_content else None,
+    )
+
+
 _SOURCE_KIND_PRIORITY: dict[str, int] = {
     VOICE_SOURCE_KIND: 0,
     IMAGE_SOURCE_KIND: 1,
@@ -382,7 +422,7 @@ def close_pending_event_metadata(pending_events: list[PendingEvent]) -> None:
     """Close opaque metadata owned by pending events that cannot dispatch."""
     for pending_event in pending_events:
         for item in pending_event.dispatch_metadata:
-            item.close()
+            item.close_once()
 
 
 def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> dict[str, str]:
@@ -403,46 +443,51 @@ def _batch_source_event_metadata(ordered_pending_events: list[PendingEvent]) -> 
     }
 
 
-def build_coalesced_batch(
+def build_prepared_turn(
     key: CoalescingKey,
     pending_events: list[PendingEvent],
     *,
     timestamp_formatter: TimestampFormatter | None = None,
-) -> CoalescedBatch:
-    """Build one normalized dispatch batch from queued pending events."""
+) -> PreparedTurn:
+    """Build the logical turn represented by one coalescing-gate flush."""
     ordered_pending_events = list(pending_events)
     primary_pending_event = ordered_pending_events[-1]
     original_sender, raw_audio_fallback, voice_transcript = _batch_metadata(ordered_pending_events)
     prompt_rendering = _render_coalesced_prompt(ordered_pending_events, timestamp_formatter=timestamp_formatter)
-    return CoalescedBatch(
-        coalescing_key=key,
-        room=primary_pending_event.room,
-        primary_event=primary_pending_event.event,
-        requester_user_id=_batch_requester_user_id(key, primary_pending_event),
-        pending_events=tuple(ordered_pending_events),
-        prompt=prompt_rendering.prompt,
-        source_kind=_batch_source_kind(ordered_pending_events),
-        dispatch_policy_source_kind=_batch_dispatch_policy_source_kind(ordered_pending_events),
-        hook_source=_batch_hook_source(ordered_pending_events),
-        message_received_depth=_batch_message_received_depth(ordered_pending_events),
-        attachment_ids=merge_attachment_ids(
+    attachment_ids = tuple(
+        merge_attachment_ids(
             *(
                 parse_attachment_ids_from_event_source(pending_event.event.source)
                 for pending_event in ordered_pending_events
                 if _pending_event_trusts_internal_payload(pending_event)
             ),
         ),
-        source_event_ids=[pending_event.event.event_id for pending_event in ordered_pending_events],
+    )
+    return PreparedTurn(
+        coalescing_key=key,
+        room=primary_pending_event.room,
+        primary_event=primary_pending_event.event,
+        requester_user_id=_batch_requester_user_id(key, primary_pending_event),
+        prompt=prompt_rendering.prompt,
+        source_kind=_batch_source_kind(ordered_pending_events),
+        dispatch_policy_source_kind=_batch_dispatch_policy_source_kind(ordered_pending_events),
+        hook_source=_batch_hook_source(ordered_pending_events),
+        message_received_depth=_batch_message_received_depth(ordered_pending_events),
+        payload=_batch_payload_metadata(
+            ordered_pending_events,
+            attachment_ids=attachment_ids,
+            original_sender=original_sender,
+            raw_audio_fallback=raw_audio_fallback,
+            voice_transcript=voice_transcript,
+        ),
+        source_event_ids=tuple(pending_event.event.event_id for pending_event in ordered_pending_events),
         source_event_prompts=_batch_source_event_prompts(ordered_pending_events),
         source_event_metadata=_batch_source_event_metadata(ordered_pending_events),
         current_prompt_is_structured=prompt_rendering.is_structured,
-        media_events=[
+        media_events=tuple(
             pending_event.event.raw_event
             for pending_event in ordered_pending_events
             if pending_event.event.raw_event is not None
-        ],
-        original_sender=original_sender,
-        raw_audio_fallback=raw_audio_fallback,
-        voice_transcript=voice_transcript,
+        ),
         dispatch_metadata=_batch_dispatch_metadata(ordered_pending_events),
     )

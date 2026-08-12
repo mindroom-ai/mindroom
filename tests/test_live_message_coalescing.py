@@ -19,11 +19,11 @@ from mindroom.attachments import _attachment_id_for_event, load_attachment, regi
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent, is_coalescing_exempt_source_kind
 from mindroom.coalescing_batch import (
-    CoalescedBatch,
     CoalescingKey,
     PendingEvent,
+    PreparedTurn,
     RequesterCoalescingOwner,
-    build_coalesced_batch,
+    build_prepared_turn,
 )
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -49,8 +49,6 @@ from mindroom.dispatch_handoff import (
     DispatchPayloadMetadata,
     PendingDispatchMetadata,
     PreparedIngress,
-    _build_batch_dispatch_event,
-    build_dispatch_handoff,
 )
 from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
 from mindroom.dispatch_source import (
@@ -1009,7 +1007,7 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
     assert sorted(calls) == [["$m1"], ["$m2"]]
 
 
-def test_build_coalesced_batch_keeps_normalized_voice_out_of_media_events() -> None:
+def test_build_prepared_turn_keeps_normalized_voice_out_of_media_events() -> None:
     """Voice messages should enter coalescing as synthetic text, not raw media."""
     room = _make_room()
     voice_event = PreparedIngress(
@@ -1019,17 +1017,17 @@ def test_build_coalesced_batch_keeps_normalized_voice_out_of_media_events() -> N
         source={"content": {"body": "transcribed voice", SOURCE_KIND_KEY: "voice"}},
     )
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [make_pending_event(voice_event, room, source_kind="voice")],
     )
 
     assert batch.prompt == "transcribed voice"
-    assert batch.source_event_ids == ["$voice1"]
-    assert batch.media_events == []
+    assert batch.source_event_ids == ("$voice1",)
+    assert batch.media_events == ()
 
 
-def test_build_coalesced_batch_preserves_fifo_order_with_synthetic_events() -> None:
+def test_build_prepared_turn_preserves_fifo_order_with_synthetic_events() -> None:
     """Preserve queue order even when Matrix timestamps disagree."""
     room = _make_room()
     real_event = _text_event(event_id="$real", body="real", server_timestamp=1_712_350_002_000)
@@ -1041,7 +1039,7 @@ def test_build_coalesced_batch_preserves_fifo_order_with_synthetic_events() -> N
         server_timestamp=1_712_350_003_000,
     )
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
             make_pending_event(synthetic_event, room, source_kind="voice", enqueue_time=50_000.0),
@@ -1049,18 +1047,18 @@ def test_build_coalesced_batch_preserves_fifo_order_with_synthetic_events() -> N
         ],
     )
 
-    assert batch.source_event_ids == ["$synthetic", "$real"]
+    assert batch.source_event_ids == ("$synthetic", "$real")
     assert batch.prompt.endswith("synthetic\nreal")
 
 
-def test_build_coalesced_batch_prefers_media_source_kind_over_text_primary() -> None:
+def test_build_prepared_turn_prefers_media_source_kind_over_text_primary() -> None:
     """Mixed batches should keep media source_kind even when text is the primary event."""
     room = _make_room()
     image_event = _image_event(event_id="$img1", server_timestamp=1000)
     text_event = _text_event(event_id="$m2", body="describe it", server_timestamp=1001)
 
     text_pending = make_pending_event(text_event, room, source_kind="message")
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
             make_pending_event(image_event, room, source_kind="image"),
@@ -1072,7 +1070,7 @@ def test_build_coalesced_batch_prefers_media_source_kind_over_text_primary() -> 
     assert batch.source_kind == "image"
 
 
-def test_build_coalesced_batch_prefers_voice_source_kind_over_media_and_text() -> None:
+def test_build_prepared_turn_prefers_voice_source_kind_over_media_and_text() -> None:
     """Voice should win batch source_kind precedence even when a text event is primary."""
     room = _make_room()
     voice_event = PreparedIngress(
@@ -1085,7 +1083,7 @@ def test_build_coalesced_batch_prefers_voice_source_kind_over_media_and_text() -
     text_event = _text_event(event_id="$m2", body="follow-up", server_timestamp=1001)
 
     text_pending = make_pending_event(text_event, room, source_kind="message")
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
             make_pending_event(voice_event, room, source_kind="voice", enqueue_time=0.5),
@@ -1412,16 +1410,16 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
     second = _text_event(event_id="$b", body="second", sender="@bob:localhost", thread_id="$thread")
     active_threads: set[str | None] = {"$thread"}
     idle = asyncio.Event()
-    calls: list[CoalescedBatch] = []
+    calls: list[PreparedTurn] = []
 
-    async def record_dispatch(batch: CoalescedBatch) -> None:
+    async def record_dispatch(batch: PreparedTurn) -> None:
         calls.append(batch)
 
     async def wait_for_thread_response_idle(_room_id: str, _thread_id: str | None) -> None:
         await idle.wait()
 
     with (
-        patch.object(bot._turn_controller, "handle_coalesced_batch", new=AsyncMock(side_effect=record_dispatch)),
+        patch.object(bot._turn_controller, "handle_prepared_turn", new=AsyncMock(side_effect=record_dispatch)),
         patch.object(
             bot._response_runner,
             "wait_for_thread_response_idle",
@@ -1451,7 +1449,7 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
         await _wait_for(lambda: [list(batch.source_event_ids) for batch in calls] == [["$a", "$b"]])
 
     assert calls[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    assert [pending_event.event.requester_user_id for pending_event in calls[0].pending_events] == [
+    assert [calls[0].source_event_metadata[event_id].sender for event_id in calls[0].source_event_ids] == [
         "@alice:localhost",
         "@bob:localhost",
     ]
@@ -1768,11 +1766,11 @@ async def test_room_scope_text_then_voice_live_debounce_coalesces_receive_time()
     )
     calls: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 5.0,
         is_shutting_down=lambda: False,
     )
@@ -1800,7 +1798,7 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
     release_voice = asyncio.Event()
     calls: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.source_event_ids))
 
     async def ready_voice() -> ReadyPendingEvent:
@@ -1810,7 +1808,7 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
         )
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.05,
         is_shutting_down=lambda: False,
     )
@@ -1850,11 +1848,11 @@ async def test_flush_waiting_on_a_lane_that_never_settles_reports_the_stall(
     text = _text_event(event_id="$text", body="answer me", server_timestamp=1000)
     calls: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -1916,11 +1914,11 @@ async def test_voice_ready_release_combines_same_thread_backlog_in_receipt_order
             pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.02,
         is_shutting_down=lambda: False,
     )
@@ -2006,11 +2004,11 @@ async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
             pending_event=make_pending_event(second, room, source_kind="message"),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -2066,14 +2064,14 @@ async def test_voice_handoff_buffers_same_thread_followups_while_in_flight() -> 
             pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.source_event_ids))
-        if batch.source_event_ids == ["$voice"]:
+        if list(batch.source_event_ids) == ["$voice"]:
             entered_voice_dispatch.set()
             await release_voice_dispatch.wait()
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -2123,11 +2121,11 @@ async def test_voice_before_text_uses_stable_admission_key() -> None:
             pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append((batch.coalescing_key, list(batch.source_event_ids)))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.05,
         is_shutting_down=lambda: False,
     )
@@ -2176,11 +2174,11 @@ async def test_text_before_voice_uses_stable_admission_key() -> None:
             pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append((batch.coalescing_key, list(batch.source_event_ids)))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.05,
         is_shutting_down=lambda: False,
     )
@@ -2228,11 +2226,11 @@ async def test_plain_reply_voice_resolution_batches_related_text() -> None:
             pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -2280,11 +2278,11 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
             pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.03,
         is_shutting_down=lambda: False,
     )
@@ -2340,11 +2338,11 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
             ),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.03,
         is_shutting_down=lambda: False,
     )
@@ -2380,11 +2378,11 @@ async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> Non
         msg = "stt failed"
         raise RuntimeError(msg)
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 5.0,
         is_shutting_down=lambda: False,
     )
@@ -2433,11 +2431,11 @@ async def test_voice_admissions_resolving_to_different_threads_do_not_coalesce()
             pending_event=make_pending_event(event, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append((batch.coalescing_key, list(batch.source_event_ids)))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 5.0,
         is_shutting_down=lambda: False,
     )
@@ -2496,11 +2494,11 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
             pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append((batch.coalescing_key, list(batch.source_event_ids)))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -2552,11 +2550,11 @@ async def test_room_scope_voice_burst_coalesces_under_null_thread_key() -> None:
     )
     calls: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.05,
         is_shutting_down=lambda: False,
     )
@@ -2594,11 +2592,11 @@ async def test_deferred_room_scope_voice_burst_stays_one_turn_under_null_thread_
             pending_event=make_pending_event(event, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append((batch.coalescing_key, list(batch.source_event_ids)))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -2743,13 +2741,13 @@ async def test_pending_dispatch_policy_preserves_active_followup_without_bypassi
         server_timestamp=1000,
         source_kind_override="voice",
     )
-    calls: list[CoalescedBatch] = []
+    calls: list[PreparedTurn] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(batch)
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 60.0,
         is_shutting_down=lambda: False,
     )
@@ -2768,9 +2766,7 @@ async def test_pending_dispatch_policy_preserves_active_followup_without_bypassi
 
     assert calls[0].source_kind == "voice"
     assert calls[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    dispatch_event = _build_batch_dispatch_event(calls[0])
-    assert isinstance(dispatch_event, PreparedIngress)
-    assert dispatch_event.source_kind_override == "voice"
+    assert calls[0].primary_event.source_kind_override == "voice"
 
 
 @pytest.mark.asyncio
@@ -2789,7 +2785,7 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
         event_id=f"$spoof_{spoofed_source_kind}",
         source_kind=spoofed_source_kind,
     )
-    calls: list[nio.RoomMessageImage | PreparedIngress] = []
+    calls: list[tuple[PreparedIngress, DispatchIngressMetadata]] = []
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
@@ -2799,10 +2795,12 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
         media_events: list[object] | None = None,
         handled_turn: TurnRecord | None = None,
         queued_notice_reservation: object | None = None,
+        ingress_metadata: DispatchIngressMetadata,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn, queued_notice_reservation
-        calls.append(dispatched_event)
+        assert isinstance(dispatched_event, PreparedIngress)
+        calls.append((dispatched_event, ingress_metadata))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await _enqueue_for_dispatch(
@@ -2818,10 +2816,9 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
         await bot.prepare_for_sync_shutdown()
 
     assert len(calls) == 1
-    dispatched = calls[0]
-    assert isinstance(dispatched, PreparedIngress)
+    dispatched, ingress = calls[0]
     assert dispatched.event_id == f"$spoof_{spoofed_source_kind}"
-    assert dispatched.source_kind_override == IMAGE_SOURCE_KIND
+    assert ingress.source_kind == IMAGE_SOURCE_KIND
 
 
 @pytest.mark.asyncio
@@ -2833,11 +2830,11 @@ async def test_bypass_preserves_fifo_order_behind_existing_normal_work() -> None
     second = _text_event(event_id="$m2", body="second", server_timestamp=1002)
     calls: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.02,
         is_shutting_down=lambda: False,
     )
@@ -2869,15 +2866,15 @@ async def test_room_mode_voice_queued_notice_is_solo_barrier_before_nearby_norma
     )
     calls: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.source_event_ids))
-        if batch.source_event_ids == ["$voice-room"]:
+        if list(batch.source_event_ids) == ["$voice-room"]:
             assert batch.dispatch_metadata == metadata
             return
         assert batch.dispatch_metadata == ()
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 5.0,
         is_shutting_down=lambda: False,
     )
@@ -3217,8 +3214,8 @@ async def test_active_approval_fallthrough_reserves_before_async_approval_lookup
     release_approval_lookup = asyncio.Event()
     batches: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch.source_event_ids)
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(list(batch.source_event_ids))
 
     async def maybe_approval(
         *,
@@ -3234,7 +3231,7 @@ async def test_active_approval_fallthrough_reserves_before_async_approval_lookup
     # the bot posted, so its conversation is one MindRoom already knows;
     # saying so keeps the reply's thread resolution from being the subject.
     await seed_hydrated_conversation(bot, room_id=room.room_id, thread_id="$approval-card:localhost")
-    bot._coalescing_gate._dispatch_batch = dispatch_batch
+    bot._coalescing_gate._dispatch_turn = dispatch_batch
     first = _reply_event(
         event_id="$first:localhost",
         body="not my approval",
@@ -3270,8 +3267,8 @@ async def test_trusted_relay_approval_fallthrough_reserves_effective_requester(t
     release_approval_lookup = asyncio.Event()
     batches: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch.source_event_ids)
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(list(batch.source_event_ids))
 
     async def maybe_approval(
         *,
@@ -3287,7 +3284,7 @@ async def test_trusted_relay_approval_fallthrough_reserves_effective_requester(t
     # the bot posted, so its conversation is one MindRoom already knows;
     # saying so keeps the reply's thread resolution from being the subject.
     await seed_hydrated_conversation(bot, room_id=room.room_id, thread_id="$approval-card:localhost")
-    bot._coalescing_gate._dispatch_batch = dispatch_batch
+    bot._coalescing_gate._dispatch_turn = dispatch_batch
     first = _reply_event(
         event_id="$relay-first:localhost",
         body="not my approval",
@@ -3327,7 +3324,7 @@ async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing(
     """Immediate-flush telemetry should report the batch size before _flush clears pending."""
     room = _make_room()
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -3440,11 +3437,11 @@ async def test_matrix_ingress_logging_handles_missing_origin_timestamp(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_handle_coalesced_batch_timing_events_include_dispatch_scope(tmp_path: Path) -> None:
+async def test_handle_prepared_turn_timing_events_include_dispatch_scope(tmp_path: Path) -> None:
     """Coalesced-batch telemetry emitted before dispatch should carry the batch event scope."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
         [
             make_pending_event(
@@ -3459,19 +3456,19 @@ async def test_handle_coalesced_batch_timing_events_include_dispatch_scope(tmp_p
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()),
         patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit,
     ):
-        await bot._turn_controller.handle_coalesced_batch(batch)
+        await bot._turn_controller.handle_prepared_turn(batch)
 
     batch_calls = [
         call
         for call in mock_emit.call_args_list
-        if call.args and isinstance(call.args[0], str) and call.args[0].startswith("coalescing.handle_batch.")
+        if call.args and isinstance(call.args[0], str) and call.args[0].startswith("coalescing.handle_turn.")
     ]
     assert batch_calls
     assert all(call.kwargs["timing_scope"] == "$m1" for call in batch_calls)
 
 
 @pytest.mark.asyncio
-async def test_handle_coalesced_batch_uses_batch_key_for_text_primary(tmp_path: Path) -> None:
+async def test_handle_prepared_turn_uses_batch_key_for_text_primary(tmp_path: Path) -> None:
     """A mixed batch should dispatch on its single coalescing key even when text is primary."""
     bot = _make_bot(tmp_path)
     room = _make_room()
@@ -3483,7 +3480,7 @@ async def test_handle_coalesced_batch_uses_batch_key_for_text_primary(tmp_path: 
         thread_id="$voice_thread",
     )
     typed = _text_event(event_id="$typed", body="typed follow-up", server_timestamp=1001)
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(room.room_id, "$voice_thread", RequesterCoalescingOwner("@user:localhost")),
         [
             make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
@@ -3492,16 +3489,18 @@ async def test_handle_coalesced_batch_uses_batch_key_for_text_primary(tmp_path: 
     )
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch:
-        await bot._turn_controller.handle_coalesced_batch(batch)
+        await bot._turn_controller.handle_prepared_turn(batch)
 
     dispatched_event = mock_dispatch.await_args.args[1]
+    ingress = mock_dispatch.await_args.kwargs["ingress_metadata"]
     assert isinstance(dispatched_event, PreparedIngress)
-    content = dispatched_event.source["content"]
-    assert content["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$voice_thread"}
+    assert ingress.coalescing_key == batch.coalescing_key
+    assert ingress.coalescing_key.thread_id == "$voice_thread"
+    assert "m.relates_to" not in dispatched_event.source["content"]
 
 
-def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> None:
-    """A room-resolved voice batch must not dispatch through a typed reply's stale thread relation."""
+def test_room_resolved_voice_turn_keeps_target_separate_from_physical_relation() -> None:
+    """Room target comes from turn key, without rewriting typed reply evidence."""
     room = _make_room()
     room_key = CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost"))
     voice = _text_event(
@@ -3517,7 +3516,7 @@ def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> Non
         thread_id="$voice",
     )
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         room_key,
         [
             make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
@@ -3525,10 +3524,11 @@ def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> Non
         ],
     )
 
-    handoff = build_dispatch_handoff(batch)
-
-    assert isinstance(handoff.event, PreparedIngress)
-    assert "m.relates_to" not in handoff.event.source["content"]
+    assert batch.coalescing_key.thread_id is None
+    assert batch.primary_event.source["content"]["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": "$voice",
+    }
 
 
 def test_room_level_batch_preserves_plain_reply_relation_without_thread_target() -> None:
@@ -3540,20 +3540,17 @@ def test_room_level_batch_preserves_plain_reply_relation_without_thread_target()
         body="typed follow-up",
         server_timestamp=1001,
     )
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
         [make_pending_event(typed_reply, room, source_kind=MESSAGE_SOURCE_KIND)],
     )
 
-    handoff = build_dispatch_handoff(batch)
-
-    assert isinstance(handoff.event, PreparedIngress)
-    assert handoff.event.source["content"]["m.relates_to"] == {"m.in_reply_to": {"event_id": "$voice"}}
-    assert not EventInfo.from_event(handoff.event.source).can_be_thread_root
+    assert batch.primary_event.source["content"]["m.relates_to"] == {"m.in_reply_to": {"event_id": "$voice"}}
+    assert not EventInfo.from_event(batch.primary_event.source).can_be_thread_root
 
 
-def test_room_level_batch_preserves_mentions_while_removing_stale_thread_relation() -> None:
-    """Mention metadata must survive, but explicit stale threads come from the batch key."""
+def test_room_level_turn_preserves_mentions_without_rewriting_physical_relation() -> None:
+    """Mention metadata and canonical target stay separate from physical relation evidence."""
     room = _make_room()
     typed_reply = _text_event(
         event_id="$typed",
@@ -3562,17 +3559,14 @@ def test_room_level_batch_preserves_mentions_while_removing_stale_thread_relatio
         thread_id="$stale-thread",
     )
     typed_reply.source["content"]["m.mentions"] = {"user_ids": ["@agent:localhost"]}
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
         [make_pending_event(typed_reply, room, source_kind=MESSAGE_SOURCE_KIND)],
     )
 
-    handoff = build_dispatch_handoff(batch)
-
-    assert isinstance(handoff.event, PreparedIngress)
-    content = handoff.event.source["content"]
-    assert "m.relates_to" not in content
-    assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
+    assert batch.coalescing_key.thread_id is None
+    assert batch.payload.mentioned_user_ids == ("@agent:localhost",)
+    assert batch.primary_event.source["content"]["m.relates_to"]["event_id"] == "$stale-thread"
 
 
 def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
@@ -3585,18 +3579,15 @@ def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
         server_timestamp=1001,
     )
     typed_reply.source["content"]["m.mentions"] = {"user_ids": ["@agent:localhost"]}
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
         [make_pending_event(typed_reply, room, source_kind=MESSAGE_SOURCE_KIND)],
     )
 
-    handoff = build_dispatch_handoff(batch)
-
-    assert isinstance(handoff.event, PreparedIngress)
-    content = handoff.event.source["content"]
+    content = batch.primary_event.source["content"]
     assert content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$old-reply"}}
-    assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
-    assert not EventInfo.from_event(handoff.event.source).can_be_thread_root
+    assert batch.payload.mentioned_user_ids == ("@agent:localhost",)
+    assert not EventInfo.from_event(batch.primary_event.source).can_be_thread_root
 
 
 @pytest.mark.asyncio
@@ -3610,7 +3601,7 @@ async def test_coalesced_room_plain_reply_target_uses_prompt_thread_not_reply_th
         body="room-level follow-up",
         server_timestamp=1001,
     )
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
         [make_pending_event(typed_reply, room, source_kind=MESSAGE_SOURCE_KIND)],
     )
@@ -3623,15 +3614,15 @@ async def test_coalesced_room_plain_reply_target_uses_prompt_thread_not_reply_th
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
     ):
-        await bot._turn_controller.handle_coalesced_batch(batch)
+        await bot._turn_controller.handle_prepared_turn(batch)
 
     assert len(dispatches) == 1
     assert dispatches[0].target.resolved_thread_id == "$typed"
     assert dispatches[0].context.thread_id is None
 
 
-def test_single_mentioned_followup_batch_uses_coalescing_thread_relation() -> None:
-    """Mentions must not preserve an explicit stale thread relation."""
+def test_single_mentioned_followup_turn_uses_canonical_key_without_rewriting_source() -> None:
+    """Canonical key overrides stale target while physical source stays intact."""
     room = _make_room()
     typed = _text_event(
         event_id="$typed",
@@ -3640,17 +3631,14 @@ def test_single_mentioned_followup_batch_uses_coalescing_thread_relation() -> No
         thread_id="$old-thread",
     )
     typed.source["content"]["m.mentions"] = {"user_ids": ["@agent:localhost"]}
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey(room.room_id, "$new-thread", RequesterCoalescingOwner("@user:localhost")),
         [make_pending_event(typed, room, source_kind=MESSAGE_SOURCE_KIND)],
     )
 
-    handoff = build_dispatch_handoff(batch)
-
-    assert isinstance(handoff.event, PreparedIngress)
-    content = handoff.event.source["content"]
-    assert content["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$new-thread"}
-    assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
+    assert batch.coalescing_key.thread_id == "$new-thread"
+    assert batch.primary_event.source["content"]["m.relates_to"]["event_id"] == "$old-thread"
+    assert batch.payload.mentioned_user_ids == ("@agent:localhost",)
 
 
 def test_single_followup_batch_uses_coalescing_thread_relation() -> None:
@@ -3664,18 +3652,13 @@ def test_single_followup_batch_uses_coalescing_thread_relation() -> None:
         thread_id="$voice",
     )
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         post_key,
         [make_pending_event(typed, room, source_kind="message")],
     )
 
-    handoff = build_dispatch_handoff(batch)
-
-    assert isinstance(handoff.event, PreparedIngress)
-    assert handoff.event.source["content"]["m.relates_to"] == {
-        "rel_type": "m.thread",
-        "event_id": "$post-stt-thread",
-    }
+    assert batch.coalescing_key.thread_id == "$post-stt-thread"
+    assert batch.primary_event.source["content"]["m.relates_to"]["event_id"] == "$voice"
 
 
 @pytest.mark.asyncio
@@ -3835,7 +3818,7 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
         raise RuntimeError(msg)
 
     gate = CoalescingGate(
-        dispatch_batch=failing_dispatch_batch,
+        dispatch_turn=failing_dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -3863,7 +3846,7 @@ async def test_coalescing_enqueue_logs_pending_count() -> None:
     """Coalescing enqueue diagnostics should identify the pending scope."""
     room = _make_room()
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 10.0,
         is_shutting_down=lambda: False,
     )
@@ -3892,7 +3875,7 @@ async def test_slow_coalescing_flush_warns_with_correlation_metadata() -> None:
     """Slow flush diagnostics should carry event, room, and thread identifiers."""
     room = _make_room()
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -3933,7 +3916,7 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
         raise RuntimeError(msg)
 
     gate = CoalescingGate(
-        dispatch_batch=failing_dispatch_batch,
+        dispatch_turn=failing_dispatch_batch,
         debounce_seconds=lambda: 0.01,
         is_shutting_down=lambda: False,
     )
@@ -3987,7 +3970,7 @@ async def test_dispatch_failure_handoff_runs_after_gate_releases_exact_sources()
         handoff_complete.set()
 
     gate = CoalescingGate(
-        dispatch_batch=failing_dispatch_batch,
+        dispatch_turn=failing_dispatch_batch,
         debounce_seconds=lambda: 0.01,
         is_shutting_down=lambda: False,
         on_dispatch_failure=on_dispatch_failure,
@@ -4014,7 +3997,7 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
     room = _make_room()
     dispatched_source_event_ids: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         source_event_ids = list(batch.source_event_ids)
         if source_event_ids == ["$m1"]:
             msg = "boom"
@@ -4022,7 +4005,7 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
         dispatched_source_event_ids.append(source_event_ids)
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -4063,7 +4046,7 @@ async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_anot
     release_first_dispatch = asyncio.Event()
     dispatched_source_event_ids: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         source_event_ids = list(batch.source_event_ids)
         if source_event_ids == ["$m1"]:
             entered_first_dispatch.set()
@@ -4073,7 +4056,7 @@ async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_anot
         dispatched_source_event_ids.append(source_event_ids)
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -4114,7 +4097,7 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
     never_release = asyncio.Event()
     dispatched_source_event_ids: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         source_event_ids = list(batch.source_event_ids)
         dispatched_source_event_ids.append(source_event_ids)
         if source_event_ids == ["$m1"]:
@@ -4122,7 +4105,7 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
             await never_release.wait()
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -4167,7 +4150,7 @@ async def test_cancelled_drain_dispatches_buffered_ingress_without_waiting_for_a
     never_release = asyncio.Event()
     dispatched_source_event_ids: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         source_event_ids = list(batch.source_event_ids)
         dispatched_source_event_ids.append(source_event_ids)
         if source_event_ids == ["$m1"]:
@@ -4175,7 +4158,7 @@ async def test_cancelled_drain_dispatches_buffered_ingress_without_waiting_for_a
             await never_release.wait()
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -4214,7 +4197,7 @@ async def test_coalescing_drain_logs_lifecycle_metadata() -> None:
     """Drain diagnostics should include enqueue, start, finish, count, and age fields."""
     room = _make_room()
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -5621,8 +5604,8 @@ def _mention_text_event(
     )
 
 
-def test_batch_dispatch_event_merges_mentions_across_events() -> None:
-    """A batch of '@agent first' + 'follow up' must preserve the mention."""
+def test_prepared_turn_merges_mentions_across_events() -> None:
+    """A turn of '@agent first' + 'follow up' must preserve the mention."""
     room = _make_room()
     mention_event = _mention_text_event(
         event_id="$m1",
@@ -5632,22 +5615,17 @@ def test_batch_dispatch_event_merges_mentions_across_events() -> None:
     )
     followup_event = _text_event(event_id="$m2", body="follow up", server_timestamp=1001)
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
             make_pending_event(mention_event, room, source_kind="message"),
             make_pending_event(followup_event, room, source_kind="message"),
         ],
     )
-    dispatch_event = _build_batch_dispatch_event(batch)
-
-    assert isinstance(dispatch_event, PreparedIngress)
-    content = dispatch_event.source.get("content", {})
-    mentions = content.get("m.mentions", {})
-    assert "@mindroom_test_agent:localhost" in mentions.get("user_ids", [])
+    assert batch.payload.mentioned_user_ids == ("@mindroom_test_agent:localhost",)
 
 
-def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
+def test_prepared_turn_preserves_voice_fallback_metadata() -> None:
     """A trusted voice + text batch must preserve system-owned fallback metadata."""
     room = _make_room()
     voice_event = PreparedIngress(
@@ -5665,7 +5643,7 @@ def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
     )
     text_event = _text_event(event_id="$m2", body="and this too", server_timestamp=1001)
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
             make_pending_event(
@@ -5677,14 +5655,10 @@ def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
             make_pending_event(text_event, room, source_kind="message"),
         ],
     )
-    dispatch_event = _build_batch_dispatch_event(batch)
-
-    assert isinstance(dispatch_event, PreparedIngress)
-    content = dispatch_event.source.get("content", {})
-    assert content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True
+    assert batch.payload.raw_audio_fallback is True
 
 
-def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
+def test_single_prepared_turn_preserves_source_kind() -> None:
     """Single prepared events should carry active policy separately from source kind."""
     room = _make_room()
     event = PreparedIngress(
@@ -5695,7 +5669,7 @@ def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
         server_timestamp=1000,
     )
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
         [
             make_pending_event(
@@ -5706,16 +5680,12 @@ def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
             ),
         ],
     )
-    handoff = build_dispatch_handoff(batch)
-    dispatch_event = _build_batch_dispatch_event(batch)
-
-    assert handoff.ingress.source_kind == "message"
-    assert handoff.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    assert isinstance(dispatch_event, PreparedIngress)
-    assert dispatch_event.source_kind_override is None
+    assert batch.source_kind == "message"
+    assert batch.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert batch.primary_event.source_kind_override is None
 
 
-def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None:
+def test_single_text_turn_preserves_dispatch_policy_source_kind() -> None:
     """Single text active follow-ups should expose policy without changing source kind."""
     room = _make_room()
     event = PreparedIngress(
@@ -5732,19 +5702,16 @@ def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None
         source_kind="message",
         dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     )
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [pending],
     )
-    handoff = build_dispatch_handoff(batch)
-    dispatch_event = _build_batch_dispatch_event(batch)
-
-    assert handoff.ingress.source_kind == "message"
-    assert handoff.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    assert dispatch_event is pending.event
+    assert batch.source_kind == "message"
+    assert batch.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert batch.primary_event is pending.event
 
 
-def test_batch_dispatch_event_preserves_original_sender() -> None:
+def test_prepared_turn_preserves_original_sender() -> None:
     """A relay batch must preserve original_sender metadata."""
     room = _make_room()
     relay_event = PreparedIngress(
@@ -5766,7 +5733,7 @@ def test_batch_dispatch_event_preserves_original_sender() -> None:
         server_timestamp=1001,
     )
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@real_user:remote")),
         [
             make_pending_event(
@@ -5778,15 +5745,11 @@ def test_batch_dispatch_event_preserves_original_sender() -> None:
             make_pending_event(followup, room, source_kind="message"),
         ],
     )
-    dispatch_event = _build_batch_dispatch_event(batch)
-
-    assert isinstance(dispatch_event, PreparedIngress)
-    content = dispatch_event.source.get("content", {})
-    assert content.get(ORIGINAL_SENDER_KEY) == "@real_user:remote"
+    assert batch.payload.original_sender == "@real_user:remote"
 
 
-def test_batch_dispatch_event_preserves_attachment_ids() -> None:
-    """Attachment IDs from all events must flow through to the synthetic source."""
+def test_prepared_turn_preserves_attachment_ids() -> None:
+    """Attachment IDs from all events must flow through turn metadata."""
     room = _make_room()
     event_with_attachment = PreparedIngress(
         sender="@user:localhost",
@@ -5813,7 +5776,7 @@ def test_batch_dispatch_event_preserves_attachment_ids() -> None:
         server_timestamp=1001,
     )
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
             make_pending_event(
@@ -5830,14 +5793,7 @@ def test_batch_dispatch_event_preserves_attachment_ids() -> None:
             ),
         ],
     )
-    dispatch_event = _build_batch_dispatch_event(batch)
-
-    assert isinstance(dispatch_event, PreparedIngress)
-    content = dispatch_event.source.get("content", {})
-    raw_ids = content.get(ATTACHMENT_IDS_KEY, [])
-    assert isinstance(raw_ids, list), "attachment IDs must be a list, not a comma-string"
-    assert "att-001" in raw_ids
-    assert "att-002" in raw_ids
+    assert batch.payload.attachment_ids == ("att-001", "att-002")
 
 
 # ---------------------------------------------------------------------------
@@ -6368,8 +6324,8 @@ def _formatted_body_event(
     )
 
 
-def test_batch_dispatch_event_preserves_formatted_body_mentions() -> None:
-    """Bridge-style pill mentions in formatted_body must survive batch merging."""
+def test_prepared_turn_preserves_formatted_body_mentions() -> None:
+    """Bridge-style pill mentions in formatted_body must survive turn preparation."""
     room = _make_room()
     pill_event = _formatted_body_event(
         event_id="$m1",
@@ -6379,20 +6335,15 @@ def test_batch_dispatch_event_preserves_formatted_body_mentions() -> None:
     )
     followup = _text_event(event_id="$m2", body="follow up", server_timestamp=1001)
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
             make_pending_event(pill_event, room, source_kind="message"),
             make_pending_event(followup, room, source_kind="message"),
         ],
     )
-    dispatch_event = _build_batch_dispatch_event(batch)
-
-    assert isinstance(dispatch_event, PreparedIngress)
-    content = dispatch_event.source.get("content", {})
-    formatted = content.get("formatted_body", "")
-    assert "@mindroom_test_agent:localhost" in formatted
-    assert content.get("format") == "org.matrix.custom.html"
+    assert batch.payload.formatted_bodies is not None
+    assert "@mindroom_test_agent:localhost" in batch.payload.formatted_bodies[0]
 
 
 def _mentioned_matrix_ids_from_source(source: dict[str, object]) -> list[MatrixID]:
@@ -7383,7 +7334,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
         patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         patch.object(
             bot._turn_controller,
-            "handle_coalesced_batch",
+            "handle_prepared_turn",
             new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
         ),
     ):

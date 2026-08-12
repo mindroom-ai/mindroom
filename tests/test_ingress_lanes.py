@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from mindroom.coalescing_batch import CoalescedBatch
+    from mindroom.coalescing_batch import PreparedTurn
     from mindroom.event_journal import EventJournalStore
     from mindroom.handled_turns import TurnRecord
 
@@ -100,10 +100,10 @@ def _gate(
     wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
     on_undelivered_source: Callable[[str], None] | None = None,
     on_intentionally_ignored_source: Callable[[str], Awaitable[None]] | None = None,
-) -> tuple[CoalescingGate, list[CoalescedBatch]]:
-    batches: list[CoalescedBatch] = []
+) -> tuple[CoalescingGate, list[PreparedTurn]]:
+    batches: list[PreparedTurn] = []
 
-    async def record(batch: CoalescedBatch) -> None:
+    async def record(batch: PreparedTurn) -> None:
         batches.append(batch)
 
     if isinstance(dispatch_allowed_now, bool):
@@ -111,7 +111,7 @@ def _gate(
         dispatch_allowed_now = lambda _key: allowed  # noqa: E731
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch or record,
+        dispatch_turn=dispatch_batch or record,
         debounce_seconds=lambda: debounce_seconds,
         is_shutting_down=lambda: False,
         wait_until_dispatch_allowed=wait_until_dispatch_allowed,
@@ -179,7 +179,7 @@ async def test_unready_lane_slot_does_not_delay_other_senders_or_rooms() -> None
 
     blocked_voice.set()
     await gate.drain_all()
-    assert ["$voice"] in [batch.source_event_ids for batch in batches]
+    assert ["$voice"] in [list(batch.source_event_ids) for batch in batches]
 
 
 @pytest.mark.asyncio
@@ -187,11 +187,11 @@ async def test_thread_batch_dispatches_while_root_dispatch_is_in_flight() -> Non
     """A thread conversation must not wait for an in-flight room-root dispatch."""
     entered_root = asyncio.Event()
     release_root = asyncio.Event()
-    batches: list[CoalescedBatch] = []
+    batches: list[PreparedTurn] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         batches.append(batch)
-        if batch.source_event_ids == ["$root"]:
+        if list(batch.source_event_ids) == ["$root"]:
             entered_root.set()
             await release_root.wait()
 
@@ -213,7 +213,7 @@ async def test_thread_batch_dispatches_while_root_dispatch_is_in_flight() -> Non
         source_kind="message",
     )
 
-    await _wait_for(lambda: ["$reply"] in [batch.source_event_ids for batch in batches])
+    await _wait_for(lambda: ["$reply"] in [list(batch.source_event_ids) for batch in batches])
 
     release_root.set()
     await gate.drain_all()
@@ -238,7 +238,7 @@ async def test_room_mode_text_burst_coalesces_into_one_turn() -> None:
         source_kind="message",
     )
 
-    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$m1", "$m2"]])
+    await _wait_for(lambda: [list(batch.source_event_ids) for batch in batches] == [["$m1", "$m2"]])
     assert "quick succession" in batches[0].prompt
 
 
@@ -275,7 +275,7 @@ async def test_straggler_follow_up_logs_missed_combined_turn() -> None:
         source_event_id="$late",
     )
     await gate.drain_all()
-    assert [batch.source_event_ids for batch in batches] == [["$late"]]
+    assert [list(batch.source_event_ids) for batch in batches] == [["$late"]]
     assert batches[0].dispatch_policy_source_kind is None
 
 
@@ -311,7 +311,7 @@ async def test_follow_up_delivered_while_still_busy_is_not_logged_as_missed() ->
 
     busy["value"] = False
     idle.set()
-    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$queued"]])
+    await _wait_for(lambda: [list(batch.source_event_ids) for batch in batches] == [["$queued"]])
     assert batches[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     await gate.drain_all()
 
@@ -348,7 +348,7 @@ async def test_busy_conversation_queues_any_sender_into_one_combined_follow_up()
 
     busy["value"] = False
     idle.set()
-    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$a", "$b"]])
+    await _wait_for(lambda: [list(batch.source_event_ids) for batch in batches] == [["$a", "$b"]])
     assert batches[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     await gate.drain_all()
 
@@ -379,7 +379,7 @@ async def test_machine_fire_queues_while_conversation_busy() -> None:
 
     busy["value"] = False
     idle.set()
-    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$fire2"]])
+    await _wait_for(lambda: [list(batch.source_event_ids) for batch in batches] == [["$fire2"]])
     assert batches[0].dispatch_policy_source_kind is None
     await gate.drain_all()
 
@@ -390,7 +390,7 @@ async def test_enter_lane_during_bounded_drain_returns_closed_slot() -> None:
     entered_dispatch = asyncio.Event()
     release_dispatch = asyncio.Event()
 
-    async def blocking_dispatch(_batch: CoalescedBatch) -> None:
+    async def blocking_dispatch(_batch: PreparedTurn) -> None:
         entered_dispatch.set()
         await release_dispatch.wait()
 
@@ -526,7 +526,7 @@ async def test_failed_lane_readiness_does_not_block_later_same_sender_work() -> 
         ready_result=_ready(_plain_event("$text", "typed", 1_000_100)),
     )
 
-    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$text"]])
+    await _wait_for(lambda: [list(batch.source_event_ids) for batch in batches] == [["$text"]])
     await gate.drain_all()
 
 
@@ -1134,7 +1134,7 @@ async def test_lane_worker_failure_at_wait_phase_does_not_poison_lane() -> None:
         ready_result=_ready(_plain_event("$next", "still works", 1_000_100)),
     )
 
-    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$next"]])
+    await _wait_for(lambda: [list(batch.source_event_ids) for batch in batches] == [["$next"]])
     result = await gate.drain_all()
     assert result.completed is True
 
@@ -1221,9 +1221,9 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     response_running = asyncio.Event()
-    calls: list[CoalescedBatch] = []
+    calls: list[PreparedTurn] = []
 
-    async def record_dispatch(batch: CoalescedBatch) -> None:
+    async def record_dispatch(batch: PreparedTurn) -> None:
         calls.append(batch)
 
     async def blocked_response() -> None:
@@ -1242,7 +1242,7 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
         recovery_proof_ready=lambda: False,
     )
     await asyncio.wait_for(response_running.wait(), timeout=1.0)
-    with patch.object(bot._turn_controller, "handle_coalesced_batch", new=AsyncMock(side_effect=record_dispatch)):
+    with patch.object(bot._turn_controller, "handle_prepared_turn", new=AsyncMock(side_effect=record_dispatch)):
         for event_id, sender in (("$f1", "@alice:localhost"), ("$f2", "@bob:localhost")):
             await _enqueue_for_dispatch(
                 bot,
@@ -1296,7 +1296,7 @@ async def test_machine_and_human_follow_ups_split_solo_batch() -> None:
 
     busy["value"] = False
     idle.set()
-    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$human"], ["$fire"]])
+    await _wait_for(lambda: [list(batch.source_event_ids) for batch in batches] == [["$human"], ["$fire"]])
     assert batches[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     assert batches[1].dispatch_policy_source_kind is None
     await gate.drain_all()

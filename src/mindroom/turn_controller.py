@@ -12,10 +12,10 @@ from mindroom import interactive
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing_batch import (
-    CoalescedBatch,
     CoalescingKey,
     PendingEvent,
-    build_coalesced_batch,
+    PreparedTurn,
+    build_prepared_turn,
     requester_coalescing_key,
 )
 from mindroom.coalescing_cleanup import close_pending_event_metadata_once
@@ -37,13 +37,11 @@ from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import (
     DispatchEvent,
-    DispatchHandoff,
     DispatchIngressMetadata,
     DispatchPayloadMetadata,
     MediaDispatchEvent,
     PendingDispatchMetadata,
     PreparedIngress,
-    build_dispatch_handoff,
     payload_metadata_from_source,
     prepare_media_ingress,
 )
@@ -89,7 +87,6 @@ from mindroom.matrix.media import (
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
-from mindroom.message_target import ResponseLifecycleKey
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -137,7 +134,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.relation_lookup import RelationLookup
-    from mindroom.message_target import MessageTarget
+    from mindroom.message_target import MessageTarget, ResponseLifecycleKey
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.sync_restart_retry import InterruptedTurnRooms
@@ -861,17 +858,16 @@ class TurnController:
             ),
             room=room,
         )
-        batch = build_coalesced_batch(
+        turn = build_prepared_turn(
             requester_coalescing_key(room.room_id, coalescing_thread_id, requester_user_id),
             [pending_event],
         )
-        handoff = build_dispatch_handoff(batch)
         handled_turn = TurnRecord.create(
-            handoff.source_event_ids,
-            source_event_prompts=dict(handoff.source_event_prompts),
-            source_event_metadata=dict(handoff.source_event_metadata) if len(handoff.source_event_ids) > 1 else None,
+            turn.source_event_ids,
+            source_event_prompts=dict(turn.source_event_prompts),
+            source_event_metadata=dict(turn.source_event_metadata) if len(turn.source_event_ids) > 1 else None,
         )
-        await self._dispatch_handoff(handoff, handled_turn=handled_turn)
+        await self._dispatch_prepared_turn(turn, handled_turn=handled_turn)
 
     async def _enqueue_for_dispatch(
         self,
@@ -1723,74 +1719,75 @@ class TurnController:
                     canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
                 )
 
-    async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
-        """Dispatch one flushed batch through the normal text pipeline."""
-        try:
-            handoff = build_dispatch_handoff(batch)
-        except BaseException:
-            # Close-and-clear so the gate's segment owner cannot close the
-            # same metadata a second time when this exception reaches it.
-            close_pending_event_metadata_once(list(batch.pending_events))
-            raise
+    async def handle_prepared_turn(self, turn: PreparedTurn) -> None:
+        """Dispatch one logical turn emitted directly by the coalescing gate."""
+        event = replace(turn.primary_event, body=turn.prompt)
         _consume_queued_notice_reservations_from_metadata(
-            handoff.dispatch_metadata,
-            target_key=self._queued_notice_target_key_for_handoff(handoff),
+            turn.dispatch_metadata,
+            target_key=self._queued_notice_target_key(turn.room, event, turn.coalescing_key),
         )
-        timing_scope = event_timing_scope(handoff.event.event_id)
-        dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
+        timing_scope = event_timing_scope(event.event_id)
+        dispatch_timing = get_dispatch_pipeline_timing(event.source)
         if dispatch_timing is not None:
             dispatch_timing.mark("gate_exit")
         async with self.deps.resolver.turn_lookup_scope():
             dispatch_start = time.monotonic()
-            source_metadata = dict(handoff.source_event_metadata)
+            source_metadata = dict(turn.source_event_metadata)
             routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_metadata.values())))
             handled_turn = TurnRecord.create(
-                handoff.source_event_ids,
+                turn.source_event_ids,
                 discovery_event_ids=routed_aliases,
-                source_event_prompts=dict(handoff.source_event_prompts),
-                source_event_metadata=source_metadata if len(handoff.source_event_ids) > 1 or routed_aliases else None,
+                source_event_prompts=dict(turn.source_event_prompts),
+                source_event_metadata=source_metadata if len(turn.source_event_ids) > 1 or routed_aliases else None,
             )
-            close_pending_event_metadata_once(list(batch.pending_events))
-            await self._dispatch_handoff(
-                handoff,
-                handled_turn=handled_turn,
-            )
+            for item in turn.dispatch_metadata:
+                item.close_once()
+            await self._dispatch_prepared_turn(turn, handled_turn=handled_turn)
             emit_elapsed_timing(
-                "coalescing.handle_batch.dispatch_text_message",
+                "coalescing.handle_turn.dispatch_text_message",
                 dispatch_start,
-                source_event_count=len(batch.source_event_ids),
+                source_event_count=len(turn.source_event_ids),
                 timing_scope=timing_scope,
             )
 
-    def _queued_notice_target_key_for_handoff(self, handoff: DispatchHandoff) -> ResponseLifecycleKey:
-        coalescing_key = handoff.ingress.coalescing_key
-        if coalescing_key is None:
-            return ResponseLifecycleKey(room_id=handoff.room.room_id, thread_id=None)
-        context_event = _room_level_context_event(handoff.event) if coalescing_key.thread_id is None else handoff.event
-        target = self.deps.resolver.build_message_target(
-            room_id=handoff.room.room_id,
-            thread_id=coalescing_key.thread_id,
-            reply_to_event_id=handoff.event.event_id,
-            event_source=context_event.source,
-        )
-        return target.lifecycle_key
-
-    async def _dispatch_handoff(
+    def _queued_notice_target_key(
         self,
-        handoff: DispatchHandoff,
+        room: nio.MatrixRoom,
+        event: PreparedIngress,
+        coalescing_key: CoalescingKey,
+    ) -> ResponseLifecycleKey:
+        """Return the response lifecycle key for one prepared logical turn."""
+        context_event = _room_level_context_event(event) if coalescing_key.thread_id is None else event
+        return self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=coalescing_key.thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=context_event.source,
+        ).lifecycle_key
+
+    async def _dispatch_prepared_turn(
+        self,
+        turn: PreparedTurn,
         *,
         handled_turn: TurnRecord,
     ) -> None:
-        """Dispatch one coalesced handoff and own opaque metadata cleanup."""
+        """Dispatch one prepared logical turn through the text pipeline."""
+        event = replace(turn.primary_event, body=turn.prompt)
         await self._dispatch_text_message(
-            handoff.room,
-            handoff.event,
-            handoff.requester_user_id,
-            media_events=list(handoff.media_events) or None,
+            turn.room,
+            event,
+            turn.requester_user_id,
+            media_events=list(turn.media_events) or None,
             handled_turn=handled_turn,
-            ingress_metadata=handoff.ingress,
-            payload_metadata=handoff.payload,
-            current_prompt_is_structured=handoff.current_prompt_is_structured,
+            ingress_metadata=DispatchIngressMetadata(
+                source_kind=turn.source_kind,
+                coalescing_key=turn.coalescing_key,
+                dispatch_policy_source_kind=turn.dispatch_policy_source_kind,
+                hook_source=turn.hook_source,
+                message_received_depth=turn.message_received_depth,
+            ),
+            payload_metadata=turn.payload,
+            current_prompt_is_structured=turn.current_prompt_is_structured,
         )
 
     async def _claim_live_turn(

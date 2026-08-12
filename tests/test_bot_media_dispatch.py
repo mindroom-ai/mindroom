@@ -14,7 +14,7 @@ from agno.media import Image
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, LaneSlot, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, RequesterCoalescingOwner
+from mindroom.coalescing_batch import CoalescingKey, PreparedTurn, RequesterCoalescingOwner
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     SOURCE_KIND_KEY,
@@ -464,11 +464,11 @@ class TestAgentBot(AgentBotTestBase):
                 await release_text_lookup.wait()
             return "$thread-root"
 
-        async def dispatch_batch(batch: CoalescedBatch) -> None:
+        async def dispatch_batch(batch: PreparedTurn) -> None:
             dispatches.append(list(batch.source_event_ids))
 
         bot._coalescing_gate = CoalescingGate(
-            dispatch_batch=dispatch_batch,
+            dispatch_turn=dispatch_batch,
             debounce_seconds=lambda: 0.01,
             is_shutting_down=lambda: False,
         )
@@ -566,11 +566,11 @@ class TestAgentBot(AgentBotTestBase):
                 await release_media_lookup.wait()
             return "$thread-root"
 
-        async def dispatch_batch(batch: CoalescedBatch) -> None:
+        async def dispatch_batch(batch: PreparedTurn) -> None:
             dispatches.append(list(batch.source_event_ids))
 
         bot._coalescing_gate = CoalescingGate(
-            dispatch_batch=dispatch_batch,
+            dispatch_turn=dispatch_batch,
             debounce_seconds=lambda: 0.01,
             is_shutting_down=lambda: False,
         )
@@ -654,11 +654,11 @@ class TestAgentBot(AgentBotTestBase):
             await release_preview_normalization.wait()
             return prepared_sidecar
 
-        async def dispatch_batch(batch: CoalescedBatch) -> None:
+        async def dispatch_batch(batch: PreparedTurn) -> None:
             dispatches.append(list(batch.source_event_ids))
 
         bot._coalescing_gate = CoalescingGate(
-            dispatch_batch=dispatch_batch,
+            dispatch_turn=dispatch_batch,
             debounce_seconds=lambda: 0.01,
             is_shutting_down=lambda: False,
         )

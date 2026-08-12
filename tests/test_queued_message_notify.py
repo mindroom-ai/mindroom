@@ -37,7 +37,7 @@ from mindroom.coalescing_batch import (
     CoalescingKey,
     RequesterCoalescingOwner,
     active_follow_up_coalescing_key,
-    build_coalesced_batch,
+    build_prepared_turn,
 )
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -552,12 +552,12 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
         ),
     ]
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         active_follow_up_coalescing_key(room.room_id, "$thread"),
         pending_events,
     )
 
-    assert batch.source_event_ids == ["$a1", "$b1", "$a2"]
+    assert batch.source_event_ids == ("$a1", "$b1", "$a2")
     assert batch.requester_user_id == "@alice:localhost"
     assert batch.source_event_prompts == {
         "$a1": "A first",
@@ -2479,7 +2479,7 @@ async def test_reserved_follow_up_cleanup_when_prepare_dispatch_raises(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_before_dispatch(
+async def test_reserved_follow_up_cleanup_when_handle_prepared_turn_fails_before_dispatch(
     tmp_path: Path,
 ) -> None:
     """Reserved follow-ups claimed by the gate should clean up if handoff fails early."""
@@ -2500,7 +2500,7 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
     try:
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
-        batch = build_coalesced_batch(
+        batch = build_prepared_turn(
             CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner("@user:localhost")),
             [
                 make_pending_event(
@@ -2513,13 +2513,14 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
             ],
         )
         with (
-            patch(
-                "mindroom.turn_controller.build_dispatch_handoff",
-                side_effect=RuntimeError("handoff failed"),
+            patch.object(
+                bot._turn_controller,
+                "_dispatch_prepared_turn",
+                new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
             ),
-            pytest.raises(RuntimeError, match="handoff failed"),
+            pytest.raises(RuntimeError, match="dispatch failed"),
         ):
-            await bot._turn_controller.handle_coalesced_batch(batch)
+            await bot._turn_controller.handle_prepared_turn(batch)
     finally:
         queued_signal.finish_response_turn()
 
@@ -2570,7 +2571,7 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
         post_reservation = lifecycle.reserve_waiting_human_message(target=post_target, response_envelope=post_envelope)
         assert pre_reservation is not None
         assert post_reservation is not None
-        batch = build_coalesced_batch(
+        batch = build_prepared_turn(
             CoalescingKey(room.room_id, "$post_stt_thread", RequesterCoalescingOwner("@user:localhost")),
             [
                 make_pending_event(
@@ -2591,7 +2592,7 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
         )
 
         with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=capture_dispatch)):
-            await bot._turn_controller.handle_coalesced_batch(batch)
+            await bot._turn_controller.handle_prepared_turn(batch)
     finally:
         pre_signal.finish_response_turn()
         post_signal.finish_response_turn()
@@ -2641,7 +2642,7 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
     try:
         voice_reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert voice_reservation is not None
-        batch = build_coalesced_batch(
+        batch = build_prepared_turn(
             CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
             [
                 make_pending_event(
@@ -2655,7 +2656,7 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
         )
 
         with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=capture_dispatch)):
-            await bot._turn_controller.handle_coalesced_batch(batch)
+            await bot._turn_controller.handle_prepared_turn(batch)
     finally:
         queued_signal.finish_response_turn()
 
@@ -2835,7 +2836,7 @@ def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> Non
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
         with pytest.raises(ValueError, match="solo batches"):
-            build_coalesced_batch(
+            build_prepared_turn(
                 CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner("@user:localhost")),
                 [
                     make_pending_event(
