@@ -103,6 +103,7 @@ class PagedClient:
 
     pages: list[tuple[list[dict[str, Any]], str | None] | nio.RoomMessagesError]
     calls: int = 0
+    requested_limits: list[int] = field(default_factory=list)
     olm: object | None = None
 
     async def room_messages(
@@ -113,7 +114,8 @@ class PagedClient:
         limit: int = 10,
     ) -> nio.RoomMessagesResponse | nio.RoomMessagesError:
         """Return the next configured page."""
-        del room_id, start, direction, limit
+        del room_id, start, direction
+        self.requested_limits.append(limit)
         page = self.pages[self.calls]
         self.calls += 1
         if isinstance(page, nio.RoomMessagesError):
@@ -667,6 +669,7 @@ async def test_repair_raw_event_ceiling_stops_inside_a_page(principal: Principal
     assert recovery is not None
     assert recovery.state is HistoryRecoveryState.TRUNCATED
     assert client.calls == 1
+    assert client.requested_limits == [1]
     assert await bodies(principal) == ["newest"]
     assert await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
     assert not await principal.conversation_is_complete(room_id=ROOM, thread_id=None)
