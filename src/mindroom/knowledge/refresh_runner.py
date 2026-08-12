@@ -172,17 +172,28 @@ async def refresh_knowledge_binding_in_subprocess(
         **_subprocess_session_kwargs(),
     )
     try:
-        with suppress(BrokenPipeError, ConnectionResetError):
-            await _send_subprocess_refresh_request(process, request_payload)
-        return_code = await asyncio.wait_for(process.wait(), timeout=timeout)
+        async with asyncio.timeout(timeout):
+            with suppress(BrokenPipeError, ConnectionResetError):
+                await _send_subprocess_refresh_request(process, request_payload)
+            return_code = await process.wait()
     except TimeoutError:
         # A refresh child can wedge below Python: torch's Metal shader-library
         # caches are unlocked, and a corrupted lookup spins forever. The child
         # gets its own session, so nothing else would ever reap it.
-        await _terminate_refresh_subprocess(process)
         msg = f"Knowledge refresh subprocess for {base_id!r} timed out after {timeout}s and was terminated"
         logger.warning(msg, base_id=base_id)
-        await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=msg)
+        cleanup_task = asyncio.create_task(
+            _cleanup_timed_out_refresh_subprocess(
+                process,
+                key,
+                initial_state=initial_state,
+                error=msg,
+            ),
+        )
+        cancellation = await _drain_owned_cleanup_task(cleanup_task)
+        cleanup_task.result()
+        if cancellation is not None:
+            raise cancellation from None
         raise RuntimeError(msg) from None
     except asyncio.CancelledError:
         cleanup_task = asyncio.create_task(
@@ -194,9 +205,7 @@ async def refresh_knowledge_binding_in_subprocess(
                 runtime_paths=runtime_paths,
             ),
         )
-        while not cleanup_task.done():
-            with suppress(asyncio.CancelledError):
-                await asyncio.shield(cleanup_task)
+        await _drain_owned_cleanup_task(cleanup_task)
         with suppress(Exception):
             cleanup_task.result()
         raise
@@ -273,6 +282,18 @@ async def _terminate_refresh_subprocess(process: asyncio.subprocess.Process) -> 
         await process.wait()
 
 
+async def _drain_owned_cleanup_task(cleanup_task: asyncio.Task[None]) -> asyncio.CancelledError | None:
+    """Wait through repeated caller cancellation until an owned cleanup task settles."""
+    cancellation: asyncio.CancelledError | None = None
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+    return cancellation
+
+
 async def _cleanup_cancelled_refresh_subprocess(
     process: asyncio.subprocess.Process,
     key: PublishedIndexKey,
@@ -293,6 +314,18 @@ async def _cleanup_cancelled_refresh_subprocess(
             )
     except Exception:
         logger.warning("Failed to reconcile cancelled knowledge refresh subprocess", base_id=key.base_id, exc_info=True)
+
+
+async def _cleanup_timed_out_refresh_subprocess(
+    process: asyncio.subprocess.Process,
+    key: PublishedIndexKey,
+    *,
+    initial_state: PublishedIndexState | None,
+    error: str,
+) -> None:
+    """Terminate one timed-out child and persist its failure before returning."""
+    await _terminate_refresh_subprocess(process)
+    await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=error)
 
 
 async def _reconcile_failed_refresh_subprocess(

@@ -5939,6 +5939,165 @@ async def test_wedged_subprocess_refresh_is_terminated_after_timeout(
     assert "timed out after 0.05s" in state.last_error
 
 
+@pytest.mark.asyncio
+async def test_blocked_refresh_request_is_terminated_after_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The watchdog includes request delivery when a child never reads stdin."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.mark_published_index_stale(key, reason="test_stale")
+    terminated = asyncio.Event()
+
+    class _Stdin:
+        def write(self, _payload: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            await asyncio.Event().wait()
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    class _Process:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = _Stdin()
+
+        async def wait(self) -> int:
+            msg = "process.wait() must not start before request delivery finishes"
+            raise AssertionError(msg)
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        return _Process()
+
+    async def _fake_terminate(process: _Process) -> None:
+        process.returncode = -9
+        terminated.set()
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+    monkeypatch.setattr(
+        knowledge_refresh_runner,
+        "_refresh_subprocess_timeout_seconds",
+        lambda _runtime_paths: 0.05,
+    )
+
+    with pytest.raises(RuntimeError, match=r"timed out after 0\.05s"):
+        await asyncio.wait_for(
+            knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+                "docs",
+                config=config,
+                runtime_paths=runtime_paths,
+            ),
+            timeout=0.5,
+        )
+
+    assert terminated.is_set()
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.refresh_job == "failed"
+    assert state.reason == "refresh_failed"
+
+
+@pytest.mark.asyncio
+async def test_timeout_cleanup_finishes_before_cancellation_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during timeout cleanup cannot abandon child termination or reconciliation."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.mark_published_index_stale(key, reason="test_stale")
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    cleanup_cancelled = asyncio.Event()
+
+    class _Stdin:
+        def write(self, _payload: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    class _Process:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = _Stdin()
+
+        async def wait(self) -> int:
+            knowledge_registry.mark_published_index_refresh_running(key)
+            await asyncio.Event().wait()
+            raise AssertionError
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        return _Process()
+
+    async def _fake_terminate(process: _Process) -> None:
+        cleanup_started.set()
+        try:
+            await cleanup_release.wait()
+        except asyncio.CancelledError:
+            cleanup_cancelled.set()
+            raise
+        process.returncode = -9
+        cleanup_finished.set()
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+    monkeypatch.setattr(
+        knowledge_refresh_runner,
+        "_refresh_subprocess_timeout_seconds",
+        lambda _runtime_paths: 0.05,
+    )
+
+    refresh_task = asyncio.create_task(
+        knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+        ),
+    )
+    await cleanup_started.wait()
+    refresh_task.cancel()
+    await asyncio.sleep(0)
+    try:
+        assert not refresh_task.done()
+        refresh_task.cancel()
+        await asyncio.sleep(0)
+        assert not refresh_task.done()
+    finally:
+        cleanup_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await refresh_task
+
+    assert cleanup_finished.is_set()
+    assert not cleanup_cancelled.is_set()
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.refresh_job == "failed"
+    assert state.reason == "refresh_failed"
+
+
 def test_refresh_subprocess_timeout_reads_the_runtime_environment(tmp_path: Path) -> None:
     """The refresh watchdog resolves config-adjacent environment and rejects unsafe values."""
     runtime_paths = test_runtime_paths(tmp_path)
