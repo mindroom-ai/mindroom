@@ -117,7 +117,7 @@ def _create_agent_state_db(
         config,
         runtime_paths,
         execution_identity=execution_identity,
-    ).state_root
+    ).session_state_root
     return create_state_storage(
         storage_name=agent_name,
         state_root=state_storage_path,
