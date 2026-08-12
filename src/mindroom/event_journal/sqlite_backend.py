@@ -137,6 +137,10 @@ class SqliteBackend:
     # the type checker on the wrong side of it.
     _queue: asyncio.Queue[_QueuedWrite] | None = field(default=None, init=False, repr=False)
     _writer_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    # The loop the writer task drains on, remembered because a caller on any
+    # other loop can neither enqueue onto that queue nor be woken by it
+    # without being handed across deliberately.
+    _writer_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _open_readers: list[sqlite3.Connection] = field(default_factory=list, init=False, repr=False)
     _reader_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -162,6 +166,7 @@ class SqliteBackend:
         if queue is None or self._writer_task is None or self._writer_task.done():
             queue = asyncio.Queue()
             self._queue = queue
+            self._writer_loop = asyncio.get_running_loop()
             self._writer_task = asyncio.create_task(
                 # Handed the queue it drains rather than reading the field,
                 # so a task can only ever settle writes that were admitted to
@@ -271,8 +276,18 @@ class SqliteBackend:
         if self._closed:
             raise RuntimeError(_CLOSED_MESSAGE)
         queue = self._ensure_writer_task()
-        future: asyncio.Future[T] = asyncio.get_running_loop().create_future()
-        queue.put_nowait(_QueuedWrite(operation=operation, future=future))
+        caller_loop = asyncio.get_running_loop()
+        writer_loop = self._writer_loop
+        future: asyncio.Future[T] = caller_loop.create_future()
+        queued = _QueuedWrite(operation=operation, future=future)
+        # A queue belongs to the loop that drains it. Putting to one from
+        # another loop wakes its consumer through a callback scheduled on the
+        # wrong loop, which arrives whenever that loop happens to run next and
+        # not because anything told it to.
+        if writer_loop is None or writer_loop is caller_loop:
+            queue.put_nowait(queued)
+        else:
+            writer_loop.call_soon_threadsafe(queue.put_nowait, queued)
         # Cancelling this await must not report an outcome the writer has not
         # reached yet: the statement runs on a thread regardless, so the caller
         # learns how it ended before its cancellation propagates.
@@ -336,7 +351,21 @@ class SqliteBackend:
 
 
 def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:
-    """Give the waiting caller the worker's own outcome."""
+    """Give the waiting caller the worker's own outcome, on the caller's own loop.
+
+    Completing a future belonging to another loop sets its result but schedules
+    its callbacks with a plain ``call_soon``, which does not wake that loop. A
+    loop with nothing else pending -- the synchronous tool bridge's own loop,
+    between the write it issued and the answer it is waiting for -- then sleeps
+    in its selector with the result already sitting there, and the caller never
+    resumes. Handing the completion across deliberately is what wakes it.
+    """
+    caller_loop = future.get_loop()
+    if caller_loop is not _running_loop():
+        if not caller_loop.is_closed():
+            with contextlib.suppress(RuntimeError):
+                caller_loop.call_soon_threadsafe(_report, future, work)
+        return
     if future.done():
         return
     if work.cancelled():
@@ -345,6 +374,14 @@ def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:
         future.set_exception(error)
     else:
         future.set_result(work.result())
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    """Return the loop this call is running on, if it is running on one."""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
 
 
 @dataclass(slots=True)
