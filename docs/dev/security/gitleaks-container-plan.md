@@ -19,6 +19,8 @@ Pin the official Docker image to `v8.18.4@sha256:75bdb2b2f4db213cde0b8295f13a88d
 
 Keep Gitleaks findings informational with `--exit-code 0` while leaving Docker and scanner failures fatal.
 
+Run the container without networking, Linux capabilities, or privilege escalation.
+
 ---
 
 ### Task 1: Replace the Gitleaks installation path
@@ -50,6 +52,9 @@ Use this workflow command:
 - name: Secret scan (gitleaks)
   run: |
     docker run --rm \
+      --network none \
+      --cap-drop ALL \
+      --security-opt no-new-privileges \
       --volume "$PWD:/repo:ro" \
       --workdir /repo \
       zricethezav/gitleaks:v8.18.4@sha256:75bdb2b2f4db213cde0b8295f13a88d6b333091bbfbf3012a4e083d00d31caba \
