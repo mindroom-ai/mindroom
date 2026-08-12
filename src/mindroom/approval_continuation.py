@@ -245,16 +245,23 @@ class ApprovalContinuationStore:
 
     def for_source_event(self, source_event_id: str) -> ApprovalContinuation | None:
         """Return the continuation that durably owns one inbound journal source."""
-        page = 1
-        while True:
-            rows, total = self._db.get_approvals(approval_type="mindroom", limit=100, page=page)
-            for row in rows:
-                continuation = ApprovalContinuation._from_row(row)
-                if source_event_id in continuation.source_event_ids:
-                    return continuation
-            if page * 100 >= total:
-                return None
-            page += 1
+        for state in ("pending", "ready", "claimed"):
+            page = 1
+            while True:
+                rows, total = self._db.get_approvals(
+                    status=state,
+                    approval_type="mindroom",
+                    limit=100,
+                    page=page,
+                )
+                for row in rows:
+                    continuation = ApprovalContinuation._from_row(row)
+                    if source_event_id in continuation.source_event_ids:
+                        return continuation
+                if page * 100 >= total:
+                    break
+                page += 1
+        return None
 
     def attach_card(self, approval_id: str, tool_call_id: str, card_event_id: str) -> ApprovalContinuation | None:
         """Record the Matrix card that owns one still-pending call."""
@@ -375,3 +382,7 @@ class ApprovalContinuationStore:
                     break
                 page += 1
         return tuple(records)
+
+    def close(self) -> None:
+        """Close this store handle."""
+        self._db.close()

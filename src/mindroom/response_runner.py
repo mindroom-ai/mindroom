@@ -97,6 +97,7 @@ from mindroom.tool_approval import (
     evaluate_tool_approval,
     expire_suspended_tool_approval,
     native_approval_continuation,
+    resolve_tool_approval_approver,
     send_suspended_tool_approval,
 )
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -534,6 +535,10 @@ class ResponseRunner:
         """Open this runner's handle to the shared continuation store."""
         self._approval_continuations = ApprovalContinuationStore(self.deps.runtime_paths.storage_root)
 
+    async def close(self) -> None:
+        """Close this runner's continuation-store handle."""
+        await asyncio.to_thread(self._approval_continuations.close)
+
     def track_inbox_response(
         self,
         response: Coroutine[Any, Any, None],
@@ -675,7 +680,7 @@ class ResponseRunner:
             agent_name or self.deps.agent_name,
         )
 
-    async def _suspend_for_approval(  # noqa: C901
+    async def _suspend_for_approval(  # noqa: C901, PLR0912, PLR0915
         self,
         paused: PausedAttempt,
         *,
@@ -688,6 +693,15 @@ class ResponseRunner:
         team_mode: str | None = None,
     ) -> FinalDeliveryOutcome:
         """Persist a paused Agno run, expose its cards, and leave the response lock."""
+        requester_id = request.user_id or execution_identity.requester_id
+        if requester_id is None:
+            msg = "Approval continuation requires the original requester identity"
+            raise RuntimeError(msg)
+        approver_id = resolve_tool_approval_approver(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            requester_id,
+        )
         owners = {
             requirement.tool_execution.tool_call_id: requirement.member_agent_name
             for requirement in paused.requirements
@@ -709,7 +723,13 @@ class ResponseRunner:
                 owners.get(tool_call_id, self.deps.agent_name),
             )
             decisions[tool_call_id] = (
-                None if requires_approval else ContinuationDecision.APPROVED,
+                (
+                    None
+                    if requires_approval and approver_id is not None
+                    else ContinuationDecision.DENIED
+                    if requires_approval
+                    else ContinuationDecision.APPROVED
+                ),
                 timeout_seconds,
             )
 
@@ -772,7 +792,7 @@ class ResponseRunner:
             entity_name=self.deps.agent_name,
             room_id=target.room_id,
             thread_id=target.resolved_thread_id,
-            requester_id=request.user_id or execution_identity.requester_id or "",
+            requester_id=requester_id,
             response_event_id=response_event_id,
             calls=tuple(
                 ApprovalCall(
@@ -795,12 +815,19 @@ class ResponseRunner:
         if continuation.state == "ready":
             claimant_id = f"inline:{uuid4().hex}"
             claimed = self._approval_continuations.claim(approval_id, claimant_id)
-            assert claimed is not None
-            response_text, terminal = await self._run_approval_chain(
-                claimed,
-                target=target,
-                claimant_id=claimant_id,
-            )
+            if claimed is None:
+                msg = "Approval continuation lost its inline claim"
+                self._approval_continuations.fail(approval_id, msg)
+                raise RuntimeError(msg)
+            try:
+                response_text, terminal = await self._run_approval_chain(
+                    claimed,
+                    target=target,
+                    claimant_id=claimant_id,
+                )
+            except Exception as error:
+                self._approval_continuations.fail(approval_id, f"Tool approval continuation failed safely: {error}")
+                raise
             return FinalDeliveryOutcome(
                 terminal_status="completed",
                 event_id=response_event_id,
@@ -823,7 +850,7 @@ class ResponseRunner:
                     agent_name=owners.get(tool_call_id, self.deps.agent_name),
                     room_id=target.room_id,
                     thread_id=target.resolved_thread_id,
-                    requester_id=request.user_id or execution_identity.requester_id,
+                    requester_id=requester_id,
                 ),
                 approval_id=f"{approval_id}-0-{index}",
                 continuation_id=approval_id,
@@ -856,8 +883,13 @@ class ResponseRunner:
         while True:
             result = await self._continue_entity_call(current, target=target)
             if isinstance(result, str):
-                await self._edit_continuation_response(current, target=target, text=result)
-                self._approval_continuations.complete(current.approval_id, claimant_id)
+                if not await self._edit_continuation_response(current, target=target, text=result):
+                    msg = "Could not publish the final approval response"
+                    raise RuntimeError(msg)
+                completed = self._approval_continuations.complete(current.approval_id, claimant_id)
+                if completed is None:
+                    msg = "Approval continuation lost its completion claim"
+                    raise RuntimeError(msg)
                 return result, True
             advanced, waiting_text = await self._advance_approval_pause(
                 current,
@@ -889,6 +921,11 @@ class ResponseRunner:
         }
         identified: list[tuple[ToolExecution, str, str]] = []
         decisions: dict[str, tuple[ContinuationDecision | None, float]] = {}
+        approver_id = resolve_tool_approval_approver(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            current.requester_id,
+        )
         for tool in paused.tools:
             if not tool.tool_call_id or not tool.tool_name:
                 msg = "Chained approval tool is missing its exact identity"
@@ -902,7 +939,13 @@ class ResponseRunner:
                 owners.get(tool.tool_call_id, current.entity_name),
             )
             decisions[tool.tool_call_id] = (
-                None if requires_approval else ContinuationDecision.APPROVED,
+                (
+                    None
+                    if requires_approval and approver_id is not None
+                    else ContinuationDecision.DENIED
+                    if requires_approval
+                    else ContinuationDecision.APPROVED
+                ),
                 timeout_seconds,
             )
         waiting_text = "Waiting for approval: " + ", ".join(f"`{name}`" for _tool, _id, name in identified)
@@ -972,14 +1015,22 @@ class ResponseRunner:
         continuation = self._approval_continuations.get(approval_id)
         if continuation is None:
             return
-        for call in continuation.calls:
-            if (
-                call.card_event_id is not None
-                and not call.decision_recorded
-                and not await expire_suspended_tool_approval(room_id, call.card_event_id)
-            ):
-                return
-        self._approval_continuations.fail(approval_id, reason)
+        terminalized = await asyncio.gather(
+            *(
+                expire_suspended_tool_approval(room_id, call.card_event_id)
+                for call in continuation.calls
+                if call.card_event_id is not None and not call.decision_recorded
+            ),
+            return_exceptions=True,
+        )
+        first_error = next(
+            (result for result in terminalized if isinstance(result, BaseException)),
+            None,
+        )
+        if first_error is not None:
+            raise first_error
+        if all(result is True for result in terminalized):
+            self._approval_continuations.fail(approval_id, reason)
 
     async def resume_approval_continuation(self, continuation: ApprovalContinuation) -> None:
         """Claim one ready continuation and run it through the conversation serializer."""
@@ -1008,8 +1059,8 @@ class ResponseRunner:
                     "approval_continuation_failed",
                     approval_id=continuation.approval_id,
                 )
-                await self._edit_continuation_response(claimed, target=target, text=reason)
                 self._approval_continuations.fail(claimed.approval_id, reason)
+                await self._edit_continuation_response(claimed, target=target, text=reason)
 
         try:
             await self._lifecycle_coordinator.run_locked_target_operation(
@@ -1023,6 +1074,7 @@ class ResponseRunner:
 
     async def fail_approval_continuation(self, continuation: ApprovalContinuation, reason: str) -> None:
         """Make an unrecoverable continuation visibly terminal."""
+        self._approval_continuations.fail(continuation.approval_id, reason)
         target = MessageTarget(
             room_id=continuation.room_id,
             source_thread_id=continuation.thread_id,
@@ -1041,7 +1093,6 @@ class ResponseRunner:
                     delivery_stage=DeliveryStage.FINAL,
                 ),
             )
-        self._approval_continuations.fail(continuation.approval_id, reason)
 
     async def _continue_entity_call(
         self,
@@ -1064,11 +1115,12 @@ class ResponseRunner:
             msg = "Approval continuation execution identity no longer matches its target"
             raise RuntimeError(msg)
         decisions = {call.tool_call_id: call.decision is ContinuationDecision.APPROVED for call in continuation.calls}
+        approved_call_ids = frozenset(tool_call_id for tool_call_id, approved in decisions.items() if approved)
         if continuation.entity_kind == "team":
             orchestrator = self.deps.runtime.orchestrator
 
             async def continue_team() -> str | PausedAttempt:
-                with native_approval_continuation():
+                with native_approval_continuation(approved_call_ids):
                     return await continue_paused_team_run(
                         member_names=continuation.team_member_names,
                         mode=TeamMode(continuation.team_mode or "coordinate"),
@@ -1144,7 +1196,8 @@ class ResponseRunner:
                 tool.confirmation_note = "Approved by requester" if tool.confirmed else "Not approved by requester"
 
             async def continue_run() -> RunOutput:
-                with native_approval_continuation():
+                approved_call_ids = frozenset(tool_call_id for tool_call_id, approved in decisions.items() if approved)
+                with native_approval_continuation(approved_call_ids):
                     result = agent.acontinue_run(
                         run_id=continuation.run_id,
                         updated_tools=updated_tools,

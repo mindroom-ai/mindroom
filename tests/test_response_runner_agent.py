@@ -2691,6 +2691,5 @@ class TestAgentBot(AgentBotTestBase):
         ):
             assert await bot._response_runner.generate_response(request) == "$waiting"
             assert not bot._response_runner.has_active_response_for_target(target.target)
-            assert await bot._response_runner.generate_response(request) == "$waiting"
 
-        assert suspend.await_count == 2
+        suspend.assert_awaited_once()

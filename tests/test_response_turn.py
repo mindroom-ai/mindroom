@@ -268,6 +268,28 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
     assert paused.requirements[0].member_agent_name == "researcher"
 
 
+def test_paused_attempt_ignores_confirmation_entries_without_call_ids() -> None:
+    """A pause is restartable only when every retained tool has durable call identity."""
+    invalid_tool = ToolExecution(tool_name="missing-id", requires_confirmation=True)
+    invalid_requirement = RunRequirement(invalid_tool)
+    valid_tool = ToolExecution(
+        tool_call_id="call-valid",
+        tool_name="dangerous",
+        requires_confirmation=True,
+    )
+
+    paused = response_turn_module._paused_attempt(
+        tools=(invalid_tool, valid_tool),
+        requirements=(invalid_requirement,),
+        session_id="session-1",
+        run_id="run-1",
+    )
+
+    assert paused is not None
+    assert paused.tools == (valid_tool,)
+    assert paused.requirements == ()
+
+
 @pytest.mark.asyncio
 async def test_streaming_paused_attempt_escapes_without_recording_terminal_interruption() -> None:
     """Streaming must release the response lifecycle at the same persisted pause boundary."""

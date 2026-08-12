@@ -439,6 +439,73 @@ async def test_detached_approval_expiry_resolves_continuation_without_waiter(tmp
     assert editor.await_args.args[2]["status"] == "expired"
 
 
+def test_resolution_after_deadline_is_forced_to_expired() -> None:
+    """A click queued before the expiry task runs must not authorize an already-expired request."""
+    event = _approval_card()
+    content = event["content"]
+    assert isinstance(content, dict)
+    content["expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    pending = PendingApproval.from_card_event(event, room_id="!room:localhost")
+
+    status, reason, truncated = _ApprovalManager._normalized_resolution_request(
+        pending,
+        status="approved",
+        reason=None,
+    )
+
+    assert status == "expired"
+    assert reason == "Tool approval request timed out."
+    assert truncated is False
+
+
+@pytest.mark.asyncio
+async def test_detached_expiry_registration_cannot_escape_shutdown(tmp_path: Path) -> None:
+    """Shutdown racing a successful send must still leave no detached expiry task behind."""
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+
+    async def sender(*_args: object) -> SentApprovalEvent:
+        send_started.set()
+        await release_send.wait()
+        return SentApprovalEvent("$approval")
+
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=AsyncMock(return_value=True),
+        cards=FakeApprovalCards(),
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        detached_decision_handler=AsyncMock(return_value=("expired", "shutdown")),
+    )
+    create = asyncio.create_task(
+        store.create_detached_approval(
+            approval_id="approval-1",
+            continuation_id="continuation-1",
+            tool_call_id="call-1",
+            tool_name="dangerous",
+            arguments={},
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    await send_started.wait()
+    shutdown = asyncio.create_task(store.shutdown(reason="shutdown"))
+    await asyncio.sleep(0)
+    release_send.set()
+
+    await create
+    await shutdown
+    try:
+        assert store._detached_expiry_tasks == {}
+    finally:
+        await store.shutdown(reason="test cleanup")
+
+
 @pytest.mark.asyncio
 async def test_request_approval_carries_workflow_provenance_through_resolution(tmp_path: Path) -> None:
     """Dynamic Workflow participant cards must name the workflow and participant, pending and resolved."""

@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import threading
 import time
-from contextvars import copy_context
+from contextvars import ContextVar, copy_context
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import wraps
@@ -78,6 +78,7 @@ _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC = FunctionCall._build_nested_execut
 _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN = FunctionCall._build_nested_execution_chain
 _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = False
 _AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED = False
+_CURRENT_TOOL_CALL_ID: ContextVar[str | None] = ContextVar("current_tool_call_id", default=None)
 logger = get_logger(__name__)
 
 
@@ -368,7 +369,11 @@ def _patch_agno_sync_tool_hook_chain() -> None:
         execution_chain = _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN(self, entrypoint_args)
 
         def _wrapped_execution_chain(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
-            return _resolve_deferred_sync_result(execution_chain(name, func, args))
+            token = _CURRENT_TOOL_CALL_ID.set(self.call_id)
+            try:
+                return _resolve_deferred_sync_result(execution_chain(name, func, args))
+            finally:
+                _CURRENT_TOOL_CALL_ID.reset(token)
 
         return _wrapped_execution_chain
 
@@ -395,8 +400,12 @@ def _patch_agno_async_tool_hook_chain() -> None:
             func: Callable[..., Any],
             args: dict[str, Any],
         ) -> _ToolHookResult:
-            result = await execution_chain(name, func, args)
-            return await _resolve_async_tool_hook_result(result)
+            token = _CURRENT_TOOL_CALL_ID.set(self.call_id)
+            try:
+                result = await execution_chain(name, func, args)
+                return await _resolve_async_tool_hook_result(result)
+            finally:
+                _CURRENT_TOOL_CALL_ID.reset(token)
 
         return _wrapped_execution_chain
 
@@ -462,7 +471,7 @@ async def _maybe_block_for_tool_approval(
     tool_name: str,
     workflow_origin: ToolCallWorkflowOrigin | None,
 ) -> str | None:
-    if native_approval_continuation_active():
+    if native_approval_continuation_active(_CURRENT_TOOL_CALL_ID.get()):
         return None
     if resolved_context.config is None or resolved_context.runtime_paths is None:
         return None

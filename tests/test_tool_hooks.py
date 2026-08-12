@@ -51,7 +51,7 @@ from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.session_ids import create_session_id
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
-from mindroom.tool_approval import ToolCallWorkflowOrigin, _shutdown_approval_store
+from mindroom.tool_approval import ToolCallWorkflowOrigin, _shutdown_approval_store, native_approval_continuation
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -2649,6 +2649,59 @@ async def test_tool_approval_deny_emits_after_call_as_blocked(tmp_path: Path) ->
         "Adjust your approach — try a different tool or different arguments."
     )
     assert after_seen == [(True, result, None)]
+
+
+@pytest.mark.asyncio
+async def test_native_continuation_bypasses_only_preapproved_tool_call(tmp_path: Path) -> None:
+    """A resumed model may create a new gated call, which must still ask for approval."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Help with coding.", rooms=[])},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={"rules": [{"match": "echo", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+    bridge = build_tool_hook_bridge(
+        HookRegistry.from_plugins([]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    class DemoToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo", tools=[self.echo])
+
+        async def echo(self, text: str) -> str:
+            return text
+
+    toolkit = DemoToolkit()
+    function = _first_function(toolkit)
+    prepend_tool_hook_bridge(toolkit, bridge)
+    approval = AsyncMock(return_value=None)
+
+    with (
+        patch("mindroom.tool_system.tool_hooks.request_tool_approval_for_call", new=approval),
+        native_approval_continuation(frozenset({"call-approved"})),
+    ):
+        approved = await FunctionCall(
+            function=function,
+            arguments={"text": "approved"},
+            call_id="call-approved",
+        ).aexecute()
+        new = await FunctionCall(
+            function=function,
+            arguments={"text": "new"},
+            call_id="call-new",
+        ).aexecute()
+
+    assert approved.result == "approved"
+    assert new.result == "new"
+    approval.assert_awaited_once()
 
 
 @pytest.mark.asyncio

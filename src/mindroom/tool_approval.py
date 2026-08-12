@@ -75,22 +75,25 @@ __all__ = [
 _SCRIPT_CACHE: dict[tuple[str, int], ModuleType] = {}
 _SCRIPT_CACHE_LOCK = threading.Lock()
 logger = get_logger(__name__)
-_NATIVE_APPROVAL_CONTINUATION: ContextVar[bool] = ContextVar("native_approval_continuation", default=False)
+_NATIVE_APPROVAL_CONTINUATION: ContextVar[frozenset[str]] = ContextVar(
+    "native_approval_continuation",
+    default=frozenset(),
+)
 
 
 @contextmanager
-def native_approval_continuation() -> Iterator[None]:
-    """Prevent the legacy hook from re-asking for a natively confirmed call."""
-    token = _NATIVE_APPROVAL_CONTINUATION.set(True)
+def native_approval_continuation(approved_call_ids: frozenset[str]) -> Iterator[None]:
+    """Prevent the legacy hook from re-asking for exact natively confirmed calls."""
+    token = _NATIVE_APPROVAL_CONTINUATION.set(approved_call_ids)
     try:
         yield
     finally:
         _NATIVE_APPROVAL_CONTINUATION.reset(token)
 
 
-def native_approval_continuation_active() -> bool:
-    """Return whether Agno already owns approval for the current call."""
-    return _NATIVE_APPROVAL_CONTINUATION.get()
+def native_approval_continuation_active(tool_call_id: str | None) -> bool:
+    """Return whether Agno already owns approval for this exact call."""
+    return tool_call_id is not None and tool_call_id in _NATIVE_APPROVAL_CONTINUATION.get()
 
 
 class ToolApprovalScriptError(RuntimeError):

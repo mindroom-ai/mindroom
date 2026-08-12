@@ -60,6 +60,7 @@ from mindroom.streaming import (
 )
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
 from tests.conftest import (
     make_matrix_client_mock,
@@ -837,6 +838,179 @@ async def test_approval_chain_keeps_second_pause_in_same_guarded_continuation(tm
 
 
 @pytest.mark.asyncio
+async def test_approval_chain_does_not_complete_before_final_edit_is_accepted(tmp_path: Path) -> None:
+    """The continuation remains claimed while durable final delivery is still unacknowledged."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-delivery",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.APPROVED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    runner._approval_continuations.create(continuation)
+    claimed = runner._approval_continuations.claim(continuation.approval_id, "worker")
+    assert claimed is not None
+
+    with (
+        patch.object(runner, "_continue_entity_call", new=AsyncMock(return_value="done")),
+        patch.object(runner, "_edit_continuation_response", new=AsyncMock(return_value=False)),
+        pytest.raises(RuntimeError, match="final approval response"),
+    ):
+        await runner._run_approval_chain(claimed, target=_target(), claimant_id="worker")
+
+    unsettled = runner._approval_continuations.get(continuation.approval_id)
+    assert unsettled is not None
+    assert unsettled.state == "claimed"
+
+
+@pytest.mark.asyncio
+async def test_approval_chain_requires_durable_completion_transition(tmp_path: Path) -> None:
+    """A lost completion claim must not be reported as a successfully settled continuation."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-completion",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.APPROVED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    runner._approval_continuations.create(continuation)
+    claimed = runner._approval_continuations.claim(continuation.approval_id, "worker")
+    assert claimed is not None
+
+    with (
+        patch.object(runner, "_continue_entity_call", new=AsyncMock(return_value="done")),
+        patch.object(runner, "_edit_continuation_response", new=AsyncMock(return_value=True)),
+        patch.object(runner._approval_continuations, "complete", return_value=None),
+        pytest.raises(RuntimeError, match="completion claim"),
+    ):
+        await runner._run_approval_chain(claimed, target=_target(), claimant_id="worker")
+
+
+@pytest.mark.asyncio
+async def test_resume_failure_is_durable_before_visible_failure_edit(tmp_path: Path) -> None:
+    """A crash during the failure edit must not leave the already-claimed continuation replayable."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-resume-failure",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.APPROVED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    runner._approval_continuations.create(continuation)
+
+    async def assert_failed_before_edit(*_args: object, **_kwargs: object) -> bool:
+        persisted = runner._approval_continuations.get(continuation.approval_id)
+        assert persisted is not None
+        assert persisted.state == "failed"
+        msg = "edit failed"
+        raise RuntimeError(msg)
+
+    with (
+        patch.object(runner, "_continue_entity_call", new=AsyncMock(side_effect=RuntimeError("resume failed"))),
+        patch.object(runner, "_edit_continuation_response", side_effect=assert_failed_before_edit),
+        pytest.raises(RuntimeError, match="edit failed"),
+    ):
+        await runner.resume_approval_continuation(continuation)
+
+
+@pytest.mark.asyncio
+async def test_suspension_rejects_missing_requester_before_persistence(tmp_path: Path) -> None:
+    """A continuation without the original session user cannot be resumed against the same Agno run."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = replace(_plain_request(_target()), user_id=None)
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=None,
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+    )
+
+    with pytest.raises(RuntimeError, match="requester identity"):
+        await runner._suspend_for_approval(
+            paused,
+            request=request,
+            target=_target(),
+            progress=response_runner._DeliveryProgress(),
+            execution_identity=identity,
+            entity_kind="agent",
+        )
+
+
+@pytest.mark.asyncio
+async def test_response_runner_closes_approval_store_handle(tmp_path: Path) -> None:
+    """Config replacement must release every runner-owned SQLite handle."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    close = MagicMock()
+    runner._approval_continuations.close = close
+
+    await runner.close()
+
+    close.assert_called_once_with()
+
+
+@pytest.mark.asyncio
 async def test_partial_approval_card_failure_terminalizes_delivered_cards(tmp_path: Path) -> None:
     """If a later card cannot be sent, an earlier card must not survive clickable after failure."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -870,7 +1044,7 @@ async def test_partial_approval_card_failure_terminalizes_delivered_cards(tmp_pa
     )
     runner._approval_continuations.create(continuation)
 
-    with patch("mindroom.response_runner.expire_suspended_tool_approval", new=AsyncMock()) as expire:
+    with patch("mindroom.response_runner.expire_suspended_tool_approval", new=AsyncMock(return_value=True)) as expire:
         await runner._fail_approval_card_creation(
             continuation.approval_id,
             room_id=continuation.room_id,
@@ -933,6 +1107,49 @@ async def test_partial_approval_card_failure_remains_recoverable_until_cards_are
     recoverable = runner._approval_continuations.get(continuation.approval_id)
     assert recoverable is not None
     assert recoverable.state == "pending"
+
+
+@pytest.mark.asyncio
+async def test_partial_card_failure_still_terminalizes_later_delivered_cards(tmp_path: Path) -> None:
+    """One failed expiry must not leave the rest of a partially published card set clickable."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-partial-multiple",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=tuple(
+            ApprovalCall(
+                tool_call_id=f"call-{index}",
+                tool_name=f"tool-{index}",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+                card_event_id=f"$card-{index}",
+            )
+            for index in (1, 2)
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+    )
+    runner._approval_continuations.create(continuation)
+    expire = AsyncMock(side_effect=[False, True])
+
+    with patch("mindroom.response_runner.expire_suspended_tool_approval", new=expire):
+        await runner._fail_approval_card_creation(
+            continuation.approval_id,
+            room_id=continuation.room_id,
+            reason="send failed",
+        )
+
+    assert expire.await_count == 2
+    persisted = runner._approval_continuations.get(continuation.approval_id)
+    assert persisted is not None
+    assert persisted.state == "pending"
 
 
 @pytest.mark.asyncio

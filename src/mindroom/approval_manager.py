@@ -591,17 +591,40 @@ class _ApprovalManager:
                 card_event_id=sent_event.event_id,
                 card=_sent_card_body(claimed_card, sent_event),
             )
-        expiry_task = asyncio.create_task(
-            self._expire_detached_after(
-                room_id=room_id,
-                card_event_id=sent_event.event_id,
-                expires_at=expires_at,
-            ),
-            name=f"approval-expiry-{approval_id}",
-        )
-        self._detached_expiry_tasks[sent_event.event_id] = expiry_task
-        expiry_task.add_done_callback(lambda _task: self._detached_expiry_tasks.pop(sent_event.event_id, None))
+        with self._live_lock:
+            shutting_down = self._shutdown_reason is not None
+            if not shutting_down:
+                expiry_task = asyncio.create_task(
+                    self._expire_detached_after(
+                        room_id=room_id,
+                        card_event_id=sent_event.event_id,
+                        expires_at=expires_at,
+                    ),
+                    name=f"approval-expiry-{approval_id}",
+                )
+                self._detached_expiry_tasks[sent_event.event_id] = expiry_task
+                expiry_task.add_done_callback(
+                    lambda task: self._finish_detached_expiry_task(sent_event.event_id, task),
+                )
+        if shutting_down:
+            await self.expire_detached_card(room_id=room_id, card_event_id=sent_event.event_id)
         return sent_event
+
+    def _finish_detached_expiry_task(self, card_event_id: str, task: asyncio.Task[None]) -> None:
+        """Retire one expiry task and consume any failure it surfaced."""
+        with self._live_lock:
+            if self._detached_expiry_tasks.get(card_event_id) is task:
+                self._detached_expiry_tasks.pop(card_event_id)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "detached_approval_expiry_failed",
+                card_event_id=card_event_id,
+                error=str(error),
+                exception_type=type(error).__name__,
+            )
 
     async def _expire_detached_after(self, *, room_id: str, card_event_id: str, expires_at: datetime) -> None:
         await asyncio.sleep(max(0.0, (expires_at - _utcnow()).total_seconds()))
@@ -865,7 +888,7 @@ class _ApprovalManager:
                 transaction_id=transaction_id,
                 status=committed_status,
                 reason=committed_reason,
-                resolved_by=sender_id if committed_status == resolved_status else None,
+                resolved_by=sender_id if committed_status == resolved_status == status else None,
                 after_recorded=(
                     lambda: (
                         self._detached_decision_ready(continuation_id, tool_call_id)
@@ -875,7 +898,8 @@ class _ApprovalManager:
                 ),
             )
             if outcome is not _ResolutionOutcome.UNRECORDED:
-                expiry_task = self._detached_expiry_tasks.pop(card_event_id, None)
+                with self._live_lock:
+                    expiry_task = self._detached_expiry_tasks.pop(card_event_id, None)
                 if expiry_task is not None:
                     expiry_task.cancel()
             return ApprovalActionResult(
@@ -1325,7 +1349,11 @@ class _ApprovalManager:
                     status=status,
                     reason=reason,
                 )
-            decision = self._new_decision(status=resolved_status, reason=resolved_reason, resolved_by=resolved_by)
+            decision = self._new_decision(
+                status=resolved_status,
+                reason=resolved_reason,
+                resolved_by=resolved_by if resolved_status == status else None,
+            )
             delivered = await self._settle_waiter_with_terminal_edit(waiter, decision)
             with self._live_lock:
                 # Only a card the room has actually been told about is finished
@@ -2523,6 +2551,9 @@ class _ApprovalManager:
         status: _ResolutionStatus,
         reason: str | None,
     ) -> tuple[_ApprovalStatus, str | None, bool]:
+        expires_at = parse_approval_datetime(pending.expires_at)
+        if expires_at is not None and expires_at <= _utcnow():
+            return "expired", _DEFAULT_TIMEOUT_REASON, False
         arguments_unreviewable = pending.arguments_preview_truncated and not pending.full_arguments_available
         if status == "approved" and (not pending.approvable or arguments_unreviewable):
             return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON, True

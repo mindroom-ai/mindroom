@@ -360,8 +360,14 @@ def _paused_attempt(
     run_id: str | None,
 ) -> PausedAttempt | None:
     """Build one restartable pause from Agno's common pause fields."""
-    pending_requirements = tuple(requirement for requirement in requirements if requirement.needs_confirmation)
-    pending_tools = [tool for tool in tools if tool.requires_confirmation]
+    pending_requirements = tuple(
+        requirement
+        for requirement in requirements
+        if requirement.needs_confirmation
+        and requirement.tool_execution is not None
+        and requirement.tool_execution.tool_call_id
+    )
+    pending_tools = [tool for tool in tools if tool.requires_confirmation and tool.tool_call_id]
     known_call_ids = {tool.tool_call_id for tool in pending_tools}
     for requirement in pending_requirements:
         tool = requirement.tool_execution

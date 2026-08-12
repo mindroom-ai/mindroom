@@ -54,6 +54,9 @@ _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
 # What changes is the volume, because a sweep still owed something this long
 # after start is not waiting on anything transient.
 _STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION = 10
+_CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS = 0.25
+_CONTINUATION_DISPATCH_MAX_RETRY_SECONDS = 30.0
+_CONTINUATION_DISPATCH_LOG_AFTER_ATTEMPTS = 5
 
 
 class _ApprovalTransportBot(Protocol):
@@ -225,9 +228,24 @@ class ApprovalMatrixTransport:
             name=f"approval-continuation-{continuation.approval_id}",
         )
         self._continuation_tasks.add(task)
-        task.add_done_callback(self._continuation_tasks.discard)
+        task.add_done_callback(self._finish_continuation_task)
+
+    def _finish_continuation_task(self, task: asyncio.Task[None]) -> None:
+        """Retire one dispatcher and observe failures from its detached task."""
+        self._continuation_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "approval_continuation_dispatch_failed",
+                error=str(error),
+                exception_type=type(error).__name__,
+            )
 
     async def _dispatch_continuation(self, approval_id: str) -> None:
+        retry_seconds = _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS
+        attempts = 0
         while True:
             continuation = await asyncio.to_thread(self._continuations.get, approval_id)
             if continuation is None or continuation.state != "ready":
@@ -238,14 +256,32 @@ class ApprovalMatrixTransport:
                 await asyncio.sleep(0)
                 continue
             if self.entity_configured is None or self.entity_configured(continuation.entity_name):
-                await asyncio.sleep(0.25)
+                attempts += 1
+                if attempts >= _CONTINUATION_DISPATCH_LOG_AFTER_ATTEMPTS:
+                    logger.warning(
+                        "approval_continuation_waiting_for_owner",
+                        approval_id=approval_id,
+                        entity_name=continuation.entity_name,
+                        retry_seconds=retry_seconds,
+                    )
+                await asyncio.sleep(retry_seconds)
+                retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
                 continue
             reason = f"Requesting agent '{continuation.entity_name}' is no longer available."
             fallback = self.bot_provider(ROUTER_AGENT_NAME)
             if fallback is not None and fallback.running:
                 await fallback.fail_approval_continuation(continuation, reason)
                 return
-            await asyncio.sleep(0.25)
+            attempts += 1
+            if attempts >= _CONTINUATION_DISPATCH_LOG_AFTER_ATTEMPTS:
+                logger.warning(
+                    "approval_continuation_waiting_for_router",
+                    approval_id=approval_id,
+                    entity_name=continuation.entity_name,
+                    retry_seconds=retry_seconds,
+                )
+            await asyncio.sleep(retry_seconds)
+            retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
 
     def _schedule_expiry(self, continuation: ApprovalContinuation) -> None:
         for call in continuation.calls:
@@ -258,8 +294,6 @@ class ApprovalMatrixTransport:
                 continue
 
             async def expire(
-                approval_id: str = continuation.approval_id,
-                tool_call_id: str = call.tool_call_id,
                 room_id: str = continuation.room_id,
                 card_event_id: str = call.card_event_id,
                 expires_at: str = call.expires_at,
@@ -270,11 +304,28 @@ class ApprovalMatrixTransport:
                 )
                 await asyncio.sleep(delay)
                 await expire_suspended_tool_approval(room_id, card_event_id)
-                self._expiry_tasks.pop((approval_id, tool_call_id), None)
 
-            self._expiry_tasks[key] = asyncio.create_task(
+            task = asyncio.create_task(
                 expire(),
                 name=f"approval-expiry-{continuation.approval_id}-{call.tool_call_id}",
+            )
+            self._expiry_tasks[key] = task
+            task.add_done_callback(lambda completed, task_key=key: self._finish_expiry_task(task_key, completed))
+
+    def _finish_expiry_task(self, key: tuple[str, str], task: asyncio.Task[None]) -> None:
+        """Retire one expiry task and observe any Matrix settlement failure."""
+        if self._expiry_tasks.get(key) is task:
+            self._expiry_tasks.pop(key)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "approval_continuation_expiry_failed",
+                approval_id=key[0],
+                tool_call_id=key[1],
+                error=str(error),
+                exception_type=type(error).__name__,
             )
 
     async def _recover_continuations(self) -> bool:
@@ -347,13 +398,20 @@ class ApprovalMatrixTransport:
         bot = entity_bot if entity_bot is not None and entity_bot.running else router_bot
         if bot is None or not bot.running:
             return False
-        for call in continuation.calls:
-            if (
-                not call.decision_recorded
-                and call.card_event_id is not None
-                and not await expire_suspended_tool_approval(continuation.room_id, call.card_event_id)
-            ):
-                return False
+        terminalized = await asyncio.gather(
+            *(
+                expire_suspended_tool_approval(continuation.room_id, call.card_event_id)
+                for call in continuation.calls
+                if not call.decision_recorded and call.card_event_id is not None
+            ),
+            return_exceptions=True,
+        )
+        if any(result is not True for result in terminalized):
+            logger.warning(
+                "approval_continuation_card_settlement_incomplete",
+                approval_id=continuation.approval_id,
+            )
+            return False
         await bot.fail_approval_continuation(continuation, reason)
         return True
 

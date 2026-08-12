@@ -177,6 +177,16 @@ def test_continuation_store_owns_source_before_outer_turn_settlement(tmp_path: P
     assert store.for_source_event("$unrelated") is None
 
 
+def test_terminal_continuation_releases_source_replay_ownership(tmp_path: Path) -> None:
+    """Settled rows must not suppress a later legitimate delivery that reuses the source lookup."""
+    store = ApprovalContinuationStore(tmp_path)
+    continuation = _continuation()
+    store.create(continuation)
+    store.fail(continuation.approval_id, "settled")
+
+    assert store.for_source_event("$source") is None
+
+
 def test_recovery_pages_through_every_continuation(tmp_path: Path) -> None:
     """Startup recovery must not silently strand rows beyond Agno's first result page."""
     store = ApprovalContinuationStore(tmp_path)
@@ -329,10 +339,10 @@ async def test_recovered_partial_card_set_remains_recoverable_until_card_is_term
         "mindroom.approval_transport.expire_suspended_tool_approval",
         AsyncMock(side_effect=RuntimeError("crash before terminal edit")),
     )
-    with pytest.raises(RuntimeError, match="crash before terminal edit"):
-        await transport._fail_recovered_continuation(continuation, "card set incomplete")
+    settled = await transport._fail_recovered_continuation(continuation, "card set incomplete")
 
     recoverable = transport._continuations.get(continuation.approval_id)
+    assert settled is False
     assert recoverable is not None
     assert recoverable.state == "pending"
     bot.fail_approval_continuation.assert_not_awaited()
@@ -377,3 +387,42 @@ async def test_removed_owner_waits_for_router_before_retiring_ready_continuation
     assert failed is not None
     assert failed.state == "failed"
     fail_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_expiry_task_failure_is_retired_and_observed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed Matrix expiry must not leave a stale key or an unobserved task exception."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: None,
+    )
+    continuation = replace(
+        _continuation(),
+        calls=(
+            replace(
+                _continuation().calls[0],
+                card_event_id="$approval",
+                expires_at="2020-01-01T00:00:00+00:00",
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "mindroom.approval_transport.expire_suspended_tool_approval",
+        AsyncMock(side_effect=RuntimeError("Matrix unavailable")),
+    )
+
+    transport._schedule_expiry(continuation)
+    tasks = tuple(transport._expiry_tasks.values())
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert transport._expiry_tasks == {}

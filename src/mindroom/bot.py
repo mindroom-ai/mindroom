@@ -2055,6 +2055,7 @@ class AgentBot:
         # generation -- leaving it registered, half-stopped, while its
         # replacement opened the same database under the same principal.
         failures: list[Exception] = []
+        await self._release("approval continuation store", self._response_runner.close(), failures)
         await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
         if self._own_journal is not None:
             await self._release("journal store", self._own_journal.close(), failures)
