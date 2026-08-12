@@ -137,6 +137,10 @@ class SqliteBackend:
     # the type checker on the wrong side of it.
     _queue: asyncio.Queue[_QueuedWrite] | None = field(default=None, init=False, repr=False)
     _writer_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    # The loop the writer task drains on, remembered because a caller on any
+    # other loop can neither enqueue onto that queue nor be woken by it
+    # without being handed across deliberately.
+    _writer_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _open_readers: list[sqlite3.Connection] = field(default_factory=list, init=False, repr=False)
     _reader_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -162,6 +166,7 @@ class SqliteBackend:
         if queue is None or self._writer_task is None or self._writer_task.done():
             queue = asyncio.Queue()
             self._queue = queue
+            self._writer_loop = asyncio.get_running_loop()
             self._writer_task = asyncio.create_task(
                 # Handed the queue it drains rather than reading the field,
                 # so a task can only ever settle writes that were admitted to
@@ -250,10 +255,10 @@ class SqliteBackend:
     async def write[T](self, operation: Operation[T]) -> T:
         """Queue one operation for the writer task and await its commit.
 
-        Admission is decided once, here, and the decision cannot go stale:
-        nothing suspends between reading ``_closed`` and enqueuing, so a write
-        this accepted is in the queue before any ``close()`` can begin, and
-        ``close()`` therefore sees every write it will ever have to refuse.
+        Admission is decided on the writer's loop, where it cannot race
+        ``close()``. A caller already on that loop enqueues synchronously; one
+        on another loop hands the decision across, where ``_closed`` is checked
+        again before the write enters the queue.
 
         That is what the queue being unbounded buys. A bounded one parked the
         producer in ``put`` instead, and ``close()`` frees a slot per entry it
@@ -270,13 +275,44 @@ class SqliteBackend:
         """
         if self._closed:
             raise RuntimeError(_CLOSED_MESSAGE)
-        queue = self._ensure_writer_task()
-        future: asyncio.Future[T] = asyncio.get_running_loop().create_future()
-        queue.put_nowait(_QueuedWrite(operation=operation, future=future))
+        caller_loop = asyncio.get_running_loop()
+        writer_loop = self._writer_loop
+        future: asyncio.Future[T] = caller_loop.create_future()
+        queued = _QueuedWrite(operation=operation, future=future)
+        # A queue belongs to the loop that drains it. Putting to one from
+        # another loop wakes its consumer through a callback scheduled on the
+        # wrong loop, which arrives whenever that loop happens to run next and
+        # not because anything told it to.
+        if writer_loop is None or writer_loop is caller_loop:
+            queue = self._ensure_writer_task()
+            queue.put_nowait(queued)
+        else:
+            try:
+                writer_loop.call_soon_threadsafe(self._admit, queued)
+            except RuntimeError:
+                if not writer_loop.is_closed():
+                    raise
+                _deliver(future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
         # Cancelling this await must not report an outcome the writer has not
         # reached yet: the statement runs on a thread regardless, so the caller
         # learns how it ended before its cancellation propagates.
         return await settled(future)
+
+    def _admit(self, queued: _QueuedWrite) -> None:
+        """Put one handed-across write in the queue, or refuse it if ``close()`` got there first.
+
+        A write from another loop cannot be admitted or inspect the writer task
+        where it is decided, so both happen here, on the writer's own loop,
+        where ``close()`` also runs. Without this the two can interleave the one
+        way that strands a caller: ``close()`` drains the queue, and the
+        admission it never saw arrives afterwards, into a queue nothing will
+        read again.
+        """
+        if self._closed:
+            _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
+            return
+        queue = self._ensure_writer_task()
+        queue.put_nowait(queued)
 
     async def read[T](self, operation: Operation[T]) -> T:
         """Run one read on a WAL reader, concurrently with the writer."""
@@ -305,9 +341,9 @@ class SqliteBackend:
         separately before the connections they run on are closed.
 
         Draining the queue once is enough because ``_closed`` is raised before
-        it and ``write`` enqueues without suspending: every write that will
-        ever be admitted is already in the queue by the time this reaches it,
-        and every write after is refused where it starts.
+        it on the writer's loop. Every write already admitted is in the queue,
+        and every handed-across decision that runs afterwards refuses its
+        caller instead of enqueuing.
         """
         if self._closed:
             return
@@ -323,8 +359,7 @@ class SqliteBackend:
         queue = self._queue
         while queue is not None and not queue.empty():
             queued = queue.get_nowait()
-            if not queued.future.done():
-                queued.future.set_exception(RuntimeError(_CLOSED_MESSAGE))
+            _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
             queue.task_done()
         await self._offload.drain()
         await asyncio.to_thread(self._writer.close)
@@ -336,18 +371,58 @@ class SqliteBackend:
 
 
 def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:
-    """Give the waiting caller the worker's own outcome."""
+    """Snapshot the worker's outcome and give it to the waiting caller.
+
+    Completing a future belonging to another loop sets its result but schedules
+    its callbacks with a plain ``call_soon``, which does not wake that loop. A
+    loop with nothing else pending -- the synchronous tool bridge's own loop,
+    between the write it issued and the answer it is waiting for -- then sleeps
+    in its selector with the result already sitting there, and the caller never
+    resumes. Handing the completion across deliberately is what wakes it.
+    """
+    if work.cancelled():
+        outcome = _WriteOutcome(cancelled=True)
+    elif (error := work.exception()) is not None:
+        outcome = _WriteOutcome(error=error)
+    else:
+        outcome = _WriteOutcome(result=work.result())
+    _deliver(future, outcome)
+
+
+def _deliver(future: asyncio.Future[Any], outcome: _WriteOutcome) -> None:
+    """Apply a plain write outcome on the caller future's own loop."""
+    caller_loop = future.get_loop()
+    if caller_loop is not _running_loop():
+        if not caller_loop.is_closed():
+            with contextlib.suppress(RuntimeError):
+                caller_loop.call_soon_threadsafe(_deliver, future, outcome)
+        return
     if future.done():
         return
-    if work.cancelled():
+    if outcome.cancelled:
         future.cancel()
-    elif (error := work.exception()) is not None:
-        future.set_exception(error)
+    elif outcome.error is not None:
+        future.set_exception(outcome.error)
     else:
-        future.set_result(work.result())
+        future.set_result(outcome.result)
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    """Return the loop this call is running on, if it is running on one."""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
 
 
 @dataclass(slots=True)
 class _QueuedWrite:
     operation: Operation[Any]
     future: asyncio.Future[Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _WriteOutcome:
+    result: Any = None
+    error: BaseException | None = None
+    cancelled: bool = False
