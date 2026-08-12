@@ -90,38 +90,36 @@ def create_session_storage(
     execution_identity: ToolExecutionIdentity | None,
 ) -> BaseDb:
     """Create persistent session storage for an agent."""
-    return _create_agent_state_db(
+    return _create_agent_session_db(
         agent_name,
         config,
         runtime_paths,
-        subdir="sessions",
         session_table=f"{agent_name}_sessions",
         execution_identity=execution_identity,
         prompt_roles=prompt_roles_for_history_storage(),
     )
 
 
-def _create_agent_state_db(
+def _create_agent_session_db(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,
-    subdir: str,
     session_table: str,
     prompt_roles: frozenset[str] | None = None,
 ) -> BaseDb:
-    """Create persistent storage for one agent state category."""
-    state_storage_path = resolve_agent_runtime(
+    """Create persistent session storage for one agent."""
+    session_state_root = resolve_agent_runtime(
         agent_name,
         config,
         runtime_paths,
         execution_identity=execution_identity,
-    ).state_root
+    ).session_state_root
     return create_state_storage(
         storage_name=agent_name,
-        state_root=state_storage_path,
-        subdir=subdir,
+        state_root=session_state_root,
+        subdir="sessions",
         session_table=session_table,
         prompt_roles=prompt_roles,
     )
