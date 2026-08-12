@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -70,9 +71,21 @@ class FakeApprovalCards:
         self.claimed: list[str] = []
         self.attempted: list[tuple[str, str | None]] = []
         self.acknowledged: list[tuple[str, str]] = []
-        # Stands in for the claim timestamp the real table records, which is
-        # what orders the room scan and what a page cursor is built from.
-        self._claims = 0
+        # The claim timestamp the real table records, which is what orders the
+        # room scan, what a page cursor is built from, and what tells a sweep
+        # whether a row predates the process running it. A counter would order
+        # the scan just as well but would put every claim before any process
+        # start, so a double using one could not fail the way the real store
+        # can. Kept strictly increasing because two claims can land inside one
+        # clock tick and a cursor needs the pair to be unique.
+        self._last_claim_ns = 0
+        # Seeded rows are written through the same claim path but stand for
+        # work a previous process left behind, so they are stamped before any
+        # clock a live manager could have read at construction.
+        self._seeded_rows = 0
+        # Set by a test that needs the next claim written at a chosen time,
+        # which is how a backward clock step looks from inside the store.
+        self._next_claim_ns: int | None = None
 
     @property
     def resolutions(self) -> dict[str, dict[str, Any]]:
@@ -105,11 +118,12 @@ class FakeApprovalCards:
         if transaction_id in self.rows:
             return
         self.claimed.append(transaction_id)
-        self._claims += 1
+        forced, self._next_claim_ns = self._next_claim_ns, None
+        self._last_claim_ns = forced if forced is not None else max(self._last_claim_ns + 1, time.time_ns())
         self.rows[transaction_id] = _StoredRow(
             room_id=room_id,
             card=dict(card),
-            created_at_ns=self._claims,
+            created_at_ns=self._last_claim_ns,
         )
 
     async def mark_approval_card_attempted(
@@ -194,6 +208,7 @@ class FakeApprovalCards:
         """Seed one card as if a previous process had sent it and recorded the event."""
         transaction_id = transaction_id_for(card_event_id)
         await self.claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
+        self._backdate_to_previous_process(transaction_id)
         await self.mark_approval_card_attempted(
             transaction_id=transaction_id,
             sending_device_id=CLAIMING_DEVICE_ID,
@@ -226,11 +241,29 @@ class FakeApprovalCards:
             transaction_id=transaction_id,
             card=card,
         )
+        self._backdate_to_previous_process(transaction_id)
         if attempted:
             await self.mark_approval_card_attempted(
                 transaction_id=transaction_id,
                 sending_device_id=sending_device_id,
             )
+
+    def stamp_next_claim_ns(self, created_at_ns: int) -> None:
+        """Write the next claim at a chosen time rather than at now."""
+        self._next_claim_ns = created_at_ns
+
+    def _backdate_to_previous_process(self, transaction_id: str) -> None:
+        """Stamp one seeded row as older than any live manager's start.
+
+        Seeds go in through the claim path, which timestamps a row as written
+        now. A recovery test needs the opposite: a row a dead process left, so
+        that a sweep is entitled to settle it.
+        """
+        row = self.rows.get(transaction_id)
+        if row is None:
+            return
+        self._seeded_rows += 1
+        row.created_at_ns = self._seeded_rows
 
 
 def transaction_id_for(card_event_id: str) -> str:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -4181,6 +4182,226 @@ async def test_startup_discard_that_never_reached_matrix_stays_recoverable(
     editor.return_value = True
     assert (await store.discard_pending_on_startup()).discarded == 1
     assert cards.rows == {}
+
+
+@pytest.mark.asyncio
+async def test_startup_sweep_landing_inside_a_live_claim_leaves_it_alone(tmp_path: Path) -> None:
+    """A sweep that runs between a claim's commit and its return must not take the row.
+
+    The claim is committed before the send it belongs to exists, so for that
+    window there is nothing in memory saying the row is spoken for. A sweep
+    reading it then sees exactly what a dead process leaves -- claimed, never
+    attempted -- and used to delete it, stranding the caller on an approval
+    whose durable card no longer existed.
+    """
+    sweeps: list[ApprovalStartupSweep] = []
+
+    class SweepingDuringClaimCards(FakeApprovalCards):
+        """A card store that runs a startup sweep from inside the claim write."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.manager: _ApprovalManager | None = None
+
+        async def claim_approval_card(
+            self,
+            *,
+            room_id: str,
+            transaction_id: str,
+            card: Mapping[str, Any],
+        ) -> None:
+            await super().claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
+            assert self.manager is not None
+            sweeps.append(await self.manager.discard_pending_on_startup())
+
+    cards = SweepingDuringClaimCards()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    cards.manager = store
+
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="create_event",
+            arguments={"summary": "standup"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    assert sweeps, "the sweep never ran inside the claim, so this proves nothing"
+    assert all(sweep == ApprovalStartupSweep(discarded=0, failed=0) for sweep in sweeps)
+    assert cards.rows, "the sweep deleted the claim it landed inside"
+    assert sender.await_count == 1
+    # Skipped because this process owns the transaction while it publishes it.
+    assert [sweep.skipped_in_flight for sweep in sweeps] == [1] * len(sweeps)
+    assert all(sweep.scanned == 1 for sweep in sweeps)
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    decision = await task
+
+    assert result.resolved is True
+    assert decision.status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_a_request_publishing_a_claim_counts_as_live_work(tmp_path: Path) -> None:
+    """Runtime replacement must not step over a claim being published.
+
+    ``has_live_work`` is what a fresh runtime asks before it swaps the manager
+    out. A request between its claim write and its send holds a durable row
+    that only it can settle, so a swap there leaves the row owned by nobody --
+    exactly the state the startup sweep is entitled to act on.
+    """
+    live_work: list[bool] = []
+
+    class ObservingCards(FakeApprovalCards):
+        """A card store that asks the manager what it thinks during the claim."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.manager: _ApprovalManager | None = None
+
+        async def claim_approval_card(
+            self,
+            *,
+            room_id: str,
+            transaction_id: str,
+            card: Mapping[str, Any],
+        ) -> None:
+            await super().claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
+            assert self.manager is not None
+            live_work.append(self.manager.has_live_work())
+
+    cards = ObservingCards()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    cards.manager = store
+    assert store.has_live_work() is False
+
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="create_event",
+            arguments={"summary": "standup"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    assert live_work == [True]
+
+    await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    await task
+
+    assert store.has_live_work() is False
+
+
+@pytest.mark.asyncio
+async def test_a_live_claim_is_protected_by_ownership_not_by_its_timestamp(tmp_path: Path) -> None:
+    """What protects a claim being published is a hold, not when it was written.
+
+    Classifying by timestamp reads a wall clock, and a wall clock can step
+    backwards: after a correction every new claim dates before whatever the
+    process recorded at start and looks abandoned again. This row is dated
+    before every other row in the store and still survives, because the guard
+    that matters knows this process is publishing the transaction right now.
+    """
+    sweeps: list[ApprovalStartupSweep] = []
+
+    class SweepingDuringClaimCards(FakeApprovalCards):
+        """A card store that runs a startup sweep from inside the claim write."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.manager: _ApprovalManager | None = None
+
+        async def claim_approval_card(
+            self,
+            *,
+            room_id: str,
+            transaction_id: str,
+            card: Mapping[str, Any],
+        ) -> None:
+            await super().claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
+            assert self.manager is not None
+            sweeps.append(await self.manager.discard_pending_on_startup())
+
+    cards = SweepingDuringClaimCards()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    cards.manager = store
+    # Dated an hour before anything else in the store, which is what a
+    # backward clock step produces and what a timestamp guard would misread.
+    cards.stamp_next_claim_ns(time.time_ns() - 3_600_000_000_000)
+
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="create_event",
+            arguments={"summary": "standup"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    assert sweeps, "the sweep never ran inside the claim, so this proves nothing"
+    assert [sweep.skipped_in_flight for sweep in sweeps] == [1] * len(sweeps)
+    assert cards.rows, "the sweep deleted a claim this process was publishing"
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    decision = await task
+
+    assert result.resolved is True
+    assert decision.status == "approved"
 
 
 @pytest.mark.asyncio
