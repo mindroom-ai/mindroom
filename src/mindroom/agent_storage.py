@@ -12,6 +12,7 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
+from sqlalchemy import Engine, create_engine
 
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+_BUSY_TIMEOUT_SECONDS = 30.0
 
 __all__ = [
     "create_culture_storage",
@@ -62,6 +65,14 @@ def create_state_storage(
     )
 
 
+def _state_engine(db_file: str) -> Engine:
+    """Build an engine that waits for state-database locks before failing."""
+    return create_engine(
+        f"sqlite:///{db_file}",
+        connect_args={"timeout": _BUSY_TIMEOUT_SECONDS},
+    )
+
+
 def _create_sqlite_state_storage(
     storage_name: str,
     state_root: Path,
@@ -74,13 +85,18 @@ def _create_sqlite_state_storage(
     db_dir = state_root / subdir
     db_dir.mkdir(parents=True, exist_ok=True)
     db_file = str(db_dir / f"{storage_name}.db")
+    engine = _state_engine(db_file)
     if prompt_roles is not None:
         return _PromptSanitizingSqliteDb(
             prompt_roles=prompt_roles,
             session_table=session_table,
             db_file=db_file,
+            db_engine=engine,
         )
-    return SqliteDb(session_table=session_table, db_file=db_file)
+    # Both: the engine is what the database is reached through, and the path
+    # is what it reports itself as. Handing over an engine alone leaves
+    # ``db_file`` empty on a store that is very much file-backed.
+    return SqliteDb(session_table=session_table, db_file=db_file, db_engine=engine)
 
 
 def create_session_storage(
@@ -134,8 +150,9 @@ class _PromptSanitizingSqliteDb(SqliteDb):
         prompt_roles: frozenset[str],
         session_table: str,
         db_file: str,
+        db_engine: Engine,
     ) -> None:
-        super().__init__(session_table=session_table, db_file=db_file)
+        super().__init__(session_table=session_table, db_file=db_file, db_engine=db_engine)
         self._prompt_roles = prompt_roles
 
     def upsert_session(
