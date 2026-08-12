@@ -381,6 +381,15 @@ class TestAgentBot(AgentBotTestBase):
         room = MagicMock()
         room.room_id = "!test:localhost"
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.source = {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$question",
+                    "key": "👍",
+                },
+            },
+        }
         interactive._active_questions["$question"] = interactive._InteractiveQuestion(
             room_id=room.room_id,
             thread_id=None,
@@ -389,19 +398,21 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         try:
-            with (
-                patch.object(
-                    bot._turn_controller,
-                    "_execute_interactive_selection",
-                    new=AsyncMock(side_effect=OSError("pending write failed")),
-                ),
-            ):
+            execute = AsyncMock(side_effect=(OSError("pending write failed"), None))
+            with patch.object(bot._turn_controller, "_execute_interactive_selection", new=execute):
                 await _dispatch_reaction(bot, room, event)
 
-            await bot._response_runner.drain_inbox_responses()
-            assert "$question" in interactive._active_questions
-            assert event.event_id in await bot._journal_dispatcher.unsettled_event_ids()
-            assert not bot._journal_dispatcher.callbacks.source_has_live_owner(event.event_id)
+                await bot._response_runner.drain_inbox_responses()
+                assert "$question" in interactive._active_questions
+                assert event.event_id in await bot._journal_dispatcher.unsettled_event_ids()
+                assert not bot._journal_dispatcher.callbacks.source_has_live_owner(event.event_id)
+
+                await bot._journal_dispatcher.drain_once()
+                await bot._response_runner.drain_inbox_responses()
+
+            assert "$question" not in interactive._active_questions
+            assert event.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
+            assert execute.await_count == 2
         finally:
             interactive._cleanup()
 
