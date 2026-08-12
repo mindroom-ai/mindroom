@@ -114,9 +114,13 @@ def _create_sqlite_state_storage(
         return _PromptSanitizingSqliteDb(
             prompt_roles=prompt_roles,
             session_table=session_table,
+            db_file=db_file,
             db_engine=engine,
         )
-    return SqliteDb(session_table=session_table, db_engine=engine)
+    # Both: the engine is what the database is reached through, and the path
+    # is what it reports itself as. Handing over an engine alone leaves
+    # ``db_file`` empty on a store that is very much file-backed.
+    return SqliteDb(session_table=session_table, db_file=db_file, db_engine=engine)
 
 
 def create_session_storage(
@@ -171,9 +175,10 @@ class _PromptSanitizingSqliteDb(SqliteDb):
         *,
         prompt_roles: frozenset[str],
         session_table: str,
+        db_file: str,
         db_engine: Engine,
     ) -> None:
-        super().__init__(session_table=session_table, db_engine=db_engine)
+        super().__init__(session_table=session_table, db_file=db_file, db_engine=db_engine)
         self._prompt_roles = prompt_roles
 
     def upsert_session(
