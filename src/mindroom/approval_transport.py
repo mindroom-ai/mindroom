@@ -544,7 +544,6 @@ class ApprovalMatrixTransport:
             discarded=sweep.discarded,
             owed_count=sweep.failed,
             skipped_in_flight=sweep.skipped_in_flight,
-            skipped_live_waiter=sweep.skipped_live_waiter,
             dropped_never_attempted=sweep.dropped_never_attempted,
         )
         if not sweep.complete:

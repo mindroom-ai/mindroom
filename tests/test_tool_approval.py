@@ -2697,19 +2697,8 @@ async def test_the_sending_device_is_recorded_before_the_card_goes_out(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_startup_sweep_leaves_this_process_s_own_live_approval_alone(tmp_path: Path) -> None:
-    """Startup cleanup must not expire an approval this process is waiting on.
-
-    A live waiter reaches the sweep one way only: ``_bind_live_waiter``, from
-    a fresh send. So a card that has one was sent by this process and is still
-    awaiting its human, which is not what startup cleanup is for. Expiring it
-    tells that human their request was cancelled by a restart that already
-    finished before they were asked.
-
-    Nothing is owed for it either. The waiter settles the card on a click, a
-    denial, or its own timeout, and counting it would have every pending
-    approval hold the sweep open until somebody answered.
-    """
+async def test_startup_sweep_rejects_live_approval_and_releases_waiter(tmp_path: Path) -> None:
+    """Startup cleanup must return its rejection to a matching live tool call."""
     cards = FakeApprovalCards()
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
@@ -2738,36 +2727,18 @@ async def test_startup_sweep_leaves_this_process_s_own_live_approval_alone(tmp_p
     pending = await _wait_for_pending(store, sender=sender)
 
     sweep = await store.discard_pending_on_startup()
-
-    assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
-    assert sweep.skipped_live_waiter == 1
-    assert not task.done(), "the sweep expired an approval this process was waiting on"
-    assert editor.await_count == 0
-    assert set(cards.rows) == {_approval_transaction_id(pending.approval_id)}
-
-    # The waiter still owns the card, so the human's answer still lands.
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
     decision = await asyncio.wait_for(task, timeout=1)
 
-    assert result.resolved is True
-    assert decision.status == "approved"
+    assert sweep == ApprovalStartupSweep(discarded=1, failed=0)
+    assert decision.status == "expired"
+    assert decision.reason == "Bot restarted before approval — original request was cancelled."
+    assert editor.await_args.args[:2] == ("!room:localhost", pending.card_event_id)
+    assert cards.rows == {}
 
 
 @pytest.mark.asyncio
-async def test_startup_sweep_does_not_retry_against_a_live_approval(tmp_path: Path) -> None:
-    """A live approval is skipped by every pass, not retried against.
-
-    Retrying an edit is for a decision already committed that the room may not
-    show. A card whose waiter is still live has no decision to redeliver, so
-    repeated passes have nothing to converge on -- they would only expire it
-    on whichever attempt finally got its edit through.
-    """
+async def test_startup_sweep_retries_live_approval_edit_that_did_not_land(tmp_path: Path) -> None:
+    """A durable live rejection must remain eligible for Matrix redelivery."""
     cards = FakeApprovalCards()
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(side_effect=[False, True])
@@ -2795,18 +2766,14 @@ async def test_startup_sweep_does_not_retry_against_a_live_approval(tmp_path: Pa
     await _wait_for_pending(store, sender=sender)
 
     first_sweep = await store.discard_pending_on_startup()
+    decision = await asyncio.wait_for(task, timeout=1)
     second_sweep = await store.discard_pending_on_startup()
 
-    # Neither pass touches it, and neither is owed it: the request is alive.
-    assert first_sweep == ApprovalStartupSweep(discarded=0, failed=0)
-    assert second_sweep == ApprovalStartupSweep(discarded=0, failed=0)
-    assert first_sweep.skipped_live_waiter == 1
-    assert editor.await_count == 0
-    assert not task.done()
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    assert first_sweep == ApprovalStartupSweep(discarded=0, failed=1)
+    assert decision.status == "expired"
+    assert second_sweep == ApprovalStartupSweep(discarded=1, failed=0)
+    assert editor.await_count == 2
+    assert cards.rows == {}
 
 
 @pytest.mark.asyncio
