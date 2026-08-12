@@ -14,9 +14,9 @@ Remove the download and archive extraction step.
 
 Run the official `zricethezav/gitleaks:v8.18.4` Docker image by immutable multi-platform digest instead.
 
-Mount the checked-out repository read-only and run `detect --no-banner --redact` against it.
+Mount the checked-out repository read-only and run `detect --no-banner --redact --exit-code 0` against it.
 
-Keep the existing informational behavior by allowing findings to complete without failing the workflow.
+Keep findings informational with Gitleaks' dedicated exit-code option while leaving image acquisition and scanner startup failures fatal.
 
 This avoids the GitHub release-asset path without requiring the organization license used by Gitleaks Action.
 

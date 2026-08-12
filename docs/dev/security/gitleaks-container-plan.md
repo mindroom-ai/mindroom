@@ -17,7 +17,7 @@ Do not download or extract a Gitleaks release archive.
 
 Pin the official Docker image to `v8.18.4@sha256:75bdb2b2f4db213cde0b8295f13a88d6b333091bbfbf3012a4e083d00d31caba`.
 
-Keep Gitleaks findings informational with `|| true`.
+Keep Gitleaks findings informational with `--exit-code 0` while leaving Docker and scanner failures fatal.
 
 ---
 
@@ -53,7 +53,7 @@ Use this workflow command:
       --volume "$PWD:/repo:ro" \
       --workdir /repo \
       zricethezav/gitleaks:v8.18.4@sha256:75bdb2b2f4db213cde0b8295f13a88d6b333091bbfbf3012a4e083d00d31caba \
-      detect --no-banner --redact --source . || true
+      detect --no-banner --redact --exit-code 0 --source .
 ```
 
 - [ ] **Step 3: Run the container scan**
@@ -62,7 +62,11 @@ Run the command from Step 2 locally.
 
 When validating from a linked worktree, also mount its external Git metadata read-only at the absolute path referenced by the worktree's `.git` file.
 
-Expected: Docker resolves the pinned digest, Gitleaks scans the repository, and the shell exits zero.
+Expected: Docker resolves the pinned digest, Gitleaks reports findings without failing, and the shell exits zero.
+
+Run the pinned image with an invalid Gitleaks command.
+
+Expected: the container exits nonzero, proving scanner startup failures remain fatal.
 
 - [ ] **Step 4: Validate the workflow file**
 

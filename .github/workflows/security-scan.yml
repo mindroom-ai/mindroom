@@ -25,4 +25,4 @@ jobs:
             --volume "$PWD:/repo:ro" \
             --workdir /repo \
             zricethezav/gitleaks:v8.18.4@sha256:75bdb2b2f4db213cde0b8295f13a88d6b333091bbfbf3012a4e083d00d31caba \
-            detect --no-banner --redact --source . || true
+            detect --no-banner --redact --exit-code 0 --source .
