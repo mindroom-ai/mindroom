@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import os
+import signal
+import sqlite3
+import stat
 import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4, uuid5
 
@@ -24,7 +30,18 @@ from nio.ingest import (
     TransportKind,
     canonical_batch_payload,
 )
+from nio.ingest.classic import ClassicSource
+from nio.ingest.config import ClassicSourceConfig, IngestionConfig
+from nio.ingest.ports import NetworkResult, StagedSourceResponse
 from nio.ingest.serialization import batch_from_records
+from nio.ingest.source import ClassicCursor, canonical_classic_cursor
+from nio.ingest.state import SourceState, StagedFrame
+from nio.store._sync_journal_plan import (
+    _canonical_work_plaintext,
+)  # READY fixture seam.
+from nio.store._sync_journal_rows import _canonical_internal
+from nio.store._sync_journal_values import MaterializerLimits, MaterializeStatus
+from nio.store.sync_journal import open_ingestion_store
 
 from mindroom.event_journal import (
     AdmissionResult,
@@ -37,9 +54,12 @@ from mindroom.event_journal import (
     IngestionBatchIntegrityError,
     IngestionBatchSequenceError,
     IngestionBatchValidationError,
+    IngestionConsumer,
     IngestionConsumerBindingError,
     ProjectedEvent,
 )
+from mindroom.matrix import client_session
+from mindroom.matrix import durable_ingestion as durable_ingestion_module
 from mindroom.matrix.durable_ingestion import (
     consume_one_ingestion_batch,
     validate_ingestion_batch,
@@ -52,7 +72,10 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
+
+    from nio.ingest.state import OwnerView
+    from nio.store._sync_journal import SqliteIngestionJournal
 
     from mindroom.event_journal import PrincipalStore
     from mindroom.event_journal.backend import Backend, Operation, Transaction
@@ -85,6 +108,43 @@ GOLDEN_BATCH = (
 )
 GOLDEN_SHA256 = "4e1eb87df166562e921aad9ccda0ad2023cb206ee3a3fe802d8711925a3940cf"
 GOLDEN_BATCH_ID = UUID("02b67409-f182-58f3-9d27-f9b4c857969c")
+CANARY_ROOM_ID = "!canary:example.org"
+CANARY_AGENT_NAME = "canary-agent"
+CANARY_REQUESTED_GENERATION = UUID("55555555-5555-4555-8555-555555555555")
+CANARY_GENERATION = UUID("66666666-6666-4666-8666-666666666666")
+CANARY_FILTER = (
+    b'{"account_data":{"not_types":["*"]},"presence":{"not_types":["*"]},'
+    b'"room":{"account_data":{"not_types":["*"]},"ephemeral":{"not_types":'
+    b'["*"]},"rooms":["!canary:example.org"],"state":{"not_types":["*"]},'
+    b'"timeline":{"limit":1,"not_senders":["@bot:example.org"],"types":'
+    b'["m.room.encrypted","m.room.message"]}}}'
+)
+CANARY_BOUNDARIES = {
+    "consumer": "load_or_create_ingestion_consumer",
+    "bootstrap": "open_ingestion_store",
+    "bind": "bind_ingestion_stream",
+    "cold-stage": "frame_insert",
+    "live-stage": "frame_insert",
+    "cold-materialize": "frame_delete",
+    "live-materialize": "frame_delete",
+    "hydration-apply": "aggregate_update",
+    "claim": "delivery_claim_meta_cas",
+    "admission": "admit_ingestion_batch",
+    "ack": "delivery_ack_meta_cas",
+    "idle": "batch_empty",
+}
+CANARY_TRANSITIONS = {
+    phase: CANARY_BOUNDARIES[phase]
+    for phase in (
+        "cold-stage",
+        "live-stage",
+        "cold-materialize",
+        "live-materialize",
+        "hydration-apply",
+        "claim",
+        "ack",
+    )
+}
 
 
 def _record() -> EventRecord:
@@ -2044,3 +2104,2317 @@ async def test_adapter_ack_failure_redelivers_exact_duplicate(
     assert all(ref is batch.ref for ref in session.ack_attempts)
     assert session.batch is None
     assert await _graph(store) == _fresh_graph()
+
+
+@dataclass(frozen=True, slots=True)
+class _SeededReadyBatch:
+    batch: SyncBatch
+    owner: OwnerView
+
+
+@dataclass(frozen=True, slots=True)
+class _AdmissionPostCrashState:
+    source: ClassicSourceConfig
+    nio_root: Path
+    mindroom_path: Path
+    seeded: _SeededReadyBatch
+    source_at_s0: SourceState
+    work_rows: tuple[tuple[object, ...], ...]
+    delivery_frontier: tuple[tuple[object, ...], ...]
+    expected_mindroom_graph: dict[str, tuple[tuple[object, ...], ...]]
+
+
+def _nio_delivery_graph(
+    database_path: Path,
+) -> tuple[
+    tuple[tuple[object, ...], ...],
+    tuple[tuple[object, ...], ...],
+]:
+    with sqlite3.connect(database_path) as connection:
+        work_rows = connection.execute(
+            "SELECT * FROM NioIngestWork "
+            "ORDER BY ready_revision, ready_ordinal, work_id",
+        ).fetchall()
+        frontier = connection.execute(
+            "SELECT delivery_next_sequence, delivery_acknowledged_sha256, "
+            "delivery_outstanding_work_id, delivery_outstanding_ready_revision, "
+            "delivery_outstanding_ready_ordinal, delivery_outstanding_batch_sha256 "
+            "FROM NioIngestMeta LIMIT 2",
+        ).fetchall()
+    return tuple(tuple(row) for row in work_rows), tuple(tuple(row) for row in frontier)
+
+
+def _seed_ready_batch(
+    journal: SqliteIngestionJournal,
+    source: ClassicSourceConfig,
+) -> _SeededReadyBatch:
+    owner = journal.load_owner()
+    prior = journal.load_source()
+    adapter = ClassicSource(owner.stream_id, source, ACCOUNT_ID)
+    request = adapter.plan_request(prior, prior.next_request_id)
+    assert request is not None
+    response_body = b'{"next_batch":"s0","rooms":{}}'
+    normalized = adapter.normalize(
+        request,
+        NetworkResult(
+            request.stream_id,
+            request.transport,
+            request.source_epoch,
+            request.request_id,
+            200,
+            response_body,
+            None,
+            None,
+        ),
+    )
+    assert normalized.frame is not None
+    staged = StagedFrame(
+        normalized.frame.frame_id,
+        StagedSourceResponse(
+            request,
+            normalized.response_body,
+            normalized.frame.source_sha256,
+        ),
+    )
+    staged_result = journal.stage_source_response(
+        source=SourceState(
+            prior.source_epoch,
+            prior.transport_kind,
+            normalized.frame.candidate_cursor_json,
+            request.request_id + 1,
+            prior.active,
+        ),
+        frame=staged,
+    )
+    materialized = journal.materialize_oldest_frame(limits=MaterializerLimits())
+    assert materialized.status is MaterializeStatus.MATERIALIZED
+    assert materialized.frame_id == staged.frame_id
+    assert materialized.revision == staged_result.revision + 1
+    assert journal.load_source() == SourceState(
+        prior.source_epoch,
+        TransportKind.CLASSIC,
+        canonical_classic_cursor(ClassicCursor("s0")),
+        request.request_id + 1,
+        prior.active,
+    )
+    assert journal.list_frames(2) == ()
+
+    owner = journal.load_owner()
+    record = replace(_record(), event_id=None)
+    clear = (
+        record.record_id,
+        "event",
+        "ready",
+        str(UUID(int=10_000 + record.origin.frame_index)),
+        record.room_id,
+        record.membership_epoch,
+        record.room_sequence,
+        owner.revision,
+        0,
+        owner.revision,
+    )
+    payload, digest = journal._payload(
+        owner,
+        "NioIngestWork",
+        _canonical_work_plaintext("event", record),
+        header=_canonical_internal(clear),
+    )
+    with journal._owner.journal_write():
+        journal._execute(
+            "INSERT INTO NioIngestWork VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (ACCOUNT_ID, *clear, payload, digest),
+        )
+
+    batch = journal.next_batch(max_records=1)
+    assert batch is not None
+    expected = batch_from_records(
+        account_id=ACCOUNT_ID,
+        device_id=DEVICE_ID,
+        consumer_generation=CONSUMER_GENERATION,
+        stream_id=owner.stream_id,
+        sequence=0,
+        created_revision=owner.revision,
+        records=(record,),
+    )
+    assert batch == expected
+    return _SeededReadyBatch(batch, journal.load_owner())
+
+
+def _expected_mindroom_graph(
+    seeded: _SeededReadyBatch,
+) -> dict[str, tuple[tuple[object, ...], ...]]:
+    graph = _fresh_graph()
+    graph["consumers"] = (
+        (ACCOUNT_ID, str(CONSUMER_GENERATION), str(seeded.owner.stream_id), 1),
+    )
+    graph["receipts"] = (
+        (
+            ACCOUNT_ID,
+            str(CONSUMER_GENERATION),
+            str(seeded.owner.stream_id),
+            0,
+            1,
+            seeded.batch.ref.sha256.hex(),
+            EVENT_ID,
+        ),
+    )
+    return graph
+
+
+async def _prepare_admission_post_crash(
+    tmp_path: Path,
+) -> _AdmissionPostCrashState:
+    source = ClassicSourceConfig(timeout_ms=30_000, filter_json=b"{}")
+    nio_root = tmp_path / "nio"
+    bootstrap = open_ingestion_store(
+        nio_root,
+        account_id=ACCOUNT_ID,
+        device_id=DEVICE_ID,
+        consumer_generation=CONSUMER_GENERATION,
+        source=source,
+        database_name="journal.db",
+    )
+    mindroom: EventJournalStore | None = None
+    try:
+        seeded = _seed_ready_batch(bootstrap._journal, source)
+        source_at_s0 = bootstrap._journal.load_source()
+        work_rows, delivery_frontier = _nio_delivery_graph(nio_root / "journal.db")
+        assert len(work_rows) == 1
+        assert delivery_frontier == (
+            (
+                1,
+                None,
+                seeded.batch.records[0].record_id,
+                seeded.batch.created_revision,
+                0,
+                seeded.batch.ref.sha256,
+            ),
+        )
+        mindroom_path = tmp_path / "event_journal.db"
+        mindroom = EventJournalStore.open_sqlite(mindroom_path)
+        principal = mindroom.principal(ACCOUNT_ID)
+        await principal.load_or_create_ingestion_consumer(
+            new_generation=CONSUMER_GENERATION,
+        )
+        await principal.bind_ingestion_stream(
+            generation=CONSUMER_GENERATION,
+            stream_id=seeded.owner.stream_id,
+        )
+        admission = validate_ingestion_batch(
+            seeded.batch,
+            account_id=ACCOUNT_ID,
+            device_id=DEVICE_ID,
+        )
+        assert (
+            await principal.admit_ingestion_batch(admission) is AdmissionResult.ADMITTED
+        )
+        expected = _expected_mindroom_graph(seeded)
+        assert await _graph(mindroom) == expected
+        return _AdmissionPostCrashState(
+            source,
+            nio_root,
+            mindroom_path,
+            seeded,
+            source_at_s0,
+            work_rows,
+            delivery_frontier,
+            expected,
+        )
+    finally:
+        try:
+            bootstrap.close()
+        finally:
+            if mindroom is not None:
+                await mindroom.close()
+
+
+def _assert_source_requests(
+    request_calls: list[tuple[nio.AsyncClient, tuple[object, ...], dict[str, object]]],
+    client: nio.AsyncClient,
+    expected_paths: tuple[str, ...],
+) -> None:
+    assert len(request_calls) == len(expected_paths)
+    for call, expected_path in zip(request_calls, expected_paths, strict=True):
+        selected_client, args, kwargs = call
+        assert selected_client is client
+        assert args == (
+            "GET",
+            expected_path,
+            None,
+            {"Authorization": "Bearer access-token"},
+            None,
+            30.0,
+        )
+        assert kwargs == {}
+
+
+class _AdmissionResponseContent:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.position = 0
+
+    async def read(self, size: int = -1) -> bytes:
+        end = len(self.body) if size < 0 else self.position + size
+        chunk = self.body[self.position : end]
+        self.position += len(chunk)
+        return chunk
+
+
+class _AdmissionResponse:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self.content = _AdmissionResponseContent(body)
+        self.headers: dict[str, str] = {}
+        self.release_calls = 0
+
+    def release(self) -> None:
+        self.release_calls += 1
+
+
+@dataclass(slots=True)
+class _AdmissionSchedulingProxy:
+    principal: PrincipalStore
+    admission_entered: asyncio.Event
+    allow_duplicate_admission: asyncio.Event
+
+    async def admit_ingestion_batch(
+        self,
+        admission: IngestionBatchAdmission,
+    ) -> AdmissionResult:
+        self.admission_entered.set()
+        await self.allow_duplicate_admission.wait()
+        return await self.principal.admit_ingestion_batch(admission)
+
+
+_EMPTY_FRAME_STAGED_TRANSITIONS = (
+    "frame_collision_probe",
+    "meta_revision_epoch_cas",
+    "source_state_upsert",
+    "frame_insert",
+    "commit",
+)
+_EMPTY_FRAME_RETIRED_TRANSITIONS = (
+    *_EMPTY_FRAME_STAGED_TRANSITIONS,
+    "meta_revision_epoch_cas",
+    "frame_delete",
+    "before_commit",
+    "commit",
+)
+_EMPTY_FRAME_ACKED_TRANSITIONS = (
+    *_EMPTY_FRAME_RETIRED_TRANSITIONS,
+    "delivery_work_delete",
+    "delivery_ack_meta_cas",
+    "before_commit",
+    "commit",
+)
+
+
+async def _assert_blocked_empty_frame_barrier(
+    session: nio.IngestionSession,
+    state: _AdmissionPostCrashState,
+    reopened_mindroom: EventJournalStore,
+    response: _AdmissionResponse,
+    expected_source: SourceState,
+    transitions: list[str],
+    request_calls: list[tuple[nio.AsyncClient, tuple[object, ...], dict[str, object]]],
+    client: nio.AsyncClient,
+) -> None:
+    assert response.release_calls == 1
+    assert session._journal.load_source() == expected_source
+    frames = session._journal.list_frames(2)
+    assert len(frames) == 1
+    assert frames[0].response.response_body == response.content.body
+    assert _nio_delivery_graph(state.nio_root / "journal.db") == (
+        state.work_rows,
+        state.delivery_frontier,
+    )
+    assert await _graph(reopened_mindroom) == state.expected_mindroom_graph
+    assert tuple(transitions) == _EMPTY_FRAME_STAGED_TRANSITIONS
+    _assert_source_requests(
+        request_calls,
+        client,
+        ("/_matrix/client/v3/sync?since=s0&timeout=30000&filter=%7B%7D",),
+    )
+
+
+async def _assert_retired_empty_frame_barrier(
+    session: nio.IngestionSession,
+    state: _AdmissionPostCrashState,
+    reopened_mindroom: EventJournalStore,
+    response: _AdmissionResponse,
+    expected_source: SourceState,
+    transitions: list[str],
+    request_calls: list[tuple[nio.AsyncClient, tuple[object, ...], dict[str, object]]],
+    client: nio.AsyncClient,
+) -> None:
+    assert response.release_calls == 1
+    assert session._journal.load_source() == expected_source
+    assert session._journal.list_frames(2) == ()
+    assert _nio_delivery_graph(state.nio_root / "journal.db") == (
+        state.work_rows,
+        state.delivery_frontier,
+    )
+    assert await _graph(reopened_mindroom) == state.expected_mindroom_graph
+    assert tuple(transitions) == _EMPTY_FRAME_RETIRED_TRANSITIONS
+    _assert_source_requests(
+        request_calls,
+        client,
+        (
+            "/_matrix/client/v3/sync?since=s0&timeout=30000&filter=%7B%7D",
+            "/_matrix/client/v3/sync?since=s1&timeout=30000&filter=%7B%7D",
+        ),
+    )
+
+
+class _SourceRequestSchedule:
+    def __init__(self) -> None:
+        self.calls: list[
+            tuple[nio.AsyncClient, tuple[object, ...], dict[str, object]]
+        ] = []
+        self.first_response = _AdmissionResponse(
+            200,
+            b'{"next_batch":"s1","rooms":{}}',
+        )
+        self.second_entered = asyncio.Event()
+        self.second_cancelled = asyncio.Event()
+
+    async def send(
+        self,
+        selected_client: nio.AsyncClient,
+        *args: object,
+        **kwargs: object,
+    ) -> _AdmissionResponse:
+        self.calls.append((selected_client, args, kwargs))
+        if len(self.calls) == 1:
+            return self.first_response
+        if len(self.calls) != 2:
+            raise AssertionError
+        self.second_entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.second_cancelled.set()
+            raise
+        raise AssertionError
+
+
+async def _source_run_blocked(
+    run_task: asyncio.Task[None],
+    second_request_waiter: asyncio.Task[bool],
+) -> bool:
+    async with asyncio.timeout(5):
+        completed, _pending = await asyncio.wait(
+            {run_task, second_request_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    if run_task not in completed:
+        assert second_request_waiter in completed
+        return False
+    with pytest.raises(nio.IngestionBlockedError):
+        await run_task
+    return True
+
+
+async def _finish_duplicate_ack(
+    allow_duplicate_admission: asyncio.Event,
+    consume_task: asyncio.Task[AdmissionResult],
+    run_task: asyncio.Task[None],
+    transitions: list[str],
+    state: _AdmissionPostCrashState,
+    reopened_mindroom: EventJournalStore,
+) -> None:
+    allow_duplicate_admission.set()
+    async with asyncio.timeout(5):
+        assert await consume_task is AdmissionResult.DUPLICATE
+    assert not run_task.done()
+    assert tuple(transitions) == _EMPTY_FRAME_ACKED_TRANSITIONS
+    await _assert_reopened_delivery_state(state, reopened_mindroom)
+
+
+async def _cancel_and_join(task: asyncio.Task[object] | None) -> None:
+    if task is not None and not task.done():
+        task.cancel()
+    if task is not None:
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def _exercise_concurrent_duplicate_ack(
+    session: nio.IngestionSession,
+    principal: PrincipalStore,
+    client: nio.AsyncClient,
+    state: _AdmissionPostCrashState,
+    reopened_mindroom: EventJournalStore,
+    transitions: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admission_entered = asyncio.Event()
+    allow_duplicate_admission = asyncio.Event()
+    schedule = _SourceRequestSchedule()
+    expected_source_s1 = replace(
+        state.source_at_s0,
+        cursor_json=canonical_classic_cursor(ClassicCursor("s1")),
+        next_request_id=state.source_at_s0.next_request_id + 1,
+    )
+    scheduling_proxy = _AdmissionSchedulingProxy(
+        principal,
+        admission_entered,
+        allow_duplicate_admission,
+    )
+
+    async def scheduled_send(
+        selected_client: nio.AsyncClient,
+        *args: object,
+        **kwargs: object,
+    ) -> _AdmissionResponse:
+        return await schedule.send(selected_client, *args, **kwargs)
+
+    monkeypatch.setattr(nio.AsyncClient, "send", scheduled_send)
+    assert session._client is client
+    run_task: asyncio.Task[None] | None = None
+    async with session:
+        consume_task = asyncio.create_task(
+            consume_one_ingestion_batch(
+                session,
+                scheduling_proxy,
+                account_id=ACCOUNT_ID,
+                device_id=DEVICE_ID,
+            ),
+        )
+        second_request_waiter: asyncio.Task[bool] | None = None
+        try:
+            async with asyncio.timeout(5):
+                await admission_entered.wait()
+            assert not consume_task.done()
+
+            run_task = asyncio.create_task(session.run())
+            second_request_waiter = asyncio.create_task(schedule.second_entered.wait())
+            if await _source_run_blocked(run_task, second_request_waiter):
+                await _assert_blocked_empty_frame_barrier(
+                    session,
+                    state,
+                    reopened_mindroom,
+                    schedule.first_response,
+                    expected_source_s1,
+                    transitions,
+                    schedule.calls,
+                    client,
+                )
+                assert admission_entered.is_set()
+                assert not consume_task.done()
+                pytest.fail(
+                    "Task7 empty Classic frame blocked before ACK scheduling barrier",
+                )
+            assert schedule.second_entered.is_set()
+            assert not run_task.done()
+            await _assert_retired_empty_frame_barrier(
+                session,
+                state,
+                reopened_mindroom,
+                schedule.first_response,
+                expected_source_s1,
+                transitions,
+                schedule.calls,
+                client,
+            )
+            assert admission_entered.is_set()
+            assert not consume_task.done()
+            await _finish_duplicate_ack(
+                allow_duplicate_admission,
+                consume_task,
+                run_task,
+                transitions,
+                state,
+                reopened_mindroom,
+            )
+        finally:
+            await _cancel_and_join(second_request_waiter)
+            await _cancel_and_join(consume_task)
+    assert run_task is not None
+    assert run_task.cancelled()
+    assert schedule.second_cancelled.is_set()
+
+
+async def _assert_reopened_delivery_state(
+    state: _AdmissionPostCrashState,
+    reopened_mindroom: EventJournalStore,
+) -> None:
+    work_rows, frontier = _nio_delivery_graph(state.nio_root / "journal.db")
+    assert work_rows == ()
+    assert frontier == ((1, state.seeded.batch.ref.sha256, None, None, None, None),)
+    assert await _graph(reopened_mindroom) == state.expected_mindroom_graph
+
+
+async def _replay_concurrently_after_reopen(
+    state: _AdmissionPostCrashState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transitions: list[str] = []
+    reopened_bootstrap = open_ingestion_store(
+        state.nio_root,
+        account_id=ACCOUNT_ID,
+        device_id=DEVICE_ID,
+        consumer_generation=CONSUMER_GENERATION,
+        source=state.source,
+        database_name="journal.db",
+        transition_statement_hook=transitions.append,
+    )
+    reopened_mindroom: EventJournalStore | None = None
+    session: nio.IngestionSession | None = None
+    client: nio.AsyncClient | None = None
+    try:
+        reopened_owner = reopened_bootstrap._journal.load_owner()
+        assert reopened_owner == replace(
+            state.seeded.owner,
+            writer_epoch=reopened_owner.writer_epoch,
+        )
+        assert reopened_owner.writer_epoch != state.seeded.owner.writer_epoch
+        assert reopened_bootstrap._journal.load_source() == state.source_at_s0
+        assert reopened_bootstrap._journal.list_frames(2) == ()
+        assert _nio_delivery_graph(state.nio_root / "journal.db") == (
+            state.work_rows,
+            state.delivery_frontier,
+        )
+        reopened_mindroom = EventJournalStore.open_sqlite(state.mindroom_path)
+        assert await _graph(reopened_mindroom) == state.expected_mindroom_graph
+        client = _authenticated_runner_client()
+        session = nio.open_ingestion(
+            client,
+            reopened_bootstrap,
+            config=IngestionConfig(state.source),
+            consumer_generation=CONSUMER_GENERATION,
+            stream_id=state.seeded.owner.stream_id,
+            room_id=ROOM_ID,
+        )
+        transitions.clear()
+        await _exercise_concurrent_duplicate_ack(
+            session,
+            reopened_mindroom.principal(ACCOUNT_ID),
+            client,
+            state,
+            reopened_mindroom,
+            transitions,
+            monkeypatch,
+        )
+    finally:
+        try:
+            if session is None:
+                reopened_bootstrap.close()
+            else:
+                await session.close()
+        finally:
+            try:
+                if client is not None:
+                    await client.close()
+            finally:
+                if reopened_mindroom is not None:
+                    await reopened_mindroom.close()
+
+
+@pytest.mark.asyncio
+async def test_adapter_replays_admission_post_crash_and_acks_after_nio_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay a committed admission while the reopened source runner is active."""
+    state = await _prepare_admission_post_crash(tmp_path)
+    await _replay_concurrently_after_reopen(state, monkeypatch)
+
+
+@dataclass(slots=True)
+class _RunnerMatrixSync:
+    mode: str = "classic"
+
+
+@dataclass(slots=True)
+class _RunnerEventJournal:
+    backend: str = "sqlite"
+
+
+@dataclass(slots=True)
+class _RunnerConfig:
+    matrix_sync: _RunnerMatrixSync = field(default_factory=_RunnerMatrixSync)
+    event_journal: _RunnerEventJournal = field(default_factory=_RunnerEventJournal)
+
+
+@dataclass(frozen=True, slots=True)
+class _RunnerPaths:
+    storage_root: Path
+
+
+@dataclass(slots=True)
+class _RunnerDispatcher:
+    trace: list[object]
+    wake_calls: int = 0
+
+    def wake(self) -> None:
+        self.wake_calls += 1
+        self.trace.append(("dispatcher-wake", self.wake_calls))
+
+
+@dataclass(slots=True)
+class _RunnerPrincipal:
+    trace: list[object]
+    generation: UUID = CANARY_GENERATION
+    loaded_stream_id: UUID | None = None
+    load_error: BaseException | None = None
+    bind_error: BaseException | None = None
+    bind_entered: asyncio.Event | None = None
+    bind_release: asyncio.Event | None = None
+    admissions: list[IngestionBatchAdmission] = field(default_factory=list)
+    admission_results: list[AdmissionResult] = field(
+        default_factory=lambda: [AdmissionResult.ADMITTED]
+    )
+
+    async def load_or_create_ingestion_consumer(
+        self,
+        *,
+        new_generation: UUID,
+    ) -> IngestionConsumer:
+        self.trace.append(("load-consumer", new_generation))
+        if self.load_error is not None:
+            raise self.load_error
+        return IngestionConsumer(self.generation, self.loaded_stream_id)
+
+    async def bind_ingestion_stream(
+        self,
+        *,
+        generation: UUID,
+        stream_id: UUID,
+    ) -> IngestionConsumer:
+        self.trace.append(("bind-stream", generation, stream_id))
+        if self.bind_entered is not None:
+            self.bind_entered.set()
+        if self.bind_release is not None:
+            try:
+                await self.bind_release.wait()
+            except asyncio.CancelledError:
+                self.trace.append("bind-cancelled")
+                raise
+        if self.bind_error is not None:
+            raise self.bind_error
+        return IngestionConsumer(generation, stream_id)
+
+    async def admit_ingestion_batch(
+        self,
+        admission: IngestionBatchAdmission,
+    ) -> AdmissionResult:
+        self.admissions.append(admission)
+        self.trace.append("principal-admit-committed")
+        return self.admission_results.pop(0)
+
+
+@dataclass(slots=True)
+class _RunnerBot:
+    runtime_paths: _RunnerPaths
+    client: object
+    config: _RunnerConfig
+    approval_room_ids: frozenset[str]
+    principal: _RunnerPrincipal
+    _journal_dispatcher: _RunnerDispatcher
+    trace: list[object]
+    agent_name: str = CANARY_AGENT_NAME
+    principal_error: BaseException | None = None
+
+    def _journal_principal(self) -> _RunnerPrincipal:
+        assert (self.runtime_paths.storage_root / "tracking" / "nio_ingestion").is_dir()
+        self.trace.append("journal-principal")
+        if self.principal_error is not None:
+            raise self.principal_error
+        return self.principal
+
+
+@dataclass(slots=True)
+class _RunnerBootstrap:
+    trace: list[object]
+    stream_id: UUID = STREAM_ID
+    close_calls: int = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.trace.append("bootstrap-close")
+
+
+@dataclass(slots=True)
+class _RunnerSession:
+    trace: list[object]
+    bootstrap: _RunnerBootstrap
+    run_body: Callable[[], Awaitable[None]]
+    batches: list[SyncBatch | None] = field(default_factory=list)
+    batch_error: BaseException | None = None
+    next_calls: list[dict[str, object]] = field(default_factory=list)
+    ack_attempts: list[BatchRef] = field(default_factory=list)
+    enter_calls: int = 0
+    exit_calls: int = 0
+
+    def next_batch(self, **limits: object) -> SyncBatch | None:
+        self.next_calls.append(limits)
+        if self.batches:
+            return self.batches.pop(0)
+        if self.batch_error is not None:
+            raise self.batch_error
+        return None
+
+    def acknowledge_batch(self, ref: BatchRef) -> None:
+        self.ack_attempts.append(ref)
+        self.trace.append(("session-ack", len(self.ack_attempts), ref))
+
+    async def __aenter__(self) -> _RunnerSession:
+        self.enter_calls += 1
+        self.trace.append("session-enter")
+        return self
+
+    async def __aexit__(
+        self,
+        _error_type: object,
+        _error: object,
+        _traceback: object,
+    ) -> bool:
+        self.exit_calls += 1
+        self.trace.append("session-exit")
+        self.bootstrap.close()
+        return False
+
+    async def run(self) -> None:
+        self.trace.append("session-run")
+        try:
+            await self.run_body()
+        except asyncio.CancelledError:
+            self.trace.append("session-run-cancelled")
+            raise
+
+
+@dataclass(slots=True)
+class _RunnerHarness:
+    bot: _RunnerBot
+    principal: _RunnerPrincipal
+    bootstrap: _RunnerBootstrap
+    session: _RunnerSession
+    store_calls: list[tuple[Path, dict[str, object]]]
+    ingestion_calls: list[tuple[object, object, dict[str, object]]]
+    trace: list[object]
+
+
+@dataclass(slots=True)
+class _LatchRecorder:
+    offers: list[tuple[str, str, str]] = field(default_factory=list)
+
+    def offer(self, phase: str, boundary: str, side: str) -> None:
+        self.offers.append((phase, boundary, side))
+
+
+class _RunnerFailure(RuntimeError):
+    pass
+
+
+def _authenticated_runner_client() -> nio.AsyncClient:
+    client = client_session._MindRoomAsyncClient(
+        "https://example.org",
+        ACCOUNT_ID,
+        device_id=DEVICE_ID,
+    )
+    client.user_id = ACCOUNT_ID
+    client.device_id = DEVICE_ID
+    client.access_token = "access-token"
+    return client
+
+
+def _runner_bot(
+    storage_root: Path,
+    *,
+    trace: list[object] | None = None,
+    principal: _RunnerPrincipal | None = None,
+) -> _RunnerBot:
+    observed = [] if trace is None else trace
+    selected_principal = principal or _RunnerPrincipal(observed)
+    return _RunnerBot(
+        _RunnerPaths(storage_root),
+        _authenticated_runner_client(),
+        _RunnerConfig(),
+        frozenset({CANARY_ROOM_ID}),
+        selected_principal,
+        _RunnerDispatcher(observed),
+        observed,
+    )
+
+
+def _set_canary_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    agent: str | None = CANARY_AGENT_NAME,
+    stop: str | None = None,
+    trace: Path | str | None = None,
+) -> None:
+    values = {
+        "MINDROOM_INGESTION_CANARY_AGENT": agent,
+        "MINDROOM_INGESTION_CANARY_STOP": stop,
+        "MINDROOM_INGESTION_CANARY_TRACE": None if trace is None else str(trace),
+    }
+    for name, value in values.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+
+def _canary_trace(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    path.chmod(0o600)
+    return path
+
+
+def _install_runner_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    storage_root: Path,
+    *,
+    run_body: Callable[[], Awaitable[None]],
+    principal_error: BaseException | None = None,
+    loaded_stream_id: UUID | None = None,
+    load_error: BaseException | None = None,
+    store_error: BaseException | None = None,
+    bind_error: BaseException | None = None,
+    bind_entered: asyncio.Event | None = None,
+    bind_release: asyncio.Event | None = None,
+    open_error: BaseException | None = None,
+    batches: list[SyncBatch | None] | None = None,
+    batch_error: BaseException | None = None,
+    admission_results: list[AdmissionResult] | None = None,
+    stop: str | None = None,
+    trace_path: Path | None = None,
+) -> _RunnerHarness:
+    trace: list[object] = []
+    principal = _RunnerPrincipal(
+        trace,
+        loaded_stream_id=loaded_stream_id,
+        load_error=load_error,
+        bind_error=bind_error,
+        bind_entered=bind_entered,
+        bind_release=bind_release,
+        admission_results=(
+            [AdmissionResult.ADMITTED]
+            if admission_results is None
+            else list(admission_results)
+        ),
+    )
+    bot = _runner_bot(storage_root, trace=trace, principal=principal)
+    bot.principal_error = principal_error
+    bootstrap = _RunnerBootstrap(trace)
+    session = _RunnerSession(
+        trace,
+        bootstrap,
+        run_body,
+        [] if batches is None else list(batches),
+        batch_error,
+    )
+    store_calls: list[tuple[Path, dict[str, object]]] = []
+    ingestion_calls: list[tuple[object, object, dict[str, object]]] = []
+
+    def open_store(path: object, **kwargs: object) -> _RunnerBootstrap:
+        store_calls.append((Path(path), kwargs))
+        trace.append("open-store")
+        assert Path(path).is_dir()
+        if store_error is not None:
+            raise store_error
+        return bootstrap
+
+    def open_ingestion(
+        client: object,
+        selected_bootstrap: object,
+        **kwargs: object,
+    ) -> _RunnerSession:
+        ingestion_calls.append((client, selected_bootstrap, kwargs))
+        trace.append("open-ingestion")
+        if open_error is not None:
+            raise open_error
+        return session
+
+    _set_canary_environment(
+        monkeypatch,
+        stop=stop,
+        trace=trace_path,
+    )
+    monkeypatch.setattr(
+        durable_ingestion_module,
+        "uuid4",
+        lambda: CANARY_REQUESTED_GENERATION,
+    )
+    monkeypatch.setattr(nio.store, "open_ingestion_store", open_store)
+    monkeypatch.setattr(nio, "open_ingestion", open_ingestion)
+    return _RunnerHarness(
+        bot,
+        principal,
+        bootstrap,
+        session,
+        store_calls,
+        ingestion_calls,
+        trace,
+    )
+
+
+def _exception_group_contains(group: BaseException, target: BaseException) -> bool:
+    if group is target:
+        return True
+    return isinstance(group, BaseExceptionGroup) and any(
+        _exception_group_contains(item, target) for item in group.exceptions
+    )
+
+
+def _trace_position(trace: Sequence[object], value: object) -> int:
+    return next(index for index, item in enumerate(trace) if item == value)
+
+
+def _task7_interface(name: str) -> object:
+    interface = getattr(durable_ingestion_module, name, None)
+    if interface is None:
+        pytest.fail(f"Task7 missing interface: {name}", pytrace=False)
+    return interface
+
+
+async def _task7_bounded(awaitable: Awaitable[object]) -> object:
+    async with asyncio.timeout(20):
+        return await awaitable
+
+
+@pytest.mark.asyncio
+async def test_canary_filter_is_exact_canonical_classic_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _task7_interface("run_durable_ingestion")
+    error = _RunnerFailure("stop after filter capture")
+
+    async def unused_run() -> None:
+        raise AssertionError("session must not be created")
+
+    harness = _install_runner_harness(
+        monkeypatch,
+        tmp_path / "storage",
+        run_body=unused_run,
+        open_error=error,
+    )
+    monkeypatch.setenv(
+        "MINDROOM_INGESTION_DATABASE",
+        str(tmp_path / "operator-controlled.db"),
+    )
+
+    with pytest.raises(_RunnerFailure) as raised:
+        await _task7_bounded(runner(harness.bot))  # type: ignore[arg-type]
+
+    assert raised.value is error
+    assert len(harness.store_calls) == len(harness.ingestion_calls) == 1
+    store_path, store_kwargs = harness.store_calls[0]
+    client, bootstrap, ingestion_kwargs = harness.ingestion_calls[0]
+    source = store_kwargs["source"]
+    config = ingestion_kwargs["config"]
+    assert type(source) is ClassicSourceConfig
+    assert source.timeout_ms == 30_000
+    assert source.filter_json == CANARY_FILTER
+    assert type(config) is IngestionConfig
+    assert config.source is source
+    assert client is harness.bot.client
+    assert bootstrap is harness.bootstrap
+    assert store_path == tmp_path / "storage" / "tracking" / "nio_ingestion"
+    assert store_kwargs["database_name"] == f"{CANARY_AGENT_NAME}.db"
+    assert harness.bootstrap.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_canary_latch_rejects_controls_before_nio_or_http(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    latch_type = _task7_interface("_CanaryLatch")
+    runner = _task7_interface("run_durable_ingestion")
+    external_calls: list[str] = []
+    real_open, real_fstat, real_close = os.open, os.fstat, os.close
+    basic_trace = _canary_trace(tmp_path / "basic-validation.log")
+    assert basic_trace.is_absolute()
+    assert stat.S_IMODE(basic_trace.stat().st_mode) == 0o600
+
+    def forbidden_store(*_args: object, **_kwargs: object) -> None:
+        external_calls.append("store")
+        raise AssertionError("nio storage opened before validation")
+
+    def forbidden_ingestion(*_args: object, **_kwargs: object) -> None:
+        external_calls.append("http")
+        raise AssertionError("nio HTTP opened before validation")
+
+    monkeypatch.setattr(nio.store, "open_ingestion_store", forbidden_store)
+    monkeypatch.setattr(nio, "open_ingestion", forbidden_ingestion)
+
+    def invalid_bots() -> list[_RunnerBot]:
+        bots: list[_RunnerBot] = []
+        for index in range(8):
+            bots.append(_runner_bot(tmp_path / f"invalid-{index}"))
+        bots[0].config.matrix_sync.mode = "sliding"
+        bots[1].config.event_journal.backend = "postgres"
+        bots[2].client = object()
+        assert isinstance(bots[3].client, nio.AsyncClient)
+        bots[3].client.user_id = ""
+        assert isinstance(bots[4].client, nio.AsyncClient)
+        bots[4].client.device_id = ""
+        assert isinstance(bots[5].client, nio.AsyncClient)
+        bots[5].client.access_token = ""
+        bots[6].approval_room_ids = frozenset()
+        bots[7].approval_room_ids = frozenset({CANARY_ROOM_ID, "!other:example.org"})
+        return bots
+
+    basic_cases = [
+        *((bot, CANARY_AGENT_NAME) for bot in invalid_bots()),
+        (_runner_bot(tmp_path / "absent-agent"), None),
+        (_runner_bot(tmp_path / "mismatched-agent"), "other"),
+    ]
+    for bot, agent in basic_cases:
+        open_attempts: list[object] = []
+
+        def basic_open(path: object, flags: int, mode: int = 0o777) -> int:
+            open_attempts.append(path)
+            return real_open(path, flags, mode)
+
+        assert not basic_trace.resolve().is_relative_to(
+            bot.runtime_paths.storage_root.resolve()
+        )
+        with monkeypatch.context() as basic_patch:
+            basic_patch.setattr(durable_ingestion_module.os, "open", basic_open)
+            _set_canary_environment(
+                basic_patch,
+                agent=agent,
+                stop="consumer.pre",
+                trace=basic_trace,
+            )
+            with pytest.raises((TypeError, ValueError)):
+                await _task7_bounded(runner(bot))  # type: ignore[arg-type]
+        assert open_attempts == []
+        assert basic_trace.read_bytes() == b""
+        assert not (bot.runtime_paths.storage_root / "tracking").exists()
+        assert external_calls == []
+
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    valid_trace = _canary_trace(tmp_path / "trace.log")
+
+    noop_opens: list[object] = []
+
+    def noop_open(path: object, flags: int, mode: int = 0o777) -> int:
+        noop_opens.append(path)
+        return real_open(path, flags, mode)
+
+    with monkeypatch.context() as noop_patch:
+        noop_patch.setattr(durable_ingestion_module.os, "open", noop_open)
+        _set_canary_environment(noop_patch, agent=None)
+        noop = latch_type.from_environment(storage_root=storage_root)
+        noop.offer("consumer", CANARY_BOUNDARIES["consumer"], "pre")
+        noop.transition("commit")
+        noop.close()
+    assert noop_opens == []
+
+    rejected = (
+        ("consumer.pre", None),
+        (None, valid_trace),
+        ("unknown.pre", valid_trace),
+        ("consumer.middle", valid_trace),
+        ("idle.pre", valid_trace),
+        ("consumer.pre", "relative.log"),
+    )
+    for stop, trace_path in rejected:
+        open_attempts: list[object] = []
+
+        def rejected_open(path: object, flags: int, mode: int = 0o777) -> int:
+            open_attempts.append(path)
+            return real_open(path, flags, mode)
+
+        with monkeypatch.context() as rejected_patch:
+            rejected_patch.setattr(
+                durable_ingestion_module.os,
+                "open",
+                rejected_open,
+            )
+            _set_canary_environment(
+                rejected_patch,
+                agent=None,
+                stop=stop,
+                trace=trace_path,
+            )
+            with pytest.raises((OSError, TypeError, ValueError)):
+                latch_type.from_environment(storage_root=storage_root)
+        assert open_attempts == []
+
+    wrong_mode = _canary_trace(tmp_path / "wrong-mode.log")
+    wrong_mode.chmod(0o640)
+    under_storage = _canary_trace(storage_root / "trace.log")
+    aliased_parent = tmp_path / "storage-alias"
+    aliased_parent.symlink_to(storage_root, target_is_directory=True)
+    aliased_under_storage = aliased_parent / under_storage.name
+    symlink = tmp_path / "trace-link.log"
+    symlink.symlink_to(valid_trace)
+    fifo = tmp_path / "trace.fifo"
+    os.mkfifo(fifo, 0o600)
+
+    for unsafe_path in (under_storage, aliased_under_storage):
+        open_attempts = []
+
+        def contained_open(path: object, flags: int, mode: int = 0o777) -> int:
+            open_attempts.append(path)
+            return real_open(path, flags, mode)
+
+        with monkeypatch.context() as contained_patch:
+            contained_patch.setattr(
+                durable_ingestion_module.os,
+                "open",
+                contained_open,
+            )
+            _set_canary_environment(
+                contained_patch,
+                agent=None,
+                stop="consumer.pre",
+                trace=unsafe_path,
+            )
+            with pytest.raises((OSError, TypeError, ValueError)):
+                latch_type.from_environment(storage_root=storage_root)
+        assert open_attempts == []
+
+    for unsafe_path in (symlink, fifo):
+        open_attempts: list[Path] = []
+        opened: list[int] = []
+        closed: list[int] = []
+        reader_fd = (
+            real_open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+            if unsafe_path == fifo
+            else None
+        )
+
+        def unsafe_open(path: object, flags: int, mode: int = 0o777) -> int:
+            open_attempts.append(Path(os.fspath(path)))  # type: ignore[arg-type]
+            assert flags & os.O_NONBLOCK
+            assert flags & os.O_NOFOLLOW
+            fd = real_open(path, flags, mode)
+            opened.append(fd)
+            return fd
+
+        def unsafe_close(fd: int) -> None:
+            closed.append(fd)
+            real_close(fd)
+
+        try:
+            with monkeypatch.context() as unsafe_patch:
+                unsafe_patch.setattr(durable_ingestion_module.os, "open", unsafe_open)
+                unsafe_patch.setattr(durable_ingestion_module.os, "close", unsafe_close)
+                _set_canary_environment(
+                    unsafe_patch,
+                    agent=None,
+                    stop="consumer.pre",
+                    trace=unsafe_path,
+                )
+                with pytest.raises((OSError, TypeError, ValueError)):
+                    latch_type.from_environment(storage_root=storage_root)
+        finally:
+            if reader_fd is not None:
+                real_close(reader_fd)
+        assert open_attempts == [unsafe_path]
+        assert opened == closed
+        assert len(opened) == int(unsafe_path == fifo)
+
+    def wrong_owner(fd: int) -> os.stat_result:
+        result = real_fstat(fd)
+        return os.stat_result((*result[:4], result.st_uid + 1, *result[5:]))
+
+    for invalid_fstat in ("mode", "owner"):
+        opened: list[int] = []
+        closed: list[int] = []
+
+        def observed_invalid_open(
+            path: object,
+            flags: int,
+            mode: int = 0o777,
+        ) -> int:
+            fd = real_open(path, flags, mode)
+            opened.append(fd)
+            return fd
+
+        def observed_invalid_close(fd: int) -> None:
+            closed.append(fd)
+            real_close(fd)
+
+        with monkeypatch.context() as fstat_patch:
+            fstat_patch.setattr(
+                durable_ingestion_module.os,
+                "open",
+                observed_invalid_open,
+            )
+            fstat_patch.setattr(
+                durable_ingestion_module.os,
+                "close",
+                observed_invalid_close,
+            )
+            if invalid_fstat == "owner":
+                fstat_patch.setattr(
+                    durable_ingestion_module.os,
+                    "fstat",
+                    wrong_owner,
+                )
+            _set_canary_environment(
+                fstat_patch,
+                agent=None,
+                stop="consumer.pre",
+                trace=valid_trace if invalid_fstat == "owner" else wrong_mode,
+            )
+            with pytest.raises((OSError, TypeError, ValueError)):
+                latch_type.from_environment(storage_root=storage_root)
+        assert opened == closed and len(opened) == 1
+
+    missing_pairs = (("consumer.pre", None), (None, valid_trace))
+    for index, (stop, trace_path) in enumerate(missing_pairs):
+        bot = _runner_bot(tmp_path / f"runner-missing-pair-{index}")
+        _set_canary_environment(monkeypatch, stop=stop, trace=trace_path)
+        with pytest.raises((OSError, TypeError, ValueError)):
+            await _task7_bounded(runner(bot))  # type: ignore[arg-type]
+        assert not (bot.runtime_paths.storage_root / "tracking").exists()
+
+    for invalid_fstat in ("mode", "owner"):
+        bot = _runner_bot(tmp_path / f"runner-{invalid_fstat}")
+        opened = []
+        closed = []
+
+        def runner_invalid_open(
+            path: object,
+            flags: int,
+            mode: int = 0o777,
+        ) -> int:
+            fd = real_open(path, flags, mode)
+            opened.append(fd)
+            return fd
+
+        def runner_invalid_close(fd: int) -> None:
+            closed.append(fd)
+            real_close(fd)
+
+        with monkeypatch.context() as runner_invalid_patch:
+            runner_invalid_patch.setattr(
+                durable_ingestion_module.os,
+                "open",
+                runner_invalid_open,
+            )
+            runner_invalid_patch.setattr(
+                durable_ingestion_module.os,
+                "close",
+                runner_invalid_close,
+            )
+            if invalid_fstat == "owner":
+                runner_invalid_patch.setattr(
+                    durable_ingestion_module.os,
+                    "fstat",
+                    wrong_owner,
+                )
+            _set_canary_environment(
+                runner_invalid_patch,
+                stop="consumer.pre",
+                trace=valid_trace if invalid_fstat == "owner" else wrong_mode,
+            )
+            with pytest.raises((OSError, TypeError, ValueError)):
+                await _task7_bounded(runner(bot))  # type: ignore[arg-type]
+        assert opened == closed and len(opened) == 1
+        assert not (bot.runtime_paths.storage_root / "tracking").exists()
+
+    for index, invalid_stop in enumerate(("unknown.pre", "consumer.middle")):
+        _set_canary_environment(
+            monkeypatch,
+            stop=invalid_stop,
+            trace=valid_trace,
+        )
+        invalid_control_bot = _runner_bot(tmp_path / f"invalid-control-{index}")
+        with pytest.raises((OSError, TypeError, ValueError)):
+            await _task7_bounded(runner(invalid_control_bot))  # type: ignore[arg-type]
+        assert external_calls == []
+        assert not (
+            invalid_control_bot.runtime_paths.storage_root / "tracking"
+        ).exists()
+
+    opened_flags: list[int] = []
+
+    def observed_open(path: object, flags: int, mode: int = 0o777) -> int:
+        opened_flags.append(flags)
+        return real_open(path, flags, mode)
+
+    with monkeypatch.context() as flags_patch:
+        flags_patch.setattr(durable_ingestion_module.os, "open", observed_open)
+        for phase in tuple(CANARY_BOUNDARIES)[:-1]:
+            for side in ("pre", "post"):
+                _set_canary_environment(
+                    flags_patch,
+                    agent=None,
+                    stop=f"{phase}.{side}",
+                    trace=valid_trace,
+                )
+                latch_type.from_environment(storage_root=storage_root).close()
+        _set_canary_environment(
+            flags_patch,
+            agent=None,
+            stop="idle.post",
+            trace=valid_trace,
+        )
+        latch_type.from_environment(storage_root=storage_root).close()
+    expected_flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
+    assert opened_flags == [expected_flags] * 23
+
+    positive_kills: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(
+        durable_ingestion_module.os,
+        "kill",
+        lambda pid, selected_signal: positive_kills.append((pid, selected_signal)),
+    )
+    operation_sides = (
+        *(
+            (phase, side)
+            for phase in ("consumer", "bootstrap", "bind", "admission")
+            for side in ("pre", "post")
+        ),
+        ("idle", "post"),
+    )
+    for index, (phase, side) in enumerate(operation_sides, start=1):
+        trace_path = _canary_trace(tmp_path / f"operation-{phase}-{side}.log")
+        _set_canary_environment(
+            monkeypatch,
+            agent=None,
+            stop=f"{phase}.{side}",
+            trace=trace_path,
+        )
+        selected_latch = latch_type.from_environment(storage_root=storage_root)
+        selected_latch.offer(phase, CANARY_BOUNDARIES[phase], side)
+        assert json.loads(trace_path.read_bytes()) == {
+            "boundary": CANARY_BOUNDARIES[phase],
+            "phase": phase,
+            "pid": os.getpid(),
+            "side": side,
+        }
+        selected_latch.close()
+        assert positive_kills == [(os.getpid(), signal.SIGSTOP)] * index
+
+
+def test_canary_latch_writes_one_allowlisted_fsynced_stop_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    latch_type = _task7_interface("_CanaryLatch")
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    trace_path = _canary_trace(tmp_path / "trace.log")
+    _set_canary_environment(
+        monkeypatch,
+        agent=None,
+        stop="consumer.pre",
+        trace=trace_path,
+    )
+    real_write, real_fsync, real_close = os.write, os.fsync, os.close
+    order: list[tuple[str, object]] = []
+    kill_calls: list[tuple[int, signal.Signals]] = []
+    holder: dict[str, object] = {}
+
+    for invalid_count in (0, -1):
+        invalid_path = _canary_trace(tmp_path / f"write-{invalid_count}.log")
+        invalid_closes: list[int] = []
+        invalid_kills: list[tuple[int, signal.Signals]] = []
+        invalid_writes: list[int] = []
+
+        def invalid_write(_fd: int, _value: bytes) -> int:
+            invalid_writes.append(invalid_count)
+            if len(invalid_writes) > 1:
+                raise AssertionError("nonpositive write retried")
+            return invalid_count
+
+        def invalid_close(fd: int) -> None:
+            invalid_closes.append(fd)
+            real_close(fd)
+
+        with monkeypatch.context() as invalid_write_patch:
+            _set_canary_environment(
+                invalid_write_patch,
+                agent=None,
+                stop="consumer.pre",
+                trace=invalid_path,
+            )
+            invalid_write_patch.setattr(
+                durable_ingestion_module.os,
+                "write",
+                invalid_write,
+            )
+            invalid_write_patch.setattr(
+                durable_ingestion_module.os,
+                "close",
+                invalid_close,
+            )
+            invalid_write_patch.setattr(
+                durable_ingestion_module.os,
+                "kill",
+                lambda pid, selected_signal: invalid_kills.append(
+                    (pid, selected_signal)
+                ),
+            )
+            invalid = latch_type.from_environment(storage_root=storage_root)
+            with pytest.raises(ValueError):
+                invalid.offer(
+                    "consumer",
+                    CANARY_BOUNDARIES["consumer"],
+                    "pre",
+                )
+            assert len(invalid_closes) == 1
+            assert invalid_writes == [invalid_count]
+            invalid.close()
+            assert len(invalid_closes) == 1
+        assert invalid_kills == []
+        assert invalid_path.read_bytes() == b""
+
+    def partial_write(fd: int, value: bytes) -> int:
+        count = real_write(fd, value[:7])
+        order.append(("write", count))
+        return count
+
+    def observed_fsync(fd: int) -> None:
+        real_fsync(fd)
+        order.append(("fsync", fd))
+
+    def observed_close(fd: int) -> None:
+        real_close(fd)
+        order.append(("close", fd))
+
+    def observed_kill(pid: int, selected_signal: signal.Signals) -> None:
+        kill_calls.append((pid, selected_signal))
+        order.append(("kill", selected_signal))
+        if len(kill_calls) == 1:
+            selected_latch = holder["latch"]
+            selected_latch.offer(  # type: ignore[union-attr]
+                "consumer",
+                CANARY_BOUNDARIES["consumer"],
+                "pre",
+            )
+            close_count = sum(name == "close" for name, _value in order)
+            selected_latch.close()  # type: ignore[union-attr]
+            assert sum(name == "close" for name, _value in order) == close_count
+
+    monkeypatch.setattr(durable_ingestion_module.os, "write", partial_write)
+    monkeypatch.setattr(durable_ingestion_module.os, "fsync", observed_fsync)
+    monkeypatch.setattr(durable_ingestion_module.os, "close", observed_close)
+    monkeypatch.setattr(durable_ingestion_module.os, "kill", observed_kill)
+    latch = latch_type.from_environment(storage_root=storage_root)
+    holder["latch"] = latch
+
+    latch.offer("consumer", CANARY_BOUNDARIES["consumer"], "pre")
+
+    expected = (
+        f'{{"boundary":"load_or_create_ingestion_consumer","phase":"consumer",'
+        f'"pid":{os.getpid()},"side":"pre"}}\n'
+    ).encode()
+    assert trace_path.read_bytes() == expected
+    assert kill_calls == [(os.getpid(), signal.SIGSTOP)]
+    assert all(name == "write" for name, _value in order[:-3])
+    assert [name for name, _value in order[-3:]] == ["fsync", "close", "kill"]
+    first_order = tuple(order)
+    latch.offer("consumer", CANARY_BOUNDARIES["consumer"], "pre")
+    latch.close()
+    assert tuple(order) == first_order
+    assert trace_path.read_bytes() == expected
+
+    unfired_path = _canary_trace(tmp_path / "unfired.log")
+    _set_canary_environment(
+        monkeypatch,
+        agent=None,
+        stop="bind.post",
+        trace=unfired_path,
+    )
+    unfired = latch_type.from_environment(storage_root=storage_root)
+    close_count = sum(name == "close" for name, _value in order)
+    unfired.close()
+    unfired.close()
+    assert sum(name == "close" for name, _value in order) == close_count + 1
+    assert unfired_path.read_bytes() == b""
+
+
+def test_canary_latch_correlates_only_selected_final_dml_and_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    latch_type = _task7_interface("_CanaryLatch")
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    kills: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(
+        durable_ingestion_module.os,
+        "kill",
+        lambda pid, selected_signal: kills.append((pid, selected_signal)),
+    )
+    all_final_labels = set(CANARY_TRANSITIONS.values())
+
+    for phase, final_label in CANARY_TRANSITIONS.items():
+        for side in ("pre", "post"):
+            trace_path = _canary_trace(tmp_path / f"{phase}-{side}.log")
+            if side == "post":
+                unrelated_labels = (
+                    "meta_revision_epoch_cas",
+                    "delivery_work_delete",
+                    *sorted(all_final_labels - {final_label}),
+                )
+                for index, unrelated_label in enumerate(unrelated_labels):
+                    probe_path = _canary_trace(
+                        tmp_path / f"{phase}-post-unrelated-{index}.log"
+                    )
+                    _set_canary_environment(
+                        monkeypatch,
+                        agent=None,
+                        stop=f"{phase}.post",
+                        trace=probe_path,
+                    )
+                    probe = latch_type.from_environment(storage_root=storage_root)
+                    probe.transition(unrelated_label)
+                    probe.transition("before_commit")
+                    probe.transition("commit")
+                    assert probe_path.read_bytes() == b""
+                    probe.close()
+            _set_canary_environment(
+                monkeypatch,
+                agent=None,
+                stop=f"{phase}.{side}",
+                trace=trace_path,
+            )
+            latch = latch_type.from_environment(storage_root=storage_root)
+            ignored = ["commit", "before_commit"]
+            if side == "pre":
+                ignored.extend(
+                    (
+                        "meta_revision_epoch_cas",
+                        "delivery_work_delete",
+                        *sorted(all_final_labels - {final_label}),
+                    )
+                )
+            for label in ignored:
+                latch.transition(label)
+            assert trace_path.read_bytes() == b""
+            before_kills = len(kills)
+
+            latch.transition(final_label)
+            if side == "post":
+                assert trace_path.read_bytes() == b""
+                for unrelated_label in (
+                    "meta_revision_epoch_cas",
+                    "delivery_work_delete",
+                    *sorted(all_final_labels - {final_label}),
+                ):
+                    latch.transition(unrelated_label)
+                latch.transition("before_commit")
+                assert trace_path.read_bytes() == b""
+                latch.transition("commit")
+
+            assert json.loads(trace_path.read_bytes()) == {
+                "boundary": CANARY_BOUNDARIES[phase],
+                "phase": phase,
+                "pid": os.getpid(),
+                "side": side,
+            }
+            assert kills[before_kills:] == [(os.getpid(), signal.SIGSTOP)]
+            frozen = trace_path.read_bytes()
+            latch.transition("commit")
+            latch.transition(final_label)
+            latch.close()
+            assert trace_path.read_bytes() == frozen
+
+
+@pytest.mark.asyncio
+async def test_latched_admission_brackets_only_the_real_committed_view(
+    tmp_path: Path,
+) -> None:
+    latched_type = _task7_interface("_LatchedAdmission")
+    store = EventJournalStore.open_sqlite(tmp_path / "latched-admission.db")
+    try:
+        await _bound_principal(store)
+        inside_transaction = threading.Event()
+        release_transaction = threading.Event()
+
+        def hold_receipt() -> None:
+            inside_transaction.set()
+            assert release_transaction.wait(20), "latched admission never released"
+
+        principal = EventJournalStore(
+            backend=_ObservedBackend(
+                store.backend,
+                lambda transaction: _ObservedTransaction(
+                    transaction,
+                    statement_matches=lambda sql: (
+                        "INSERT INTO matrix_ingestion_receipts" in sql
+                    ),
+                    after_statement=hold_receipt,
+                ),
+            )
+        ).principal(ACCOUNT_ID)
+        recorder = _LatchRecorder()
+        view = latched_type(principal, recorder)
+        admitting = asyncio.create_task(
+            view.admit_ingestion_batch(_expected_admission())
+        )
+        try:
+            assert await asyncio.to_thread(inside_transaction.wait, 20)
+            assert recorder.offers == [
+                ("admission", CANARY_BOUNDARIES["admission"], "pre")
+            ]
+            assert not admitting.done()
+            assert await _graph(store) == _old_graph()
+        finally:
+            release_transaction.set()
+            with suppress(BaseException):
+                await _task7_bounded(admitting)
+
+        assert admitting.result() is AdmissionResult.ADMITTED
+        assert recorder.offers == [
+            ("admission", CANARY_BOUNDARIES["admission"], "pre"),
+            ("admission", CANARY_BOUNDARIES["admission"], "post"),
+        ]
+        assert await _graph(store) == _fresh_graph()
+
+        duplicate_recorder = _LatchRecorder()
+        duplicate = latched_type(
+            _AdapterAdmission(result=AdmissionResult.DUPLICATE),
+            duplicate_recorder,
+        )
+        duplicate_result = await duplicate.admit_ingestion_batch(_expected_admission())
+        assert duplicate_result is AdmissionResult.DUPLICATE
+        assert duplicate_recorder.offers == [
+            ("admission", CANARY_BOUNDARIES["admission"], "pre"),
+            ("admission", CANARY_BOUNDARIES["admission"], "post"),
+        ]
+
+        error = _RunnerFailure("admission failed")
+        failing_recorder = _LatchRecorder()
+        failing = latched_type(_AdapterAdmission(error=error), failing_recorder)
+        with pytest.raises(_RunnerFailure) as raised:
+            await failing.admit_ingestion_batch(_expected_admission())
+        assert raised.value is error
+        assert failing_recorder.offers == [
+            ("admission", CANARY_BOUNDARIES["admission"], "pre")
+        ]
+
+        entered, release = asyncio.Event(), asyncio.Event()
+        cancelled_recorder = _LatchRecorder()
+        cancellable = latched_type(
+            _AdapterAdmission(entered=entered, release=release),
+            cancelled_recorder,
+        )
+        cancelling = asyncio.create_task(
+            cancellable.admit_ingestion_batch(_expected_admission())
+        )
+        await _task7_bounded(entered.wait())
+        cancelling.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await _task7_bounded(cancelling)
+        assert cancelled_recorder.offers == [
+            ("admission", CANARY_BOUNDARIES["admission"], "pre")
+        ]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_durable_runner_uses_exact_handshake_and_one_record_task6_pump(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _task7_interface("run_durable_ingestion")
+    latch_type = _task7_interface("_CanaryLatch")
+    session_block = asyncio.Event()
+    pump_error = _RunnerFailure("focused pump complete")
+
+    async def run_body() -> None:
+        await session_block.wait()
+
+    admitted_batch, duplicate_batch = _batch(), _batch()
+    harness = _install_runner_harness(
+        monkeypatch,
+        tmp_path / "storage",
+        run_body=run_body,
+        batches=[None, admitted_batch, duplicate_batch],
+        batch_error=pump_error,
+        admission_results=[AdmissionResult.ADMITTED, AdmissionResult.DUPLICATE],
+    )
+    monkeypatch.setenv(
+        "MINDROOM_INGESTION_DATABASE",
+        str(tmp_path / "ignored-database.db"),
+    )
+
+    restart_root = tmp_path / "restart-storage"
+    restart_parent = restart_root / "tracking" / "nio_ingestion"
+    restart_parent.mkdir(parents=True)
+    restart_error = _RunnerFailure("restart reached top-level open")
+
+    async def restart_unused_run() -> None:
+        raise AssertionError("restart session must not be entered")
+
+    with monkeypatch.context() as restart_patch:
+        restart_harness = _install_runner_harness(
+            restart_patch,
+            restart_root,
+            run_body=restart_unused_run,
+            loaded_stream_id=STREAM_ID,
+            open_error=restart_error,
+        )
+        with pytest.raises(_RunnerFailure) as restart_raised:
+            await _task7_bounded(runner(restart_harness.bot))  # type: ignore[arg-type]
+    assert restart_raised.value is restart_error
+    assert restart_parent.is_dir()
+    assert restart_harness.trace == [
+        "journal-principal",
+        ("load-consumer", CANARY_REQUESTED_GENERATION),
+        "open-store",
+        ("bind-stream", CANARY_GENERATION, STREAM_ID),
+        "open-ingestion",
+        "bootstrap-close",
+    ]
+    assert restart_harness.bootstrap.close_calls == 1
+    assert (
+        restart_harness.session.enter_calls == restart_harness.session.exit_calls == 0
+    )
+    assert len(restart_harness.store_calls) == len(restart_harness.ingestion_calls) == 1
+    restart_store_path, restart_store_kwargs = restart_harness.store_calls[0]
+    restart_client, restart_bootstrap, restart_ingestion_kwargs = (
+        restart_harness.ingestion_calls[0]
+    )
+    assert restart_store_path == restart_parent
+    assert restart_store_kwargs["consumer_generation"] == CANARY_GENERATION
+    assert restart_client is restart_harness.bot.client
+    assert restart_bootstrap is restart_harness.bootstrap
+    assert restart_ingestion_kwargs["consumer_generation"] == CANARY_GENERATION
+    assert restart_ingestion_kwargs["stream_id"] == STREAM_ID
+    assert restart_ingestion_kwargs["room_id"] == CANARY_ROOM_ID
+
+    consume_calls: list[tuple[object, object, str, str]] = []
+    latch_offers: list[tuple[str, str, str]] = []
+    latch_instances: list[object] = []
+    call_count = 0
+    real_consume = consume_one_ingestion_batch
+    real_offer = latch_type.offer
+
+    def observed_offer(
+        latch: object,
+        phase: str,
+        boundary: str,
+        side: str,
+    ) -> None:
+        latch_instances.append(latch)
+        latch_offers.append((phase, boundary, side))
+        harness.trace.append(("latch-offer", phase, boundary, side))
+        real_offer(latch, phase, boundary, side)
+
+    async def consume(
+        session: object,
+        admission: object,
+        *,
+        account_id: str,
+        device_id: str,
+    ) -> AdmissionResult | None:
+        nonlocal call_count
+        call_count += 1
+        consume_calls.append((session, admission, account_id, device_id))
+        harness.trace.append(f"task6-call-{call_count}")
+        result = await real_consume(
+            session,  # type: ignore[arg-type]
+            admission,  # type: ignore[arg-type]
+            account_id=account_id,
+            device_id=device_id,
+        )
+        harness.trace.append(("task6-return", call_count, result))
+        return result
+
+    real_sleep = asyncio.sleep
+    sleep_calls: list[float] = []
+
+    async def observed_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+        harness.trace.append(("sleep", delay))
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        durable_ingestion_module,
+        "consume_one_ingestion_batch",
+        consume,
+    )
+    monkeypatch.setattr(latch_type, "offer", observed_offer)
+    monkeypatch.setattr(durable_ingestion_module.asyncio, "sleep", observed_sleep)
+
+    with pytest.raises(ExceptionGroup) as raised:
+        await _task7_bounded(runner(harness.bot))  # type: ignore[arg-type]
+
+    assert _exception_group_contains(raised.value, pump_error)
+    consumer_pre = (
+        "latch-offer",
+        "consumer",
+        CANARY_BOUNDARIES["consumer"],
+        "pre",
+    )
+    consumer_post = (*consumer_pre[:-1], "post")
+    bootstrap_pre = (
+        "latch-offer",
+        "bootstrap",
+        CANARY_BOUNDARIES["bootstrap"],
+        "pre",
+    )
+    bootstrap_post = (*bootstrap_pre[:-1], "post")
+    bind_pre = ("latch-offer", "bind", CANARY_BOUNDARIES["bind"], "pre")
+    bind_post = (*bind_pre[:-1], "post")
+    idle_post = ("latch-offer", "idle", CANARY_BOUNDARIES["idle"], "post")
+    assert (
+        _trace_position(harness.trace, "journal-principal")
+        < _trace_position(harness.trace, consumer_pre)
+        < _trace_position(harness.trace, ("load-consumer", CANARY_REQUESTED_GENERATION))
+        < _trace_position(harness.trace, consumer_post)
+    )
+    assert (
+        _trace_position(harness.trace, bootstrap_pre)
+        < _trace_position(harness.trace, "open-store")
+        < _trace_position(harness.trace, bootstrap_post)
+    )
+    assert (
+        _trace_position(harness.trace, bind_pre)
+        < _trace_position(harness.trace, ("bind-stream", CANARY_GENERATION, STREAM_ID))
+        < _trace_position(harness.trace, bind_post)
+        < _trace_position(harness.trace, "open-ingestion")
+    )
+    assert harness.session.enter_calls == harness.session.exit_calls == 1
+    assert harness.bootstrap.close_calls == 1
+    assert len(harness.store_calls) == len(harness.ingestion_calls) == 1
+    store_path, store_kwargs = harness.store_calls[0]
+    client, bootstrap, ingestion_kwargs = harness.ingestion_calls[0]
+    expected_parent = tmp_path / "storage" / "tracking" / "nio_ingestion"
+    assert store_path == expected_parent
+    assert expected_parent.is_dir()
+    assert set(store_kwargs) == {
+        "account_id",
+        "device_id",
+        "consumer_generation",
+        "source",
+        "database_name",
+        "transition_statement_hook",
+    }
+    assert store_kwargs["account_id"] == ACCOUNT_ID
+    assert store_kwargs["device_id"] == DEVICE_ID
+    assert store_kwargs["consumer_generation"] == CANARY_GENERATION
+    assert type(store_kwargs["source"]) is ClassicSourceConfig
+    assert store_kwargs["source"].filter_json == CANARY_FILTER  # type: ignore[union-attr]
+    assert store_kwargs["database_name"] == f"{CANARY_AGENT_NAME}.db"
+    transition_hook = store_kwargs["transition_statement_hook"]
+    assert callable(transition_hook)
+    assert transition_hook.__self__ is latch_instances[0]  # type: ignore[union-attr]
+    assert transition_hook.__func__ is latch_type.transition  # type: ignore[union-attr]
+    assert client is harness.bot.client
+    assert bootstrap is harness.bootstrap
+    assert set(ingestion_kwargs) == {
+        "config",
+        "consumer_generation",
+        "stream_id",
+        "room_id",
+    }
+    assert type(ingestion_kwargs["config"]) is IngestionConfig
+    assert ingestion_kwargs["config"].source is store_kwargs["source"]  # type: ignore[union-attr]
+    assert ingestion_kwargs["consumer_generation"] == CANARY_GENERATION
+    assert ingestion_kwargs["stream_id"] == STREAM_ID
+    assert ingestion_kwargs["room_id"] == CANARY_ROOM_ID
+    assert len(consume_calls) == 4
+    assert all(call[0] is harness.session for call in consume_calls)
+    assert all(
+        type(call[1]) is durable_ingestion_module._LatchedAdmission
+        for call in consume_calls
+    )
+    assert all(call[2:] == (ACCOUNT_ID, DEVICE_ID) for call in consume_calls)
+    assert harness.session.next_calls == [{"max_records": 1}] * 4
+    assert harness.session.ack_attempts == [
+        admitted_batch.ref,
+        duplicate_batch.ref,
+    ]
+    assert sleep_calls == [0.05]
+    assert harness.bot._journal_dispatcher.wake_calls == 2
+    assert harness.principal.admissions == [
+        _expected_admission(),
+        _expected_admission(),
+    ]
+    assert latch_instances and all(
+        latch is latch_instances[0] for latch in latch_instances
+    )
+    assert latch_offers == [
+        ("consumer", CANARY_BOUNDARIES["consumer"], "pre"),
+        ("consumer", CANARY_BOUNDARIES["consumer"], "post"),
+        ("bootstrap", CANARY_BOUNDARIES["bootstrap"], "pre"),
+        ("bootstrap", CANARY_BOUNDARIES["bootstrap"], "post"),
+        ("bind", CANARY_BOUNDARIES["bind"], "pre"),
+        ("bind", CANARY_BOUNDARIES["bind"], "post"),
+        ("idle", CANARY_BOUNDARIES["idle"], "post"),
+        ("admission", CANARY_BOUNDARIES["admission"], "pre"),
+        ("admission", CANARY_BOUNDARIES["admission"], "post"),
+        ("admission", CANARY_BOUNDARIES["admission"], "pre"),
+        ("admission", CANARY_BOUNDARIES["admission"], "post"),
+    ]
+    assert (
+        _trace_position(harness.trace, ("task6-return", 1, None))
+        < _trace_position(harness.trace, idle_post)
+        < _trace_position(harness.trace, ("sleep", 0.05))
+    )
+    for index, result in enumerate(
+        (AdmissionResult.ADMITTED, AdmissionResult.DUPLICATE),
+        start=1,
+    ):
+        call = index + 1
+        assert _trace_position(
+            harness.trace,
+            ("session-ack", index, harness.session.ack_attempts[index - 1]),
+        ) < _trace_position(harness.trace, ("task6-return", call, result))
+        assert _trace_position(
+            harness.trace, ("task6-return", call, result)
+        ) < _trace_position(harness.trace, ("dispatcher-wake", index))
+    assert "session-run-cancelled" in harness.trace
+
+
+@pytest.mark.asyncio
+async def test_durable_runner_closes_session_when_either_taskgroup_child_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _task7_interface("run_durable_ingestion")
+    real_open, real_close = os.open, os.close
+
+    for failing_child in ("session", "pump"):
+        with monkeypatch.context() as selected:
+            case_root = tmp_path / failing_child
+            storage_root = case_root / "storage"
+            trace_path = _canary_trace(case_root / "trace.log")
+            run_started, pump_started = asyncio.Event(), asyncio.Event()
+            error = _RunnerFailure(f"{failing_child} failed")
+
+            async def run_body() -> None:
+                run_started.set()
+                if failing_child == "session":
+                    await pump_started.wait()
+                    raise error
+                await asyncio.Future()
+
+            harness = _install_runner_harness(
+                selected,
+                storage_root,
+                run_body=run_body,
+                stop="idle.post",
+                trace_path=trace_path,
+            )
+            opened: list[int] = []
+            closed: list[int] = []
+            kill_calls: list[tuple[int, signal.Signals]] = []
+
+            def observed_open(path: object, flags: int, mode: int = 0o777) -> int:
+                fd = real_open(path, flags, mode)
+                opened.append(fd)
+                return fd
+
+            def observed_close(fd: int) -> None:
+                closed.append(fd)
+                harness.trace.append("latch-close")
+                real_close(fd)
+
+            async def consume(
+                _session: object,
+                _admission: object,
+                *,
+                account_id: str,
+                device_id: str,
+            ) -> None:
+                assert (account_id, device_id) == (ACCOUNT_ID, DEVICE_ID)
+                pump_started.set()
+                if failing_child == "pump":
+                    await run_started.wait()
+                    raise error
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    harness.trace.append("pump-cancelled")
+                    raise
+
+            selected.setattr(durable_ingestion_module.os, "open", observed_open)
+            selected.setattr(durable_ingestion_module.os, "close", observed_close)
+            selected.setattr(
+                durable_ingestion_module.os,
+                "kill",
+                lambda pid, selected_signal: kill_calls.append((pid, selected_signal)),
+            )
+            selected.setattr(
+                durable_ingestion_module,
+                "consume_one_ingestion_batch",
+                consume,
+            )
+
+            with pytest.raises(ExceptionGroup) as raised:
+                await _task7_bounded(runner(harness.bot))  # type: ignore[arg-type]
+
+            assert _exception_group_contains(raised.value, error)
+            assert run_started.is_set() and pump_started.is_set()
+            assert harness.session.enter_calls == harness.session.exit_calls == 1
+            assert harness.bootstrap.close_calls == 1
+            assert opened == closed and len(opened) == 1
+            assert kill_calls == []
+            assert trace_path.read_bytes() == b""
+            assert _trace_position(harness.trace, "bootstrap-close") < _trace_position(
+                harness.trace, "latch-close"
+            )
+            assert harness.bot._journal_dispatcher.wake_calls == 0
+            cancelled = (
+                "pump-cancelled"
+                if failing_child == "session"
+                else "session-run-cancelled"
+            )
+            assert cancelled in harness.trace
+
+
+@pytest.mark.asyncio
+async def test_durable_runner_closes_bootstrap_and_latch_when_bind_or_open_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _task7_interface("run_durable_ingestion")
+    latch_type = _task7_interface("_CanaryLatch")
+    real_offer = latch_type.offer
+    real_open, real_write, real_close = os.open, os.write, os.close
+    consumer_pair = [
+        ("consumer", CANARY_BOUNDARIES["consumer"], "pre"),
+        ("consumer", CANARY_BOUNDARIES["consumer"], "post"),
+    ]
+    bootstrap_pair = [
+        ("bootstrap", CANARY_BOUNDARIES["bootstrap"], "pre"),
+        ("bootstrap", CANARY_BOUNDARIES["bootstrap"], "post"),
+    ]
+    bind_pair = [
+        ("bind", CANARY_BOUNDARIES["bind"], "pre"),
+        ("bind", CANARY_BOUNDARIES["bind"], "post"),
+    ]
+    failure_stops = {
+        "mkdir": "consumer.pre",
+        "principal": "consumer.pre",
+        "load": "consumer.post",
+        "store": "bootstrap.post",
+        "bind": "bind.post",
+        "open": "idle.post",
+    }
+
+    for failure_point in (
+        "mkdir",
+        "principal",
+        "load",
+        "store",
+        "bind",
+        "open",
+    ):
+        with monkeypatch.context() as selected:
+            case_root = tmp_path / failure_point
+            trace_path = _canary_trace(case_root / "trace.log")
+            error = _RunnerFailure(f"{failure_point} failed")
+            storage_root = case_root / "storage"
+            expected_parent = storage_root / "tracking" / "nio_ingestion"
+            if failure_point == "mkdir":
+                storage_root.mkdir()
+                (storage_root / "tracking").write_bytes(b"not-a-directory")
+            elif failure_point == "principal":
+                expected_parent.mkdir(parents=True)
+
+            async def unused_run() -> None:
+                raise AssertionError("session must not be entered")
+
+            harness = _install_runner_harness(
+                selected,
+                storage_root,
+                run_body=unused_run,
+                principal_error=error if failure_point == "principal" else None,
+                load_error=error if failure_point == "load" else None,
+                store_error=error if failure_point == "store" else None,
+                bind_error=error if failure_point == "bind" else None,
+                open_error=error if failure_point == "open" else None,
+                stop=failure_stops[failure_point],
+                trace_path=trace_path,
+            )
+            opened: list[int] = []
+            closed: list[int] = []
+            kill_calls: list[tuple[int, signal.Signals]] = []
+            offers: list[tuple[str, str, str]] = []
+            write_calls: list[tuple[int, bytes]] = []
+
+            def observed_open(path: object, flags: int, mode: int = 0o777) -> int:
+                fd = real_open(path, flags, mode)
+                opened.append(fd)
+                return fd
+
+            def observed_close(fd: int) -> None:
+                closed.append(fd)
+                harness.trace.append("latch-close")
+                real_close(fd)
+
+            def observed_write(fd: int, value: bytes) -> int:
+                write_calls.append((fd, value))
+                return real_write(fd, value)
+
+            def observed_offer(
+                latch: object,
+                phase: str,
+                boundary: str,
+                side: str,
+            ) -> None:
+                offers.append((phase, boundary, side))
+                real_offer(latch, phase, boundary, side)
+
+            selected.setattr(durable_ingestion_module.os, "open", observed_open)
+            selected.setattr(durable_ingestion_module.os, "close", observed_close)
+            selected.setattr(durable_ingestion_module.os, "write", observed_write)
+            selected.setattr(latch_type, "offer", observed_offer)
+            selected.setattr(
+                durable_ingestion_module.os,
+                "kill",
+                lambda pid, selected_signal: kill_calls.append((pid, selected_signal)),
+            )
+
+            if failure_point == "mkdir":
+                with pytest.raises(NotADirectoryError) as raised:
+                    await _task7_bounded(runner(harness.bot))  # type: ignore[arg-type]
+                assert Path(raised.value.filename) == expected_parent
+            else:
+                with pytest.raises(_RunnerFailure) as raised:
+                    await _task7_bounded(runner(harness.bot))  # type: ignore[arg-type]
+                assert raised.value is error
+            bootstrap_owned = failure_point in ("bind", "open")
+            assert harness.bootstrap.close_calls == int(bootstrap_owned)
+            assert harness.session.enter_calls == harness.session.exit_calls == 0
+            assert opened == closed and len(opened) == 1
+            assert kill_calls == []
+            assert write_calls == []
+            assert trace_path.read_bytes() == b""
+            if bootstrap_owned:
+                assert _trace_position(
+                    harness.trace, "bootstrap-close"
+                ) < _trace_position(harness.trace, "latch-close")
+            else:
+                assert "bootstrap-close" not in harness.trace
+                assert "latch-close" in harness.trace
+            assert len(harness.store_calls) == int(
+                failure_point not in ("mkdir", "principal", "load")
+            )
+            assert len(harness.ingestion_calls) == int(failure_point == "open")
+            assert harness.principal.admissions == []
+            assert harness.bot._journal_dispatcher.wake_calls == 0
+            expected_offers = {
+                "mkdir": [],
+                "principal": [],
+                "load": [consumer_pair[0]],
+                "store": [*consumer_pair, bootstrap_pair[0]],
+                "bind": [*consumer_pair, *bootstrap_pair, bind_pair[0]],
+                "open": [*consumer_pair, *bootstrap_pair, *bind_pair],
+            }
+            assert offers == expected_offers[failure_point]
+            expected_traces = {
+                "mkdir": ["latch-close"],
+                "principal": ["journal-principal", "latch-close"],
+                "load": [
+                    "journal-principal",
+                    ("load-consumer", CANARY_REQUESTED_GENERATION),
+                    "latch-close",
+                ],
+                "store": [
+                    "journal-principal",
+                    ("load-consumer", CANARY_REQUESTED_GENERATION),
+                    "open-store",
+                    "latch-close",
+                ],
+                "bind": [
+                    "journal-principal",
+                    ("load-consumer", CANARY_REQUESTED_GENERATION),
+                    "open-store",
+                    ("bind-stream", CANARY_GENERATION, STREAM_ID),
+                    "bootstrap-close",
+                    "latch-close",
+                ],
+                "open": [
+                    "journal-principal",
+                    ("load-consumer", CANARY_REQUESTED_GENERATION),
+                    "open-store",
+                    ("bind-stream", CANARY_GENERATION, STREAM_ID),
+                    "open-ingestion",
+                    "bootstrap-close",
+                    "latch-close",
+                ],
+            }
+            assert harness.trace == expected_traces[failure_point]
+
+
+@pytest.mark.asyncio
+async def test_durable_runner_closes_bootstrap_and_latch_when_setup_is_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _task7_interface("run_durable_ingestion")
+    latch_type = _task7_interface("_CanaryLatch")
+    real_offer = latch_type.offer
+    bind_entered, bind_release = asyncio.Event(), asyncio.Event()
+    trace_path = _canary_trace(tmp_path / "trace.log")
+
+    async def unused_run() -> None:
+        raise AssertionError("session must not be entered")
+
+    harness = _install_runner_harness(
+        monkeypatch,
+        tmp_path / "storage",
+        run_body=unused_run,
+        bind_entered=bind_entered,
+        bind_release=bind_release,
+        stop="bind.post",
+        trace_path=trace_path,
+    )
+    real_open, real_close = os.open, os.close
+    opened: list[int] = []
+    closed: list[int] = []
+    kill_calls: list[tuple[int, signal.Signals]] = []
+    offers: list[tuple[str, str, str]] = []
+
+    def observed_open(path: object, flags: int, mode: int = 0o777) -> int:
+        fd = real_open(path, flags, mode)
+        opened.append(fd)
+        return fd
+
+    def observed_close(fd: int) -> None:
+        closed.append(fd)
+        harness.trace.append("latch-close")
+        real_close(fd)
+
+    def observed_offer(
+        latch: object,
+        phase: str,
+        boundary: str,
+        side: str,
+    ) -> None:
+        offers.append((phase, boundary, side))
+        real_offer(latch, phase, boundary, side)
+
+    monkeypatch.setattr(durable_ingestion_module.os, "open", observed_open)
+    monkeypatch.setattr(durable_ingestion_module.os, "close", observed_close)
+    monkeypatch.setattr(latch_type, "offer", observed_offer)
+    monkeypatch.setattr(
+        durable_ingestion_module.os,
+        "kill",
+        lambda pid, selected_signal: kill_calls.append((pid, selected_signal)),
+    )
+    running = asyncio.create_task(runner(harness.bot))  # type: ignore[arg-type]
+    await _task7_bounded(bind_entered.wait())
+    running.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await _task7_bounded(running)
+    assert harness.bootstrap.close_calls == 1
+    assert harness.session.enter_calls == harness.session.exit_calls == 0
+    assert harness.ingestion_calls == []
+    assert "bind-cancelled" in harness.trace
+    assert opened == closed and len(opened) == 1
+    assert kill_calls == []
+    assert offers == [
+        ("consumer", CANARY_BOUNDARIES["consumer"], "pre"),
+        ("consumer", CANARY_BOUNDARIES["consumer"], "post"),
+        ("bootstrap", CANARY_BOUNDARIES["bootstrap"], "pre"),
+        ("bootstrap", CANARY_BOUNDARIES["bootstrap"], "post"),
+        ("bind", CANARY_BOUNDARIES["bind"], "pre"),
+    ]
+    assert trace_path.read_bytes() == b""
+    assert _trace_position(harness.trace, "bootstrap-close") < _trace_position(
+        harness.trace, "latch-close"
+    )
