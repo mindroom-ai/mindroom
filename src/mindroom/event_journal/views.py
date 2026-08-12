@@ -201,16 +201,25 @@ class HydrationView(Protocol):
         """Return one room's current history-recovery obligation, if any."""
         ...
 
-    async def settle_room_history_recovery(
+    async def install_room_history_recovery_chunk(
         self,
         recovery: RoomHistoryRecovery,
         *,
         events: tuple[ProjectedEvent, ...],
+        expected_membership_epoch: int,
+    ) -> bool:
+        """Project one bounded recovery chunk only while both fences match."""
+        ...
+
+    async def settle_room_history_recovery(
+        self,
+        recovery: RoomHistoryRecovery,
+        *,
         exhausted_server: bool,
         attempted_policy_rank: int,
         expected_membership_epoch: int,
     ) -> HistoryRecoveryOutcome:
-        """Install a recovery in chunks, then publish and settle atomically."""
+        """Publish an installed recovery and settle its exact obligation."""
         ...
 
     async def conversation_is_hydrated(self, *, room_id: str, thread_id: str | None) -> bool:
