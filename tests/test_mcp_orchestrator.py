@@ -232,7 +232,7 @@ def test_external_trigger_runtime_binds_router_with_live_readiness_gate(tmp_path
     router_bot.agent_name = ROUTER_AGENT_NAME
     router_bot.running = True
     router_bot.client = object()
-    router_bot._conversation_cache = object()
+    router_bot._conversation_reader = object()
 
     target_bot = MagicMock(spec=AgentBot)
     target_bot.agent_name = "code"
@@ -248,7 +248,7 @@ def test_external_trigger_runtime_binds_router_with_live_readiness_gate(tmp_path
 
     mock_bind.assert_called_once()
     assert mock_bind.call_args.kwargs["client"] is router_bot.client
-    assert mock_bind.call_args.kwargs["conversation_cache"] is router_bot._conversation_cache
+    assert mock_bind.call_args.kwargs["conversation_reader"] is router_bot._conversation_reader
     assert callable(mock_bind.call_args.kwargs["is_trigger_snapshot_ready"])
 
 
@@ -391,7 +391,6 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_activate_hook_registry"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app", return_value=True),
         patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
@@ -428,7 +427,7 @@ async def test_trigger_support_only_reload_publishes_api_config_before_binding_r
     router_bot.agent_name = ROUTER_AGENT_NAME
     router_bot.running = True
     router_bot.client = object()
-    router_bot._conversation_cache = object()
+    router_bot._conversation_reader = object()
     target_bot = MagicMock(spec=AgentBot)
     target_bot.agent_name = "code"
     target_bot.running = True
@@ -451,7 +450,6 @@ async def test_trigger_support_only_reload_publishes_api_config_before_binding_r
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_activate_hook_registry"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
@@ -522,7 +520,6 @@ async def test_trigger_support_only_reload_unbinds_and_raises_when_api_publish_f
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_activate_hook_registry"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app", return_value=False),
         patch.object(orchestrator._external_trigger_runtime, "unbind") as mock_unbind_runtime,
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as mock_bind_runtime,
@@ -690,7 +687,7 @@ async def test_mcp_catalog_replacement_recovers_interrupted_rooms(tmp_path: Path
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
     router_bot.client = MagicMock()
-    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    router_bot.recover_pending_turn_journal_events = AsyncMock()
     orchestrator._external_trigger_runtime.api_enabled = False
     orchestrator.agent_bots = {
         ROUTER_AGENT_NAME: router_bot,
@@ -793,7 +790,7 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
     router_bot.first_sync_complete = True
-    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    router_bot.recover_pending_turn_journal_events = AsyncMock()
     code_bot = MagicMock(spec=AgentBot)
     code_bot.running = False
     code_bot.first_sync_complete = False
@@ -1138,7 +1135,7 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
     router_bot.first_sync_complete = True
-    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    router_bot.recover_pending_turn_journal_events = AsyncMock()
     code_bot = MagicMock(spec=AgentBot)
     code_bot.running = False
     code_bot.first_sync_complete = False
@@ -1174,7 +1171,6 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_activate_hook_registry"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app", return_value=True),
         patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime),
@@ -1233,7 +1229,7 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
     router_bot.first_sync_complete = True
-    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    router_bot.recover_pending_turn_journal_events = AsyncMock()
     code_bot = MagicMock(spec=AgentBot)
     code_bot.running = False
     code_bot.first_sync_complete = False
@@ -1279,7 +1275,6 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_activate_hook_registry"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app", return_value=True),
         patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "unbind"),
@@ -1425,7 +1420,6 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
         patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
         patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=fake_stop_entities)),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(side_effect=fake_sync_mcp_manager)),
-        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch.object(
             orchestrator,
             "_restart_changed_entities",

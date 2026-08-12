@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -43,8 +42,7 @@ class UserStopReconciler:
         *,
         delivery_settled: bool = False,
     ) -> TurnRecord:
-        stopped = await asyncio.to_thread(
-            self.deps.turn_store.record_user_stopped_response,
+        stopped = await self.deps.turn_store.record_user_stopped_response(
             response_event_id,
             stop_receipt_order,
             delivery_settled=delivery_settled,

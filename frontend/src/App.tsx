@@ -167,6 +167,7 @@ function AppContent() {
     syncStatus,
     diagnostics,
     configUsesIncludes,
+    configJournalPendingRestart,
     isLoading,
     selectedAgentId,
     selectedTeamId,
@@ -277,8 +278,7 @@ function AppContent() {
 
   const getPlatformUrl = () => {
     const configured = (import.meta as any).env?.VITE_PLATFORM_URL as
-      | string
-      | undefined;
+      string | undefined;
     if (configured && configured.length > 0) return configured;
     if (typeof window !== "undefined") {
       const host = window.location.host;
@@ -518,6 +518,17 @@ function AppContent() {
             <code>!include</code>. The backend rejects structured saves from the
             dashboard editors — make changes by editing the include source files
             directly.
+          </div>
+        )}
+
+        {configJournalPendingRestart && (
+          <div className="border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-100 sm:px-6">
+            The saved <code>event_journal</code> names a different database from
+            the one this process has open. It is read once, when the store is
+            opened, so the change takes effect at the next restart — and
+            MindRoom refuses to start against a journal it is not bound to, so
+            run <code>mindroom journal adopt</code> first if the move is
+            deliberate.
           </div>
         )}
 

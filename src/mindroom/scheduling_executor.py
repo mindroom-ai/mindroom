@@ -21,7 +21,7 @@ from mindroom.hooks import (
     build_hook_room_state_putter,
     build_hook_room_state_querier,
     emit,
-    send_and_track_message,
+    send_matrix_message,
 )
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.scheduling import ScheduledWorkflow
 
 logger = get_logger(__name__)
@@ -68,7 +68,7 @@ async def _build_workflow_message_content(
     config: Config,
     runtime_paths: RuntimePaths,
     message_text: str,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
 ) -> dict[str, typing.Any]:
     """Build Matrix message content for a scheduled workflow."""
     if workflow.new_thread:
@@ -84,10 +84,9 @@ async def _build_workflow_message_content(
     assert workflow.room_id is not None  # Caller checks this
     latest_thread_event_id = None
     if target.resolved_thread_id is not None:
-        latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
-            workflow.room_id,
-            target.resolved_thread_id,
-            caller_label="scheduled_workflow_message",
+        latest_thread_event_id = await conversation_reader.latest_thread_event_id(
+            room_id=workflow.room_id,
+            thread_id=target.resolved_thread_id,
         )
     return format_message_with_mentions(
         config,
@@ -102,16 +101,15 @@ async def _build_scheduled_failure_content(
     workflow: ScheduledWorkflow,
     target: MessageTarget,
     error_message: str,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
 ) -> dict[str, typing.Any]:
     """Build a failure message that follows the scheduled workflow target."""
     latest_thread_event_id = None
     if target.resolved_thread_id is not None:
         assert workflow.room_id is not None
-        latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
-            workflow.room_id,
-            target.resolved_thread_id,
-            caller_label="scheduled_workflow_failure",
+        latest_thread_event_id = await conversation_reader.latest_thread_event_id(
+            room_id=workflow.room_id,
+            thread_id=target.resolved_thread_id,
         )
     return build_message_content(
         body=error_message,
@@ -125,7 +123,7 @@ async def send_scheduled_failure_notice(
     workflow: ScheduledWorkflow,
     target: MessageTarget,
     error_message: str,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
 ) -> None:
     """Send a visible failure notice that follows the scheduled workflow target."""
     assert workflow.room_id is not None  # Callers guard on room_id before notifying
@@ -133,9 +131,9 @@ async def send_scheduled_failure_notice(
         workflow,
         target,
         error_message,
-        conversation_cache,
+        conversation_reader,
     )
-    await send_and_track_message(client, workflow.room_id, error_content, conversation_cache)
+    await send_matrix_message(client, workflow.room_id, error_content)
 
 
 async def _notify_scheduled_workflow_failure(
@@ -143,7 +141,7 @@ async def _notify_scheduled_workflow_failure(
     workflow: ScheduledWorkflow,
     target: MessageTarget,
     error: Exception,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
 ) -> None:
     """Send the visible failure notice for one scheduled workflow when possible."""
     if not workflow.room_id:
@@ -153,10 +151,10 @@ async def _notify_scheduled_workflow_failure(
         workflow,
         target,
         error_message,
-        conversation_cache,
+        conversation_reader,
     )
     try:
-        await send_and_track_message(client, workflow.room_id, error_content, conversation_cache)
+        await send_matrix_message(client, workflow.room_id, error_content)
     except Exception:
         logger.exception("Failed to send scheduled workflow failure message")
 
@@ -166,7 +164,7 @@ async def execute_scheduled_workflow(
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     task_id: str = "scheduled-task",
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> ScheduledWorkflowOutcome:
@@ -195,7 +193,7 @@ async def execute_scheduled_workflow(
                         client,
                         config,
                         runtime_paths,
-                        conversation_cache=conversation_cache,
+                        conversation_reader=conversation_reader,
                     ),
                     matrix_admin=matrix_admin,
                     room_state_querier=build_hook_room_state_querier(client),
@@ -219,7 +217,7 @@ async def execute_scheduled_workflow(
                 config,
                 runtime_paths,
                 message_text,
-                conversation_cache,
+                conversation_reader,
             )
             if workflow.created_by:
                 content[ORIGINAL_SENDER_KEY] = workflow.created_by
@@ -228,7 +226,7 @@ async def execute_scheduled_workflow(
                 content[PER_FIRE_THREAD_ROOT_KEY] = True
             if workflow.history_limit is not None:
                 content[SCHEDULED_HISTORY_LIMIT_KEY] = workflow.history_limit
-            delivered = await send_and_track_message(client, workflow.room_id, content, conversation_cache)
+            delivered = await send_matrix_message(client, workflow.room_id, content)
             if delivered is None:
                 _raise_scheduled_workflow_send_error()
             logger.info(
@@ -245,7 +243,7 @@ async def execute_scheduled_workflow(
                 workflow,
                 target,
                 e,
-                conversation_cache,
+                conversation_reader,
             )
             return ScheduledWorkflowOutcome(delivered=False, failure_reason=str(e))
         else:

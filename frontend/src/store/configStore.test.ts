@@ -64,6 +64,7 @@ describe("configStore", () => {
       diagnostics: [],
       syncStatus: "disconnected",
       configUsesIncludes: false,
+      configJournalPendingRestart: false,
       privateWorkerScopeBackups: {},
     });
 
@@ -145,6 +146,33 @@ describe("configStore", () => {
       await useConfigStore.getState().loadConfig();
 
       expect(useConfigStore.getState().configUsesIncludes).toBe(true);
+    });
+
+    it("records when the saved event journal only takes effect after a restart", async () => {
+      // The backend accepts the edit and keeps using the store it opened at
+      // startup, so the editor showing the saved value without saying so would
+      // be reporting a database nothing is writing to.
+      const mockConfig = {
+        agents: {},
+        models: { default: { provider: "ollama", id: "test-model" } },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+        headers: {
+          get: (name: string) =>
+            name === "x-mindroom-config-pending-restart" ? "true" : null,
+        },
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: {} }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+
+      expect(useConfigStore.getState().configJournalPendingRestart).toBe(true);
     });
 
     it("uses the room id fallback for blank authored room display names", async () => {

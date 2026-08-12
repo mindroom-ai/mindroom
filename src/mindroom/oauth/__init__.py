@@ -1,5 +1,6 @@
 """Generic OAuth provider framework."""
 
+from mindroom.oauth.discovery import OAuthDiscoveryConfig, oauth_runtime_bootstrapper
 from mindroom.oauth.providers import (
     OAuthClaimValidationError,
     OAuthClientConfigResolution,
@@ -13,9 +14,11 @@ from mindroom.oauth.providers import (
 __all__ = [
     "OAuthClaimValidationError",
     "OAuthClientConfigResolution",
+    "OAuthDiscoveryConfig",
     "OAuthProvider",
     "OAuthProviderError",
     "OAuthRefreshRejectedError",
     "is_oauth_loopback_hostname",
     "oauth_connect_url_requires_host_browser",
+    "oauth_runtime_bootstrapper",
 ]

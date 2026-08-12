@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import nio
+
 if TYPE_CHECKING:
-    import nio
+    from collections.abc import Iterable
 
     from mindroom.config.main import Config
+
+# The memberships that end this account's stay in a room.
+_DEPARTED_MEMBERSHIPS = frozenset({"leave", "ban"})
 
 _SLIDING_SYNC_REQUIRED_STATE: tuple[tuple[str, str], ...] = (
     ("m.room.create", ""),
@@ -52,23 +58,97 @@ def _sliding_sync_extensions() -> dict[str, object]:
     }
 
 
-def sliding_own_membership_sets(response: nio.SlidingSyncResponse) -> tuple[set[str], set[str]]:
-    """Return this account's (joined, departed) room-id sets from one sliding sync response.
+@dataclass(frozen=True, slots=True)
+class OwnRoomMembership:
+    """What one sync response says about this account's own room memberships.
 
-    nio applies sliding rooms to client state but, like classic /v3/sync, never
-    surfaces the account's own departures, so kicks and bans must be read from
-    the per-room membership here.
+    ``departures`` is one entry per departure the response shows, not a set of
+    rooms that departed. The two differ whenever an account leaves, comes back
+    and leaves again inside one sync interval, and the difference matters
+    because the fence's bookkeeping is per departure: a local leave records
+    that it is owed one sync report, and a room id offered once can only ever
+    be read as that report. The second departure is then absorbed rather than
+    fenced, and everything the membership between them built survives into a
+    membership that has no right to it.
+    """
+
+    joined_room_ids: frozenset[str]
+    left_room_ids: frozenset[str]
+    departures: tuple[str, ...]
+
+    @property
+    def departed_room_ids(self) -> frozenset[str]:
+        """Return the rooms this response reported at least one departure from."""
+        return frozenset(self.departures)
+
+
+def own_membership_from_sync(response: nio.SyncResponse, *, self_user_id: str) -> OwnRoomMembership:
+    """Return this account's own membership transitions from one /sync response.
+
+    nio applies the room sections to client state but never surfaces the
+    account's own departures, so they are read here: from the leave section,
+    and from the timeline of rooms whose membership at the end of the response
+    is join because the account came back before it ended.
+    """
+    left_room_ids = frozenset(response.rooms.leave)
+    departures: list[str] = []
+    for room_id, room_info in (*response.rooms.join.items(), *response.rooms.leave.items()):
+        observed = _own_departures_in(room_info.timeline.events, self_user_id)
+        # A room in the leave section departed whether or not the timeline it
+        # arrived with is long enough to show the transition.
+        departures.extend([room_id] * max(observed, 1 if room_id in left_room_ids else 0))
+    return OwnRoomMembership(
+        joined_room_ids=frozenset(response.rooms.join),
+        left_room_ids=left_room_ids,
+        departures=tuple(departures),
+    )
+
+
+def own_membership_from_sliding_sync(
+    response: nio.SlidingSyncResponse,
+    *,
+    self_user_id: str,
+) -> OwnRoomMembership:
+    """Return this account's own membership transitions from one sliding sync response.
+
+    Same reading as classic /v3/sync, from the shape sliding sync uses: the
+    room's own membership rather than which section it arrived in.
     """
     joined_room_ids: set[str] = set()
-    departed_room_ids: set[str] = set()
+    left_room_ids: set[str] = set()
+    departures: list[str] = []
     for room_id, room in response.rooms.items():
-        if room.membership in ("leave", "ban"):
-            departed_room_ids.add(room_id)
+        observed = _own_departures_in(room.timeline, self_user_id)
+        if room.membership in _DEPARTED_MEMBERSHIPS:
+            left_room_ids.add(room_id)
+            departures.extend([room_id] * max(observed, 1))
             continue
         is_invite = room.membership == "invite" or (room.membership is None and bool(room.stripped_state))
         if not is_invite:
             joined_room_ids.add(room_id)
-    return joined_room_ids, departed_room_ids
+        departures.extend([room_id] * observed)
+    return OwnRoomMembership(
+        joined_room_ids=frozenset(joined_room_ids),
+        left_room_ids=frozenset(left_room_ids),
+        departures=tuple(departures),
+    )
+
+
+def _own_departures_in(events: Iterable[object], self_user_id: str) -> int:
+    """Return how many distinct departures of this account one timeline shows.
+
+    Counted by event, because one timeline can carry two of them and a repeat
+    delivery can carry the same one twice.
+    """
+    return len(
+        {
+            event.event_id
+            for event in events
+            if isinstance(event, nio.RoomMemberEvent)
+            and event.state_key == self_user_id
+            and event.membership in _DEPARTED_MEMBERSHIPS
+        },
+    )
 
 
 async def run_matrix_sync_forever(

@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -13,35 +12,38 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.attachment_helpers import resolve_canonical_tool_thread_target
-from mindroom.matrix import thread_bookkeeping
-from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_bookkeeping import (
-    MutationThreadImpact,
-    MutationThreadImpactState,
-    ThreadMutationResolver,
-    resolve_event_thread_impact_for_client,
-    resolve_redaction_thread_impact_for_client,
-)
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DEGRADED,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
 )
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadResolution,
     ThreadResolutionState,
-    ThreadRootProof,
+    _page_event_info_counts_as_thread_child_proof,
+    _ThreadRootProof,
     map_backed_thread_membership_access,
-    page_event_info_counts_as_thread_child_proof,
     resolve_event_thread_membership,
     resolve_related_event_thread_membership,
     thread_messages_thread_membership_access,
 )
+from mindroom.matrix.thread_mutation_impact import (
+    MutationThreadImpactState,
+    resolve_event_thread_impact_for_client,
+    resolve_redaction_thread_impact_for_client,
+)
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 
 def _message_event_info(content: dict[str, object]) -> EventInfo:
@@ -54,7 +56,7 @@ def _message_event_info(content: dict[str, object]) -> EventInfo:
 
 
 def test_page_event_info_counts_as_thread_child_proof_preserves_thread_semantics() -> None:
-    """Page-local root proof should count only non-root children of the candidate thread."""
+    """Page-local root proof counts only non-root children carrying a native thread relation."""
     thread_root_id = "$thread-root:localhost"
     explicit_child = _message_event_info(
         {
@@ -118,27 +120,31 @@ def test_page_event_info_counts_as_thread_child_proof_preserves_thread_semantics
         },
     )
 
-    assert page_event_info_counts_as_thread_child_proof(
+    assert _page_event_info_counts_as_thread_child_proof(
         thread_root_id,
         event_id="$reply:localhost",
         event_info=explicit_child,
     )
-    assert page_event_info_counts_as_thread_child_proof(
+    # An edit naming the candidate inside its ``m.new_content`` proves nothing about it. That
+    # relation is ignored when the replacement is applied, and the edit is placed by the event it
+    # replaces - which is `$reply:localhost`, not the candidate. Counting it would let one
+    # replacement promote any relation-free message in the page into a thread root.
+    assert not _page_event_info_counts_as_thread_child_proof(
         thread_root_id,
         event_id="$reply-edit:localhost",
         event_info=edit_child,
     )
-    assert not page_event_info_counts_as_thread_child_proof(
+    assert not _page_event_info_counts_as_thread_child_proof(
         thread_root_id,
         event_id=thread_root_id,
         event_info=root_info,
     )
-    assert not page_event_info_counts_as_thread_child_proof(
+    assert not _page_event_info_counts_as_thread_child_proof(
         thread_root_id,
         event_id="$other-reply:localhost",
         event_info=unrelated,
     )
-    assert not page_event_info_counts_as_thread_child_proof(
+    assert not _page_event_info_counts_as_thread_child_proof(
         thread_root_id,
         event_id="$sticker:localhost",
         event_info=sticker_child,
@@ -166,8 +172,8 @@ def _tool_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=AsyncMock(),
-        event_cache=make_event_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
         room=None,
         storage_path=runtime_root,
     )
@@ -212,7 +218,7 @@ async def test_resolve_event_thread_membership_promotes_plain_reply_transitively
         ),
     )
 
-    assert resolution == ThreadResolution.threaded("$thread-root:localhost")
+    assert resolution == ThreadResolution._threaded("$thread-root:localhost")
 
 
 @pytest.mark.asyncio
@@ -248,7 +254,7 @@ async def test_resolve_event_thread_membership_proves_current_root_when_allowed(
         ),
     )
 
-    assert resolution == ThreadResolution.threaded("$thread-root:localhost")
+    assert resolution == ThreadResolution._threaded("$thread-root:localhost")
 
 
 @pytest.mark.asyncio
@@ -279,7 +285,7 @@ async def test_resolve_related_event_thread_membership_terminates_on_relation_cy
         fetched_event_ids.append(event_id)
         return event_infos[event_id]
 
-    async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
+    async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
         msg = "events with relations can never become thread roots"
         raise AssertionError(msg)
 
@@ -335,38 +341,10 @@ async def test_thread_root_proof_from_degraded_history_is_indeterminate() -> Non
 
 
 @pytest.mark.asyncio
-async def test_thread_bookkeeping_removes_boolean_wrapper_entrypoints() -> None:
-    """Thread bookkeeping should expose only the shared impact API entrypoints."""
-    assert "event_requires_thread_bookkeeping" not in vars(thread_bookkeeping)
-    assert "redaction_requires_thread_bookkeeping" not in vars(thread_bookkeeping)
-
-
-@pytest.mark.asyncio
 async def test_resolve_event_thread_impact_for_client_returns_threaded_impact() -> None:
     """Client-side message classification should expose the canonical threaded impact, not only a bool."""
     client = AsyncMock()
-    conversation_cache = AsyncMock()
-    conversation_cache.get_thread_id_for_event.side_effect = lambda room_id, event_id: (
-        "$thread-root:localhost" if (room_id, event_id) == ("!room:localhost", "$thread-reply:localhost") else None
-    )
-    conversation_cache.get_event.return_value = nio.RoomGetEventResponse.from_dict(
-        {
-            "event_id": "$thread-reply:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-            "content": {
-                "body": "thread reply",
-                "msgtype": "m.text",
-                "m.relates_to": {
-                    "event_id": "$thread-root:localhost",
-                    "rel_type": "m.thread",
-                },
-            },
-        },
-    )
-
+    relations = make_relation_lookup(threads={"$thread-reply:localhost": "$thread-root:localhost"})
     impact = await resolve_event_thread_impact_for_client(
         client,
         "!room:localhost",
@@ -376,10 +354,10 @@ async def test_resolve_event_thread_impact_for_client_returns_threaded_impact() 
             "msgtype": "m.text",
             "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
         },
-        conversation_cache=conversation_cache,
+        relations=relations,
     )
 
-    assert impact == MutationThreadImpact.threaded("$thread-root:localhost")
+    assert impact is MutationThreadImpactState.THREADED
 
 
 @pytest.mark.parametrize(
@@ -395,25 +373,27 @@ async def test_resolve_event_thread_impact_for_client_rejects_non_message_ancest
 ) -> None:
     """Client-side reply and reference walks must enforce the conversation-family boundary."""
     client = AsyncMock()
-    conversation_cache = AsyncMock()
-    conversation_cache.get_thread_id_for_event.return_value = None
-    conversation_cache.get_event.return_value = nio.RoomGetEventResponse.from_dict(
-        {
-            "event_id": "$sticker:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.sticker",
-            "content": {
-                "body": "sticker",
-                "m.relates_to": {
-                    "event_id": "$thread-root:localhost",
-                    "rel_type": "m.thread",
+    relations_client = MagicMock()
+    relations_client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "event_id": "$sticker:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": "!room:localhost",
+                "type": "m.sticker",
+                "content": {
+                    "body": "sticker",
+                    "m.relates_to": {
+                        "event_id": "$thread-root:localhost",
+                        "rel_type": "m.thread",
+                    },
+                    "url": "mxc://localhost/sticker",
                 },
-                "url": "mxc://localhost/sticker",
             },
-        },
+        ),
     )
+    relations = make_relation_lookup(client=relations_client)
 
     impact = await resolve_event_thread_impact_for_client(
         client,
@@ -424,20 +404,19 @@ async def test_resolve_event_thread_impact_for_client_rejects_non_message_ancest
             "msgtype": "m.text",
             "m.relates_to": relation,
         },
-        conversation_cache=conversation_cache,
+        relations=relations,
     )
 
-    assert impact.state is MutationThreadImpactState.UNKNOWN
-    assert impact.thread_id is None
+    assert impact is MutationThreadImpactState.UNKNOWN
 
 
 @pytest.mark.asyncio
 async def test_resolve_event_thread_impact_for_client_preserves_unknown_lookup_failures() -> None:
     """Lookup failures must stay explicit in the authoritative impact API."""
     client = AsyncMock()
-    conversation_cache = AsyncMock()
-    conversation_cache.get_thread_id_for_event.return_value = None
-    conversation_cache.get_event.side_effect = RuntimeError("boom")
+    relations_client = MagicMock()
+    relations_client.room_get_event = AsyncMock(side_effect=RuntimeError("boom"))
+    relations = make_relation_lookup(client=relations_client)
 
     impact = await resolve_event_thread_impact_for_client(
         client,
@@ -448,129 +427,45 @@ async def test_resolve_event_thread_impact_for_client_preserves_unknown_lookup_f
             "msgtype": "m.text",
             "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
         },
-        conversation_cache=conversation_cache,
+        relations=relations,
     )
 
-    assert impact.state is MutationThreadImpactState.UNKNOWN
-    assert impact.thread_id is None
+    assert impact is MutationThreadImpactState.UNKNOWN
 
 
 @pytest.mark.asyncio
 async def test_resolve_redaction_thread_impact_for_client_returns_room_level_for_reactions() -> None:
     """Client-side redaction classification should expose room-level reaction handling directly."""
     client = AsyncMock()
-    conversation_cache = AsyncMock()
-    conversation_cache.get_event.return_value = nio.RoomGetEventResponse.from_dict(
-        {
-            "event_id": "$reaction:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.reaction",
-            "content": {
-                "m.relates_to": {
-                    "rel_type": "m.annotation",
-                    "event_id": "$thread-reply:localhost",
-                    "key": "👍",
+    relations_client = MagicMock()
+    relations_client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "event_id": "$reaction:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": "!room:localhost",
+                "type": "m.reaction",
+                "content": {
+                    "m.relates_to": {
+                        "rel_type": "m.annotation",
+                        "event_id": "$thread-reply:localhost",
+                        "key": "👍",
+                    },
                 },
             },
-        },
+        ),
     )
+    relations = make_relation_lookup(client=relations_client)
 
     impact = await resolve_redaction_thread_impact_for_client(
         client,
         "!room:localhost",
         event_id="$reaction:localhost",
-        conversation_cache=conversation_cache,
+        relations=relations,
     )
 
-    assert impact == MutationThreadImpact.room_level()
-
-
-def _mutation_resolver_with_index(
-    *,
-    fetch_event_info: AsyncMock,
-    get_thread_id_for_event: AsyncMock,
-    logger: Mock | None = None,
-) -> ThreadMutationResolver:
-    """Build one mutation resolver over a stub runtime exposing only the event->thread index."""
-    resolved_logger = logger if logger is not None else Mock()
-    return ThreadMutationResolver(
-        logger_getter=lambda: resolved_logger,
-        runtime=SimpleNamespace(event_cache=SimpleNamespace(get_thread_id_for_event=get_thread_id_for_event)),
-        fetch_event_info_for_thread_resolution=fetch_event_info,
-    )
-
-
-@pytest.mark.asyncio
-async def test_metadata_less_redaction_scopes_to_cached_thread_index() -> None:
-    """A redaction whose target metadata is gone should invalidate only the cache-known thread."""
-    logger = Mock()
-    resolver = _mutation_resolver_with_index(
-        fetch_event_info=AsyncMock(return_value=None),
-        get_thread_id_for_event=AsyncMock(return_value="$thread-root:localhost"),
-        logger=logger,
-    )
-
-    impact = await resolver.resolve_redaction_thread_impact(
-        "!room:localhost",
-        "$old-target:localhost",
-        failure_message="Failed to apply sync redaction to cache",
-        event_id="$redaction:localhost",
-    )
-
-    assert impact == MutationThreadImpact.threaded("$thread-root:localhost")
-    logger.info.assert_called_once_with(
-        "Scoped metadata-less redaction to its cached thread",
-        room_id="!room:localhost",
-        event_id="$redaction:localhost",
-        redacted_event_id="$old-target:localhost",
-        thread_id="$thread-root:localhost",
-    )
-
-
-@pytest.mark.asyncio
-async def test_metadata_less_redaction_stays_unknown_without_index_entry() -> None:
-    """A redaction target absent from the cache index must keep failing closed."""
-    resolver = _mutation_resolver_with_index(
-        fetch_event_info=AsyncMock(return_value=None),
-        get_thread_id_for_event=AsyncMock(return_value=None),
-    )
-
-    impact = await resolver.resolve_redaction_thread_impact(
-        "!room:localhost",
-        "$untracked-target:localhost",
-        failure_message="Failed to apply sync redaction to cache",
-    )
-
-    assert impact == MutationThreadImpact.unknown()
-
-
-@pytest.mark.asyncio
-async def test_metadata_less_redaction_stays_unknown_when_index_lookup_fails() -> None:
-    """An index lookup error must not weaken the fail-closed redaction path."""
-    logger = Mock()
-    resolver = _mutation_resolver_with_index(
-        fetch_event_info=AsyncMock(return_value=None),
-        get_thread_id_for_event=AsyncMock(side_effect=RuntimeError("cache unavailable")),
-        logger=logger,
-    )
-
-    impact = await resolver.resolve_redaction_thread_impact(
-        "!room:localhost",
-        "$old-target:localhost",
-        failure_message="Failed to apply sync redaction to cache",
-        event_id="$redaction:localhost",
-    )
-
-    assert impact == MutationThreadImpact.unknown()
-    logger.warning.assert_called_once_with(
-        "Redaction thread-index fallback failed; failing closed",
-        room_id="!room:localhost",
-        event_id="$redaction:localhost",
-        redacted_event_id="$old-target:localhost",
-        error="cache unavailable",
-    )
+    assert impact is MutationThreadImpactState.ROOM_LEVEL
 
 
 @pytest.mark.asyncio

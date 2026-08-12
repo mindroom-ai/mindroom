@@ -47,7 +47,7 @@ class ExternalTriggerRuntimeCoordinator:
         api_main.bind_external_trigger_runtime(
             api_main.app,
             client=router_bot.client,
-            conversation_cache=router_bot._conversation_cache,
+            conversation_reader=router_bot._conversation_reader,
             is_trigger_snapshot_ready=is_trigger_snapshot_ready,
         )
 

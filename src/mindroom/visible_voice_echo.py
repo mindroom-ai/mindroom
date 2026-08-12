@@ -21,10 +21,10 @@ from mindroom.constants import (
     VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
-from mindroom.dispatch_handoff import PreparedTextEvent, payload_metadata_from_source
+from mindroom.dispatch_handoff import PreparedIngress, payload_metadata_from_source
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
+from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.turn_origin import original_sender_for_router_relay
 
 if TYPE_CHECKING:
@@ -295,7 +295,7 @@ class VisibleVoiceEchoLifecycle:
     async def finish(
         self,
         handle: _VisibleVoiceEchoHandle | None,
-        normalized_event: PreparedTextEvent,
+        normalized_event: PreparedIngress,
     ) -> None:
         """Best-effort settle one started lifecycle without blocking canonical dispatch."""
         if handle is None:
@@ -321,7 +321,7 @@ class VisibleVoiceEchoLifecycle:
     def finish_after_cancellation(
         self,
         handle: _VisibleVoiceEchoHandle | None,
-        fallback_event: PreparedTextEvent,
+        fallback_event: PreparedIngress,
     ) -> None:
         """Schedule terminal fallback cleanup without swallowing caller cancellation."""
         if handle is None:
@@ -343,7 +343,7 @@ class VisibleVoiceEchoLifecycle:
     def _spawn_settle(
         self,
         handle: _VisibleVoiceEchoHandle,
-        event: PreparedTextEvent,
+        event: PreparedIngress,
         *,
         name: str,
     ) -> asyncio.Task[str | None]:
@@ -404,7 +404,7 @@ class VisibleVoiceEchoLifecycle:
                 return existing_event_id
             existing_event_id = await self._recover_visible_echo_event_id(request)
             if existing_event_id is not None:
-                self.deps.turn_store.record_visible_echo(request.source_event_id, existing_event_id)
+                await self.deps.turn_store.record_visible_echo(request.source_event_id, existing_event_id)
                 _publish_echo_barrier(barrier, existing_event_id)
                 return existing_event_id
             event_id = await self.deps.delivery_gateway.send_text(
@@ -419,14 +419,14 @@ class VisibleVoiceEchoLifecycle:
                 ),
             )
             if event_id is not None:
-                self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+                await self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
                 _publish_echo_barrier(barrier, event_id)
             return event_id
 
     async def _settle(
         self,
         handle: _VisibleVoiceEchoHandle,
-        normalized_event: PreparedTextEvent,
+        normalized_event: PreparedIngress,
     ) -> str | None:
         request = handle.request
         is_fallback = _is_raw_audio_fallback(normalized_event)
@@ -448,7 +448,7 @@ class VisibleVoiceEchoLifecycle:
             if event_id is None:
                 event_id = await self._recover_visible_echo_event_id(request)
                 if event_id is not None:
-                    self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+                    await self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
             if event_id is None:
                 event_id = await self.deps.delivery_gateway.send_text(
                     SendTextRequest(
@@ -460,7 +460,7 @@ class VisibleVoiceEchoLifecycle:
                 )
                 if event_id is None:
                     return None
-                self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+                await self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
             else:
                 edited = await self.deps.delivery_gateway.edit_text(
                     EditTextRequest(
@@ -474,7 +474,7 @@ class VisibleVoiceEchoLifecycle:
                 if not edited:
                     return None
 
-            self.deps.turn_store.record_finalized_visible_echo(
+            await self.deps.turn_store.record_finalized_visible_echo(
                 request.source_event_id,
                 event_id,
                 is_fallback=is_fallback,
@@ -544,6 +544,6 @@ class VisibleVoiceEchoLifecycle:
         return extra_content
 
 
-def _is_raw_audio_fallback(event: PreparedTextEvent) -> bool:
+def _is_raw_audio_fallback(event: PreparedIngress) -> bool:
     content = event.source.get("content")
     return isinstance(content, dict) and content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True

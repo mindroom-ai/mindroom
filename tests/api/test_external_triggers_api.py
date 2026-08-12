@@ -192,7 +192,7 @@ def _bind_runtime(ready_snapshots: list[TriggerDeliverySnapshot]) -> object:
     api_main.bind_external_trigger_runtime(
         api_main.app,
         client=client,
-        conversation_cache=object(),
+        conversation_reader=object(),
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
     )
     return client

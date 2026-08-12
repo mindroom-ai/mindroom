@@ -13,7 +13,7 @@ import pytest
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, VISIBLE_ROUTER_VOICE_ECHO_KEY
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
@@ -65,13 +65,13 @@ class _EchoTurnStore:
     def visible_echo_for_source(self, source_event_id: str) -> str | None:
         return self.visible_event_ids.get(source_event_id)
 
-    def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
+    async def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         self.visible_event_ids[source_event_id] = echo_event_id
 
     def finalized_visible_echo(self, source_event_id: str) -> None:  # noqa: ARG002
         return None
 
-    def record_finalized_visible_echo(
+    async def record_finalized_visible_echo(
         self,
         source_event_id: str,  # noqa: ARG002
         echo_event_id: str,  # noqa: ARG002
@@ -136,8 +136,6 @@ def _echo_harness(
         runtime_paths=runtime_paths,
         enable_streaming=True,
         orchestrator=cast("OrchestratorRuntime", _RouterReadiness(router_ready)),
-        event_cache=None,
-        event_cache_write_coordinator=None,
     )
     router_user_id = entity_identity_registry(config, runtime_paths).current_id(ROUTER_AGENT_NAME).full_id
     ingress = _RouterIngress(router_user_id)
@@ -181,8 +179,8 @@ def _request(source_event_id: str) -> VisibleVoiceEchoRequest:
     )
 
 
-def _normalized_event(source_event_id: str) -> PreparedTextEvent:
-    return PreparedTextEvent(
+def _normalized_event(source_event_id: str) -> PreparedIngress:
+    return PreparedIngress(
         sender=_REQUESTER_ID,
         event_id=source_event_id,
         body="🎤 test transcript",

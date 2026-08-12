@@ -7,23 +7,19 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.cancellation import request_task_cancel, task_cancel_source_from_message
-from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
-from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.presence import is_user_online
 from mindroom.orchestration.runtime import cancel_failure_reason, classify_cancel_source, log_cancelled_response
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Callable, Coroutine
 
     import nio
     import structlog
 
     from mindroom.config.main import Config
-    from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.message_target import MessageTarget
     from mindroom.stop import StopManager
-    from mindroom.timing import DispatchPipelineTiming
 
 type _MatrixEventId = str
 
@@ -35,13 +31,10 @@ class ResponseAttemptDeps:
     """Collaborators needed to run a visible response attempt."""
 
     client: nio.AsyncClient
-    delivery_gateway: DeliveryGateway
     stop_manager: StopManager
     logger: structlog.stdlib.BoundLogger
     show_stop_button: Callable[[], bool]
     config: Config
-    notify_outbound_event: Callable[[str, dict[str, object]], None]
-    notify_outbound_redaction: Callable[[str, str], None]
 
 
 @dataclass(frozen=True)
@@ -50,35 +43,25 @@ class ResponseAttemptRequest:
 
     target: MessageTarget
     response_function: Callable[[str | None], Coroutine[Any, Any, None]]
-    thinking_message: str | None = None
     existing_event_id: str | None = None
     user_id: str | None = None
     run_id: str | None = None
-    pipeline_timing: DispatchPipelineTiming | None = None
     on_cancelled: Callable[[str], None] | None = None
-    on_visible_response: Callable[[str], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
 class ResponseAttemptRunner:
-    """Own placeholder delivery, stop tracking, and attempt task cleanup."""
+    """Own stop tracking and attempt task cleanup for one visible response.
+
+    Sending the turn's placeholder is deliberately not part of this: the
+    durable ``INITIAL`` outbox row is the only thing allowed to put one in the
+    room. A second sender here would send under a transaction ID nothing owns,
+    so a placeholder the homeserver accepted without confirming would sit
+    beside the one recovery replays -- two "Thinking..." messages for one turn,
+    only one of which the answer ever edits.
+    """
 
     deps: ResponseAttemptDeps
-
-    async def _send_thinking_message(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:
-        message_id = await self.deps.delivery_gateway.send_text(
-            SendTextRequest(
-                target=request.target,
-                response_text=request.thinking_message or "",
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
-            ),
-        )
-        if message_id is not None and request.pipeline_timing is not None:
-            request.pipeline_timing.mark("placeholder_sent")
-            request.pipeline_timing.mark_first_visible_reply("placeholder")
-        if message_id is not None and request.on_visible_response is not None:
-            await request.on_visible_response(message_id)
-        return message_id
 
     async def _should_show_stop_button(self, request: ResponseAttemptRequest, message_id: str) -> bool:
         show_stop_button = self.deps.show_stop_button()
@@ -136,16 +119,8 @@ class ResponseAttemptRunner:
 
     async def run(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:
         """Run one response coroutine under visible message tracking."""
-        if request.thinking_message is not None and request.existing_event_id is not None:
-            msg = "thinking_message and existing_event_id are mutually exclusive"
-            raise ValueError(msg)
-
         with bound_log_context(**request.target.log_context):
-            initial_message_id = None
-            if request.thinking_message is not None:
-                initial_message_id = await self._send_thinking_message(request)
-
-            message_id = request.existing_event_id or initial_message_id
+            message_id = request.existing_event_id
             task: asyncio.Task[None] = asyncio.create_task(request.response_function(message_id))
             tracked_message_id = message_id or f"__pending_response__:{id(task)}"
             show_stop_button = False
@@ -165,7 +140,6 @@ class ResponseAttemptRunner:
                     await self.deps.stop_manager.add_stop_button(
                         self.deps.client,
                         message_id,
-                        notify_outbound_event=self.deps.notify_outbound_event,
                     )
 
             try:
@@ -193,7 +167,6 @@ class ResponseAttemptRunner:
                     tracked_message_id,
                     self.deps.client,
                     remove_button=show_stop_button and not button_already_removed,
-                    notify_outbound_redaction=self.deps.notify_outbound_redaction,
                 )
 
             return message_id

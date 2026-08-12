@@ -10,7 +10,9 @@ import hashlib
 import json
 import os
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from contextvars import copy_context
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
@@ -51,7 +53,7 @@ from mindroom.workers.runtime import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
@@ -68,6 +70,8 @@ _DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
 _SANDBOX_ALL_EXECUTION_MODES = frozenset({"all", "sandbox_all"})
 _SANDBOX_SELECTIVE_EXECUTION_MODES = frozenset({"selective", "sandbox_selective"})
 _UNSAFE_LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
+# Process-lifetime pool: threads start lazily and ThreadPoolExecutor joins them at interpreter shutdown.
+_WORKER_PROXY_EXECUTOR = ThreadPoolExecutor(thread_name_prefix="mindroom-worker-proxy")
 
 
 class _AttachmentSavePayloadFields(TypedDict):
@@ -834,6 +838,13 @@ def _call_proxy_sync(
         )
 
 
+async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
+    """Run one blocking worker proxy call outside asyncio's default executor."""
+    context = copy_context()
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_WORKER_PROXY_EXECUTOR, context.run, call)
+
+
 def _wrap_sync_function(
     function: Function,
     tool_name: str,
@@ -891,7 +902,7 @@ def _wrap_async_function(
 
     @functools.wraps(function.entrypoint)
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
-        return await asyncio.to_thread(
+        call = functools.partial(
             _call_proxy_sync,
             runtime_paths=runtime_paths,
             tool_name=tool_name,
@@ -906,6 +917,7 @@ def _wrap_async_function(
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
         )
+        return await _run_in_worker_proxy_executor(call)
 
     wrapped.entrypoint = proxy_entrypoint
     return wrapped

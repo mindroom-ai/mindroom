@@ -14,7 +14,12 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.scheduling import ScheduledWorkflow, SchedulingRuntime, schedule_task
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 
@@ -40,14 +45,8 @@ def create_mock_room(room_id: str, user_ids: list[str] | None = None) -> nio.Mat
     return room
 
 
-def _conversation_cache(thread_history: list[object] | None = None) -> MagicMock:
-    access = MagicMock()
-    access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
-    return access
-
-
-def _event_cache() -> AsyncMock:
-    return make_event_cache_mock()
+def _conversation_reader() -> MagicMock:
+    return MagicMock()
 
 
 def _allow_schedule_state_persistence(client: AsyncMock, room_id: str) -> None:
@@ -65,8 +64,7 @@ def _scheduling_runtime(
         config=config,
         runtime_paths=runtime_paths_for(config),
         room=room,
-        conversation_cache=_conversation_cache(),
-        event_cache=_event_cache(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
 
@@ -235,7 +233,6 @@ async def test_schedule_allows_agents_in_room() -> None:
 
     with patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
-        conversation_cache = _conversation_cache()
 
         # Try to schedule in a thread where calculator is in the room
         task_id, response = await schedule_task(
@@ -244,8 +241,7 @@ async def test_schedule_allows_agents_in_room() -> None:
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 room=room,
-                conversation_cache=conversation_cache,
-                event_cache=_event_cache(),
+                conversation_reader=make_conversation_reader_mock(),
             ),
             room_id="test_room",
             thread_id="$thread123",
@@ -371,7 +367,6 @@ async def test_schedule_with_no_agent_mentions() -> None:
 
     with patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
-        conversation_cache = _conversation_cache()
 
         task_id, response = await schedule_task(
             runtime=SchedulingRuntime(
@@ -379,8 +374,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 room=room,
-                conversation_cache=conversation_cache,
-                event_cache=_event_cache(),
+                conversation_reader=make_conversation_reader_mock(),
             ),
             room_id="test_room",
             thread_id="$thread123",
@@ -392,7 +386,6 @@ async def test_schedule_with_no_agent_mentions() -> None:
     assert task_id is not None
     assert "✅ Scheduled" in response
     assert "New thread per fire" in response
-    conversation_cache.get_thread_history.assert_not_called()
     available_agents = mock_parse.await_args.args[3]
     expected_agents = [
         entity_ids(config, runtime_paths_for(config))["assistant"],

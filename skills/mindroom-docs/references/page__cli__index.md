@@ -50,6 +50,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │                     Matrix E2EE.                                                       │
 │ avatars             Generate and sync managed avatar assets.                           │
 │ threads             Export Matrix threads to local files.                              │
+│ journal             Inspect and rebind the durable event journal.                      │
 │ service             Install and manage MindRoom as a background user service.          │
 │ trigger             Send signed external triggers.                                     │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
@@ -573,7 +574,9 @@ Adopt such a root by creating `.mindroom-thread-exports` inside it containing ex
 Cleanup then removes only recognizable room directories and thread YAML files, leaving unrelated entries untouched and logged.
 Retracting a room whose directory still holds unrelated entries removes only the exported files and leaves the directory in place, and repeating the pass stays a quiet no-op.
 Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
-With `--prefer-cache` thread bodies are served from the durable event cache and only fetched from the homeserver on miss or invalidation; use it alongside a running MindRoom that keeps the cache fresh.
+Thread bodies come from the journal projection, read as the same principal a running bot writes it under, so an exported thread reduces edits, redactions, and long-text sidecars exactly the way agent prompts do.
+A thread nobody has read yet is built from the homeserver once and then costs no Matrix history call at all, so a repeated export pass is a local read.
+Building it also writes it, into the same journal the bot is writing, from the export's own process, so a first pass over a thread competes with live admission for that database's one write lock while a later pass over the same thread does not.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -608,12 +611,6 @@ With `--prefer-cache` thread bodies are served from the durable event cache and 
 │ --max-thread-roots                            INTEGER  Maximum thread roots to         │
 │                                                        enumerate per room.             │
 │                                                        [default: 2000]                 │
-│ --prefer-cache                                         Serve thread bodies from the    │
-│                                                        durable event cache and only    │
-│                                                        fetch from the homeserver on    │
-│                                                        miss or invalidation. Use       │
-│                                                        alongside a running MindRoom    │
-│                                                        that keeps the cache fresh.     │
 │ --invited-rooms         --no-invited-rooms             Include rooms joined through    │
 │                                                        authorized invites              │
 │                                                        (user-created rooms).           │
@@ -630,7 +627,139 @@ With `--prefer-cache` thread bodies are served from the durable event cache and 
 mindroom threads export --storage-path mindroom_data --output "$HOME/mindroom-thread-exports"
 mindroom threads export --storage-path mindroom_data --room lobby
 mindroom threads export --storage-path mindroom_data --watch --interval 300
-mindroom threads export --storage-path mindroom_data --prefer-cache
+```
+
+## journal
+
+Inspect and rebind the durable event journal.
+
+The event journal is the database that holds turn deduplication, delivery ownership, and recovery ownership.
+Every install is bound to exactly one, and MindRoom refuses to start against any other one, because using a stranger's journal does not fail — it answers every question confidently and about somebody else's history.
+
+An install is bound the first time it opens a journal.
+The database mints a generation when it is first used and never rewrites it, so the generation names the database rather than the process, and the binding recorded in `<storage>/tracking/event_journal_binding.json` names that generation.
+A later start reads the configured database's generation before it opens the store and refuses when the two do not match.
+Refusal happens before anything is created, so a database that gets refused is left exactly as it was found.
+
+Each refusal is a different problem and says so:
+
+| Message | What happened | What to do |
+| --- | --- | --- |
+| `has never been used by this install` | The configured database carries no generation at all. | Usually a connection pointing somewhere new. Point `event_journal` back, or adopt deliberately. |
+| `is a different journal from the one this install is bound to` | The configured database carries someone else's generation. | Usually a connection pointing at another install. Point `event_journal` back, or adopt deliberately. |
+| `could not be read` | The binding file itself is corrupt or truncated. | Repair or delete `<storage>/tracking/event_journal_binding.json`, then adopt. |
+
+<!-- CODE:START -->
+<!-- from mindroom.cli.main import app -->
+<!-- from typer.testing import CliRunner -->
+<!-- runner = CliRunner() -->
+<!-- result = runner.invoke(app, ["journal", "--help"]) -->
+<!-- print("```") -->
+<!-- print(result.output) -->
+<!-- print("```") -->
+<!-- CODE:END -->
+<!-- OUTPUT:START -->
+<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
+```
+
+ Usage: root journal [OPTIONS] COMMAND [ARGS]...
+
+ Inspect and rebind the durable event journal.
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ adopt   Bind this install to the configured event-journal database.                    │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+```
+
+<!-- OUTPUT:END -->
+
+## journal adopt
+
+Bind this install to the event-journal database that is configured right now.
+
+This is the deliberate override of the startup refusal, and the only repair for an install whose binding has been lost.
+Adopting gives up the deduplication, delivery, and recovery history held in the previously bound journal, so it asks for confirmation unless `--yes` is passed.
+
+Stop MindRoom before adopting.
+A running MindRoom keeps writing to the database it opened at startup, so adopting under it does not move the running install — it splits the install's history across two databases, and nothing will ever read the older one again.
+A process that has the journal open holds an advisory claim on `<storage>/tracking/event_journal_store.lock` for as long as it has it open, and adoption refuses while that claim is held.
+The claim ends when the store is closed, and the operating system withdraws it if the process dies, so a crashed MindRoom leaves nothing to clean up.
+`--force` adopts anyway, for the case where the claim cannot be trusted: it is advisory, and it does not travel between hosts sharing one storage root over a network filesystem.
+
+Adoption keeps the old binding until the new one is ready.
+If the candidate cannot be opened — an unreachable server, a bad DSN, a full disk — the command fails with the previous binding still in place, and the install starts exactly as it did before.
+
+### Moving a journal safely
+
+Copying a database the supported way carries its generation with it, so a copy is accepted by the same binding and needs no adoption.
+That cuts both ways: a stale clone taken weeks ago carries the same generation as the live database and will be accepted without complaint, even though every turn since the clone was taken is missing from it.
+The generation proves the database is the same lineage, not that it is up to date, and nothing else checks.
+
+For a quiesced migration:
+
+1. Stop MindRoom, and any `mindroom threads export --watch` running against the same storage root.
+2. Copy or dump-and-restore the database in full.
+3. Point `event_journal` at the new location.
+4. Start MindRoom. No adoption is needed, because the generation travelled with the data.
+
+Adopt instead of copying only when you accept beginning the journal's history fresh.
+
+### Recovering from a failure
+
+An install refuses to start and you did not move anything.
+Check `event_journal` and the environment variable named by `event_journal.database_url_env` before adopting: a DSN that has drifted to a fresh database is the common cause, and adopting would throw the real journal's history away rather than find it.
+
+An install refuses to start with `could not be read`.
+The binding file is corrupt. Delete it and run `mindroom journal adopt` against the database you actually want; there is nothing recoverable inside it that the database does not already know.
+
+Adoption refuses because the journal is in use.
+Stop MindRoom and try again. Use `--force` only when you are certain nothing is running, for example after a host has been rebooted with a stale storage root on a network filesystem.
+
+<!-- CODE:START -->
+<!-- from mindroom.cli.main import app -->
+<!-- from typer.testing import CliRunner -->
+<!-- runner = CliRunner() -->
+<!-- result = runner.invoke(app, ["journal", "adopt", "--help"]) -->
+<!-- print("```") -->
+<!-- print(result.output) -->
+<!-- print("```") -->
+<!-- CODE:END -->
+<!-- OUTPUT:START -->
+<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
+```
+
+ Usage: root journal adopt [OPTIONS]
+
+ Bind this install to the configured event-journal database.
+
+ MindRoom refuses to start against a journal it is not bound to, because
+ using a different one loses turn deduplication, delivery ownership, and
+ recovery ownership without any error. This is how you say the change was
+ deliberate.
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --config        -c      PATH  Use this config file path.                               │
+│ --storage-path  -s      PATH  Base directory for persistent MindRoom data.             │
+│ --yes           -y            Adopt without confirming, even when another journal is   │
+│                               already bound.                                           │
+│ --force                       Adopt even though another process still has this         │
+│                               install's journal open.                                  │
+│ --help          -h            Show this message and exit.                              │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+```
+
+<!-- OUTPUT:END -->
+
+```bash
+mindroom journal adopt --storage-path mindroom_data
+mindroom journal adopt --storage-path mindroom_data --yes
 ```
 
 ## service

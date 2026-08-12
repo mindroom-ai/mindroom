@@ -35,15 +35,16 @@ from mindroom.commands.config_confirmation import (
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delivery_gateway import SendTextRequest
+from mindroom.event_journal_open import record_opened_event_journal
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.plugins import PluginReloadResult
-from tests.conftest import make_event_cache_mock, write_config_yaml
+from tests.conftest import make_conversation_reader_mock, write_config_yaml
 
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
@@ -426,10 +427,9 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         ),
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$response"),
     )
@@ -469,10 +469,9 @@ async def test_handle_command_config_disabled_by_default(tmp_path: Path) -> None
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
     )
@@ -513,10 +512,9 @@ async def test_handle_command_config_enabled_requires_admin(tmp_path: Path) -> N
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
     )
@@ -552,10 +550,9 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
     )
@@ -602,10 +599,9 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
         config=SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
@@ -659,10 +655,9 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
@@ -696,10 +691,9 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
         config=SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
@@ -733,10 +727,9 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$preview"),
     )
@@ -805,10 +798,9 @@ async def test_handle_command_config_set_stays_retryable_after_post_send_failure
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$preview"),
     )
@@ -1778,6 +1770,64 @@ async def test_apply_config_change_preserves_call_profile_authorship(tmp_path: P
         "cleared": "openai-realtime",
         "inherited": "openai-realtime",
     }
+
+
+@pytest.mark.asyncio
+async def test_apply_config_change_saves_a_journal_edit_and_says_it_waits_for_a_restart(
+    tmp_path: Path,
+) -> None:
+    """The journal is opened once at startup, so saying "affects new interactions" would be false."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths_for_config(config_path)
+    record_opened_event_journal(load_config(runtime_paths).event_journal, runtime_paths=runtime_paths)
+
+    response = await apply_config_change("event_journal.backend", "postgres", runtime_paths)
+
+    assert "Configuration updated successfully" in response
+    assert "applies after MindRoom restarts" in response
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["event_journal"]["backend"] == "postgres", "the edit the operator asked for was not saved"
+
+
+@pytest.mark.asyncio
+async def test_a_saved_journal_edit_survives_a_later_unrelated_write(tmp_path: Path) -> None:
+    """The authored file is the operator's, and nothing may quietly put it back.
+
+    The in-force journal is a separate runtime fact, so it must never be stamped
+    onto the adopted config: an authored dump carrying the in-force value would
+    make the next structured write revert an edit the operator deliberately made
+    and was told had been saved.
+    """
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths_for_config(config_path)
+    record_opened_event_journal(load_config(runtime_paths).event_journal, runtime_paths=runtime_paths)
+    await apply_config_change("event_journal.database_url", "postgresql://journal.invalid/moved", runtime_paths)
+    await apply_config_change("event_journal.backend", "postgres", runtime_paths)
+    after_journal_edit = yaml.safe_load(config_path.read_text(encoding="utf-8"))["event_journal"]
+
+    await apply_config_change("defaults.markdown", False, runtime_paths)
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["defaults"]["markdown"] is False
+    assert saved["event_journal"] == after_journal_edit, "an unrelated write reverted the operator's journal edit"
 
 
 @pytest.mark.asyncio

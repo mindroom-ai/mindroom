@@ -43,7 +43,7 @@ dependencies = [
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
   # Arbitrary Olm to-device encryption uses the fork's tested internal API; update only with its round-trip tests.
-  "mindroom-nio[e2e]==0.36",
+  "mindroom-nio[e2e]>=0.37,<0.39",
   "openai",
   "packaging>=24",
   "pydantic>=2",
@@ -552,22 +552,27 @@ sort_by_size = true
 
 [tool.ty.environment]
 python-version = "3.13"
+# Mock patterns cause many false positives in tests (e.g., mock.call_args
+# returns _Call | None, attribute access on MagicMock, passing mocks as typed
+# arguments).
 [[tool.ty.overrides]]
 include = [ "tests/" ]
-[tool.ty.overrides.rules]
-# Mock patterns cause many false positives in tests (e.g., mock.call_args
-# returns _Call | None, attribute access on MagicMock, passing mocks as
-# typed arguments).
-call-non-callable = "ignore"
-invalid-argument-type = "ignore"
-invalid-assignment = "ignore"
-invalid-return-type = "ignore"
-no-matching-overload = "ignore"
-not-iterable = "ignore"
-not-subscriptable = "ignore"
-too-many-positional-arguments = "ignore"
-unresolved-attribute = "ignore"
-unsupported-operator = "ignore"
+rules = { call-non-callable = "ignore", invalid-argument-type = "ignore", invalid-assignment = "ignore", invalid-return-type = "ignore", no-matching-overload = "ignore", not-iterable = "ignore", not-subscriptable = "ignore", too-many-positional-arguments = "ignore", unresolved-attribute = "ignore", unsupported-operator = "ignore" }
+
+# The macOS accessibility backend imports pyobjc, declared
+# `sys_platform=='darwin'` and so genuinely absent everywhere else. Checking on
+# another platform cannot resolve it and should not pretend to; the alternative
+# is declaring the whole project macOS-targeted, which would hide real errors in
+# the paths that are not. The imports are already function-level.
+#
+# `unused-ignore-comment` goes with it: the per-attribute ignores in those files
+# are load-bearing on macOS, where pyobjc resolves and ty sees real types, and
+# necessarily unused wherever the import does not resolve. One file cannot
+# satisfy both platforms, so the warning is scoped off rather than the
+# directives deleted.
+[[tool.ty.overrides]]
+include = [ "src/mindroom/desktop/" ]
+rules = { unresolved-import = "ignore", unused-ignore-comment = "ignore" }
 [tool.ty.rules]
 deprecated = "ignore"  # FastAPI on_event deprecation; refactor to lifespan separately
 [tool.ty.src]
@@ -593,6 +598,7 @@ markers = [
   "requires_matrix: marks tests that require a real Matrix server connection (deselect with '-m \"not requires_matrix\"')",
   "e2e: marks end-to-end tests",
   "slow: marks tests as slow",
+  "ledger_loads_from_disk: the test warms its own handled-turn ledger and needs the real database read",
 ]
 
 [tool.coverage.report]

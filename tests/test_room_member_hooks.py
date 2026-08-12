@@ -6,6 +6,7 @@ import asyncio
 import os
 import stat
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -13,21 +14,30 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
+import mindroom.hooks as hook_api
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.entity_resolution import mindroom_user_id
-from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
+from mindroom.event_journal import EventClass, EventKind
+from mindroom.hooks import (
+    EVENT_ROOM_MEMBER_JOINED,
+    EVENT_ROOM_MEMBER_LEFT,
+    HookRegistry,
+    RoomMemberJoinedContext,
+    RoomMemberLeftContext,
+    hook,
+)
 from mindroom.matrix import room_member_joins
-from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
+from mindroom.matrix.sync_certification import SyncTrustState
+from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     test_runtime_paths,
 )
@@ -36,8 +46,6 @@ from tests.sync_continuity_helpers import load_sync_checkpoint
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from mindroom.dispatch_obligations.storage import DispatchObligation, DispatchObligationKey
 
 
 def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
@@ -74,6 +82,8 @@ def _room_member_event(
     prev_membership: str | None = "leave",
     display_name: str | None = "Alice",
     avatar_url: str | None = "mxc://localhost/alice",
+    prev_display_name: str | None = None,
+    prev_avatar_url: str | None = None,
 ) -> nio.RoomMemberEvent:
     content: dict[str, object] = {"membership": membership}
     if display_name is not None:
@@ -89,7 +99,12 @@ def _room_member_event(
         "content": content,
     }
     if prev_membership is not None:
-        raw_event["unsigned"] = {"prev_content": {"membership": prev_membership}}
+        prev_content: dict[str, object] = {"membership": prev_membership}
+        if prev_display_name is not None:
+            prev_content["displayname"] = prev_display_name
+        if prev_avatar_url is not None:
+            prev_content["avatar_url"] = prev_avatar_url
+        raw_event["unsigned"] = {"prev_content": prev_content}
     event = nio.RoomMemberEvent.from_dict(raw_event)
     assert isinstance(event, nio.RoomMemberEvent)
     return event
@@ -129,7 +144,7 @@ def _router_bot(
     config = bind_runtime_paths(Config(bot_accounts=bot_accounts or [], mindroom_user=mindroom_user), runtime_paths)
     persist_entity_accounts(config, runtime_paths, usernames={ROUTER_AGENT_NAME: "mindroom_router"})
     bot = AgentBot(_router_user(), tmp_path, config=config, runtime_paths=runtime_paths)
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.homeserver = "http://localhost:8008"
     bot._first_sync_done = True
@@ -146,7 +161,7 @@ def _agent_bot(tmp_path: Path) -> AgentBot:
         display_name="Helper",
         password=TEST_PASSWORD,
     )
-    return install_runtime_cache_support(AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths))
+    return install_runtime_journal_support(AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths))
 
 
 def test_room_member_joined_is_a_builtin_hook_event() -> None:
@@ -159,6 +174,20 @@ def test_room_member_joined_is_a_builtin_hook_event() -> None:
     registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
     assert registry.has_hooks(EVENT_ROOM_MEMBER_JOINED)
+
+
+def test_room_member_left_is_a_builtin_hook_event() -> None:
+    """room:member_left should be accepted as a built-in hook event."""
+    event_name = hook_api.EVENT_ROOM_MEMBER_LEFT
+    context_type = hook_api.RoomMemberLeftContext
+
+    @hook(event_name)
+    async def left(ctx: object) -> None:
+        assert isinstance(ctx, context_type)
+
+    registry = HookRegistry.from_plugins([_plugin("personal-room-reinvite", [left])])
+
+    assert registry.has_hooks(event_name)
 
 
 def test_router_registers_room_member_callback_after_initial_sync(tmp_path: Path) -> None:
@@ -212,6 +241,119 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
     assert context.display_name == "Alice"
     assert context.avatar_url == "mxc://localhost/alice"
     assert context.matrix_admin is not None
+
+
+@pytest.mark.asyncio
+async def test_router_emits_room_member_left_for_human_self_leave(tmp_path: Path) -> None:
+    """The router should expose an exact human join-to-leave self-transition."""
+    seen: list[RoomMemberLeftContext] = []
+
+    @hook(EVENT_ROOM_MEMBER_LEFT)
+    async def left(ctx: RoomMemberLeftContext) -> None:
+        seen.append(ctx)
+
+    bot = _router_bot(tmp_path)
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("personal-room-reinvite", [left])])
+
+    await bot._on_room_member(
+        _room("!personal:localhost"),
+        _room_member_event(
+            event_id="$leave1",
+            membership="leave",
+            prev_membership="join",
+            display_name=None,
+            avatar_url=None,
+            prev_display_name="Alice",
+            prev_avatar_url="mxc://localhost/alice",
+        ),
+    )
+
+    assert len(seen) == 1
+    context = seen[0]
+    assert context.agent_name == ROUTER_AGENT_NAME
+    assert context.room_id == "!personal:localhost"
+    assert context.event_id == "$leave1"
+    assert context.user_id == "@alice:localhost"
+    assert context.sender_id == "@alice:localhost"
+    assert context.membership == "leave"
+    assert context.prev_membership == "join"
+    assert context.display_name == "Alice"
+    assert context.avatar_url == "mxc://localhost/alice"
+    assert context.matrix_admin is not None
+
+
+@pytest.mark.asyncio
+async def test_router_dispatches_recovered_room_member_self_leave_once(tmp_path: Path) -> None:
+    """An unsettled recovered leave remains owed work and settles exactly once."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_LEFT)
+    async def left(ctx: RoomMemberLeftContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room("!personal:localhost")
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("personal-room-reinvite", [left])])
+    event = _room_member_event(
+        event_id="$recovered-leave",
+        membership="leave",
+        prev_membership="join",
+    )
+    await bot._journal_dispatcher.admit_out_of_band(
+        room,
+        event,
+        EventKind.ROOM_LIFECYCLE,
+        EventClass.ACTIONABLE,
+        live=False,
+    )
+
+    await bot._journal_dispatcher.drain_once()
+    await bot._journal_dispatcher.drain_once()
+
+    assert seen == ["$recovered-leave"]
+    assert not await bot._journal_dispatcher.store.is_pending("$recovered-leave")
+
+
+@pytest.mark.asyncio
+async def test_router_ignores_non_human_or_non_self_room_member_leaves(tmp_path: Path) -> None:
+    """Joins, kicks, bans, uncertain history, and configured bots are not self-leaves."""
+    seen: list[RoomMemberLeftContext] = []
+
+    @hook(EVENT_ROOM_MEMBER_LEFT)
+    async def left(ctx: RoomMemberLeftContext) -> None:
+        seen.append(ctx)
+
+    bot = _router_bot(tmp_path, bot_accounts=["@service:localhost"])
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("personal-room-reinvite", [left])])
+    room = _room("!personal:localhost")
+
+    events = (
+        _room_member_event(event_id="$join", membership="join", prev_membership="leave"),
+        _room_member_event(
+            event_id="$kick",
+            membership="leave",
+            prev_membership="join",
+            sender="@admin:localhost",
+        ),
+        _room_member_event(
+            event_id="$ban",
+            membership="ban",
+            prev_membership="join",
+            sender="@admin:localhost",
+        ),
+        _room_member_event(event_id="$unknown", membership="leave", prev_membership=None),
+        _room_member_event(
+            event_id="$service-leave",
+            user_id="@service:localhost",
+            membership="leave",
+            prev_membership="join",
+        ),
+    )
+    for event in events:
+        await bot._on_room_member(room, event)
+
+    assert seen == []
 
 
 def test_room_member_marker_returns_normally_or_raises_without_boolean_status(tmp_path: Path) -> None:
@@ -335,7 +477,6 @@ async def test_router_emits_live_room_member_join_without_previous_membership(tm
 @pytest.mark.asyncio
 async def test_router_emits_room_member_joined_from_sync_state_after_initial_sync(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Live joins delivered through sync room state should trigger onboarding hooks."""
     seen: list[str] = []
@@ -348,11 +489,6 @@ async def test_router_emits_room_member_joined_from_sync_state_after_initial_syn
     room = _room()
     bot.client.rooms = {room.room_id: room}
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
-    )
 
     await bot._on_sync_response(_sync_response_with_state(room.room_id, [_room_member_event(event_id="$state-join")]))
 
@@ -362,7 +498,6 @@ async def test_router_emits_room_member_joined_from_sync_state_after_initial_syn
 @pytest.mark.asyncio
 async def test_cancelled_sync_state_member_hook_is_directly_recoverable(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Classic sync callback cancellation must leave transport-neutral exact work."""
     entered = asyncio.Event()
@@ -381,11 +516,6 @@ async def test_cancelled_sync_state_member_hook_is_directly_recoverable(
     room = _room()
     bot.client.rooms = {room.room_id: room}
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
-    )
     sync_task = asyncio.create_task(
         bot._on_sync_response(
             _sync_response_with_state(room.room_id, [_room_member_event(event_id="$state-retry")]),
@@ -396,19 +526,13 @@ async def test_cancelled_sync_state_member_hook_is_directly_recoverable(
     sync_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await sync_task
-    assert bot._dispatch_obligation_store.has_pending(
-        "$state-retry",
-        DispatchCallbackKind.ROOM_LIFECYCLE,
-    )
+    assert await bot._journal_dispatcher.store.is_pending("$state-retry")
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
 
-    await bot._dispatch_obligation_runner.recover_pending()
+    await bot._journal_dispatcher.drain_once()
 
     assert attempts == 2
-    assert not bot._dispatch_obligation_store.has_pending(
-        "$state-retry",
-        DispatchCallbackKind.ROOM_LIFECYCLE,
-    )
+    assert not await bot._journal_dispatcher.store.is_pending("$state-retry")
 
 
 @pytest.mark.asyncio
@@ -429,14 +553,9 @@ async def test_sync_state_marker_failure_blocks_checkpoint_certification(
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_after_marker_failure"
     if retry_token is not None:
-        bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-        bot._sync_cache_trust.checkpoint = SyncCheckpoint(retry_token)
+        bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
+        bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint(retry_token)
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
-    )
 
     def failing_write(
         path: Path,
@@ -478,22 +597,17 @@ async def test_sync_room_lifecycle_persist_failure_rewinds_once(
     room = _room()
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_after_failure"
-    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
+    bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_failure")
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
-    )
 
-    def fail_create(_obligation: object) -> object:
+    async def fail_create(*_args: object, **_kwargs: object) -> object:
         message = "dispatch database unavailable"
         raise OSError(message)
 
     reset = AsyncMock(wraps=bot._reset_classic_sync_state)
     monkeypatch.setattr(bot, "_reset_classic_sync_state", reset)
-    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_create)
+    monkeypatch.setattr(type(bot._journal_dispatcher.store), "admit", fail_create)
 
     with pytest.raises(OSError, match="dispatch database unavailable"):
         await bot._on_sync_response(
@@ -608,13 +722,14 @@ async def test_sync_state_lifecycle_dispatch_does_not_hold_marker_lock(
     async def dispatch(
         _room: nio.MatrixRoom,
         event: nio.Event,
-        callback_kind: DispatchCallbackKind,
+        kind: EventKind,
+        _event_class: EventClass,
     ) -> None:
         assert not bot._room_member_join_lock.locked()
-        assert callback_kind is DispatchCallbackKind.ROOM_LIFECYCLE
+        assert kind is EventKind.ROOM_LIFECYCLE
         dispatched.append(event.event_id)
 
-    monkeypatch.setattr(bot._dispatch_obligation_runner, "dispatch", dispatch)
+    monkeypatch.setattr(bot._journal_dispatcher, "admit_and_run", dispatch)
 
     await bot._emit_room_member_joined_sync_state_hooks(
         _sync_response_with_state(room.room_id, [_room_member_event(event_id="$dispatch")]),
@@ -623,34 +738,61 @@ async def test_sync_state_lifecycle_dispatch_does_not_hold_marker_lock(
     assert dispatched == ["$dispatch"]
 
 
-@pytest.mark.asyncio
-async def test_router_emits_room_member_joined_from_first_restored_token_sync_timeline(
+def _restored_token_router_bot(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The first sync after a restored certified token should emit missed live joins."""
-    seen: list[str] = []
+    room: MagicMock,
+    seen: list[str],
+) -> AgentBot:
+    """Return a router whose first sync restores a certified token."""
 
     @hook(EVENT_ROOM_MEMBER_JOINED)
     async def joined(ctx: RoomMemberJoinedContext) -> None:
         seen.append(ctx.event_id)
 
     bot = _router_bot(tmp_path)
-    room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    bot._sync_cache_trust.state = SyncTrustState.PENDING
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_restored")
+    bot._sync_checkpoint_trust.state = SyncTrustState.PENDING
+    bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_restored")
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     bot._emit_agent_lifecycle_event = AsyncMock()
-    bot._maybe_start_startup_thread_prewarm = MagicMock()
     bot._maybe_start_deferred_overdue_task_drain = MagicMock()
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    return bot
+
+
+def _record_timeline_lifecycle_dispatches(
+    bot: AgentBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, EventClass]]:
+    """Capture how the timeline walk admits each member event it dispatches."""
+    dispatched: list[tuple[str, EventClass]] = []
+
+    async def admit_and_run(
+        _room: nio.MatrixRoom,
+        event: nio.Event,
+        kind: EventKind,
+        event_class: EventClass,
+    ) -> None:
+        assert kind is EventKind.ROOM_LIFECYCLE
+        dispatched.append((event.event_id, event_class))
+
+    monkeypatch.setattr(bot._journal_dispatcher, "admit_and_run", admit_and_run)
+    return dispatched
+
+
+@pytest.mark.asyncio
+async def test_router_emits_room_member_joined_from_first_restored_token_sync_timeline(
+    tmp_path: Path,
+) -> None:
+    """The first sync after a restored certified token should emit missed live joins."""
+    seen: list[str] = []
+    room = _room()
+    bot = _restored_token_router_bot(tmp_path, room, seen)
+    bot._journal_dispatcher.timeline_member_provenance.record(
+        "$catchup-join",
+        nio.TimelineEventProvenance.RECOVERED,
     )
 
     await bot._on_sync_response(
@@ -665,9 +807,115 @@ async def test_router_emits_room_member_joined_from_first_restored_token_sync_ti
 
 
 @pytest.mark.asyncio
-async def test_router_replays_failed_live_join_admission_after_classic_reset(
+async def test_router_leaves_cold_history_sync_timeline_joins_unanswered(
+    tmp_path: Path,
+) -> None:
+    """A join nio called cold history is context, however the walk reaches it."""
+    seen: list[str] = []
+    room = _room()
+    bot = _restored_token_router_bot(tmp_path, room, seen)
+    bot._journal_dispatcher.timeline_member_provenance.record(
+        "$ancient-join",
+        nio.TimelineEventProvenance.HISTORY,
+    )
+
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [],
+            timeline_events=[_room_member_event(event_id="$ancient-join", prev_membership=None)],
+        ),
+    )
+
+    assert seen == []
+    # Admitted already settled, so no callback will ever claim the parsed
+    # event. Holding it would keep one object per cold-history join forever.
+    assert bot._journal_dispatcher._live_events == {}
+
+
+@pytest.mark.asyncio
+async def test_router_admits_sync_timeline_joins_with_the_class_nio_gave_them(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each provenance reaches admission as the class it maps to, not a fixed one."""
+    room = _room()
+    bot = _restored_token_router_bot(tmp_path, room, [])
+    provenance = {
+        "$recovered-join": nio.TimelineEventProvenance.RECOVERED,
+        "$live-join": nio.TimelineEventProvenance.LIVE,
+        "$ancient-join": nio.TimelineEventProvenance.HISTORY,
+    }
+    for event_id, recorded in provenance.items():
+        bot._journal_dispatcher.timeline_member_provenance.record(event_id, recorded)
+    dispatched = _record_timeline_lifecycle_dispatches(bot, monkeypatch)
+
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [],
+            timeline_events=[
+                _room_member_event(event_id=event_id, user_id=f"@user{index}:localhost", prev_membership=None)
+                for index, event_id in enumerate(provenance)
+            ],
+        ),
+    )
+
+    assert dispatched == [
+        ("$recovered-join", EventClass.ACTIONABLE),
+        ("$live-join", EventClass.ACTIONABLE),
+        ("$ancient-join", EventClass.CONTEXT_ONLY),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_router_skips_sync_timeline_joins_nio_admitted_on_an_earlier_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No verdict means the event is already journaled, so the walk must not guess one."""
+    seen: list[str] = []
+    room = _room()
+    bot = _restored_token_router_bot(tmp_path, room, seen)
+    dispatched = _record_timeline_lifecycle_dispatches(bot, monkeypatch)
+
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [],
+            timeline_events=[_room_member_event(event_id="$already-admitted", prev_membership=None)],
+        ),
+    )
+
+    assert dispatched == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_sync_timeline_member_provenance_does_not_outlive_its_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A verdict nio gave one response must not answer for the next one."""
+    room = _room()
+    bot = _restored_token_router_bot(tmp_path, room, [])
+    bot._journal_dispatcher.timeline_member_provenance.record(
+        "$catchup-join",
+        nio.TimelineEventProvenance.RECOVERED,
+    )
+    dispatched = _record_timeline_lifecycle_dispatches(bot, monkeypatch)
+    join_event = _room_member_event(event_id="$catchup-join", prev_membership=None)
+
+    await bot._on_sync_response(_sync_response_with_state(room.room_id, [], timeline_events=[join_event]))
+    bot._classic_sync_rebuild_pending = True
+    await bot._on_sync_response(_sync_response_with_state(room.room_id, [], timeline_events=[join_event]))
+
+    assert dispatched == [("$catchup-join", EventClass.ACTIONABLE)]
+
+
+@pytest.mark.asyncio
+async def test_router_replays_failed_live_join_admission_after_classic_reset(
+    tmp_path: Path,
 ) -> None:
     """A reset from a certified checkpoint must re-admit its catch-up timeline join."""
     seen: list[str] = []
@@ -680,22 +928,12 @@ async def test_router_replays_failed_live_join_admission_after_classic_reset(
     room = _room()
     bot._first_sync_done = True
     bot._room_member_join_hooks_armed = True
-    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_join")
+    bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_join")
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_after_join"
     bot.client.has_uncommitted_classic_sync_state = True
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(
-            side_effect=[
-                SyncCacheWriteResult(complete=True),
-                SyncCacheWriteResult(complete=True),
-            ],
-        ),
-    )
     join_event = _room_member_event(
         event_id="$replayed-live-join",
         prev_membership=None,
@@ -734,7 +972,6 @@ async def test_router_replays_failed_live_join_admission_after_classic_reset(
 @pytest.mark.asyncio
 async def test_tokenless_timeline_only_baseline_prevents_later_false_join(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A first-sync timeline member is existing state, even without state duplication."""
     seen: list[str] = []
@@ -747,18 +984,12 @@ async def test_tokenless_timeline_only_baseline_prevents_later_false_join(
     room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    assert await bot._sync_cache_trust.prepare_startup() is None
+    assert await bot._sync_checkpoint_trust.prepare_startup() is None
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = None
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     bot._emit_agent_lifecycle_event = AsyncMock()
-    bot._maybe_start_startup_thread_prewarm = MagicMock()
     bot._maybe_start_deferred_overdue_task_drain = MagicMock()
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
-    )
 
     await bot._on_sync_response(
         _sync_response_with_state(
@@ -789,7 +1020,6 @@ async def test_tokenless_timeline_only_baseline_prevents_later_false_join(
 @pytest.mark.asyncio
 async def test_router_ignores_restored_token_first_sync_full_state_member_snapshot(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Restored-token first-sync state is full state, not a live join stream."""
     seen: list[str] = []
@@ -802,18 +1032,12 @@ async def test_router_ignores_restored_token_first_sync_full_state_member_snapsh
     room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    bot._sync_cache_trust.state = SyncTrustState.PENDING
+    bot._sync_checkpoint_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     bot._emit_agent_lifecycle_event = AsyncMock()
-    bot._maybe_start_startup_thread_prewarm = MagicMock()
     bot._maybe_start_deferred_overdue_task_drain = MagicMock()
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
-    )
 
     await bot._on_sync_response(
         _sync_response_with_state(
@@ -835,7 +1059,6 @@ async def test_router_ignores_restored_token_first_sync_full_state_member_snapsh
 @pytest.mark.asyncio
 async def test_router_ignores_restored_token_timeline_profile_update_for_existing_member(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Restored-token timeline member updates should not onboard users already in state."""
     seen: list[str] = []
@@ -848,18 +1071,12 @@ async def test_router_ignores_restored_token_timeline_profile_update_for_existin
     room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    bot._sync_cache_trust.state = SyncTrustState.PENDING
+    bot._sync_checkpoint_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     bot._emit_agent_lifecycle_event = AsyncMock()
-    bot._maybe_start_startup_thread_prewarm = MagicMock()
     bot._maybe_start_deferred_overdue_task_drain = MagicMock()
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
-    )
 
     await bot._on_sync_response(
         _sync_response_with_state(
@@ -875,7 +1092,6 @@ async def test_router_ignores_restored_token_timeline_profile_update_for_existin
 @pytest.mark.asyncio
 async def test_router_ignores_sync_state_member_snapshot_without_previous_membership(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Sync state snapshots without a membership transition should not trigger onboarding."""
     seen: list[str] = []
@@ -888,11 +1104,6 @@ async def test_router_ignores_sync_state_member_snapshot_without_previous_member
     room = _room()
     bot.client.rooms = {room.room_id: room}
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
-    )
 
     await bot._on_sync_response(
         _sync_response_with_state(
@@ -914,7 +1125,6 @@ async def test_router_ignores_sync_state_member_snapshot_without_previous_member
 @pytest.mark.asyncio
 async def test_router_ignores_limited_sync_state_member_snapshot(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Limited sync state is not a live join stream."""
     seen: list[str] = []
@@ -927,12 +1137,6 @@ async def test_router_ignores_limited_sync_state_member_snapshot(
     room = _room()
     bot.client.rooms = {room.room_id: room}
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True, limited_room_ids=(room.room_id,))),
-    )
-
     await bot._on_sync_response(
         _sync_response_with_state(
             room.room_id,
@@ -961,29 +1165,31 @@ async def test_limited_state_snapshot_does_not_settle_delayed_lifecycle_replay(
     bot.client.rooms = {room.room_id: room}
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     event = _room_member_event(event_id="$delayed-lifecycle")
-    obligation = await bot._dispatch_obligation_runner.persist(
+    await bot._journal_dispatcher.admit_out_of_band(
         room,
         event,
-        DispatchCallbackKind.ROOM_LIFECYCLE,
+        EventKind.ROOM_LIFECYCLE,
+        EventClass.ACTIONABLE,
     )
-    assert obligation is not None
+    # Hold the lifecycle callback open so the snapshot marker arrives while
+    # the exact pending work is still running.
+    lifecycle_started = asyncio.Event()
+    release_lifecycle = asyncio.Event()
+    original_on_room_member = bot._on_room_member
 
-    lookup_started = threading.Event()
-    release_lookup = threading.Event()
-    pending_for = bot._dispatch_obligation_store.pending_for
+    async def blocked_on_room_member(*args: object, **kwargs: object) -> None:
+        lifecycle_started.set()
+        await release_lifecycle.wait()
+        await original_on_room_member(*args, **kwargs)
 
-    def delayed_pending_for(key: DispatchObligationKey) -> DispatchObligation | None:
-        lookup_started.set()
-        assert release_lookup.wait(timeout=1.0)
-        return pending_for(key)
-
-    monkeypatch.setattr(bot._dispatch_obligation_store, "pending_for", delayed_pending_for)
-    callback = bot._dispatch_obligation_runner.task_wrapper(
-        DispatchCallbackKind.ROOM_LIFECYCLE,
-        owner=bot._runtime_view,
+    monkeypatch.setattr(bot, "_on_room_member", blocked_on_room_member)
+    monkeypatch.setattr(
+        bot._journal_dispatcher,
+        "callbacks",
+        replace(bot._journal_dispatcher.callbacks, on_room_lifecycle=blocked_on_room_member),
     )
-    await callback(room, event)
-    assert await asyncio.to_thread(lookup_started.wait, 1.0)
+    draining = asyncio.create_task(bot._journal_dispatcher.drain_once())
+    await asyncio.wait_for(lifecycle_started.wait(), timeout=1.0)
 
     await bot._emit_room_member_joined_sync_state_hooks(
         _sync_response_with_state(
@@ -992,20 +1198,17 @@ async def test_limited_state_snapshot_does_not_settle_delayed_lifecycle_replay(
             timeline_limited=True,
         ),
     )
-    release_lookup.set()
+    release_lifecycle.set()
+    await draining
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == ["$delayed-lifecycle"]
-    assert not bot._dispatch_obligation_store.has_pending(
-        event.event_id,
-        DispatchCallbackKind.ROOM_LIFECYCLE,
-    )
+    assert not await bot._journal_dispatcher.store.is_pending(event.event_id)
 
 
 @pytest.mark.asyncio
 async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A tokenless resync after M_UNKNOWN_POS should not onboard existing members."""
     seen: list[str] = []
@@ -1019,22 +1222,11 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_rejected"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
-    )
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
     await bot._on_sync_error(sync_error)
     bot.client.rooms = {room.room_id: room}
-    assert (
-        bot._dispatch_obligation_runner._admission_kind(
-            _room_member_event(event_id="$timeline-snapshot"),
-        )
-        is None
-    )
     await bot._on_sync_response(
         _sync_response_with_state(
             room.room_id,
@@ -1071,7 +1263,6 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
 @pytest.mark.asyncio
 async def test_registered_room_member_callback_uses_delivery_time_arming_state(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Queued recovery-sync member events should not emit after hooks re-arm."""
     seen: list[str] = []
@@ -1086,13 +1277,8 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
     bot.client.next_batch = "s_rejected"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     bot._register_room_member_callback_after_initial_sync()
-    room_member_admission = bot._dispatch_obligation_runner._admit_source_event
+    room_member_admission = bot._journal_dispatcher._ingress._admit
     room_member_callback = bot.client.add_event_callback.call_args.args[0]
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
-    )
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
@@ -1104,6 +1290,7 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
         nio.TimelineEventProvenance.HISTORY,
     )
     await room_member_callback(room, timeline_event)
+    await bot._journal_dispatcher.drain_once()
     await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
@@ -1116,6 +1303,7 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
         nio.TimelineEventProvenance.LIVE,
     )
     await room_member_callback(room, live_event)
+    await bot._journal_dispatcher.drain_once()
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == ["$live"]
@@ -1141,27 +1329,24 @@ async def test_member_callback_runs_exact_pending_lifecycle_obligation(
     bot._register_room_member_callback_after_initial_sync()
     room_member_callback = bot.client.add_event_callback.call_args.args[0]
     event = _room_member_event(event_id="$pending-member")
-    obligation = await bot._dispatch_obligation_runner.persist(
+    await bot._journal_dispatcher.admit_out_of_band(
         room,
         event,
-        DispatchCallbackKind.ROOM_LIFECYCLE,
+        EventKind.ROOM_LIFECYCLE,
+        EventClass.ACTIONABLE,
     )
-    assert obligation is not None
 
     await room_member_callback(room, event)
+    await bot._journal_dispatcher.drain_once()
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == ["$pending-member"]
-    assert not bot._dispatch_obligation_store.has_pending(
-        "$pending-member",
-        DispatchCallbackKind.ROOM_LIFECYCLE,
-    )
+    assert not await bot._journal_dispatcher.store.is_pending("$pending-member")
 
 
 @pytest.mark.asyncio
 async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snapshot(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A tokenless resync after first-sync uncertainty should not onboard existing members."""
     seen: list[str] = []
@@ -1174,31 +1359,21 @@ async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snaps
     room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    bot._sync_cache_trust.state = SyncTrustState.PENDING
+    bot._sync_checkpoint_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(
-            side_effect=[
-                SyncCacheWriteResult(complete=False),
-                SyncCacheWriteResult(complete=True),
-            ],
-        ),
-    )
+
+    # What makes the first sync uncertain has to be stated, not inherited from a
+    # cache that happened not to write in this fixture. A refused admission is
+    # the durable-ownership failure that used to be reported as an incomplete
+    # cache write, and it is consumed by this response, so the next one is clean.
+    bot._sync_checkpoint_trust.record_dispatch_persist_failure()
 
     await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
     assert bot.client.next_batch == ""
     bot.client.rooms = {room.room_id: room}
 
-    assert (
-        bot._dispatch_obligation_runner._admission_kind(
-            _room_member_event(event_id="$timeline-snapshot"),
-        )
-        is None
-    )
     await bot._on_sync_response(
         _sync_response_with_state(
             room.room_id,
@@ -1322,12 +1497,29 @@ async def test_room_member_joined_deduplicates_concurrent_same_user_marking(
     assert seen == ["$join1"]
 
 
-def test_room_member_join_admission_ignores_initial_sync_history(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_room_member_join_admission_ignores_initial_sync_history(tmp_path: Path) -> None:
     """Initial sync history must not enter the delayed live-callback boundary."""
-    bot = _router_bot(tmp_path)
-    bot._first_sync_done = False
+    seen: list[str] = []
 
-    assert bot._dispatch_obligation_runner._admission_kind(_room_member_event()) is None
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot._first_sync_done = False
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot._journal_dispatcher.register(bot.client)
+    admit = bot.client.add_event_admission_callback.call_args.args[0]
+
+    await admit(room, _room_member_event(event_id="$history-join"), nio.TimelineEventProvenance.LIVE)
+    await bot._journal_dispatcher.drain_once()
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert seen == []
+    assert await bot._journal_dispatcher.store.load_event("$history-join") is None
 
 
 @pytest.mark.asyncio

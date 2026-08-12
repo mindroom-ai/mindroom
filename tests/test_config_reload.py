@@ -22,13 +22,13 @@ from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamCo
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.delivery_gateway import SendTextRequest
 from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents, build_config_update_plan
 from mindroom.orchestration.plugin_watch import (
     _collect_plugin_root_changes,
@@ -47,8 +47,6 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_send_response_mock,
-    make_event_cache_mock,
-    make_event_cache_write_coordinator_mock,
     orchestrator_runtime_paths,
     request_envelope,
     runtime_paths_for,
@@ -58,6 +56,8 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+    from mindroom.message_target import MessageTarget
 
 
 def _calls_for(
@@ -90,8 +90,6 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     """Helper to setup a test bot with required attributes."""
     bot.client = mock_client
-    bot.event_cache = make_event_cache_mock()
-    bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
 
 
 def test_startup_phase_logging_helpers_emit_structured_timing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -236,13 +234,6 @@ async def _noop_sync_mcp_manager(
     return set()
 
 
-async def _noop_sync_event_cache_service(
-    self: _MultiAgentOrchestrator,
-    config: Config,
-) -> None:
-    del self, config
-
-
 async def _noop_sync_runtime_support_services(
     self: _MultiAgentOrchestrator,
     config: Config,
@@ -303,10 +294,6 @@ def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(
         "mindroom.orchestrator._MultiAgentOrchestrator._sync_mcp_manager",
         _noop_sync_mcp_manager,
-    )
-    monkeypatch.setattr(
-        "mindroom.orchestrator._MultiAgentOrchestrator._sync_event_cache_service",
-        _noop_sync_event_cache_service,
     )
     monkeypatch.setattr(
         "mindroom.orchestrator._MultiAgentOrchestrator._sync_runtime_support_services",
@@ -1456,7 +1443,6 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
                 new=AsyncMock(side_effect=start_blocked_reload),
             ),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
             patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         ):
@@ -1589,7 +1575,6 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         return await runner._run_cancellable_response(
             target=target,
             response_function=response_function,
-            thinking_message="Thinking...",
         )
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
@@ -1609,7 +1594,6 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
 
     try:
         await asyncio.wait_for(response_started.wait(), timeout=1)
-        send_response.assert_awaited_once()
         assert bot.in_flight_response_count == 1
 
         orchestrator.config_reload.request_reload()
@@ -2220,8 +2204,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
-        _event_cache: object,
-        _conversation_cache: object,
+        _conversation_reader: object,
     ) -> int:
         return 0
 
@@ -2304,8 +2287,7 @@ async def test_router_updates_rooms_on_config_reload(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
-        _event_cache: object,
-        _conversation_cache: object,
+        _conversation_reader: object,
     ) -> int:
         return 0
 
@@ -2384,8 +2366,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
-        _event_cache: object,
-        _conversation_cache: object,
+        _conversation_reader: object,
     ) -> int:
         return 0
 
@@ -2459,8 +2440,7 @@ async def test_team_room_changes_on_config_reload(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
-        _event_cache: object,
-        _conversation_cache: object,
+        _conversation_reader: object,
     ) -> int:
         return 0
 
@@ -2667,8 +2647,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
-        _event_cache: object,
-        _conversation_cache: object,
+        _conversation_reader: object,
     ) -> int:
         return 0
 
@@ -2794,9 +2773,6 @@ async def test_in_flight_response_count_nonzero_during_send_response(
     send_response = AsyncMock(side_effect=slow_send)
     install_send_response_mock(bot, send_response)
 
-    async def response_function(message_id: str | None) -> None:
-        pass
-
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = ResponseRequest(
         thread_history=(),
@@ -2812,10 +2788,14 @@ async def test_in_flight_response_count_nonzero_during_send_response(
         target: MessageTarget,
         _early_placeholder: object,
     ) -> str | None:
+        async def response_function(_message_id: str | None) -> None:
+            await bot._delivery_gateway.send_text(
+                SendTextRequest(target=target, response_text="the answer"),
+            )
+
         return await runner._run_cancellable_response(
             target=target,
             response_function=response_function,
-            thinking_message="Thinking...",
         )
 
     task = asyncio.create_task(
@@ -3046,60 +3026,6 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_run_cancellable_response_marks_thinking_placeholder_pending(
-    tmp_path: Path,
-    mock_agent_users: dict[str, AgentMatrixUser],
-) -> None:
-    """Initial thinking messages should carry pending stream metadata for restart-safe classification."""
-    config = _runtime_bound_config(
-        Config(
-            agents={"agent1": AgentConfig(display_name="Agent 1")},
-            router=RouterConfig(model="default"),
-        ),
-        tmp_path,
-    )
-    bot = AgentBot(
-        agent_user=mock_agent_users["agent1"],
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    setup_test_bot(bot, AsyncMock())
-
-    captured_send: dict[str, object] = {}
-
-    async def fake_send_response(
-        *,
-        target: object,
-        response_text: str,
-        skip_mentions: bool = False,
-        tool_trace: list[object] | None = None,
-        extra_content: dict[str, object] | None = None,
-    ) -> str:
-        captured_send["response_text"] = response_text
-        captured_send["target"] = target
-        captured_send["skip_mentions"] = skip_mentions
-        captured_send["tool_trace"] = tool_trace
-        captured_send["extra_content"] = extra_content
-        return "$thinking"
-
-    send_response = AsyncMock(side_effect=fake_send_response)
-    install_send_response_mock(bot, send_response)
-
-    async def response_function(message_id: str | None) -> None:
-        assert message_id == "$thinking"
-
-    await bot._response_runner._run_cancellable_response(
-        target=MessageTarget.resolve("!room:localhost", None, "$reply"),
-        response_function=response_function,
-        thinking_message="Thinking...",
-    )
-
-    assert captured_send["response_text"] == "Thinking..."
-    assert captured_send["extra_content"] == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,7 @@ from mindroom.response_runner import ResponseRequest
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     request_envelope,
     runtime_paths_for,
@@ -124,7 +124,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         client.user_id = "@mindroom_general:localhost"
         client.room_send.return_value = _room_send_response("$agent_message_id")
         bot.client = client
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
 
         room_id = "!test:localhost"
         user_message_id = "$user_original_message"
@@ -183,7 +183,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         patch("mindroom.response_runner.ai_response") as mock_ai_response,
         patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
         patch(
-            "mindroom.delivery_gateway.edit_message_result",
+            "mindroom.delivery_gateway.edit_message_outcome",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
         ),
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
@@ -230,7 +230,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         client.user_id = "@mindroom_general:localhost"
         client.room_send.return_value = _room_send_response("$agent_response_id")
         bot.client = client
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
 
         room_id = "!test:localhost"
         user_message_id = "$user_thread_start"
@@ -325,7 +325,7 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         client.user_id = "@mindroom_general:localhost"
         client.room_send.return_value = _room_send_response("$standalone_message")
         bot.client = client
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
 
         room_id = "!test:localhost"
         resolution = await bot._response_runner.generate_response(

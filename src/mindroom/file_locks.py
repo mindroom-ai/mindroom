@@ -14,7 +14,13 @@ if TYPE_CHECKING:
 
 _DEFAULT_POLL_SECONDS = 0.1
 
-__all__ = ["advisory_file_lock", "async_exclusive_file_lock"]
+__all__ = [
+    "acquire_shared_file_lock",
+    "advisory_file_lock",
+    "async_exclusive_file_lock",
+    "file_lock_is_held",
+    "release_file_lock",
+]
 
 
 def _open_lock_file(lock_path: Path) -> TextIO:
@@ -34,6 +40,49 @@ def advisory_file_lock(lock_path: Path, *, exclusive: bool = True) -> Iterator[N
     finally:
         if acquired:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
+
+def acquire_shared_file_lock(lock_path: Path) -> TextIO:
+    """Take a shared advisory lock and return the handle that keeps holding it.
+
+    For claims that outlive a block: a process that has something open declares
+    it for as long as that thing is open, and the operating system withdraws
+    the claim if the process dies, which is what a PID file cannot do.
+    """
+    lock_file = _open_lock_file(lock_path)
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+    except BaseException:
+        lock_file.close()
+        raise
+    return lock_file
+
+
+def release_file_lock(lock_file: TextIO) -> None:
+    """Give up a lock taken by :func:`acquire_shared_file_lock`."""
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
+
+
+def file_lock_is_held(lock_path: Path) -> bool:
+    """Return whether anyone currently holds this lock, without waiting to find out.
+
+    A point-in-time answer: a holder can arrive the instant after it is read.
+    Callers use it to refuse an operation that a holder would make unsafe, not
+    to make the operation safe.
+    """
+    lock_file = _open_lock_file(lock_path)
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    else:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        return False
+    finally:
         lock_file.close()
 
 

@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import TYPE_CHECKING, Literal, cast, get_args
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -13,14 +14,16 @@ import pytest
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
+from mindroom import coalescing
 from mindroom.attachments import _attachment_id_for_event, load_attachment, register_local_attachment
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent, is_coalescing_exempt_source_kind
 from mindroom.coalescing_batch import (
-    CoalescedBatch,
     CoalescingKey,
     PendingEvent,
-    build_coalesced_batch,
+    PreparedTurn,
+    RequesterCoalescingOwner,
+    build_prepared_turn,
 )
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -33,7 +36,6 @@ from mindroom.constants import (
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
-    STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
@@ -45,12 +47,8 @@ from mindroom.dispatch_handoff import (
     DispatchEvent,
     DispatchIngressMetadata,
     DispatchPayloadMetadata,
-    PendingDispatchMetadata,
-    PreparedTextEvent,
-    _build_batch_dispatch_event,
-    build_dispatch_handoff,
+    PreparedIngress,
 )
-from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -58,6 +56,13 @@ from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
+)
+from mindroom.event_journal import (
+    AdmissionResult,
+    EventClass,
+    EventKind,
+    JournalEvent,
+    PendingTurnView,
 )
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord
 from mindroom.hooks import MessageEnvelope
@@ -67,16 +72,17 @@ from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
     _BatchMediaAttachmentResult,
 )
-from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.journal_ingress import inbound_event
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
-    THREAD_HISTORY_ERROR_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DEGRADED,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
 )
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
@@ -88,8 +94,8 @@ from tests.conftest import (
     dispatch_context_result,
     install_generate_response_mock,
     install_send_response_mock,
-    make_conversation_cache_mock,
     make_matrix_client_mock,
+    make_pending_event,
     message_origin,
     prepare_payload_via_seam,
     prepared_dispatch_result,
@@ -99,9 +105,11 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.threading_helpers import seed_hydrated_conversation, seed_unhydrated_room_event
+from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
     from pathlib import Path
 
 
@@ -160,9 +168,69 @@ def _make_bot(
     return bot
 
 
+async def _admit_pending_thread_event(
+    bot: AgentBot,
+    event_source: dict[str, Any],
+    *,
+    kind: EventKind = EventKind.MESSAGE,
+) -> None:
+    """Admit one raw event into the bot's journal as unfinished actionable work.
+
+    Through the production admission shaping rather than a hand-built row: the
+    degraded replay guard filters on the thread the journal recorded, so a test
+    that wrote that column itself would prove nothing about which events really
+    land in a thread.
+
+    ``kind`` is a parameter because thread membership is derived from content
+    for every kind alike -- ``inbound_event`` calls ``thread_root`` regardless
+    -- so a non-turn-backed event can sit in a thread and be seen by a guard
+    that only asks what is pending.
+    """
+    parsed = nio.Event.parse_event(event_source)
+    assert isinstance(parsed, nio.Event)
+    admitted = await bot._journal_store.principal(bot._journal_principal_id).admit(
+        inbound_event(str(event_source["room_id"]), parsed, kind, EventClass.ACTIONABLE),
+    )
+    assert admitted is AdmissionResult.ADMITTED
+
+
+@dataclass
+class _RecordingPendingTurns:
+    """A real journal read that also records how the replay guard asked for it."""
+
+    store: PendingTurnView
+    calls: list[tuple[str, str, int, str]] = field(default_factory=list)
+
+    async def pending_thread_events_after(
+        self,
+        *,
+        room_id: str,
+        thread_id: str,
+        after_origin_server_ts: int,
+        excluding_event_id: str,
+        limit: int = 256,
+    ) -> tuple[JournalEvent, ...]:
+        """Record the bounds this read was given, then answer from the journal."""
+        self.calls.append((room_id, thread_id, after_origin_server_ts, excluding_event_id))
+        return await self.store.pending_thread_events_after(
+            room_id=room_id,
+            thread_id=thread_id,
+            after_origin_server_ts=after_origin_server_ts,
+            excluding_event_id=excluding_event_id,
+            limit=limit,
+        )
+
+
+def _watch_pending_turns(bot: AgentBot) -> _RecordingPendingTurns:
+    """Route the bot's degraded replay-guard reads through a recorder."""
+    recorder = _RecordingPendingTurns(store=bot._turn_controller.deps.pending_turns)
+    replace_turn_controller_deps(bot, pending_turns=cast("PendingTurnView", recorder))
+    return recorder
+
+
 async def _enqueue_for_dispatch(
     bot: AgentBot,
-    event: DispatchEvent,
+    event: DispatchEvent | nio.RoomMessageText,
     room: nio.MatrixRoom,
     *,
     source_kind: str,
@@ -174,6 +242,14 @@ async def _enqueue_for_dispatch(
     trust_internal_payload_metadata: bool | None = None,
 ) -> _IngressAdmissionOutcome:
     """Test helper for the reserved Matrix-ingress enqueue path."""
+    if isinstance(event, nio.RoomMessageText):
+        event = PreparedIngress(
+            sender=event.sender,
+            event_id=event.event_id,
+            body=event.body,
+            source=event.source,
+            server_timestamp=event.server_timestamp,
+        )
     reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, requester_user_id)
     try:
         return await bot._turn_controller._enqueue_for_dispatch(
@@ -201,7 +277,7 @@ async def _admit_ready(
     await gate.admit(
         key,
         source_event_id=pending_event.event.event_id,
-        source_kind=pending_event.source_kind,
+        source_kind=pending_event.event.source_kind,
         ready_result=ReadyPendingEvent(pending_event=pending_event),
     )
 
@@ -241,35 +317,45 @@ def _make_room(room_id: str = "!room:localhost") -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_duplicate_delivery_is_claimed_before_dispatch_resolution(tmp_path: Path) -> None:
-    """A replay arriving during cache resolution must not repeat that work."""
+    """A replay arriving during dispatch planning must not repeat that work."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
-    event = _text_event(event_id="$duplicate", body="@test_agent hello")
-    resolution_started = asyncio.Event()
+    event = PreparedIngress(
+        sender="@user:localhost",
+        event_id="$duplicate",
+        body="@test_agent hello",
+        source={"event_id": "$duplicate", "sender": "@user:localhost", "content": {"msgtype": "m.text"}},
+        server_timestamp=1000,
+    )
+    plan_started = asyncio.Event()
     duplicate_reservation = MagicMock()
 
-    async def slow_normalize(*_args: object, **_kwargs: object) -> None:
-        resolution_started.set()
+    async def slow_plan(*_args: object, **_kwargs: object) -> None:
+        plan_started.set()
         await asyncio.Event().wait()
 
-    normalizer = MagicMock()
-    normalizer.resolve_text_event = AsyncMock(side_effect=slow_normalize)
-    controller = replace_turn_controller_deps(bot, normalizer=normalizer)
-    first = asyncio.create_task(
-        controller._dispatch_text_message(room, event, "@user:localhost"),
-    )
-    await resolution_started.wait()
-    await controller._dispatch_text_message(
-        room,
-        event,
-        "@user:localhost",
-        queued_notice_reservation=duplicate_reservation,
-    )
-    first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first
+    controller = replace_turn_controller_deps(bot)
+    plan_turn = AsyncMock(side_effect=slow_plan)
+    with patch.object(controller.deps.turn_policy, "plan_turn", new=plan_turn):
+        first = asyncio.create_task(
+            dispatch_test_turn(controller, room, event, "@user:localhost"),
+        )
+        await asyncio.wait_for(plan_started.wait(), timeout=1.0)
+        await asyncio.wait_for(
+            dispatch_test_turn(
+                controller,
+                room,
+                event,
+                "@user:localhost",
+                queued_notice_reservation=duplicate_reservation,
+            ),
+            timeout=1.0,
+        )
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
 
-    normalizer.resolve_text_event.assert_awaited_once()
+    plan_turn.assert_awaited_once()
     duplicate_reservation.cancel.assert_called_once_with()
 
 
@@ -490,10 +576,8 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
         body="!help" if terminal_path == "non_owner_command" else "ignore me",
     )
     dispatch = _prepared_dispatch(event_id=event.event_id, body=event.body)
-    runner = bot._dispatch_obligation_runner
-    runner._retry_initial_delay_seconds = 0.001
-    runner._retry_max_delay_seconds = 0.001
-    await runner.persist(room, event, DispatchCallbackKind.MESSAGE)
+    dispatcher = bot._journal_dispatcher
+    await dispatcher.admit_out_of_band(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
 
     plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
     with (
@@ -526,11 +610,8 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
         plan_turn.assert_awaited_once()
     else:
         plan_turn.assert_not_awaited()
-    assert not bot._turn_store.is_durably_handled(event.event_id)
-    await _wait_for(
-        lambda: not runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE),
-        deadline_seconds=1,
-    )
+    assert not bot._turn_store.is_handled(event.event_id)
+    assert not await dispatcher.store.is_pending(event.event_id)
 
 
 @pytest.mark.asyncio
@@ -553,7 +634,10 @@ async def test_single_message_dispatches_after_debounce_window(tmp_path: Path) -
         _ = handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), media_events or []))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             event,
@@ -588,7 +672,10 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
         _ = media_events, handled_turn
         calls.append((dispatched_event.event_id, dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             first,
@@ -627,7 +714,7 @@ async def test_two_rapid_text_messages_forward_prompt_map_to_dispatch(tmp_path: 
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000, thread_id="$thread")
     second = _text_event(event_id="$m2", body="second", server_timestamp=1001, thread_id="$thread")
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch:
+    with patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch:
         await _enqueue_for_dispatch(
             bot,
             first,
@@ -645,7 +732,7 @@ async def test_two_rapid_text_messages_forward_prompt_map_to_dispatch(tmp_path: 
         await bot._coalescing_gate.drain_all()
 
     assert mock_dispatch.await_count == 1
-    handled_turn = mock_dispatch.await_args.kwargs["handled_turn"]
+    handled_turn = mock_dispatch.await_args.args[1].handled_turn
     assert list(handled_turn.source_event_ids) == ["$m1", "$m2"]
     assert handled_turn.source_event_prompts == {
         "$m1": "first",
@@ -674,7 +761,10 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
         _ = handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             image_event,
@@ -725,7 +815,10 @@ async def test_room_root_image_and_caption_coalesce_into_single_dispatch(tmp_pat
     ) -> None:
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await bot._turn_controller.handle_media_event(room, image_event)
         await asyncio.sleep(0.005)
         await bot._turn_controller.handle_text_event(room, text_event)
@@ -766,7 +859,10 @@ async def test_images_then_caption_coalesce_into_single_dispatch(tmp_path: Path)
     ) -> None:
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             first_image,
@@ -818,7 +914,10 @@ async def test_each_thread_text_dispatches_immediately_as_own_turn(tmp_path: Pat
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             first,
@@ -864,7 +963,10 @@ async def test_image_after_text_dispatch_is_a_second_batch(tmp_path: Path) -> No
         _ = handled_turn
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             text_event,
@@ -910,7 +1012,10 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             alice,
@@ -930,31 +1035,31 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
     assert sorted(calls) == [["$m1"], ["$m2"]]
 
 
-def test_build_coalesced_batch_keeps_normalized_voice_out_of_media_events() -> None:
+def test_build_prepared_turn_keeps_normalized_voice_out_of_media_events() -> None:
     """Voice messages should enter coalescing as synthetic text, not raw media."""
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice1",
         body="transcribed voice",
         source={"content": {"body": "transcribed voice", SOURCE_KIND_KEY: "voice"}},
     )
 
-    batch = build_coalesced_batch(
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
-        [PendingEvent(event=voice_event, room=room, source_kind="voice")],
+    batch = build_prepared_turn(
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+        [make_pending_event(voice_event, room, source_kind="voice")],
     )
 
-    assert batch.prompt == "transcribed voice"
-    assert batch.source_event_ids == ["$voice1"]
-    assert batch.media_events == []
+    assert batch.event.body == "transcribed voice"
+    assert batch.handled_turn.source_event_ids == ("$voice1",)
+    assert batch.media_events == ()
 
 
-def test_build_coalesced_batch_preserves_fifo_order_with_synthetic_events() -> None:
+def test_build_prepared_turn_preserves_fifo_order_with_synthetic_events() -> None:
     """Preserve queue order even when Matrix timestamps disagree."""
     room = _make_room()
     real_event = _text_event(event_id="$real", body="real", server_timestamp=1_712_350_002_000)
-    synthetic_event = PreparedTextEvent(
+    synthetic_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$synthetic",
         body="synthetic",
@@ -962,40 +1067,42 @@ def test_build_coalesced_batch_preserves_fifo_order_with_synthetic_events() -> N
         server_timestamp=1_712_350_003_000,
     )
 
-    batch = build_coalesced_batch(
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
+    batch = build_prepared_turn(
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
-            PendingEvent(event=synthetic_event, room=room, source_kind="voice", enqueue_time=50_000.0),
-            PendingEvent(event=real_event, room=room, source_kind="message"),
+            make_pending_event(synthetic_event, room, source_kind="voice", enqueue_time=50_000.0),
+            make_pending_event(real_event, room, source_kind="message"),
         ],
     )
 
-    assert batch.source_event_ids == ["$synthetic", "$real"]
-    assert batch.prompt.endswith("synthetic\nreal")
+    assert batch.handled_turn.source_event_ids == ("$synthetic", "$real")
+    assert batch.event.body.endswith("synthetic\nreal")
 
 
-def test_build_coalesced_batch_prefers_media_source_kind_over_text_primary() -> None:
+def test_build_prepared_turn_prefers_media_source_kind_over_text_primary() -> None:
     """Mixed batches should keep media source_kind even when text is the primary event."""
     room = _make_room()
     image_event = _image_event(event_id="$img1", server_timestamp=1000)
     text_event = _text_event(event_id="$m2", body="describe it", server_timestamp=1001)
 
-    batch = build_coalesced_batch(
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
+    text_pending = make_pending_event(text_event, room, source_kind="message")
+    batch = build_prepared_turn(
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
-            PendingEvent(event=image_event, room=room, source_kind="image"),
-            PendingEvent(event=text_event, room=room, source_kind="message"),
+            make_pending_event(image_event, room, source_kind="image"),
+            text_pending,
         ],
     )
 
-    assert batch.primary_event is text_event
-    assert batch.source_kind == "image"
+    assert batch.event.event_id == text_pending.event.event_id
+    assert batch.event.source is text_pending.event.source
+    assert batch.ingress.source_kind == "image"
 
 
-def test_build_coalesced_batch_prefers_voice_source_kind_over_media_and_text() -> None:
+def test_build_prepared_turn_prefers_voice_source_kind_over_media_and_text() -> None:
     """Voice should win batch source_kind precedence even when a text event is primary."""
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice1",
         body="voice prompt",
@@ -1004,17 +1111,19 @@ def test_build_coalesced_batch_prefers_voice_source_kind_over_media_and_text() -
     image_event = _image_event(event_id="$img1", server_timestamp=1000)
     text_event = _text_event(event_id="$m2", body="follow-up", server_timestamp=1001)
 
-    batch = build_coalesced_batch(
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
+    text_pending = make_pending_event(text_event, room, source_kind="message")
+    batch = build_prepared_turn(
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
-            PendingEvent(event=voice_event, room=room, source_kind="voice", enqueue_time=0.5),
-            PendingEvent(event=image_event, room=room, source_kind="image"),
-            PendingEvent(event=text_event, room=room, source_kind="message"),
+            make_pending_event(voice_event, room, source_kind="voice", enqueue_time=0.5),
+            make_pending_event(image_event, room, source_kind="image"),
+            text_pending,
         ],
     )
 
-    assert batch.primary_event is text_event
-    assert batch.source_kind == "voice"
+    assert batch.event.event_id == text_pending.event.event_id
+    assert batch.event.source is text_pending.event.source
+    assert batch.ingress.source_kind == "voice"
 
 
 @pytest.mark.asyncio
@@ -1038,7 +1147,10 @@ async def test_same_sender_different_threads_dispatch_separately(tmp_path: Path)
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             thread_a,
@@ -1070,8 +1182,16 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
         reply_to_event_id="$thread-seed",
         server_timestamp=1001,
     )
-    bot._turn_controller.deps.resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
-        side_effect=lambda _room_id, event_id: "$thread-root" if event_id == "$thread-seed" else None,
+    # The reply inherits its thread from the event it answers, so the journal
+    # has to already place that event in one. Without it the walk reaches an
+    # unhydrated candidate root instead, and unproven roots are refused a
+    # coalescing key rather than guessed at.
+    await seed_unhydrated_room_event(
+        bot,
+        room_id=room.room_id,
+        event_id="$thread-seed",
+        body="thread seed",
+        thread_id="$thread-root",
     )
     calls: list[list[str]] = []
 
@@ -1087,7 +1207,10 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             room_message,
@@ -1109,7 +1232,14 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
 
 @pytest.mark.asyncio
 async def test_plain_reply_with_unproven_root_is_not_admitted_under_guessed_key(tmp_path: Path) -> None:
-    """Unproven roots should not be admitted as canonical room-level coalescing keys."""
+    """Unproven roots should not be admitted as canonical room-level coalescing keys.
+
+    An unhydrated candidate is ordinarily repaired by a strict read, so the
+    homeserver here refuses the relation walk that repair depends on: it serves
+    ``$root-a`` but will not say what relates to it. That leaves the candidate
+    genuinely unprovable, which is the only state in which admitting anything
+    would mean guessing the key the batch is formed under.
+    """
     bot = _make_bot(tmp_path)
     room = _make_room()
     reply_a = _reply_event(
@@ -1118,27 +1248,18 @@ async def test_plain_reply_with_unproven_root_is_not_admitted_under_guessed_key(
         reply_to_event_id="$root-a",
         server_timestamp=1000,
     )
-
-    def root_response(event_id: str) -> nio.RoomGetEventResponse:
-        return nio.RoomGetEventResponse.from_dict(
-            {
-                "content": {"body": event_id, "msgtype": "m.text"},
-                "event_id": event_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 999,
-                "room_id": room.room_id,
-                "type": "m.room.message",
-            },
-        )
-
-    async def get_event(_room_id: str, event_id: str) -> nio.RoomGetEventResponse:
-        return root_response(event_id)
-
-    bot._turn_controller.deps.resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
-    bot._turn_controller.deps.resolver.deps.conversation_cache.get_event = AsyncMock(side_effect=get_event)
-    bot._turn_controller.deps.resolver.deps.conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
-        side_effect=TimeoutError("dispatch read timed out"),
+    await seed_unhydrated_room_event(
+        bot,
+        room_id=room.room_id,
+        event_id="$root-a",
+        body="root a",
     )
+
+    async def refuse_relations(**_kwargs: object) -> AsyncIterator[nio.Event]:
+        raise nio.InsufficientRecursionDepthError(required=0, reported=None)
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
+    bot.client.room_get_event_relations = MagicMock(side_effect=refuse_relations)
     calls: list[list[str]] = []
 
     async def record_dispatch(
@@ -1154,7 +1275,10 @@ async def test_plain_reply_with_unproven_root_is_not_admitted_under_guessed_key(
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
     with (
-        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+        patch(
+            "mindroom.turn_controller.dispatch_text_message",
+            new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+        ),
         pytest.raises(RuntimeError, match="Could not resolve canonical coalescing thread"),
     ):
         await _enqueue_for_dispatch(
@@ -1189,7 +1313,10 @@ async def test_command_executes_immediately_while_text_batch_debounces(tmp_path:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await bot._turn_controller.handle_text_event(room, first)
         await bot._turn_controller.handle_text_event(room, command)
 
@@ -1224,7 +1351,10 @@ async def test_command_during_media_debounce_executes_immediately(tmp_path: Path
         _ = media_events
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await bot._turn_controller.handle_media_event(room, image_event)
         await bot._turn_controller.handle_text_event(room, command_event)
 
@@ -1273,7 +1403,10 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
             await release_first_dispatch.wait()
 
     with (
-        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+        patch(
+            "mindroom.turn_controller.dispatch_text_message",
+            new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+        ),
         patch.object(
             bot._response_runner,
             "wait_for_thread_response_idle",
@@ -1303,7 +1436,7 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
                 room,
                 source_kind="message",
                 requester_user_id="@user:localhost",
-                coalescing_key=CoalescingKey(room.room_id, "$m1", "@user:localhost"),
+                coalescing_key=CoalescingKey(room.room_id, "$m1", RequesterCoalescingOwner("@user:localhost")),
             )
             await asyncio.sleep(0.03)
 
@@ -1325,16 +1458,16 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
     second = _text_event(event_id="$b", body="second", sender="@bob:localhost", thread_id="$thread")
     active_threads: set[str | None] = {"$thread"}
     idle = asyncio.Event()
-    calls: list[CoalescedBatch] = []
+    calls: list[PreparedTurn] = []
 
-    async def record_dispatch(batch: CoalescedBatch) -> None:
+    async def record_dispatch(_controller: object, batch: PreparedTurn) -> None:
         calls.append(batch)
 
     async def wait_for_thread_response_idle(_room_id: str, _thread_id: str | None) -> None:
         await idle.wait()
 
     with (
-        patch.object(bot._turn_controller, "handle_coalesced_batch", new=AsyncMock(side_effect=record_dispatch)),
+        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch.object(
             bot._response_runner,
             "wait_for_thread_response_idle",
@@ -1354,17 +1487,20 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
                 room,
                 source_kind="message",
                 requester_user_id=requester_user_id,
-                coalescing_key=CoalescingKey(room.room_id, "$thread", requester_user_id),
+                coalescing_key=CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner(requester_user_id)),
             )
         await asyncio.sleep(0.01)
         assert calls == []
 
         active_threads.clear()
         idle.set()
-        await _wait_for(lambda: [list(batch.source_event_ids) for batch in calls] == [["$a", "$b"]])
+        await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$a", "$b"]])
 
-    assert calls[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    assert [pending_event.requester_user_id for pending_event in calls[0].pending_events] == [
+    assert calls[0].ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert [
+        calls[0].handled_turn.source_event_metadata[event_id].sender
+        for event_id in calls[0].handled_turn.source_event_ids
+    ] == [
         "@alice:localhost",
         "@bob:localhost",
     ]
@@ -1398,7 +1534,7 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
     release_second_lookup = asyncio.Event()
     calls: list[list[str]] = []
 
-    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedTextEvent) -> str | None:
+    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedIngress) -> str | None:
         if event.event_id == "$m2":
             second_lookup_started.set()
             await release_second_lookup.wait()
@@ -1427,7 +1563,10 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
                 "coalescing_thread_id",
                 new=AsyncMock(side_effect=coalescing_thread_id),
             ),
-            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+            patch(
+                "mindroom.turn_controller.dispatch_text_message",
+                new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+            ),
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             second_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, second))
@@ -1486,7 +1625,7 @@ async def test_later_slow_thread_lookup_active_follow_up_lands_as_own_turn(tmp_p
     release_second_lookup = asyncio.Event()
     calls: list[list[str]] = []
 
-    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedTextEvent) -> str | None:
+    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedIngress) -> str | None:
         if event.event_id == "$m2":
             second_lookup_started.set()
             await release_second_lookup.wait()
@@ -1515,7 +1654,10 @@ async def test_later_slow_thread_lookup_active_follow_up_lands_as_own_turn(tmp_p
                 "coalescing_thread_id",
                 new=AsyncMock(side_effect=coalescing_thread_id),
             ),
-            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+            patch(
+                "mindroom.turn_controller.dispatch_text_message",
+                new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+            ),
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             first_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, first))
@@ -1640,7 +1782,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
                     room,
                     source_kind=IMAGE_SOURCE_KIND if event.event_id == "$img" else MESSAGE_SOURCE_KIND,
                     requester_user_id=requester_user_id,
-                    coalescing_key=CoalescingKey(room.room_id, "$thread", requester_user_id),
+                    coalescing_key=CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner(requester_user_id)),
                 )
 
             await _wait_for(
@@ -1681,18 +1823,18 @@ async def test_room_scope_text_then_voice_live_debounce_coalesces_receive_time()
     )
     calls: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 5.0,
         is_shutting_down=lambda: False,
     )
-    key = CoalescingKey("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
 
-    await _admit_ready(gate, key, PendingEvent(event=text, room=room, source_kind="message"))
-    await _admit_ready(gate, key, PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND))
+    await _admit_ready(gate, key, make_pending_event(text, room, source_kind="message"))
+    await _admit_ready(gate, key, make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND))
     await gate.drain_all()
 
     assert calls == [["$text", "$voice"]]
@@ -1713,24 +1855,24 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
     release_voice = asyncio.Event()
     calls: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
 
     async def ready_voice() -> ReadyPendingEvent:
         await release_voice.wait()
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+            pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.05,
         is_shutting_down=lambda: False,
     )
-    key = CoalescingKey("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
 
-    await _admit_ready(gate, key, PendingEvent(event=text, room=room, source_kind="message"))
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    await _admit_ready(gate, key, make_pending_event(text, room, source_kind="message"))
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=key,
@@ -1748,6 +1890,65 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
 
 
 @pytest.mark.asyncio
+async def test_flush_waiting_on_a_lane_that_never_settles_reports_the_stall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A burst wait that stops looking live must leave a record, then keep waiting.
+
+    An admitted batch held by an undelivered lane slot is invisible: the gate
+    logs the enqueue and then nothing at all. The wait stays unbounded so a
+    slow burst still coalesces, but a lane that is not going to settle has to
+    be diagnosable from the log rather than only from a missing reply.
+    """
+    monkeypatch.setattr(coalescing, "_LANE_WAIT_STALL_SECONDS", 0.01)
+    room = _make_room()
+    text = _text_event(event_id="$text", body="answer me", server_timestamp=1000)
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost"))
+    lane_key = ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost")
+    text_slot = gate.enter_lane(lane_key)
+    stuck_slot = gate.enter_lane(lane_key)
+
+    with capture_logs() as logs:
+        gate.submit_lane_slot(
+            text_slot,
+            key=key,
+            source_event_id="$text",
+            source_kind="message",
+            ready_result=ReadyPendingEvent(
+                pending_event=make_pending_event(text, room, source_kind="message"),
+            ),
+        )
+        await _wait_for(
+            lambda: any(entry["event"] == "coalescing_gate_lane_wait_stalled" for entry in logs),
+        )
+        assert calls == []
+
+        gate.release_lane_slot(stuck_slot)
+        await _wait_for(lambda: calls == [["$text"]])
+
+    stalls = [entry for entry in logs if entry["event"] == "coalescing_gate_lane_wait_stalled"]
+    # One report per wait, not one per polling interval: the flush keeps
+    # waiting for the burst after reporting rather than restarting the wait.
+    assert len(stalls) == 1
+    stalled = stalls[0]
+    assert stalled["log_level"] == "warning"
+    assert stalled["room_id"] == room.room_id
+    assert stalled["sender_id"] == "@user:localhost"
+    assert stalled["unsettled_slot_count"] == 1
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
 async def test_voice_ready_release_combines_same_thread_backlog_in_receipt_order() -> None:
     """Voice resolving late releases the whole same-thread backlog as one receipt-ordered turn."""
     room = _make_room()
@@ -1760,21 +1961,21 @@ async def test_voice_ready_release_combines_same_thread_backlog_in_receipt_order
         thread_id="$thread-a",
         source_kind=VOICE_SOURCE_KIND,
     )
-    text_key = CoalescingKey(room.room_id, "$thread-a", "@user:localhost")
+    text_key = CoalescingKey(room.room_id, "$thread-a", RequesterCoalescingOwner("@user:localhost"))
     release_voice = asyncio.Event()
     calls: list[list[str]] = []
 
     async def ready_voice() -> ReadyPendingEvent:
         await release_voice.wait()
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+            pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.02,
         is_shutting_down=lambda: False,
     )
@@ -1782,12 +1983,15 @@ async def test_voice_ready_release_combines_same_thread_backlog_in_receipt_order
     start = time.monotonic() - 1.0
     await gate.admit(
         text_key,
-        ready_result=ReadyPendingEvent(pending_event=PendingEvent(event=first, room=room, source_kind="message")),
+        ready_result=ReadyPendingEvent(pending_event=make_pending_event(first, room, source_kind="message")),
         receipt_time=start,
         source_event_id="$typed1",
         source_kind="message",
     )
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost", receipt_time=start + 0.005)
+    voice_slot = gate.enter_lane(
+        ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"),
+        receipt_time=start + 0.005,
+    )
     gate.submit_lane_slot(
         voice_slot,
         key=text_key,
@@ -1797,7 +2001,7 @@ async def test_voice_ready_release_combines_same_thread_backlog_in_receipt_order
     )
     await gate.admit(
         text_key,
-        ready_result=ReadyPendingEvent(pending_event=PendingEvent(event=second, room=room, source_kind="message")),
+        ready_result=ReadyPendingEvent(pending_event=make_pending_event(second, room, source_kind="message")),
         receipt_time=start + 0.5,
         source_event_id="$typed2",
         source_kind="message",
@@ -1833,7 +2037,10 @@ async def test_command_executes_immediately_despite_unresolved_ingress(tmp_path:
 
     reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
     try:
-        with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        with patch(
+            "mindroom.turn_controller.dispatch_text_message",
+            new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+        ):
             await bot._turn_controller.handle_text_event(room, command_event)
 
         assert calls == [("!help", ["$cmd"])]
@@ -1845,7 +2052,7 @@ async def test_command_executes_immediately_despite_unresolved_ingress(tmp_path:
 async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
     """A cancelled drain should not lose queued or still-resolving admissions."""
     room = _make_room()
-    key = CoalescingKey(room.room_id, "$thread", "@user:localhost")
+    key = CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner("@user:localhost"))
     first = _text_event(event_id="$first", body="first")
     second = _text_event(event_id="$second", body="second")
     release_second = asyncio.Event()
@@ -1854,20 +2061,20 @@ async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
     async def ready_second() -> ReadyPendingEvent:
         await release_second.wait()
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=second, room=room, source_kind="message"),
+            pending_event=make_pending_event(second, room, source_kind="message"),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
-    await _admit_ready(gate, key, PendingEvent(event=first, room=room, source_kind="message"))
-    second_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    await _admit_ready(gate, key, make_pending_event(first, room, source_kind="message"))
+    second_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"))
     gate.submit_lane_slot(
         second_slot,
         key=key,
@@ -1907,29 +2114,29 @@ async def test_voice_handoff_buffers_same_thread_followups_while_in_flight() -> 
         server_timestamp=1001,
         thread_id="$voice_thread",
     )
-    resolved_key = CoalescingKey(room.room_id, "$voice_thread", "@user:localhost")
+    resolved_key = CoalescingKey(room.room_id, "$voice_thread", RequesterCoalescingOwner("@user:localhost"))
     entered_voice_dispatch = asyncio.Event()
     release_voice_dispatch = asyncio.Event()
     calls: list[list[str]] = []
 
     async def ready_voice() -> ReadyPendingEvent:
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+            pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
-        if batch.source_event_ids == ["$voice"]:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
+        if list(batch.handled_turn.source_event_ids) == ["$voice"]:
             entered_voice_dispatch.set()
             await release_voice_dispatch.wait()
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=resolved_key,
@@ -1938,7 +2145,7 @@ async def test_voice_handoff_buffers_same_thread_followups_while_in_flight() -> 
         ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.wait_for(entered_voice_dispatch.wait(), timeout=0.2)
-    await _admit_ready(gate, resolved_key, PendingEvent(event=followup, room=room, source_kind="message"))
+    await _admit_ready(gate, resolved_key, make_pending_event(followup, room, source_kind="message"))
     await asyncio.sleep(0.02)
 
     assert calls == [["$voice"]]
@@ -1952,7 +2159,7 @@ async def test_voice_handoff_buffers_same_thread_followups_while_in_flight() -> 
 async def test_voice_before_text_uses_stable_admission_key() -> None:
     """Voice admitted with a canonical thread key should wait for readiness during debounce."""
     room = _make_room()
-    resolved_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
+    resolved_key = CoalescingKey(room.room_id, "$thread-root", RequesterCoalescingOwner("@user:localhost"))
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -1971,19 +2178,19 @@ async def test_voice_before_text_uses_stable_admission_key() -> None:
     async def ready_voice() -> ReadyPendingEvent:
         await release_voice.wait()
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+            pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append((batch.coalescing_key, list(batch.source_event_ids)))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append((batch.ingress.coalescing_key, list(batch.handled_turn.source_event_ids)))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.05,
         is_shutting_down=lambda: False,
     )
 
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=resolved_key,
@@ -1992,7 +2199,7 @@ async def test_voice_before_text_uses_stable_admission_key() -> None:
         ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.sleep(0.005)
-    await _admit_ready(gate, resolved_key, PendingEvent(event=typed, room=room, source_kind="message"))
+    await _admit_ready(gate, resolved_key, make_pending_event(typed, room, source_kind="message"))
     await asyncio.sleep(0.06)
     assert calls == []
 
@@ -2005,7 +2212,7 @@ async def test_voice_before_text_uses_stable_admission_key() -> None:
 async def test_text_before_voice_uses_stable_admission_key() -> None:
     """A later voice admitted with the same canonical key should join queued text."""
     room = _make_room()
-    resolved_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
+    resolved_key = CoalescingKey(room.room_id, "$thread-root", RequesterCoalescingOwner("@user:localhost"))
     typed = _text_event(
         event_id="$typed",
         body="typed follow-up",
@@ -2024,20 +2231,20 @@ async def test_text_before_voice_uses_stable_admission_key() -> None:
     async def ready_voice() -> ReadyPendingEvent:
         await release_voice.wait()
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+            pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append((batch.coalescing_key, list(batch.source_event_ids)))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append((batch.ingress.coalescing_key, list(batch.handled_turn.source_event_ids)))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.05,
         is_shutting_down=lambda: False,
     )
 
-    await _admit_ready(gate, resolved_key, PendingEvent(event=typed, room=room, source_kind="message"))
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    await _admit_ready(gate, resolved_key, make_pending_event(typed, room, source_kind="message"))
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=resolved_key,
@@ -2057,7 +2264,7 @@ async def test_text_before_voice_uses_stable_admission_key() -> None:
 async def test_plain_reply_voice_resolution_batches_related_text() -> None:
     """A resolved voice should merge related text that waited behind audio readiness."""
     room = _make_room()
-    root_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
+    root_key = CoalescingKey(room.room_id, "$thread-root", RequesterCoalescingOwner("@user:localhost"))
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -2076,19 +2283,19 @@ async def test_plain_reply_voice_resolution_batches_related_text() -> None:
     async def ready_voice() -> ReadyPendingEvent:
         await release_voice.wait()
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+            pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=root_key,
@@ -2096,7 +2303,7 @@ async def test_plain_reply_voice_resolution_batches_related_text() -> None:
         source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice()),
     )
-    await _admit_ready(gate, root_key, PendingEvent(event=typed, room=room, source_kind="message"))
+    await _admit_ready(gate, root_key, make_pending_event(typed, room, source_kind="message"))
     await asyncio.sleep(0.02)
     assert calls == []
 
@@ -2109,7 +2316,7 @@ async def test_plain_reply_voice_resolution_batches_related_text() -> None:
 async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() -> None:
     """A later voice reply may still belong to a text gate that is debouncing."""
     room = _make_room()
-    root_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
+    root_key = CoalescingKey(room.room_id, "$thread-root", RequesterCoalescingOwner("@user:localhost"))
     typed = _text_event(
         event_id="$typed",
         body="typed follow-up",
@@ -2128,20 +2335,20 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
     async def ready_voice() -> ReadyPendingEvent:
         await release_voice.wait()
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+            pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.03,
         is_shutting_down=lambda: False,
     )
 
-    await _admit_ready(gate, root_key, PendingEvent(event=typed, room=room, source_kind="message"))
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    await _admit_ready(gate, root_key, make_pending_event(typed, room, source_kind="message"))
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=root_key,
@@ -2162,8 +2369,8 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
 async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None:
     """A later voice from another sender's thread must not hold earlier text."""
     room = _make_room()
-    text_key = CoalescingKey(room.room_id, "$thread-a-root", "@user:localhost")
-    voice_root_key = CoalescingKey(room.room_id, "$thread-b-root", "@voice-sender:localhost")
+    text_key = CoalescingKey(room.room_id, "$thread-a-root", RequesterCoalescingOwner("@user:localhost"))
+    voice_root_key = CoalescingKey(room.room_id, "$thread-b-root", RequesterCoalescingOwner("@voice-sender:localhost"))
     typed = _text_event(
         event_id="$typed",
         body="typed follow-up",
@@ -2183,26 +2390,26 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
     async def ready_voice() -> ReadyPendingEvent:
         await release_voice.wait()
         return ReadyPendingEvent(
-            pending_event=PendingEvent(
-                event=voice,
-                room=room,
+            pending_event=make_pending_event(
+                voice,
+                room,
                 source_kind=VOICE_SOURCE_KIND,
                 requester_user_id="@voice-sender:localhost",
             ),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.03,
         is_shutting_down=lambda: False,
     )
 
-    await _admit_ready(gate, text_key, PendingEvent(event=typed, room=room, source_kind="message"))
+    await _admit_ready(gate, text_key, make_pending_event(typed, room, source_kind="message"))
     await asyncio.sleep(0.005)
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@voice-sender:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@voice-sender:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=voice_root_key,
@@ -2222,7 +2429,7 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
 async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> None:
     """A failed voice admission should not make unrelated room roots share a turn."""
     room = _make_room()
-    key = CoalescingKey(room.room_id, None, "@user:localhost")
+    key = CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost"))
     first = _text_event(event_id="$first", body="first", server_timestamp=1000)
     second = _text_event(event_id="$second", body="second", server_timestamp=1002)
     calls: list[list[str]] = []
@@ -2231,17 +2438,17 @@ async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> Non
         msg = "stt failed"
         raise RuntimeError(msg)
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 5.0,
         is_shutting_down=lambda: False,
     )
 
-    await _admit_ready(gate, key, PendingEvent(event=first, room=room, source_kind="message"))
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    await _admit_ready(gate, key, make_pending_event(first, room, source_kind="message"))
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=key,
@@ -2249,7 +2456,7 @@ async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> Non
         source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(failed_voice()),
     )
-    await _admit_ready(gate, key, PendingEvent(event=second, room=room, source_kind="message"))
+    await _admit_ready(gate, key, make_pending_event(second, room, source_kind="message"))
 
     await gate.drain_all()
 
@@ -2261,8 +2468,8 @@ async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> Non
 async def test_voice_admissions_resolving_to_different_threads_do_not_coalesce() -> None:
     """Voice admissions in different resolved threads must stay separate turns."""
     room = _make_room()
-    first_key = CoalescingKey(room.room_id, "$post_one", "@user:localhost")
-    second_key = CoalescingKey(room.room_id, "$post_two", "@user:localhost")
+    first_key = CoalescingKey(room.room_id, "$post_one", RequesterCoalescingOwner("@user:localhost"))
+    second_key = CoalescingKey(room.room_id, "$post_two", RequesterCoalescingOwner("@user:localhost"))
     first_voice = _text_event(
         event_id="$voice1",
         body="first voice",
@@ -2281,20 +2488,20 @@ async def test_voice_admissions_resolving_to_different_threads_do_not_coalesce()
 
     async def ready_voice(event: nio.RoomMessageText) -> ReadyPendingEvent:
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=event, room=room, source_kind=VOICE_SOURCE_KIND),
+            pending_event=make_pending_event(event, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append((batch.coalescing_key, list(batch.source_event_ids)))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append((batch.ingress.coalescing_key, list(batch.handled_turn.source_event_ids)))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 5.0,
         is_shutting_down=lambda: False,
     )
 
-    first_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
-    second_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    first_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"))
+    second_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"))
     gate.submit_lane_slot(
         first_slot,
         key=first_key,
@@ -2323,8 +2530,8 @@ async def test_voice_admissions_resolving_to_different_threads_do_not_coalesce()
 async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> None:
     """A pending voice admission must not steal another sender's thread turn."""
     room = _make_room()
-    voice_key = CoalescingKey(room.room_id, "$thread-a-child", "@user:localhost")
-    unrelated_thread_key = CoalescingKey(room.room_id, "$thread-b-root", "@other:localhost")
+    voice_key = CoalescingKey(room.room_id, "$thread-a-child", RequesterCoalescingOwner("@user:localhost"))
+    unrelated_thread_key = CoalescingKey(room.room_id, "$thread-b-root", RequesterCoalescingOwner("@other:localhost"))
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -2344,19 +2551,19 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
     async def ready_voice() -> ReadyPendingEvent:
         await release_voice.wait()
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+            pending_event=make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append((batch.coalescing_key, list(batch.source_event_ids)))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append((batch.ingress.coalescing_key, list(batch.handled_turn.source_event_ids)))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=voice_key,
@@ -2367,7 +2574,7 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
     await _admit_ready(
         gate,
         unrelated_thread_key,
-        PendingEvent(event=typed, room=room, source_kind="message", requester_user_id="@other:localhost"),
+        make_pending_event(typed, room, source_kind="message", requester_user_id="@other:localhost"),
     )
     await _wait_for(lambda: calls == [(unrelated_thread_key, ["$typed"])])
 
@@ -2403,18 +2610,18 @@ async def test_room_scope_voice_burst_coalesces_under_null_thread_key() -> None:
     )
     calls: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.05,
         is_shutting_down=lambda: False,
     )
-    key = CoalescingKey("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
 
-    await _admit_ready(gate, key, PendingEvent(event=first_voice, room=room, source_kind=VOICE_SOURCE_KIND))
-    await _admit_ready(gate, key, PendingEvent(event=second_voice, room=room, source_kind=VOICE_SOURCE_KIND))
+    await _admit_ready(gate, key, make_pending_event(first_voice, room, source_kind=VOICE_SOURCE_KIND))
+    await _admit_ready(gate, key, make_pending_event(second_voice, room, source_kind=VOICE_SOURCE_KIND))
     await gate.drain_all()
 
     assert calls == [["$voice1", "$voice2"]]
@@ -2437,25 +2644,25 @@ async def test_deferred_room_scope_voice_burst_stays_one_turn_under_null_thread_
         server_timestamp=1001,
         source_kind=VOICE_SOURCE_KIND,
     )
-    key = CoalescingKey(room.room_id, None, "@user:localhost")
+    key = CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost"))
     calls: list[tuple[tuple[str, str | None, str], list[str]]] = []
 
     async def ready_voice(event: nio.RoomMessageText) -> ReadyPendingEvent:
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=event, room=room, source_kind=VOICE_SOURCE_KIND),
+            pending_event=make_pending_event(event, room, source_kind=VOICE_SOURCE_KIND),
         )
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append((batch.coalescing_key, list(batch.source_event_ids)))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append((batch.ingress.coalescing_key, list(batch.handled_turn.source_event_ids)))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
-    first_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
-    second_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    first_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"))
+    second_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"))
     gate.submit_lane_slot(
         first_slot,
         key=key,
@@ -2503,7 +2710,10 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
             entered_first_dispatch.set()
             await release_first_dispatch.wait()
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await asyncio.wait_for(
             _enqueue_for_dispatch(
                 bot,
@@ -2569,7 +2779,10 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
         _ = media_events, handled_turn
         calls.append(dispatched_event.body)
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             event,
@@ -2586,7 +2799,7 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
 async def test_pending_dispatch_policy_preserves_active_followup_without_bypassing_modality() -> None:
     """Active follow-up policy should stay metadata while voice remains coalescible."""
     room = _make_room()
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice_followup",
         body="voice follow-up",
@@ -2594,34 +2807,32 @@ async def test_pending_dispatch_policy_preserves_active_followup_without_bypassi
         server_timestamp=1000,
         source_kind_override="voice",
     )
-    calls: list[CoalescedBatch] = []
+    calls: list[PreparedTurn] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
+    async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(batch)
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 60.0,
         is_shutting_down=lambda: False,
     )
 
     await _admit_ready(
         gate,
-        CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
-        PendingEvent(
-            event=event,
-            room=room,
+        CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
+        make_pending_event(
+            event,
+            room,
             source_kind="voice",
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
     )
     await gate.drain_all()
 
-    assert calls[0].source_kind == "voice"
-    assert calls[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    dispatch_event = _build_batch_dispatch_event(calls[0])
-    assert isinstance(dispatch_event, PreparedTextEvent)
-    assert dispatch_event.source_kind_override == "voice"
+    assert calls[0].ingress.source_kind == "voice"
+    assert calls[0].ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert calls[0].event.source_kind_override == "voice"
 
 
 @pytest.mark.asyncio
@@ -2640,22 +2851,27 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
         event_id=f"$spoof_{spoofed_source_kind}",
         source_kind=spoofed_source_kind,
     )
-    calls: list[nio.RoomMessageImage | PreparedTextEvent] = []
+    calls: list[tuple[PreparedIngress, DispatchIngressMetadata]] = []
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: nio.RoomMessageImage | PreparedTextEvent,
+        dispatched_event: nio.RoomMessageImage | PreparedIngress,
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
         handled_turn: TurnRecord | None = None,
         queued_notice_reservation: object | None = None,
+        ingress_metadata: DispatchIngressMetadata,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn, queued_notice_reservation
-        calls.append(dispatched_event)
+        assert isinstance(dispatched_event, PreparedIngress)
+        calls.append((dispatched_event, ingress_metadata))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             event,
@@ -2669,10 +2885,9 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
         await bot.prepare_for_sync_shutdown()
 
     assert len(calls) == 1
-    dispatched = calls[0]
-    assert isinstance(dispatched, PreparedTextEvent)
+    dispatched, ingress = calls[0]
     assert dispatched.event_id == f"$spoof_{spoofed_source_kind}"
-    assert dispatched.source_kind_override == IMAGE_SOURCE_KIND
+    assert ingress.source_kind == IMAGE_SOURCE_KIND
 
 
 @pytest.mark.asyncio
@@ -2684,70 +2899,22 @@ async def test_bypass_preserves_fifo_order_behind_existing_normal_work() -> None
     second = _text_event(event_id="$m2", body="second", server_timestamp=1002)
     calls: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.02,
         is_shutting_down=lambda: False,
     )
-    key = CoalescingKey("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
 
-    await _admit_ready(gate, key, PendingEvent(event=first, room=room, source_kind="message"))
-    await _admit_ready(gate, key, PendingEvent(event=hook, room=room, source_kind="hook"))
-    await _admit_ready(gate, key, PendingEvent(event=second, room=room, source_kind="message"))
+    await _admit_ready(gate, key, make_pending_event(first, room, source_kind="message"))
+    await _admit_ready(gate, key, make_pending_event(hook, room, source_kind="hook"))
+    await _admit_ready(gate, key, make_pending_event(second, room, source_kind="message"))
 
     await _wait_for(lambda: calls == [["$m1"], ["$hook"], ["$m2"]])
 
-    assert _coalescing_gate_is_idle(gate)
-
-
-@pytest.mark.asyncio
-async def test_room_mode_voice_queued_notice_is_solo_barrier_before_nearby_normal_message() -> None:
-    """Room-scoped voice notices should dispatch solo instead of joining normal debounce batches."""
-    room = _make_room()
-    voice = _text_event(event_id="$voice-room", body="voice transcript", server_timestamp=1000, source_kind="voice")
-    normal = _text_event(event_id="$normal", body="nearby text", server_timestamp=1001)
-    reservation = MagicMock()
-    metadata = (
-        PendingDispatchMetadata(
-            kind="queued_notice_reservation",
-            payload=reservation,
-            close=reservation.cancel,
-            requires_solo_batch=True,
-        ),
-    )
-    calls: list[list[str]] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
-        if batch.source_event_ids == ["$voice-room"]:
-            assert batch.dispatch_metadata == metadata
-            return
-        assert batch.dispatch_metadata == ()
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 5.0,
-        is_shutting_down=lambda: False,
-    )
-    key = CoalescingKey("!room:localhost", None, "@user:localhost")
-
-    await _admit_ready(
-        gate,
-        key,
-        PendingEvent(event=voice, room=room, source_kind="voice", dispatch_metadata=metadata),
-    )
-    await _admit_ready(gate, key, PendingEvent(event=normal, room=room, source_kind="message"))
-
-    await _wait_for(lambda: calls == [["$voice-room"], ["$normal"]], deadline_seconds=0.2)
-    reservation.cancel.assert_not_called()
-
-    await gate.drain_all()
-
-    assert calls == [["$voice-room"], ["$normal"]]
-    reservation.cancel.assert_not_called()
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2793,7 +2960,10 @@ async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
             entered_first_dispatch.set()
             await release_first_dispatch.wait()
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             first,
@@ -2846,7 +3016,10 @@ async def test_prepare_for_sync_shutdown_waits_for_active_flush_task(tmp_path: P
         entered_dispatch.set()
         await release_dispatch.wait()
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             event,
@@ -2888,7 +3061,10 @@ async def test_prepare_for_sync_shutdown_drains_pending_debounced_messages(tmp_p
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             event,
@@ -2922,7 +3098,10 @@ async def test_prepare_for_sync_shutdown_drains_pending_media_debounce(tmp_path:
         _ = media_events
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             event,
@@ -2965,7 +3144,10 @@ async def test_shutdown_during_in_flight_dispatch_flushes_remaining_without_wait
             entered_dispatch.set()
             await release_dispatch.wait()
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             first,
@@ -3026,7 +3208,10 @@ async def test_thread_followups_dispatch_while_first_turn_root_in_flight(tmp_pat
             entered_dispatch.set()
             await release_first_dispatch.wait()
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         first_task = asyncio.create_task(
             _enqueue_for_dispatch(
                 bot,
@@ -3068,8 +3253,8 @@ async def test_active_approval_fallthrough_reserves_before_async_approval_lookup
     release_approval_lookup = asyncio.Event()
     batches: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch.source_event_ids)
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(list(batch.handled_turn.source_event_ids))
 
     async def maybe_approval(
         *,
@@ -3081,7 +3266,11 @@ async def test_active_approval_fallthrough_reserves_before_async_approval_lookup
             await release_approval_lookup.wait()
         return False
 
-    bot._coalescing_gate._dispatch_batch = dispatch_batch
+    # These are ingress-ordering tests. The reply target is an approval card
+    # the bot posted, so its conversation is one MindRoom already knows;
+    # saying so keeps the reply's thread resolution from being the subject.
+    await seed_hydrated_conversation(bot, room_id=room.room_id, thread_id="$approval-card:localhost")
+    bot._coalescing_gate._dispatch_turn = dispatch_batch
     first = _reply_event(
         event_id="$first:localhost",
         body="not my approval",
@@ -3117,8 +3306,8 @@ async def test_trusted_relay_approval_fallthrough_reserves_effective_requester(t
     release_approval_lookup = asyncio.Event()
     batches: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch.source_event_ids)
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(list(batch.handled_turn.source_event_ids))
 
     async def maybe_approval(
         *,
@@ -3130,7 +3319,11 @@ async def test_trusted_relay_approval_fallthrough_reserves_effective_requester(t
             await release_approval_lookup.wait()
         return False
 
-    bot._coalescing_gate._dispatch_batch = dispatch_batch
+    # These are ingress-ordering tests. The reply target is an approval card
+    # the bot posted, so its conversation is one MindRoom already knows;
+    # saying so keeps the reply's thread resolution from being the subject.
+    await seed_hydrated_conversation(bot, room_id=room.room_id, thread_id="$approval-card:localhost")
+    bot._coalescing_gate._dispatch_turn = dispatch_batch
     first = _reply_event(
         event_id="$relay-first:localhost",
         body="not my approval",
@@ -3170,7 +3363,7 @@ async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing(
     """Immediate-flush telemetry should report the batch size before _flush clears pending."""
     room = _make_room()
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -3178,10 +3371,10 @@ async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing(
     with patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit:
         await _admit_ready(
             gate,
-            CoalescingKey("!room:localhost", None, "@user:localhost"),
-            PendingEvent(
-                event=_text_event(event_id="$m1", body="first"),
-                room=room,
+            CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+            make_pending_event(
+                _text_event(event_id="$m1", body="first"),
+                room,
                 source_kind="message",
             ),
         )
@@ -3213,7 +3406,7 @@ async def test_enqueue_for_dispatch_timing_events_include_explicit_scope(tmp_pat
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
-            coalescing_key=CoalescingKey(room.room_id, None, "@user:localhost"),
+            coalescing_key=CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
         )
 
     handoff_calls = [
@@ -3283,38 +3476,38 @@ async def test_matrix_ingress_logging_handles_missing_origin_timestamp(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_handle_coalesced_batch_timing_events_include_dispatch_scope(tmp_path: Path) -> None:
+async def test_handle_prepared_turn_timing_events_include_dispatch_scope(tmp_path: Path) -> None:
     """Coalesced-batch telemetry emitted before dispatch should carry the batch event scope."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    batch = build_coalesced_batch(
-        CoalescingKey(room.room_id, None, "@user:localhost"),
+    batch = build_prepared_turn(
+        CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
         [
-            PendingEvent(
-                event=_text_event(event_id="$m1", body="hello"),
-                room=room,
+            make_pending_event(
+                _text_event(event_id="$m1", body="hello"),
+                room,
                 source_kind="message",
             ),
         ],
     )
 
     with (
-        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()),
+        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()),
         patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit,
     ):
-        await bot._turn_controller.handle_coalesced_batch(batch)
+        await bot._turn_controller.handle_prepared_turn(batch)
 
     batch_calls = [
         call
         for call in mock_emit.call_args_list
-        if call.args and isinstance(call.args[0], str) and call.args[0].startswith("coalescing.handle_batch.")
+        if call.args and isinstance(call.args[0], str) and call.args[0].startswith("coalescing.handle_turn.")
     ]
     assert batch_calls
     assert all(call.kwargs["timing_scope"] == "$m1" for call in batch_calls)
 
 
 @pytest.mark.asyncio
-async def test_handle_coalesced_batch_uses_batch_key_for_text_primary(tmp_path: Path) -> None:
+async def test_handle_prepared_turn_uses_batch_key_for_text_primary(tmp_path: Path) -> None:
     """A mixed batch should dispatch on its single coalescing key even when text is primary."""
     bot = _make_bot(tmp_path)
     room = _make_room()
@@ -3326,27 +3519,29 @@ async def test_handle_coalesced_batch_uses_batch_key_for_text_primary(tmp_path: 
         thread_id="$voice_thread",
     )
     typed = _text_event(event_id="$typed", body="typed follow-up", server_timestamp=1001)
-    batch = build_coalesced_batch(
-        CoalescingKey(room.room_id, "$voice_thread", "@user:localhost"),
+    batch = build_prepared_turn(
+        CoalescingKey(room.room_id, "$voice_thread", RequesterCoalescingOwner("@user:localhost")),
         [
-            PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
-            PendingEvent(event=typed, room=room, source_kind="message"),
+            make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
+            make_pending_event(typed, room, source_kind="message"),
         ],
     )
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch:
-        await bot._turn_controller.handle_coalesced_batch(batch)
+    with patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch:
+        await bot._turn_controller.handle_prepared_turn(batch)
 
-    dispatched_event = mock_dispatch.await_args.args[1]
-    assert isinstance(dispatched_event, PreparedTextEvent)
-    content = dispatched_event.source["content"]
-    assert content["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$voice_thread"}
+    dispatched_event = mock_dispatch.await_args.args[1].event
+    ingress = mock_dispatch.await_args.args[1].ingress
+    assert isinstance(dispatched_event, PreparedIngress)
+    assert ingress.coalescing_key == batch.ingress.coalescing_key
+    assert ingress.coalescing_key.thread_id == "$voice_thread"
+    assert "m.relates_to" not in dispatched_event.source["content"]
 
 
-def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> None:
-    """A room-resolved voice batch must not dispatch through a typed reply's stale thread relation."""
+def test_room_resolved_voice_turn_keeps_target_separate_from_physical_relation() -> None:
+    """Room target comes from turn key, without rewriting typed reply evidence."""
     room = _make_room()
-    room_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    room_key = CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost"))
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -3360,18 +3555,19 @@ def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> Non
         thread_id="$voice",
     )
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         room_key,
         [
-            PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
-            PendingEvent(event=typed, room=room, source_kind="message"),
+            make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
+            make_pending_event(typed, room, source_kind="message"),
         ],
     )
 
-    handoff = build_dispatch_handoff(batch)
-
-    assert isinstance(handoff.event, PreparedTextEvent)
-    assert "m.relates_to" not in handoff.event.source["content"]
+    assert batch.ingress.coalescing_key.thread_id is None
+    assert batch.event.source["content"]["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": "$voice",
+    }
 
 
 def test_room_level_batch_preserves_plain_reply_relation_without_thread_target() -> None:
@@ -3383,20 +3579,17 @@ def test_room_level_batch_preserves_plain_reply_relation_without_thread_target()
         body="typed follow-up",
         server_timestamp=1001,
     )
-    batch = build_coalesced_batch(
-        CoalescingKey(room.room_id, None, "@user:localhost"),
-        [PendingEvent(event=typed_reply, room=room, source_kind=MESSAGE_SOURCE_KIND)],
+    batch = build_prepared_turn(
+        CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
+        [make_pending_event(typed_reply, room, source_kind=MESSAGE_SOURCE_KIND)],
     )
 
-    handoff = build_dispatch_handoff(batch)
-
-    assert isinstance(handoff.event, PreparedTextEvent)
-    assert handoff.event.source["content"]["m.relates_to"] == {"m.in_reply_to": {"event_id": "$voice"}}
-    assert not EventInfo.from_event(handoff.event.source).can_be_thread_root
+    assert batch.event.source["content"]["m.relates_to"] == {"m.in_reply_to": {"event_id": "$voice"}}
+    assert not EventInfo.from_event(batch.event.source).can_be_thread_root
 
 
-def test_room_level_batch_preserves_mentions_while_removing_stale_thread_relation() -> None:
-    """Mention metadata must survive, but explicit stale threads come from the batch key."""
+def test_room_level_turn_preserves_mentions_without_rewriting_physical_relation() -> None:
+    """Mention metadata and canonical target stay separate from physical relation evidence."""
     room = _make_room()
     typed_reply = _text_event(
         event_id="$typed",
@@ -3405,17 +3598,14 @@ def test_room_level_batch_preserves_mentions_while_removing_stale_thread_relatio
         thread_id="$stale-thread",
     )
     typed_reply.source["content"]["m.mentions"] = {"user_ids": ["@agent:localhost"]}
-    batch = build_coalesced_batch(
-        CoalescingKey(room.room_id, None, "@user:localhost"),
-        [PendingEvent(event=typed_reply, room=room, source_kind=MESSAGE_SOURCE_KIND)],
+    batch = build_prepared_turn(
+        CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
+        [make_pending_event(typed_reply, room, source_kind=MESSAGE_SOURCE_KIND)],
     )
 
-    handoff = build_dispatch_handoff(batch)
-
-    assert isinstance(handoff.event, PreparedTextEvent)
-    content = handoff.event.source["content"]
-    assert "m.relates_to" not in content
-    assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
+    assert batch.ingress.coalescing_key.thread_id is None
+    assert batch.payload.mentioned_user_ids == ("@agent:localhost",)
+    assert batch.event.source["content"]["m.relates_to"]["event_id"] == "$stale-thread"
 
 
 def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
@@ -3428,18 +3618,15 @@ def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
         server_timestamp=1001,
     )
     typed_reply.source["content"]["m.mentions"] = {"user_ids": ["@agent:localhost"]}
-    batch = build_coalesced_batch(
-        CoalescingKey(room.room_id, None, "@user:localhost"),
-        [PendingEvent(event=typed_reply, room=room, source_kind=MESSAGE_SOURCE_KIND)],
+    batch = build_prepared_turn(
+        CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
+        [make_pending_event(typed_reply, room, source_kind=MESSAGE_SOURCE_KIND)],
     )
 
-    handoff = build_dispatch_handoff(batch)
-
-    assert isinstance(handoff.event, PreparedTextEvent)
-    content = handoff.event.source["content"]
+    content = batch.event.source["content"]
     assert content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$old-reply"}}
-    assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
-    assert not EventInfo.from_event(handoff.event.source).can_be_thread_root
+    assert batch.payload.mentioned_user_ids == ("@agent:localhost",)
+    assert not EventInfo.from_event(batch.event.source).can_be_thread_root
 
 
 @pytest.mark.asyncio
@@ -3453,12 +3640,9 @@ async def test_coalesced_room_plain_reply_target_uses_prompt_thread_not_reply_th
         body="room-level follow-up",
         server_timestamp=1001,
     )
-    bot._conversation_cache.get_thread_id_for_event = AsyncMock(
-        side_effect=lambda _room_id, event_id: "$thread-root" if event_id == "$old-reply" else None,
-    )
-    batch = build_coalesced_batch(
-        CoalescingKey(room.room_id, None, "@user:localhost"),
-        [PendingEvent(event=typed_reply, room=room, source_kind=MESSAGE_SOURCE_KIND)],
+    batch = build_prepared_turn(
+        CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
+        [make_pending_event(typed_reply, room, source_kind=MESSAGE_SOURCE_KIND)],
     )
     dispatches: list[PreparedDispatch] = []
 
@@ -3469,15 +3653,15 @@ async def test_coalesced_room_plain_reply_target_uses_prompt_thread_not_reply_th
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
     ):
-        await bot._turn_controller.handle_coalesced_batch(batch)
+        await bot._turn_controller.handle_prepared_turn(batch)
 
     assert len(dispatches) == 1
     assert dispatches[0].target.resolved_thread_id == "$typed"
     assert dispatches[0].context.thread_id is None
 
 
-def test_single_mentioned_followup_batch_uses_coalescing_thread_relation() -> None:
-    """Mentions must not preserve an explicit stale thread relation."""
+def test_single_mentioned_followup_turn_uses_canonical_key_without_rewriting_source() -> None:
+    """Canonical key overrides stale target while physical source stays intact."""
     room = _make_room()
     typed = _text_event(
         event_id="$typed",
@@ -3486,23 +3670,20 @@ def test_single_mentioned_followup_batch_uses_coalescing_thread_relation() -> No
         thread_id="$old-thread",
     )
     typed.source["content"]["m.mentions"] = {"user_ids": ["@agent:localhost"]}
-    batch = build_coalesced_batch(
-        CoalescingKey(room.room_id, "$new-thread", "@user:localhost"),
-        [PendingEvent(event=typed, room=room, source_kind=MESSAGE_SOURCE_KIND)],
+    batch = build_prepared_turn(
+        CoalescingKey(room.room_id, "$new-thread", RequesterCoalescingOwner("@user:localhost")),
+        [make_pending_event(typed, room, source_kind=MESSAGE_SOURCE_KIND)],
     )
 
-    handoff = build_dispatch_handoff(batch)
-
-    assert isinstance(handoff.event, PreparedTextEvent)
-    content = handoff.event.source["content"]
-    assert content["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$new-thread"}
-    assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
+    assert batch.ingress.coalescing_key.thread_id == "$new-thread"
+    assert batch.event.source["content"]["m.relates_to"]["event_id"] == "$old-thread"
+    assert batch.payload.mentioned_user_ids == ("@agent:localhost",)
 
 
 def test_single_followup_batch_uses_coalescing_thread_relation() -> None:
     """A single follow-up batch dispatches on its coalescing key."""
     room = _make_room()
-    post_key = CoalescingKey(room.room_id, "$post-stt-thread", "@user:localhost")
+    post_key = CoalescingKey(room.room_id, "$post-stt-thread", RequesterCoalescingOwner("@user:localhost"))
     typed = _text_event(
         event_id="$typed",
         body="typed follow-up",
@@ -3510,18 +3691,13 @@ def test_single_followup_batch_uses_coalescing_thread_relation() -> None:
         thread_id="$voice",
     )
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         post_key,
-        [PendingEvent(event=typed, room=room, source_kind="message")],
+        [make_pending_event(typed, room, source_kind="message")],
     )
 
-    handoff = build_dispatch_handoff(batch)
-
-    assert isinstance(handoff.event, PreparedTextEvent)
-    assert handoff.event.source["content"]["m.relates_to"] == {
-        "rel_type": "m.thread",
-        "event_id": "$post-stt-thread",
-    }
+    assert batch.ingress.coalescing_key.thread_id == "$post-stt-thread"
+    assert batch.event.source["content"]["m.relates_to"]["event_id"] == "$voice"
 
 
 @pytest.mark.asyncio
@@ -3681,7 +3857,7 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
         raise RuntimeError(msg)
 
     gate = CoalescingGate(
-        dispatch_batch=failing_dispatch_batch,
+        dispatch_turn=failing_dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -3689,10 +3865,10 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
     with patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit:
         await _admit_ready(
             gate,
-            CoalescingKey("!room:localhost", None, "@user:localhost"),
-            PendingEvent(
-                event=_text_event(event_id="$m1", body="first"),
-                room=room,
+            CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+            make_pending_event(
+                _text_event(event_id="$m1", body="first"),
+                room,
                 source_kind="message",
             ),
         )
@@ -3709,7 +3885,7 @@ async def test_coalescing_enqueue_logs_pending_count() -> None:
     """Coalescing enqueue diagnostics should identify the pending scope."""
     room = _make_room()
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 10.0,
         is_shutting_down=lambda: False,
     )
@@ -3717,10 +3893,10 @@ async def test_coalescing_enqueue_logs_pending_count() -> None:
     with patch("mindroom.coalescing.logger.info") as mock_info:
         await _admit_ready(
             gate,
-            CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
-            PendingEvent(
-                event=_text_event(event_id="$m1", body="first"),
-                room=room,
+            CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
+            make_pending_event(
+                _text_event(event_id="$m1", body="first"),
+                room,
                 source_kind="message",
             ),
         )
@@ -3738,7 +3914,7 @@ async def test_slow_coalescing_flush_warns_with_correlation_metadata() -> None:
     """Slow flush diagnostics should carry event, room, and thread identifiers."""
     room = _make_room()
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -3748,10 +3924,10 @@ async def test_slow_coalescing_flush_warns_with_correlation_metadata() -> None:
     ):
         await _admit_ready(
             gate,
-            CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
-            PendingEvent(
-                event=_text_event(event_id="$m1", body="first"),
-                room=room,
+            CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
+            make_pending_event(
+                _text_event(event_id="$m1", body="first"),
+                room,
                 source_kind="message",
             ),
         )
@@ -3779,7 +3955,7 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
         raise RuntimeError(msg)
 
     gate = CoalescingGate(
-        dispatch_batch=failing_dispatch_batch,
+        dispatch_turn=failing_dispatch_batch,
         debounce_seconds=lambda: 0.01,
         is_shutting_down=lambda: False,
     )
@@ -3792,10 +3968,10 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
         with patch("mindroom.coalescing.logger.exception") as mock_exception:
             await _admit_ready(
                 gate,
-                CoalescingKey("!room:localhost", None, "@user:localhost"),
-                PendingEvent(
-                    event=_text_event(event_id="$m1", body="first"),
-                    room=room,
+                CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+                make_pending_event(
+                    _text_event(event_id="$m1", body="first"),
+                    room,
                     source_kind="message",
                 ),
             )
@@ -3833,7 +4009,7 @@ async def test_dispatch_failure_handoff_runs_after_gate_releases_exact_sources()
         handoff_complete.set()
 
     gate = CoalescingGate(
-        dispatch_batch=failing_dispatch_batch,
+        dispatch_turn=failing_dispatch_batch,
         debounce_seconds=lambda: 0.01,
         is_shutting_down=lambda: False,
         on_dispatch_failure=on_dispatch_failure,
@@ -3841,10 +4017,10 @@ async def test_dispatch_failure_handoff_runs_after_gate_releases_exact_sources()
 
     await _admit_ready(
         gate,
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
-        PendingEvent(
-            event=_text_event(event_id="$m1", body="first"),
-            room=room,
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+        make_pending_event(
+            _text_event(event_id="$m1", body="first"),
+            room,
             source_kind="message",
         ),
     )
@@ -3860,15 +4036,15 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
     room = _make_room()
     dispatched_source_event_ids: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        source_event_ids = list(batch.source_event_ids)
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        source_event_ids = list(batch.handled_turn.source_event_ids)
         if source_event_ids == ["$m1"]:
             msg = "boom"
             raise RuntimeError(msg)
         dispatched_source_event_ids.append(source_event_ids)
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -3876,10 +4052,10 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
     with patch("mindroom.coalescing.logger.exception") as mock_exception:
         await _admit_ready(
             gate,
-            CoalescingKey("!room:localhost", None, "@user:localhost"),
-            PendingEvent(
-                event=_text_event(event_id="$m1", body="first"),
-                room=room,
+            CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+            make_pending_event(
+                _text_event(event_id="$m1", body="first"),
+                room,
                 source_kind="message",
             ),
         )
@@ -3889,10 +4065,10 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
 
     await _admit_ready(
         gate,
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
-        PendingEvent(
-            event=_text_event(event_id="$m2", body="second"),
-            room=room,
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+        make_pending_event(
+            _text_event(event_id="$m2", body="second"),
+            room,
             source_kind="message",
         ),
     )
@@ -3909,8 +4085,8 @@ async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_anot
     release_first_dispatch = asyncio.Event()
     dispatched_source_event_ids: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        source_event_ids = list(batch.source_event_ids)
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        source_event_ids = list(batch.handled_turn.source_event_ids)
         if source_event_ids == ["$m1"]:
             entered_first_dispatch.set()
             await release_first_dispatch.wait()
@@ -3919,7 +4095,7 @@ async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_anot
         dispatched_source_event_ids.append(source_event_ids)
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -3927,20 +4103,20 @@ async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_anot
     with patch("mindroom.coalescing.logger.exception") as mock_exception:
         await _admit_ready(
             gate,
-            CoalescingKey("!room:localhost", None, "@user:localhost"),
-            PendingEvent(
-                event=_text_event(event_id="$m1", body="first"),
-                room=room,
+            CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+            make_pending_event(
+                _text_event(event_id="$m1", body="first"),
+                room,
                 source_kind="message",
             ),
         )
         await entered_first_dispatch.wait()
         await _admit_ready(
             gate,
-            CoalescingKey("!room:localhost", None, "@user:localhost"),
-            PendingEvent(
-                event=_text_event(event_id="$m2", body="second"),
-                room=room,
+            CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+            make_pending_event(
+                _text_event(event_id="$m2", body="second"),
+                room,
                 source_kind="message",
             ),
         )
@@ -3960,25 +4136,25 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
     never_release = asyncio.Event()
     dispatched_source_event_ids: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        source_event_ids = list(batch.source_event_ids)
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        source_event_ids = list(batch.handled_turn.source_event_ids)
         dispatched_source_event_ids.append(source_event_ids)
         if source_event_ids == ["$m1"]:
             entered_first_dispatch.set()
             await never_release.wait()
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
     await _admit_ready(
         gate,
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
-        PendingEvent(
-            event=_text_event(event_id="$m1", body="first"),
-            room=room,
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+        make_pending_event(
+            _text_event(event_id="$m1", body="first"),
+            room,
             source_kind="message",
         ),
     )
@@ -3993,10 +4169,10 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
 
     await _admit_ready(
         gate,
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
-        PendingEvent(
-            event=_text_event(event_id="$m2", body="second"),
-            room=room,
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+        make_pending_event(
+            _text_event(event_id="$m2", body="second"),
+            room,
             source_kind="message",
         ),
     )
@@ -4013,35 +4189,35 @@ async def test_cancelled_drain_dispatches_buffered_ingress_without_waiting_for_a
     never_release = asyncio.Event()
     dispatched_source_event_ids: list[list[str]] = []
 
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        source_event_ids = list(batch.source_event_ids)
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        source_event_ids = list(batch.handled_turn.source_event_ids)
         dispatched_source_event_ids.append(source_event_ids)
         if source_event_ids == ["$m1"]:
             entered_first_dispatch.set()
             await never_release.wait()
 
     gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
+        dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
 
     await _admit_ready(
         gate,
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
-        PendingEvent(
-            event=_text_event(event_id="$m1", body="first"),
-            room=room,
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+        make_pending_event(
+            _text_event(event_id="$m1", body="first"),
+            room,
             source_kind="message",
         ),
     )
     await entered_first_dispatch.wait()
     await _admit_ready(
         gate,
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
-        PendingEvent(
-            event=_text_event(event_id="$m2", body="second"),
-            room=room,
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+        make_pending_event(
+            _text_event(event_id="$m2", body="second"),
+            room,
             source_kind="message",
         ),
     )
@@ -4060,7 +4236,7 @@ async def test_coalescing_drain_logs_lifecycle_metadata() -> None:
     """Drain diagnostics should include enqueue, start, finish, count, and age fields."""
     room = _make_room()
     gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
+        dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -4068,10 +4244,10 @@ async def test_coalescing_drain_logs_lifecycle_metadata() -> None:
     with patch("mindroom.coalescing.logger.debug") as mock_debug:
         await _admit_ready(
             gate,
-            CoalescingKey("!room:localhost", None, "@user:localhost"),
-            PendingEvent(
-                event=_text_event(event_id="$m1", body="first"),
-                room=room,
+            CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+            make_pending_event(
+                _text_event(event_id="$m1", body="first"),
+                room,
                 source_kind="message",
             ),
         )
@@ -4101,7 +4277,7 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
     event = _image_event(event_id="$m1")
 
     with (
-        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
         patch("mindroom.bot.get_joined_rooms", new=AsyncMock(return_value=[])),
         patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock()),
     ):
@@ -4192,7 +4368,10 @@ async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await _enqueue_for_dispatch(
             bot,
             event,
@@ -4227,7 +4406,10 @@ async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> 
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
         await bot._turn_controller.handle_text_event(room, first_cmd)
         await bot._turn_controller.handle_text_event(room, second_cmd)
 
@@ -4244,7 +4426,7 @@ async def test_gate_entry_removed_after_dispatch_with_no_pending(tmp_path: Path)
     room = _make_room()
     event = _text_event(event_id="$m1", body="hello")
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()):
+    with patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()):
         assert _coalescing_gate_is_idle(bot._coalescing_gate)
         await _enqueue_for_dispatch(
             bot,
@@ -4268,7 +4450,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
     """Skip an older message during backlog replay when a newer unresponded message exists."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -4298,7 +4480,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
 
     # Older message should be skipped — resolve_dispatch_action never called
     action_mock.assert_not_awaited()
@@ -4354,7 +4536,7 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
     """
     bot = _make_bot(tmp_path)
     room = _make_room()
-    primary_event = PreparedTextEvent(
+    primary_event = PreparedIngress(
         sender="@bob:localhost",
         event_id="$bob",
         body="bob",
@@ -4387,7 +4569,8 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
         )
         dispatch.context.thread_history = degraded_history
         dispatch.context.replay_guard_history = degraded_history
-        bot.event_cache.get_recent_room_events.return_value = [
+        await _admit_pending_thread_event(
+            bot,
             _text_event(
                 event_id="$newer-bob",
                 body="newer bob",
@@ -4395,9 +4578,10 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
                 server_timestamp=3000,
                 thread_id="$thread",
             ).source,
-        ]
+        )
     else:
         _set_context_histories(dispatch, [newer_bob_message])
+    pending_turns = _watch_pending_turns(bot)
     handled_turn = _coalesced_ownership_record(ownership)
     superseded = ownership in {"single", "redacted"}
 
@@ -4424,7 +4608,8 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
         ),
         patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
     ):
-        await bot._turn_controller._dispatch_text_message(
+        await dispatch_test_turn(
+            bot._turn_controller,
             room,
             primary_event,
             "@bob:localhost",
@@ -4437,13 +4622,9 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
         for log in captured_logs
     )
     if degraded and superseded:
-        bot.event_cache.get_recent_room_events.assert_awaited_once_with(
-            room.room_id,
-            event_type="m.room.message",
-            since_ts_ms=2000,
-        )
+        assert pending_turns.calls == [(room.room_id, "$thread", 2000, "$bob")]
     else:
-        bot.event_cache.get_recent_room_events.assert_not_awaited()
+        assert pending_turns.calls == []
     assert not bot._turn_store.is_handled("$alice")
     assert not bot._turn_store.is_handled("$bob")
 
@@ -4460,7 +4641,7 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
     room = _make_room()
     relay_event_id = "$relay"
     human_event_id = "$human"
-    primary_event = PreparedTextEvent(
+    primary_event = PreparedIngress(
         sender="@bob:localhost",
         event_id=relay_event_id,
         body="relay",
@@ -4510,7 +4691,8 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
         ),
         patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
     ):
-        await bot._turn_controller._dispatch_text_message(
+        await dispatch_test_turn(
+            bot._turn_controller,
             room,
             primary_event,
             "@bob:localhost",
@@ -4529,10 +4711,10 @@ async def test_backlog_replay_fails_closed_after_legacy_coalesced_projection(tmp
     room = _make_room()
     conflicting_event_id = "$already-owned"
     retained_event_id = "$retained"
-    bot._turn_store.record_turn(
+    await bot._turn_store.record_turn(
         TurnRecord.create([conflicting_event_id], response_event_id="$existing-response"),
     )
-    projected = bot._turn_store.record_pending_turn(
+    projected = await bot._turn_store.record_pending_turn(
         TurnRecord.create(
             [conflicting_event_id, retained_event_id],
             redacted_source_event_ids=[conflicting_event_id],
@@ -4544,7 +4726,7 @@ async def test_backlog_replay_fails_closed_after_legacy_coalesced_projection(tmp
     assert projected.source_event_ids == (retained_event_id,)
     assert projected.source_event_metadata == {}
 
-    primary_event = PreparedTextEvent(
+    primary_event = PreparedIngress(
         sender="@bob:localhost",
         event_id=retained_event_id,
         body="retained",
@@ -4581,7 +4763,8 @@ async def test_backlog_replay_fails_closed_after_legacy_coalesced_projection(tmp
         ),
         patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
     ):
-        await bot._turn_controller._dispatch_text_message(
+        await dispatch_test_turn(
+            bot._turn_controller,
             room,
             primary_event,
             "@bob:localhost",
@@ -4593,11 +4776,13 @@ async def test_backlog_replay_fails_closed_after_legacy_coalesced_projection(tmp
 
 
 @pytest.mark.asyncio
-async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_positive_proof(tmp_path: Path) -> None:
+async def test_backlog_replay_degraded_thread_history_uses_pending_journal_event_positive_proof(
+    tmp_path: Path,
+) -> None:
     """Degraded empty thread history must not prove that no newer thread message exists."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -4611,7 +4796,6 @@ async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_pos
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -4630,7 +4814,8 @@ async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_pos
             "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
         },
     }
-    bot.event_cache.get_recent_room_events.return_value = [newer_event_source]
+    await _admit_pending_thread_event(bot, newer_event_source)
+    pending_turns = _watch_pending_turns(bot)
 
     action_mock = AsyncMock()
     history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
@@ -4643,24 +4828,35 @@ async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_pos
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
-    bot.event_cache.get_recent_room_events.assert_awaited_once_with(
-        room.room_id,
-        event_type="m.room.message",
-        since_ts_ms=1000,
-    )
+    assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
     action_mock.assert_not_awaited()
     assert not bot._turn_store.is_handled("$m1")
 
 
 @pytest.mark.asyncio
-async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_cached_event(tmp_path: Path) -> None:
-    """Cached replay proof must be strictly newer, matching the full-history guard."""
+async def test_backlog_replay_degraded_thread_history_ignores_pending_undecryptable_event(
+    tmp_path: Path,
+) -> None:
+    """Only an event that can become a turn may prove an older one stale.
+
+    The guard asks the journal for pending work in the thread, and *pending*
+    alone does not mean *will answer*. Thread membership is derived from
+    content for every kind -- ``inbound_event`` calls ``thread_root``
+    unconditionally -- and an ``m.room.encrypted`` event keeps its
+    ``m.relates_to`` in the clear so servers can aggregate relations. So a
+    threaded message this bot could not decrypt is admitted pending, in the
+    thread, under the requester's own sender.
+
+    It will never produce a response. Letting it count as a newer unanswered
+    turn drops the older message with no answer, and the undecryptable one
+    produces none either, so the user is answered twice with nothing.
+    """
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -4674,7 +4870,64 @@ async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_ca
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+        },
+    )
+    dispatch.context.am_i_mentioned = False
+    dispatch.context.thread_history = degraded_history
+    dispatch.context.replay_guard_history = degraded_history
+    dispatch.context.requires_model_history_refresh = True
+    undecryptable_source = {
+        "event_id": "$m2",
+        "sender": "@user:localhost",
+        "origin_server_ts": 2000,
+        "room_id": room.room_id,
+        "type": "m.room.encrypted",
+        "content": {
+            "algorithm": "m.megolm.v1.aes-sha2",
+            "ciphertext": "AwgAEnB2aWxsZQ",
+            "sender_key": "sender_key",
+            "device_id": "DEVICE",
+            "session_id": "session_id",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+        },
+    }
+    await _admit_pending_thread_event(bot, undecryptable_source, kind=EventKind.DECRYPTION_FAILURE)
+
+    action_mock = AsyncMock()
+    with (
+        patch.object(
+            bot._turn_controller,
+            "_prepare_dispatch",
+            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+        ),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+    ):
+        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+
+    action_mock.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_pending_event(
+    tmp_path: Path,
+) -> None:
+    """Journal replay proof must be strictly newer, matching the full-history guard."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    older_event = PreparedIngress(
+        sender="@user:localhost",
+        event_id="$m1",
+        body="old",
+        source={"content": {"msgtype": "m.text", "body": "old"}},
+        server_timestamp=1000,
+    )
+    dispatch = _prepared_dispatch(event_id="$m1", body="old", thread_id="$thread")
+    degraded_history = ThreadHistoryResult(
+        [],
+        is_full_history=False,
+        diagnostics={
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -4693,7 +4946,8 @@ async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_ca
             "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
         },
     }
-    bot.event_cache.get_recent_room_events.return_value = [same_timestamp_event_source]
+    await _admit_pending_thread_event(bot, same_timestamp_event_source)
+    pending_turns = _watch_pending_turns(bot)
 
     action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
     history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
@@ -4706,24 +4960,20 @@ async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_ca
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
-    bot.event_cache.get_recent_room_events.assert_awaited_once_with(
-        room.room_id,
-        event_type="m.room.message",
-        since_ts_ms=1000,
-    )
+    assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
     action_mock.assert_awaited_once()
     assert not bot._turn_store.is_handled("$m1")
 
 
 @pytest.mark.asyncio
 async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_command_body(tmp_path: Path) -> None:
-    """Cached voice transcripts that parse like commands should still count as requester turns."""
+    """Journal voice transcripts that parse like commands should still count as requester turns."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -4737,7 +4987,6 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -4758,7 +5007,7 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
             "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
         },
     }
-    bot.event_cache.get_recent_room_events.return_value = [newer_voice_event_source]
+    await _admit_pending_thread_event(bot, newer_voice_event_source)
 
     action_mock = AsyncMock()
     with (
@@ -4769,7 +5018,7 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
 
     action_mock.assert_not_awaited()
     assert not bot._turn_store.is_handled("$m1")
@@ -4777,7 +5026,7 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
 
 def test_replay_guard_does_not_supersede_non_interactive_origin_turns() -> None:
     """Replay suppression is gated by turn-origin policy, not just sender/timestamp matching."""
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@mindroom_general:localhost",
         event_id="$managed",
         body="internal status",
@@ -4811,7 +5060,7 @@ def test_replay_guard_does_not_supersede_non_interactive_origin_turns() -> None:
 
 def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> None:
     """Visible router voice echoes must not suppress the canonical voice turn in full history."""
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice",
         body="check my calendar",
@@ -4857,7 +5106,7 @@ def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> None:
 
 def test_full_history_replay_guard_counts_non_router_visible_echo_marker() -> None:
     """Only router voice echoes are display-only; other trusted relay turns still suppress older turns."""
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice",
         body="check my calendar",
@@ -4904,7 +5153,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
     """Router transcript echoes must not suppress the canonical voice turn they represent."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice",
         body="check my calendar",
@@ -4918,7 +5167,6 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -4940,7 +5188,8 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
             "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
         },
     }
-    bot.event_cache.get_recent_room_events.return_value = [visible_echo_source]
+    await _admit_pending_thread_event(bot, visible_echo_source)
+    pending_turns = _watch_pending_turns(bot)
 
     action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
     history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
@@ -4953,14 +5202,10 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
-    bot.event_cache.get_recent_room_events.assert_awaited_once_with(
-        room.room_id,
-        event_type="m.room.message",
-        since_ts_ms=1000,
-    )
+    assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$voice")]
     action_mock.assert_awaited_once()
     assert not bot._turn_store.is_handled("$voice")
 
@@ -4970,7 +5215,7 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
     """Only router transcript echoes are replay noise; other marked relays still count as newer turns."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice",
         body="check my calendar",
@@ -4984,7 +5229,6 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -5006,7 +5250,8 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
             "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
         },
     }
-    bot.event_cache.get_recent_room_events.return_value = [marked_helper_relay_source]
+    await _admit_pending_thread_event(bot, marked_helper_relay_source)
+    pending_turns = _watch_pending_turns(bot)
 
     action_mock = AsyncMock()
     history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
@@ -5019,24 +5264,28 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
-    bot.event_cache.get_recent_room_events.assert_awaited_once_with(
-        room.room_id,
-        event_type="m.room.message",
-        since_ts_ms=1000,
-    )
+    assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$voice")]
     action_mock.assert_not_awaited()
     assert not bot._turn_store.is_handled("$voice")
 
 
 @pytest.mark.asyncio
-async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_reply(tmp_path: Path) -> None:
-    """Degraded replay guard should accept cache-indexed plain replies as same-thread proof."""
+async def test_backlog_replay_degraded_thread_history_ignores_plain_reply_outside_the_thread(
+    tmp_path: Path,
+) -> None:
+    """A plain reply the journal placed in no thread is not proof of a newer turn in one.
+
+    Thread membership is now the column the journal recorded at admission, which
+    is the event's own MSC3440 relation. A reply that only carries
+    ``m.in_reply_to`` belongs to the room conversation, so suppressing a
+    threaded turn on its account would answer neither message.
+    """
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -5050,7 +5299,6 @@ async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_r
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -5069,12 +5317,9 @@ async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_r
             "m.relates_to": {"m.in_reply_to": {"event_id": "$root"}},
         },
     }
-    bot.event_cache.get_recent_room_events.return_value = [newer_event_source]
-    bot._conversation_cache.get_thread_id_for_event = AsyncMock(
-        side_effect=lambda _room_id, event_id: "$thread" if event_id == "$m2" else None,
-    )
-
-    action_mock = AsyncMock()
+    await _admit_pending_thread_event(bot, newer_event_source)
+    pending_turns = _watch_pending_turns(bot)
+    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
     history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
     with (
         patch.object(
@@ -5085,20 +5330,20 @@ async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_r
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
-    bot._conversation_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$m2")
-    action_mock.assert_not_awaited()
+    assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
+    action_mock.assert_awaited_once()
     assert not bot._turn_store.is_handled("$m1")
 
 
 @pytest.mark.asyncio
 async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_path: Path) -> None:
-    """Cached edits should not count as newer unresponded requester turns."""
+    """Edits should not count as newer unresponded requester turns."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -5112,7 +5357,6 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -5136,7 +5380,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
         },
     }
-    bot.event_cache.get_recent_room_events.return_value = [edit_event_source]
+    await _admit_pending_thread_event(bot, edit_event_source)
 
     action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
     history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
@@ -5149,7 +5393,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
     action_mock.assert_awaited_once()
@@ -5157,13 +5401,13 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_backlog_replay_degraded_thread_history_fails_open_without_positive_cached_proof(
+async def test_backlog_replay_degraded_thread_history_fails_open_without_positive_journal_proof(
     tmp_path: Path,
 ) -> None:
-    """Degraded replay guard should proceed unless raw cached events positively prove a newer same-thread turn."""
+    """Degraded replay guard should proceed unless a pending journal event proves a newer same-thread turn."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -5177,14 +5421,13 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
     dispatch.context.thread_history = degraded_history
     dispatch.context.replay_guard_history = degraded_history
     dispatch.context.requires_model_history_refresh = True
-    bot.event_cache.get_recent_room_events.return_value = []
+    pending_turns = _watch_pending_turns(bot)
 
     action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
     history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
@@ -5198,14 +5441,10 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
-    bot.event_cache.get_recent_room_events.assert_awaited_once_with(
-        room.room_id,
-        event_type="m.room.message",
-        since_ts_ms=1000,
-    )
+    assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
     action_mock.assert_awaited_once()
     assert not bot._turn_store.is_handled("$m1")
     assert any(
@@ -5215,12 +5454,83 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("settled", [False, True])
+async def test_backlog_replay_degraded_thread_history_only_counts_unsettled_journal_events(
+    tmp_path: Path,
+    *,
+    settled: bool,
+) -> None:
+    """Only a journal event that still owes an answer supersedes an older turn.
+
+    Settling is not a cheaper way of saying "old". It says the turn already ran
+    or was deliberately dropped, and it releases the replay payload with it, so
+    a settled event will never produce the newer response the older message
+    would be held back for. Holding the older one back anyway answers neither.
+    """
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    older_event = PreparedIngress(
+        sender="@user:localhost",
+        event_id="$m1",
+        body="old",
+        source={"content": {"msgtype": "m.text", "body": "old"}},
+        server_timestamp=1000,
+    )
+    dispatch = _prepared_dispatch(event_id="$m1", body="old", thread_id="$thread")
+    degraded_history = ThreadHistoryResult(
+        [],
+        is_full_history=False,
+        diagnostics={
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+        },
+    )
+    dispatch.context.am_i_mentioned = False
+    dispatch.context.thread_history = degraded_history
+    dispatch.context.replay_guard_history = degraded_history
+    dispatch.context.requires_model_history_refresh = True
+    await _admit_pending_thread_event(
+        bot,
+        {
+            "event_id": "$m2",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "room_id": room.room_id,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "newer",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+            },
+        },
+    )
+    if settled:
+        await bot._journal_store.principal(bot._journal_principal_id).settle("$m2")
+    pending_turns = _watch_pending_turns(bot)
+
+    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+    with (
+        patch.object(
+            bot._turn_controller,
+            "_prepare_dispatch",
+            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+        ),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+    ):
+        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+
+    assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
+    assert action_mock.await_count == (1 if settled else 0)
+    assert not bot._turn_store.is_handled("$m1")
+
+
+@pytest.mark.asyncio
 async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_history(tmp_path: Path) -> None:
     """Media-backed turns must use replay snapshot history instead of mutable planning history."""
     bot = _make_bot(tmp_path)
     room = _make_room()
     image_event = _image_event(event_id="$img1", server_timestamp=1000)
-    dispatch_event = PreparedTextEvent(
+    dispatch_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$img1",
         body="[Attached image]",
@@ -5253,7 +5563,8 @@ async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_h
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=newer_mock),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
-        await bot._turn_controller._dispatch_text_message(
+        await dispatch_test_turn(
+            bot._turn_controller,
             room,
             dispatch_event,
             "@user:localhost",
@@ -5271,7 +5582,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
     """Normal live dispatch proceeds when no newer unresponded message exists."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="hello",
@@ -5299,7 +5610,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
         ),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
-        await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, event, "@user:localhost")
 
     # Dispatch proceeded to completion
     assert bot._turn_store.is_handled("$m1")
@@ -5342,8 +5653,8 @@ def _mention_text_event(
     )
 
 
-def test_batch_dispatch_event_merges_mentions_across_events() -> None:
-    """A batch of '@agent first' + 'follow up' must preserve the mention."""
+def test_prepared_turn_merges_mentions_across_events() -> None:
+    """A turn of '@agent first' + 'follow up' must preserve the mention."""
     room = _make_room()
     mention_event = _mention_text_event(
         event_id="$m1",
@@ -5353,25 +5664,20 @@ def test_batch_dispatch_event_merges_mentions_across_events() -> None:
     )
     followup_event = _text_event(event_id="$m2", body="follow up", server_timestamp=1001)
 
-    batch = build_coalesced_batch(
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
+    batch = build_prepared_turn(
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
-            PendingEvent(event=mention_event, room=room, source_kind="message"),
-            PendingEvent(event=followup_event, room=room, source_kind="message"),
+            make_pending_event(mention_event, room, source_kind="message"),
+            make_pending_event(followup_event, room, source_kind="message"),
         ],
     )
-    dispatch_event = _build_batch_dispatch_event(batch)
-
-    assert isinstance(dispatch_event, PreparedTextEvent)
-    content = dispatch_event.source.get("content", {})
-    mentions = content.get("m.mentions", {})
-    assert "@mindroom_test_agent:localhost" in mentions.get("user_ids", [])
+    assert batch.payload.mentioned_user_ids == ("@mindroom_test_agent:localhost",)
 
 
-def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
+def test_prepared_turn_preserves_voice_fallback_metadata() -> None:
     """A trusted voice + text batch must preserve system-owned fallback metadata."""
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice1",
         body="transcribed voice",
@@ -5386,29 +5692,25 @@ def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
     )
     text_event = _text_event(event_id="$m2", body="and this too", server_timestamp=1001)
 
-    batch = build_coalesced_batch(
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
+    batch = build_prepared_turn(
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
-            PendingEvent(
-                event=voice_event,
-                room=room,
+            make_pending_event(
+                voice_event,
+                room,
                 source_kind="voice",
                 trust_internal_payload_metadata=True,
             ),
-            PendingEvent(event=text_event, room=room, source_kind="message"),
+            make_pending_event(text_event, room, source_kind="message"),
         ],
     )
-    dispatch_event = _build_batch_dispatch_event(batch)
-
-    assert isinstance(dispatch_event, PreparedTextEvent)
-    content = dispatch_event.source.get("content", {})
-    assert content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True
+    assert batch.payload.raw_audio_fallback is True
 
 
-def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
+def test_single_prepared_turn_preserves_source_kind() -> None:
     """Single prepared events should carry active policy separately from source kind."""
     room = _make_room()
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$followup",
         body="stop if you see this",
@@ -5416,54 +5718,53 @@ def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
         server_timestamp=1000,
     )
 
-    batch = build_coalesced_batch(
-        CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+    batch = build_prepared_turn(
+        CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
         [
-            PendingEvent(
-                event=event,
-                room=room,
+            make_pending_event(
+                event,
+                room,
                 source_kind="message",
                 dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
             ),
         ],
     )
-    handoff = build_dispatch_handoff(batch)
-    dispatch_event = _build_batch_dispatch_event(batch)
-
-    assert handoff.ingress.source_kind == "message"
-    assert handoff.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    assert isinstance(dispatch_event, PreparedTextEvent)
-    assert dispatch_event.source_kind_override is None
+    assert batch.ingress.source_kind == "message"
+    assert batch.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert batch.event.source_kind_override is None
 
 
-def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None:
+def test_single_text_turn_preserves_dispatch_policy_source_kind() -> None:
     """Single text active follow-ups should expose policy without changing source kind."""
     room = _make_room()
-    event = _text_event(event_id="$relay", body="@agent relay", server_timestamp=1000)
-
-    batch = build_coalesced_batch(
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
-        [
-            PendingEvent(
-                event=event,
-                room=room,
-                source_kind="message",
-                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-            ),
-        ],
+    event = PreparedIngress(
+        sender="@user:localhost",
+        event_id="$relay",
+        body="@agent relay",
+        source={"event_id": "$relay", "sender": "@user:localhost", "content": {"msgtype": "m.text"}},
+        server_timestamp=1000,
     )
-    handoff = build_dispatch_handoff(batch)
-    dispatch_event = _build_batch_dispatch_event(batch)
 
-    assert handoff.ingress.source_kind == "message"
-    assert handoff.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    assert isinstance(dispatch_event, nio.RoomMessageText)
+    pending = make_pending_event(
+        event,
+        room,
+        source_kind="message",
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    )
+    batch = build_prepared_turn(
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+        [pending],
+    )
+    assert batch.ingress.source_kind == "message"
+    assert batch.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert batch.event.event_id == pending.event.event_id
+    assert batch.event.source is pending.event.source
 
 
-def test_batch_dispatch_event_preserves_original_sender() -> None:
+def test_prepared_turn_preserves_original_sender() -> None:
     """A relay batch must preserve original_sender metadata."""
     room = _make_room()
-    relay_event = PreparedTextEvent(
+    relay_event = PreparedIngress(
         sender="@bridge:localhost",
         event_id="$relay1",
         body="relayed message",
@@ -5482,29 +5783,25 @@ def test_batch_dispatch_event_preserves_original_sender() -> None:
         server_timestamp=1001,
     )
 
-    batch = build_coalesced_batch(
-        CoalescingKey("!room:localhost", None, "@real_user:remote"),
+    batch = build_prepared_turn(
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@real_user:remote")),
         [
-            PendingEvent(
-                event=relay_event,
-                room=room,
+            make_pending_event(
+                relay_event,
+                room,
                 source_kind="message",
                 trust_internal_payload_metadata=True,
             ),
-            PendingEvent(event=followup, room=room, source_kind="message"),
+            make_pending_event(followup, room, source_kind="message"),
         ],
     )
-    dispatch_event = _build_batch_dispatch_event(batch)
-
-    assert isinstance(dispatch_event, PreparedTextEvent)
-    content = dispatch_event.source.get("content", {})
-    assert content.get(ORIGINAL_SENDER_KEY) == "@real_user:remote"
+    assert batch.payload.original_sender == "@real_user:remote"
 
 
-def test_batch_dispatch_event_preserves_attachment_ids() -> None:
-    """Attachment IDs from all events must flow through to the synthetic source."""
+def test_prepared_turn_preserves_attachment_ids() -> None:
+    """Attachment IDs from all events must flow through turn metadata."""
     room = _make_room()
-    event_with_attachment = PreparedTextEvent(
+    event_with_attachment = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="see attached",
@@ -5516,7 +5813,7 @@ def test_batch_dispatch_event_preserves_attachment_ids() -> None:
         },
         server_timestamp=1000,
     )
-    event_with_another = PreparedTextEvent(
+    event_with_another = PreparedIngress(
         sender="@user:localhost",
         event_id="$m2",
         body="another",
@@ -5529,31 +5826,24 @@ def test_batch_dispatch_event_preserves_attachment_ids() -> None:
         server_timestamp=1001,
     )
 
-    batch = build_coalesced_batch(
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
+    batch = build_prepared_turn(
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
-            PendingEvent(
-                event=event_with_attachment,
-                room=room,
+            make_pending_event(
+                event_with_attachment,
+                room,
                 source_kind="message",
                 trust_internal_payload_metadata=True,
             ),
-            PendingEvent(
-                event=event_with_another,
-                room=room,
+            make_pending_event(
+                event_with_another,
+                room,
                 source_kind="message",
                 trust_internal_payload_metadata=True,
             ),
         ],
     )
-    dispatch_event = _build_batch_dispatch_event(batch)
-
-    assert isinstance(dispatch_event, PreparedTextEvent)
-    content = dispatch_event.source.get("content", {})
-    raw_ids = content.get(ATTACHMENT_IDS_KEY, [])
-    assert isinstance(raw_ids, list), "attachment IDs must be a list, not a comma-string"
-    assert "att-001" in raw_ids
-    assert "att-002" in raw_ids
+    assert batch.payload.attachment_ids == ("att-001", "att-002")
 
 
 # ---------------------------------------------------------------------------
@@ -5566,7 +5856,7 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
     """A newer !command must not suppress an older legitimate message during backlog replay."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="What is the project structure?",
@@ -5606,7 +5896,7 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
         ),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
-        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
 
     # The older message must NOT be suppressed — dispatch action should be called
     action_mock.assert_awaited_once()
@@ -5617,7 +5907,7 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
     """A newer command with leading whitespace must not suppress older messages."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="hello",
@@ -5656,7 +5946,7 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
         ),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
-        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
 
     action_mock.assert_awaited_once()
 
@@ -5671,7 +5961,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
     """Synthetic scheduled events must never be suppressed by the thread-history guard."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    scheduled_event = PreparedTextEvent(
+    scheduled_event = PreparedIngress(
         sender="@mindroom_test_agent:localhost",
         event_id="$s1",
         body="scheduled task output",
@@ -5714,7 +6004,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         ),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
-        await bot._turn_controller._dispatch_text_message(room, scheduled_event, "@mindroom_test_agent:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, scheduled_event, "@mindroom_test_agent:localhost")
 
     action_mock.assert_awaited_once()
 
@@ -5724,7 +6014,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
     """Synthetic hook events must never be suppressed by the thread-history guard."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    hook_event = PreparedTextEvent(
+    hook_event = PreparedIngress(
         sender="@mindroom_test_agent:localhost",
         event_id="$h1",
         body="hook result",
@@ -5764,7 +6054,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         ),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
-        await bot._turn_controller._dispatch_text_message(room, hook_event, "@mindroom_test_agent:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, hook_event, "@mindroom_test_agent:localhost")
 
     action_mock.assert_awaited_once()
 
@@ -5775,7 +6065,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
     bot = _make_bot(tmp_path)
     room = _make_room()
 
-    first_fire = PreparedTextEvent(
+    first_fire = PreparedIngress(
         sender="@mindroom_test_agent:localhost",
         event_id="$s1",
         body="scheduled fire 1",
@@ -5816,7 +6106,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         ),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
-        await bot._turn_controller._dispatch_text_message(room, first_fire, "@mindroom_test_agent:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, first_fire, "@mindroom_test_agent:localhost")
 
     # First fire must NOT be suppressed
     action_mock.assert_awaited_once()
@@ -5832,7 +6122,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
     """Coalesced user batches (is_synthetic=True, source_kind='user') must be guarded."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    coalesced_event = PreparedTextEvent(
+    coalesced_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="batched message",
@@ -5862,7 +6152,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, coalesced_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, coalesced_event, "@user:localhost")
 
     # Coalesced user batch MUST be suppressed — not an automation event
     action_mock.assert_not_awaited()
@@ -5875,7 +6165,7 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
     bot = _make_bot(tmp_path)
     room = _make_room()
     image_event = _image_event(event_id="$img1", server_timestamp=1000)
-    coalesced_event = PreparedTextEvent(
+    coalesced_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$img1",
         body="[Attached image]",
@@ -5905,7 +6195,8 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(
+        await dispatch_test_turn(
+            bot._turn_controller,
             room,
             coalesced_event,
             "@user:localhost",
@@ -5922,7 +6213,7 @@ async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -
     """Non-voice !commands must still take the command execution path."""
     bot = _make_bot(tmp_path, agent_name="router")
     room = _make_room()
-    command_event = PreparedTextEvent(
+    command_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$c1",
         body="!schedule tomorrow at 9am turn off the lights",
@@ -5945,7 +6236,7 @@ async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -
         ),
         patch.object(bot._command_turn_executor, "execute_if_owned", new=handle_cmd_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, command_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, command_event, "@user:localhost")
 
     handle_cmd_mock.assert_awaited_once()
 
@@ -5955,7 +6246,7 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
     """Voice active follow-ups should force response policy without becoming commands."""
     bot = _make_bot(tmp_path, agent_name="router")
     room = _make_room()
-    voice_command_event = PreparedTextEvent(
+    voice_command_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice_command",
         body="!schedule tomorrow at 9am turn off the lights",
@@ -5967,6 +6258,7 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
             },
         },
         server_timestamp=1000,
+        source_kind="voice",
         source_kind_override="voice",
     )
     dispatch = _prepared_dispatch(
@@ -5991,7 +6283,7 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
         patch.object(bot._command_turn_executor, "execute_if_owned", new=execute_command_mock),
         patch.object(bot._turn_controller, "_execute_response_action", new=execute_response_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, voice_command_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, voice_command_event, "@user:localhost")
 
     prepare_dispatch_mock.assert_awaited_once()
     assert prepare_dispatch_mock.await_args.kwargs["use_command_context"] is False
@@ -6010,7 +6302,7 @@ async def test_older_command_not_suppressed_during_replay(tmp_path: Path) -> Non
     """An older !help replayed while a newer normal message exists must still dispatch."""
     bot = _make_bot(tmp_path, agent_name="router")
     room = _make_room()
-    cmd_event = PreparedTextEvent(
+    cmd_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$c1",
         body="!help",
@@ -6039,7 +6331,7 @@ async def test_older_command_not_suppressed_during_replay(tmp_path: Path) -> Non
         ),
         patch.object(bot._command_turn_executor, "execute_if_owned", new=handle_cmd_mock),
     ):
-        await bot._turn_controller._dispatch_text_message(room, cmd_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_controller, room, cmd_event, "@user:localhost")
 
     # Command must have been dispatched, not suppressed
     handle_cmd_mock.assert_awaited_once()
@@ -6083,8 +6375,8 @@ def _formatted_body_event(
     )
 
 
-def test_batch_dispatch_event_preserves_formatted_body_mentions() -> None:
-    """Bridge-style pill mentions in formatted_body must survive batch merging."""
+def test_prepared_turn_preserves_formatted_body_mentions() -> None:
+    """Bridge-style pill mentions in formatted_body must survive turn preparation."""
     room = _make_room()
     pill_event = _formatted_body_event(
         event_id="$m1",
@@ -6094,20 +6386,15 @@ def test_batch_dispatch_event_preserves_formatted_body_mentions() -> None:
     )
     followup = _text_event(event_id="$m2", body="follow up", server_timestamp=1001)
 
-    batch = build_coalesced_batch(
-        CoalescingKey("!room:localhost", None, "@user:localhost"),
+    batch = build_prepared_turn(
+        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [
-            PendingEvent(event=pill_event, room=room, source_kind="message"),
-            PendingEvent(event=followup, room=room, source_kind="message"),
+            make_pending_event(pill_event, room, source_kind="message"),
+            make_pending_event(followup, room, source_kind="message"),
         ],
     )
-    dispatch_event = _build_batch_dispatch_event(batch)
-
-    assert isinstance(dispatch_event, PreparedTextEvent)
-    content = dispatch_event.source.get("content", {})
-    formatted = content.get("formatted_body", "")
-    assert "@mindroom_test_agent:localhost" in formatted
-    assert content.get("format") == "org.matrix.custom.html"
+    assert batch.payload.formatted_bodies is not None
+    assert "@mindroom_test_agent:localhost" in batch.payload.formatted_bodies[0]
 
 
 def _mentioned_matrix_ids_from_source(source: dict[str, object]) -> list[MatrixID]:
@@ -6130,7 +6417,7 @@ def _mentioned_matrix_ids_from_source(source: dict[str, object]) -> list[MatrixI
 async def _capture_gate_dispatches(
     bot: AgentBot,
     room: nio.MatrixRoom,
-    enqueued: Sequence[tuple[nio.Event | PreparedTextEvent, str, str | None, dict[str, object]]],
+    enqueued: Sequence[tuple[nio.Event | PreparedIngress, str, str | None, dict[str, object]]],
     *,
     captured_plan_extra_content: list[object] | None = None,
 ) -> tuple[list[MessageEnvelope], list[list[object]], list[DispatchPayloadWithAttachmentsRequest]]:
@@ -6161,14 +6448,14 @@ async def _capture_gate_dispatches(
     }
     original_coalescing_thread_id = bot._conversation_resolver.coalescing_thread_id
 
-    async def coalescing_thread_id(room: nio.MatrixRoom, event: nio.Event | PreparedTextEvent) -> str | None:
+    async def coalescing_thread_id(room: nio.MatrixRoom, event: nio.Event | PreparedIngress) -> str | None:
         if event.event_id in coalescing_thread_id_overrides:
             return cast("str | None", coalescing_thread_id_overrides[event.event_id])
         return await original_coalescing_thread_id(room, event)
 
     async def extract_dispatch_context(
         _room: nio.MatrixRoom,
-        event: nio.Event | PreparedTextEvent,
+        event: nio.Event | PreparedIngress,
         **_kwargs: object,
     ) -> object:
         thread_id = EventInfo.from_event(event.source).thread_id
@@ -6212,7 +6499,7 @@ async def _capture_gate_dispatches(
         for event, source_kind, dispatch_policy_source_kind, metadata in enqueued:
             await _enqueue_for_dispatch(
                 bot,
-                cast("nio.RoomMessageText | PreparedTextEvent", event),
+                cast("nio.RoomMessageText | PreparedIngress", event),
                 room,
                 source_kind=source_kind,
                 dispatch_policy_source_kind=dispatch_policy_source_kind,
@@ -6235,7 +6522,7 @@ async def test_gate_final_envelope_preserves_active_voice_source_and_policy(tmp_
     bot = _make_bot(tmp_path, debounce_ms=0)
     bot.config.agents["test_agent"].thread_mode = "room"
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice-active",
         body="!help",
@@ -6268,7 +6555,7 @@ async def test_gate_final_envelope_preserves_non_active_voice_command_policy(tmp
     bot = _make_bot(tmp_path, debounce_ms=0)
     bot.config.agents["test_agent"].thread_mode = "room"
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice-normal",
         body="!help",
@@ -6503,7 +6790,7 @@ async def test_coalesced_attachment_ids_reach_envelope_and_model_payload(tmp_pat
     """Coalesced attachment IDs should reach both the final envelope and model payload request."""
     bot = _make_bot(tmp_path, debounce_ms=10)
     room = _make_room()
-    first = PreparedTextEvent(
+    first = PreparedIngress(
         sender="@user:localhost",
         event_id="$att1",
         body="first attachment",
@@ -6516,7 +6803,7 @@ async def test_coalesced_attachment_ids_reach_envelope_and_model_payload(tmp_pat
         },
         server_timestamp=1000,
     )
-    second = PreparedTextEvent(
+    second = PreparedIngress(
         sender="@user:localhost",
         event_id="$att2",
         body="second attachment",
@@ -6689,7 +6976,7 @@ async def test_untrusted_synthetic_voice_payload_metadata_spoofing_is_not_truste
     bot = _make_bot(tmp_path, debounce_ms=0)
     bot.config.agents["test_agent"].thread_mode = "room"
     room = _make_room()
-    spoofed_voice = PreparedTextEvent(
+    spoofed_voice = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice-spoof",
         body="voice transcript",
@@ -6729,7 +7016,7 @@ async def test_trusted_voice_normalized_payload_metadata_reaches_envelope_and_pa
     bot = _make_bot(tmp_path, debounce_ms=0)
     bot.config.agents["test_agent"].thread_mode = "room"
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice-trusted",
         body="voice transcript",
@@ -6775,7 +7062,7 @@ async def test_trusted_voice_transcript_metadata_reaches_envelope_and_payload(
     bot = _make_bot(tmp_path, debounce_ms=0)
     bot.config.agents["test_agent"].thread_mode = "room"
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice-transcript",
         body="voice transcript",
@@ -6818,7 +7105,7 @@ async def test_coalesced_root_voice_attachment_is_trusted_when_later_text_is_pri
     """Root voice audio should stay in the current payload when later root text becomes primary."""
     bot = _make_bot(tmp_path, debounce_ms=10)
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice-root",
         body="voice transcript",
@@ -6909,7 +7196,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
 
     async def extract_dispatch_context(
         _room: nio.MatrixRoom,
-        event: nio.Event | PreparedTextEvent,
+        event: nio.Event | PreparedIngress,
         **_kwargs: object,
     ) -> object:
         thread_id = EventInfo.from_event(event.source).thread_id
@@ -6965,12 +7252,7 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
     """Trusted hydrated sidecar attachment metadata should feed the envelope and payload request."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
-    preview = _text_event(
-        event_id="$trusted-sidecar",
-        body="preview",
-        sender="@mindroom_test_agent:localhost",
-    )
-    hydrated = PreparedTextEvent(
+    hydrated = PreparedIngress(
         sender="@mindroom_test_agent:localhost",
         event_id="$trusted-sidecar",
         body="hydrated scheduled body",
@@ -7001,20 +7283,16 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
     with (
         patch.object(
             bot._inbound_turn_normalizer,
-            "resolve_text_event",
-            new=AsyncMock(return_value=hydrated),
-        ),
-        patch.object(
-            bot._inbound_turn_normalizer,
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(side_effect=record_payload_request),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
         patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
     ):
-        await bot._turn_controller._dispatch_text_message(
+        await dispatch_test_turn(
+            bot._turn_controller,
             room,
-            preview,
+            hydrated,
             "@requester:localhost",
             ingress_metadata=DispatchIngressMetadata(source_kind="scheduled"),
             payload_metadata=DispatchPayloadMetadata(attachment_ids=None),
@@ -7027,11 +7305,10 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
 
 @pytest.mark.asyncio
 async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(tmp_path: Path) -> None:
-    """Hydrated sidecar metadata should replace preview prompt and feed final context extraction."""
+    """Prepared sidecar metadata should feed the envelope and persisted prompts before dispatch."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
-    preview = _text_event(event_id="$sidecar", body="preview")
-    hydrated = PreparedTextEvent(
+    hydrated = PreparedIngress(
         sender="@user:localhost",
         event_id="$sidecar",
         body="@test_agent hydrated body",
@@ -7055,19 +7332,15 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
     async def record_response(*_args: object, **kwargs: object) -> None:
         captured_handled_turns.append(cast("TurnRecord", kwargs["handled_turn"]))
 
-    handled_turn = TurnRecord.create(["$sidecar"], source_event_prompts={"$sidecar": "preview"})
+    handled_turn = TurnRecord.create(["$sidecar"], source_event_prompts={"$sidecar": "@test_agent hydrated body"})
     with (
-        patch.object(
-            bot._inbound_turn_normalizer,
-            "resolve_text_event",
-            new=AsyncMock(return_value=hydrated),
-        ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
         patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
     ):
-        await bot._turn_controller._dispatch_text_message(
+        await dispatch_test_turn(
+            bot._turn_controller,
             room,
-            preview,
+            hydrated,
             "@user:localhost",
             handled_turn=handled_turn,
         )
@@ -7091,7 +7364,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
         "preview_size": len(sidecar.body),
         "is_complete_content": True,
     }
-    hydrated = PreparedTextEvent(
+    hydrated = PreparedIngress(
         sender=sidecar.sender,
         event_id=sidecar.event_id,
         body="hydrated body",
@@ -7102,8 +7375,8 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
 
     with (
         patch.object(
-            bot._dispatch_obligation_runner,
-            "retry_pending_turn_source",
+            bot._journal_dispatcher,
+            "retry_turn_source",
             new=retry_pending_source,
         ),
         patch.object(
@@ -7112,9 +7385,8 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
             new=AsyncMock(return_value=hydrated),
         ),
         patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
-        patch.object(
-            bot._turn_controller,
-            "handle_coalesced_batch",
+        patch(
+            "mindroom.turn_controller.dispatch_text_message",
             new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
         ),
     ):
@@ -7129,38 +7401,11 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
 
     assert outcome is _IngressAdmissionOutcome.ADMITTED
     assert drain_result.dispatch_failure_count == 1
-    retry_pending_source.assert_called_once_with(sidecar.event_id, DispatchCallbackKind.MEDIA)
+    retry_pending_source.assert_called_once_with(sidecar.event_id)
 
 
 @pytest.mark.asyncio
-async def test_router_caches_agent_pending_thread_placeholder_before_ignoring_dispatch(tmp_path: Path) -> None:
-    """Keep an active agent visible to router history while its response is still streaming."""
-    bot = _make_bot(tmp_path, agent_name="router")
-    room = _make_room()
-    placeholder = _text_event(
-        event_id="$agent-placeholder",
-        body="Thinking...",
-        sender="@mindroom_test_agent:localhost",
-        thread_id="$thread",
-    )
-    content = placeholder.source["content"]
-    assert isinstance(content, dict)
-    content[STREAM_STATUS_KEY] = STREAM_STATUS_PENDING
-    conversation_cache = make_conversation_cache_mock()
-    controller = replace_turn_controller_deps(bot, conversation_cache=conversation_cache)
-
-    outcome = await controller.handle_text_event(room, placeholder)
-
-    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
-    conversation_cache.append_live_event.assert_awaited_once_with(
-        room.room_id,
-        placeholder,
-        event_info=EventInfo.from_event(placeholder.source),
-    )
-
-
-@pytest.mark.asyncio
-async def test_router_skips_intermediate_agent_stream_edit_without_precheck_or_cache(tmp_path: Path) -> None:
+async def test_router_skips_intermediate_agent_stream_edit_without_precheck(tmp_path: Path) -> None:
     """Keep progressive stream edits on the pre-existing fast ignore path."""
     bot = _make_bot(tmp_path, agent_name="router")
     room = _make_room()
@@ -7182,8 +7427,7 @@ async def test_router_skips_intermediate_agent_stream_edit_without_precheck_or_c
         "event_id": "$agent-placeholder",
     }
     assert EventInfo.from_event(streaming_edit.source).is_edit
-    conversation_cache = make_conversation_cache_mock()
-    controller = replace_turn_controller_deps(bot, conversation_cache=conversation_cache)
+    controller = replace_turn_controller_deps(bot)
 
     with patch(
         "mindroom.turn_controller.TurnController._precheck_dispatch_event",
@@ -7193,40 +7437,6 @@ async def test_router_skips_intermediate_agent_stream_edit_without_precheck_or_c
 
     assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     precheck.assert_not_called()
-    conversation_cache.append_live_event.assert_not_awaited()
-
-
-@pytest.mark.parametrize(
-    "sender",
-    [
-        pytest.param("@user:localhost", id="accepted-human"),
-        pytest.param("@mindroom_router:localhost", id="rejected-self"),
-    ],
-)
-@pytest.mark.asyncio
-async def test_router_does_not_cache_nonterminal_stream_without_accepted_managed_sender(
-    tmp_path: Path,
-    sender: str,
-) -> None:
-    """Reject cache writes unless ingress accepts a managed entity's stream."""
-    bot = _make_bot(tmp_path, agent_name="router")
-    room = _make_room()
-    placeholder = _text_event(
-        event_id="$untrusted-placeholder",
-        body="Thinking...",
-        sender=sender,
-        thread_id="$thread",
-    )
-    content = placeholder.source["content"]
-    assert isinstance(content, dict)
-    content[STREAM_STATUS_KEY] = STREAM_STATUS_PENDING
-    conversation_cache = make_conversation_cache_mock()
-    controller = replace_turn_controller_deps(bot, conversation_cache=conversation_cache)
-
-    outcome = await controller.handle_text_event(room, placeholder)
-
-    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
-    conversation_cache.append_live_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -7276,9 +7486,8 @@ async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) 
             },
         ),
     )
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
-        return_value=ThreadHistoryResult([], is_full_history=False),
-    )
+    snapshot = AsyncMock(return_value=ThreadHistoryResult([], is_full_history=False))
+    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = snapshot
 
     should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
         room,
@@ -7288,10 +7497,9 @@ async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) 
     )
 
     assert should_skip is False
-    bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+    snapshot.assert_awaited_once_with(
         room.room_id,
         "$thread",
-        caller_label="router_pre_ingress_skip",
     )
 
 
@@ -7316,7 +7524,8 @@ async def test_router_early_skip_fails_open_for_thread_snapshot_failure(tmp_path
             },
         ),
     )
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
+    snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
+    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = snapshot
 
     should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
         room,
@@ -7326,8 +7535,7 @@ async def test_router_early_skip_fails_open_for_thread_snapshot_failure(tmp_path
     )
 
     assert should_skip is False
-    bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+    snapshot.assert_awaited_once_with(
         room.room_id,
         "$maybe-root",
-        caller_label="router_pre_ingress_skip",
     )

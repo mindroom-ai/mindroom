@@ -14,13 +14,20 @@ helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
   --create-namespace
 ```
 
-The default values render a self-contained Deployment, Service, ConfigMap, runtime PVC, and PostgreSQL event-cache StatefulSet.
+The default values render a self-contained Deployment, Service, ConfigMap, runtime PVC, and PostgreSQL event-journal StatefulSet.
 A real deployment should provide a useful config and Matrix settings.
 
-## Event Cache
+## Event Journal
 
-The runtime chart defaults to PostgreSQL for MindRoom's Matrix event cache, because Kubernetes deployments need a restart-safe cache backend.
-The chart can either create a small PostgreSQL StatefulSet for this cache or wire the runtime to an externally managed database.
+The runtime chart defaults to PostgreSQL for MindRoom's Matrix event journal, because Kubernetes deployments need a durable database for it.
+The chart can either create a small PostgreSQL StatefulSet for the journal or wire the runtime to an externally managed database.
+
+This database is not a cache.
+It is the single durable owner of admitted Matrix events, turn records, the response outbox, and history debt, so losing it loses the record of which messages have already been answered rather than merely costing a rebuild.
+Size and back it up accordingly.
+
+The chart's values and resource names still say `eventCache`, and they keep that name so existing deployments do not have to be renamed.
+Wherever this document says event journal, the value to set is `eventCache`.
 
 Use the chart-managed database for a simple cluster deployment:
 
@@ -73,8 +80,9 @@ eventCache:
   backend: sqlite
 ```
 
-When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `cache` section follows `eventCache`.
-When using `config.existingConfigMap` or custom `config.data`, keep that config's cache settings aligned with the chart values.
+When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `event_journal` section follows `eventCache`.
+When using `config.existingConfigMap` or custom `config.data`, keep that config's `event_journal` settings aligned with the chart values.
+The runtime config rejects unknown top-level keys, so a `cache` section makes MindRoom refuse to start.
 
 ## Config Sources
 
@@ -263,7 +271,7 @@ networkPolicy:
 The API port follows `runtime.apiPort`, so the policy stays aligned with the Deployment without a separate port value.
 When `apiIngressFrom` is empty, the policy allows the API port from all sources while still denying other ingress to the pod.
 Use `networkPolicy.extraIngress` and `networkPolicy.extraEgress` for raw Kubernetes rules beyond the API rule.
-Setting any `extraEgress` entry adds `Egress` to `policyTypes`, so those rules must then cover every egress flow the runtime needs, such as DNS, the Matrix homeserver, model APIs, the event cache, workers, and the Kubernetes API server when `workers.backend` is `kubernetes`.
+Setting any `extraEgress` entry adds `Egress` to `policyTypes`, so those rules must then cover every egress flow the runtime needs, such as DNS, the Matrix homeserver, model APIs, the event journal database, workers, and the Kubernetes API server when `workers.backend` is `kubernetes`.
 
 ## Worker Egress Proxy
 
@@ -509,7 +517,7 @@ workers:
 
 - The chart does not create ingress or a Matrix homeserver.
 - Set `networkPolicy.create: true` to restrict control-plane API ingress to known client pods.
-- The chart can create PostgreSQL for MindRoom's event cache, or use an external PostgreSQL URL from an existing Secret.
+- The chart can create PostgreSQL for MindRoom's event journal, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
 - Use `providerCredentials` to feed model-provider API keys from existing Kubernetes Secrets into the runtime's credential service.
 - Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime and static runner sidecar receive the same Secret-backed key.

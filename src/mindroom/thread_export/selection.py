@@ -119,10 +119,21 @@ def _account_user_from_state(
 
 
 def select_export_account(runtime_paths: RuntimePaths, homeserver: str) -> AgentMatrixUser:
-    """Select a persisted Matrix account for export reads."""
+    """Select a persisted Matrix account for export reads.
+
+    The router first, and the internal user last. Export reads thread bodies
+    from the journal projection of whichever principal it logs in as, and only
+    an account something is actually syncing has one: the internal user runs no
+    bot, so choosing it would mean hydrating every thread from the homeserver on
+    every pass. The router is the one managed entity that joins every configured
+    room, which is what the rooms in ``matrix_state.yaml`` are.
+    """
     state = matrix_state_for_runtime(runtime_paths)
-    preferred_keys = [INTERNAL_USER_ACCOUNT_KEY, managed_account_key(ROUTER_AGENT_NAME)]
-    candidate_keys = [*preferred_keys, *state.accounts]
+    candidate_keys = [
+        managed_account_key(ROUTER_AGENT_NAME),
+        *(account_key for account_key in state.accounts if account_key != INTERNAL_USER_ACCOUNT_KEY),
+        INTERNAL_USER_ACCOUNT_KEY,
+    ]
     seen_keys: set[str] = set()
 
     for account_key in candidate_keys:

@@ -11,6 +11,8 @@ import os
 import stat
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -76,7 +78,12 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
-from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock, requires_linux
+from tests.conftest import (
+    FakeCredentialsManager,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    requires_linux,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -96,6 +103,42 @@ _TEST_KUBERNETES_CONFIG_SNAPSHOT: dict[str, object] = {
     "knowledge_bases": {},
 }
 _TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
+
+
+@pytest.mark.asyncio
+async def test_worker_proxy_executor_isolated_from_default_pool_and_preserves_context() -> None:
+    """Worker proxy calls must not queue behind unrelated default-pool work."""
+    loop = asyncio.get_running_loop()
+    default_executor = ThreadPoolExecutor(max_workers=1)
+    replacement_executor = ThreadPoolExecutor()
+    loop.set_default_executor(default_executor)
+    default_started = threading.Event()
+    release_default = threading.Event()
+    request_scope = ContextVar[str]("test_worker_proxy_request_scope")
+
+    def block_default_executor() -> None:
+        default_started.set()
+        release_default.wait(timeout=5)
+
+    default_blocker = loop.run_in_executor(None, block_default_executor)
+    assert default_started.wait(timeout=1)
+    token = request_scope.set("request-scope")
+
+    try:
+        result = await asyncio.wait_for(
+            sandbox_proxy_module._run_in_worker_proxy_executor(request_scope.get),
+            timeout=1,
+        )
+
+        assert result == "request-scope"
+        assert not default_blocker.done()
+    finally:
+        request_scope.reset(token)
+        release_default.set()
+        await default_blocker
+        loop.set_default_executor(replacement_executor)
+        default_executor.shutdown(wait=True)
+        replacement_executor.shutdown(wait=True)
 
 
 def test_approved_egress_tool_stays_primary_even_when_sandbox_mode_all(tmp_path: Path) -> None:
@@ -2841,8 +2884,8 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
             models={},
         ),
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with tool_runtime_context(runtime_context):
@@ -2938,8 +2981,8 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
             models={},
         ),
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with tool_runtime_context(runtime_context):
@@ -3048,8 +3091,8 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
             models={},
         ),
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with tool_runtime_context(runtime_context):
@@ -4364,8 +4407,8 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
     proxy_config = sandbox_proxy_module.sandbox_proxy_config(runtime_paths)
     monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", _fake_get_primary_worker_manager)
@@ -4417,8 +4460,8 @@ def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
     proxy_config = sandbox_proxy_module.sandbox_proxy_config(runtime_paths)
     monkeypatch.setattr(
@@ -4509,8 +4552,8 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
         storage_path=request_storage_path,
     )
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
@@ -4700,8 +4743,8 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with (
@@ -5420,8 +5463,8 @@ async def test_docker_backend_misconfiguration_raises_instead_of_running_locally
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with (

@@ -19,19 +19,20 @@ from agno.models.ollama import Ollama
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.hooks import MessageEnvelope
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
+from mindroom.matrix.sync_certification import SyncTrustState
+from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import EntityStartResults
@@ -45,8 +46,9 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
+    make_pending_event,
     make_visible_message,
     message_origin,
     runtime_paths_for,
@@ -150,7 +152,7 @@ def setup_test_bot(
         enable_streaming=enable_streaming,
     )
     bot.client = make_matrix_client_mock(user_id=agent.user_id)
-    return install_runtime_cache_support(bot)
+    return install_runtime_journal_support(bot)
 
 
 def _router_readiness_runtime(
@@ -467,7 +469,7 @@ class TestRoutingRegression:
     """Regression tests for routing behavior."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock)
+    @patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock)
     async def test_router_turn_recovery_defers_only_selected_unready_candidate(
         self,
         mock_suggest_responder: AsyncMock,
@@ -482,62 +484,56 @@ class TestRoutingRegression:
             room_id=room_id,
         )
         mock_suggest_responder.return_value = "healthy"
-        await router_bot._dispatch_obligation_runner.persist(
+        await router_bot._journal_dispatcher.admit_out_of_band(
             room,
             event,
-            DispatchCallbackKind.MESSAGE,
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            live=False,
         )
 
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
         await drain_coalescing(router_bot)
         assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
 
         mock_suggest_responder.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_healthy:localhost could you help with this?"
-        assert not router_bot._dispatch_obligation_store.has_pending(
-            event.event_id,
-            DispatchCallbackKind.MESSAGE,
-        )
+        assert not await router_bot._journal_dispatcher.store.is_pending(event.event_id)
 
         blocked_event = _router_readiness_event("$blocked-recovery")
         mock_suggest_responder.reset_mock(return_value=True)
         mock_suggest_responder.return_value = "stuck"
         router_bot.client.room_send.reset_mock()
-        await router_bot._dispatch_obligation_runner.persist(
+        await router_bot._journal_dispatcher.admit_out_of_band(
             room,
             blocked_event,
-            DispatchCallbackKind.MESSAGE,
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            live=False,
         )
 
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
         await drain_coalescing(router_bot)
 
         mock_suggest_responder.assert_awaited_once()
         router_bot.client.room_send.assert_not_awaited()
-        assert router_bot._dispatch_obligation_store.has_pending(
-            blocked_event.event_id,
-            DispatchCallbackKind.MESSAGE,
-        )
-        assert not router_bot._dispatch_obligation_runner._retry_keys
+        assert await router_bot._journal_dispatcher.store.is_pending(blocked_event.event_id)
 
         stuck_bot._first_sync_done = True
         router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
             {"event_id": "$stuck-router-response"},
             room_id=room_id,
         )
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
         await drain_coalescing(router_bot)
         assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
 
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_stuck:localhost could you help with this?"
-        assert not router_bot._dispatch_obligation_store.has_pending(
-            blocked_event.event_id,
-            DispatchCallbackKind.MESSAGE,
-        )
+        assert not await router_bot._journal_dispatcher.store.is_pending(blocked_event.event_id)
 
     @pytest.mark.asyncio
     async def test_router_relay_waits_for_target_first_sync(self, tmp_path: Path) -> None:
@@ -607,27 +603,27 @@ class TestRoutingRegression:
         assert SOURCE_KIND_KEY not in content
 
         coalescing_gate = CoalescingGate(
-            dispatch_batch=lambda _: admitted_relay("$router-shutdown"),
+            dispatch_turn=lambda _: admitted_relay("$router-shutdown"),
             debounce_seconds=lambda: 0,
             is_shutting_down=lambda: False,
         )
         router_bot.admission_gate.close()
         router_bot._response_runner.refuse_pending_admissions()
         await coalescing_gate.admit(
-            CoalescingKey(room.room_id, None, "@user:localhost"),
+            CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
             ready_result=ReadyPendingEvent(
-                pending_event=PendingEvent(
-                    event=_router_readiness_event("$router-shutdown"),
-                    room=room,
+                pending_event=make_pending_event(
+                    _router_readiness_event("$router-shutdown"),
+                    room,
                     source_kind="message",
                 ),
             ),
         )
         await coalescing_gate.drain_all()
-        router_bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-        router_bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_router_shutdown")
+        router_bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
+        router_bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_router_shutdown")
         await router_bot.prepare_for_sync_shutdown()
-        assert router_bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_before_router_shutdown")
+        assert router_bot._sync_checkpoint_trust.checkpoint == SyncCheckpoint("s_before_router_shutdown")
 
     @pytest.mark.asyncio
     async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(
@@ -700,7 +696,7 @@ class TestRoutingRegression:
     @pytest.mark.asyncio
     @patch("mindroom.response_attempt.is_user_online")
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_does_not_respond_when_agent_mentioned(
         self,
         mock_suggest_responder: AsyncMock,
@@ -773,7 +769,7 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_activates_when_no_agent_mentioned(
         self,
         mock_suggest_responder: AsyncMock,
@@ -875,7 +871,7 @@ class TestRoutingRegression:
         assert news_bot.client.room_send.call_count == 0
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_relay_bypasses_ai_when_reply_permissions_leave_one_candidate(
         self,
         mock_suggest_responder: AsyncMock,
@@ -973,7 +969,7 @@ class TestRoutingRegression:
             pytest.param({ORIGINAL_SENDER_KEY: "@human:localhost"}, "@human:localhost", id="preserved"),
         ],
     )
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_relay_does_not_stamp_managed_requester_as_original_sender(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1051,7 +1047,7 @@ class TestRoutingRegression:
             assert content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_relay_failure_does_not_stamp_original_sender(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1199,7 +1195,7 @@ class TestRoutingRegression:
             )
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_relay_filters_configured_room_candidates_by_live_state(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1461,7 +1457,7 @@ class TestRoutingRegression:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_filters_by_agent_reply_permissions_with_multiple_allowed(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1548,7 +1544,7 @@ class TestRoutingRegression:
         ]
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_reply_permissions_block_router_response(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1626,7 +1622,7 @@ class TestRoutingRegression:
         router_bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_routes_when_thread_agents_are_disallowed_for_sender(
         self,
         mock_suggest_responder: AsyncMock,

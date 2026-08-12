@@ -1,12 +1,7 @@
 // Tool configuration type definitions
 
 export type FieldType =
-  | "text"
-  | "password"
-  | "number"
-  | "boolean"
-  | "select"
-  | "url";
+  "text" | "password" | "number" | "boolean" | "select" | "url";
 
 export interface ToolConfigField {
   name: string;
@@ -32,12 +27,7 @@ export interface ToolConfigSchema {
   icon?: string;
   fields: ToolConfigField[];
   category?:
-    | "search"
-    | "files"
-    | "communication"
-    | "development"
-    | "data"
-    | "other";
+    "search" | "files" | "communication" | "development" | "data" | "other";
 }
 
 // Tool-specific configuration values

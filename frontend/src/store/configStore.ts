@@ -596,6 +596,10 @@ interface ConfigState {
   // Whether the committed config is composed from multiple files via !include,
   // in which case structured saves are rejected by the backend.
   configUsesIncludes: boolean;
+  // Whether the saved event_journal names a database other than the one this
+  // process has open. Saving it is accepted and changes nothing until a
+  // restart, so the editor has to say so.
+  configJournalPendingRestart: boolean;
   // UI-only backup so a draft private toggle can restore the prior explicit worker_scope
   // until the draft is either saved successfully or toggled back off.
   privateWorkerScopeBackups: Record<string, Agent["worker_scope"] | null>;
@@ -737,6 +741,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   diagnostics: [],
   syncStatus: "disconnected",
   configUsesIncludes: false,
+  configJournalPendingRestart: false,
   privateWorkerScopeBackups: {},
 
   // Load configuration from backend
@@ -756,6 +761,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         config: rawConfig,
         generation,
         usesIncludes,
+        pendingRestart,
       } = await configService.loadConfig();
       const {
         normalizedConfig: loadedConfig,
@@ -808,6 +814,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           syncStatus: latestState.syncStatus,
           diagnostics: retainedDraftDiagnostics(latestState.diagnostics),
           configUsesIncludes: usesIncludes,
+          configJournalPendingRestart: pendingRestart,
         });
         return;
       }
@@ -834,6 +841,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         dirtyRoots: [],
         diagnostics,
         configUsesIncludes: usesIncludes,
+        configJournalPendingRestart: pendingRestart,
         privateWorkerScopeBackups: {},
       });
     } catch (error) {

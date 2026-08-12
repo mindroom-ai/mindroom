@@ -21,7 +21,7 @@ from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayloadWithAttachmentsRequest,
 )
-from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.timing import elapsed_ms_between, emit_elapsed_timing
 
 if TYPE_CHECKING:
@@ -38,7 +38,14 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class DispatchPayloadInputs:
-    """Attachment and media inputs produced by ingress for one response payload."""
+    """Attachment and media inputs produced by ingress for one response payload.
+
+    These live for the duration of one dispatch and are never written down.
+    The durable copy of a turn's media is the journal's own pending row, which
+    is what a replay after a crash rebuilds the media event from, so recording
+    a second copy alongside the turn would duplicate attachment key material
+    into a file that outlives the work it belongs to.
+    """
 
     message_attachment_ids: tuple[str, ...]
     trusted_attachment_ids: tuple[str, ...]

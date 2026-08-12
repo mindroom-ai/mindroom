@@ -26,7 +26,7 @@ from tests.conftest import (
     bind_runtime_paths,
     dispatch_context_result,
     drain_coalescing,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     install_send_response_mock,
     runtime_paths_for,
     test_runtime_paths,
@@ -92,7 +92,7 @@ class TestResponseTrackingRegression:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -182,7 +182,7 @@ class TestResponseTrackingRegression:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -238,7 +238,7 @@ class TestResponseTrackingRegression:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_ai_routing_response_tracking(
         self,
         mock_suggest_responder: AsyncMock,
@@ -265,7 +265,7 @@ class TestResponseTrackingRegression:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
 
         # Mock successful room_send
         mock_send_response = MagicMock()

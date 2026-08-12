@@ -21,7 +21,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -79,7 +79,7 @@ class TestTeamRoomMembership:
             team_model=None,
             enable_streaming=False,
         )
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
 
         # Mock the client
         mock_client = AsyncMock()
@@ -101,7 +101,7 @@ class TestTeamRoomMembership:
             _room_id: str,
             _config: Config,
             _runtime_paths: object,
-            _event_cache: object,
+            _conversation_reader: object,
         ) -> int:
             return 0
 
@@ -137,7 +137,7 @@ class TestTeamRoomMembership:
             team_model=None,
             enable_streaming=False,
         )
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
 
         # Mock the client
         mock_client = AsyncMock()
@@ -208,7 +208,7 @@ class TestTeamRoomMembership:
             team_model=None,
             enable_streaming=False,
         )
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
         bot.client = AsyncMock()
 
         join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)

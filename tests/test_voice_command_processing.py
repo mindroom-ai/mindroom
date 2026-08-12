@@ -28,12 +28,12 @@ from mindroom.constants import (
     VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
 from mindroom.voice_handler import prepare_voice_message
@@ -42,7 +42,7 @@ from tests.conftest import (
     drain_coalescing,
     install_edit_message_mock,
     install_generate_response_mock,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     install_send_response_mock,
     orchestrator_runtime_paths,
     replace_turn_controller_deps,
@@ -63,7 +63,7 @@ def _attach_runtime_paths(config: Config, tmp_path: Path) -> Config:
 
 def _agent_bot(*, agent_user: object, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
     """Construct an agent bot with the explicit runtime bound to the test config."""
-    bot = install_runtime_cache_support(
+    bot = install_runtime_journal_support(
         AgentBot(
             agent_user=agent_user,
             storage_path=storage_path,
@@ -127,11 +127,8 @@ def _install_voice_thread_dispatch_mocks(
     bot: AgentBot,
 ) -> None:
     """Provide minimal explicit-thread cache reads for normalized voice dispatch."""
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
-    )
-    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
     )
 
 
@@ -549,7 +546,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_turn = MagicMock(wraps=turn_store.record_turn)
+    turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -755,7 +752,7 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_turn = MagicMock(wraps=turn_store.record_turn)
+    turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = MagicMock()
@@ -809,8 +806,8 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_pending_turn = MagicMock(wraps=turn_store.record_pending_turn)
-    turn_store.record_turn = MagicMock(wraps=turn_store.record_turn)
+    turn_store.record_pending_turn = AsyncMock(wraps=turn_store.record_pending_turn)
+    turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
@@ -1099,7 +1096,7 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
     normalization_started = asyncio.Event()
     placeholder_send_started = asyncio.Event()
     normalization_count = 0
-    normalized_event = PreparedTextEvent(
+    normalized_event = PreparedIngress(
         sender=event.sender,
         event_id=event.event_id,
         body=f"{VOICE_PREFIX}@home turn on the lights",
@@ -1115,7 +1112,7 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
         source_kind_override=VOICE_SOURCE_KIND,
     )
 
-    async def normalize_voice(*_args: object, **_kwargs: object) -> tuple[PreparedTextEvent, str]:
+    async def normalize_voice(*_args: object, **_kwargs: object) -> tuple[PreparedIngress, str]:
         nonlocal normalization_count
         normalization_count += 1
         normalization_started.set()
@@ -1227,8 +1224,8 @@ async def test_finalized_voice_transcript_is_not_replaced_by_late_fallback(tmp_p
         reply_to_event_id=event.event_id,
         event_source=event.source,
     )
-    bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
-    bot._turn_store.record_finalized_visible_echo(
+    await bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
+    await bot._turn_store.record_finalized_visible_echo(
         event.event_id,
         "$voice_echo",
         is_fallback=False,
@@ -1244,7 +1241,7 @@ async def test_finalized_voice_transcript_is_not_replaced_by_late_fallback(tmp_p
 
     await bot._visible_voice_echo.finish(
         handle,
-        PreparedTextEvent(
+        PreparedIngress(
             sender=event.sender,
             event_id=event.event_id,
             body=f"{VOICE_PREFIX}[Attached voice message]",
@@ -1274,8 +1271,8 @@ async def test_cancelled_voice_finish_does_not_replace_finalized_transcript(tmp_
         reply_to_event_id=event.event_id,
         event_source=event.source,
     )
-    bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
-    bot._turn_store.record_finalized_visible_echo(
+    await bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
+    await bot._turn_store.record_finalized_visible_echo(
         event.event_id,
         "$voice_echo",
         is_fallback=False,
@@ -1288,7 +1285,7 @@ async def test_cancelled_voice_finish_does_not_replace_finalized_transcript(tmp_
             raw_source=event.source,
         ),
     )
-    fallback_event = PreparedTextEvent(
+    fallback_event = PreparedIngress(
         sender=event.sender,
         event_id=event.event_id,
         body=f"{VOICE_PREFIX}[Attached voice message]",
@@ -1345,7 +1342,7 @@ async def test_transcript_wins_when_fallback_edit_is_in_flight(tmp_path) -> None
         return True
 
     bot._delivery_gateway.edit_text.side_effect = edit_text
-    fallback_event = PreparedTextEvent(
+    fallback_event = PreparedIngress(
         sender=event.sender,
         event_id=event.event_id,
         body=f"{VOICE_PREFIX}[Attached voice message]",
@@ -1356,7 +1353,7 @@ async def test_transcript_wins_when_fallback_edit_is_in_flight(tmp_path) -> None
             },
         },
     )
-    transcript_event = PreparedTextEvent(
+    transcript_event = PreparedIngress(
         sender=event.sender,
         event_id=event.event_id,
         body=f"{VOICE_PREFIX}summarize this audio",
@@ -1591,7 +1588,7 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
-        patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -1670,7 +1667,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
-        patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
         patch(
             "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
             new_callable=AsyncMock,
@@ -1700,6 +1697,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
 
 
 @pytest.mark.asyncio
+@pytest.mark.ledger_loads_from_disk
 async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_after_restart(
     tmp_path: Path,
 ) -> None:
@@ -1713,12 +1711,13 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         agents=agents,
         send_response_side_effect=["$voice_echo", None],
     )
+    await bot._turn_store.warm()
 
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
-        patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -1733,12 +1732,15 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         agents=agents,
         send_response_return="$route",
     )
+    # The replacement opens its own database handle, so the echo it must reuse
+    # only reaches it by reading the rows the first run wrote.
+    await restarted_bot._turn_store.warm()
 
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
-        patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
         patch(
             "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
             new_callable=AsyncMock,
@@ -1784,7 +1786,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_turn = MagicMock(wraps=turn_store.record_turn)
+    turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
@@ -1804,7 +1806,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
-        patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"

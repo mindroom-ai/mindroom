@@ -17,10 +17,13 @@ from mindroom.approval_manager import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     DEFAULT_SHUTDOWN_REASON,
     ApprovalActionResult,
+    ApprovalCardLocator,
     ApprovalDecision,
     ApprovalRoomProvider,
+    ApprovalStartupSweep,
     MatrixEventEditor,
     MatrixEventSender,
+    SendingDeviceProvider,
     SentApprovalEvent,
     ToolApprovalTransportError,
     TransportSenderProvider,
@@ -37,12 +40,13 @@ if TYPE_CHECKING:
 
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
-    from mindroom.matrix.cache.event_cache import ConversationEventCache
+    from mindroom.event_journal import ApprovalView
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "ApprovalActionResult",
     "ApprovalDecision",
+    "ApprovalStartupSweep",
     "MatrixApprovalAction",
     "SentApprovalEvent",
     "ToolApprovalCall",
@@ -333,26 +337,30 @@ def initialize_approval_runtime(
     *,
     sender: MatrixEventSender,
     editor: MatrixEventEditor,
-    event_cache: ConversationEventCache,
+    cards: ApprovalView | None,
     approval_room_ids: ApprovalRoomProvider,
     transport_sender: TransportSenderProvider,
+    sending_device: SendingDeviceProvider,
+    locate_card: ApprovalCardLocator,
 ) -> None:
     """Initialize the approval runtime behind the public approval seam."""
     approval_manager.initialize_approval_store(
         runtime_paths,
         sender=sender,
         editor=editor,
-        event_cache=event_cache,
+        cards=cards,
         approval_room_ids=approval_room_ids,
         transport_sender=transport_sender,
+        sending_device=sending_device,
+        locate_card=locate_card,
     )
 
 
-async def expire_orphaned_approval_cards_on_startup() -> int:
+async def expire_orphaned_approval_cards_on_startup() -> ApprovalStartupSweep:
     """Expire router-authored approval cards that can no longer have live waiters."""
     manager = approval_manager.get_approval_store()
     if manager is None:
-        return 0
+        return ApprovalStartupSweep(discarded=0, failed=0)
     return await manager.discard_pending_on_startup()
 
 

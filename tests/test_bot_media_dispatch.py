@@ -14,14 +14,14 @@ from agno.media import Image
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, LaneSlot, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescingKey, PreparedTurn, RequesterCoalescingOwner
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
@@ -32,7 +32,7 @@ from mindroom.hooks import (
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
 from mindroom.ingress_validation import IngressValidator
-from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
@@ -61,6 +61,7 @@ from tests.conftest import (
     dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
+    make_pending_event,
     replace_turn_controller_deps,
     runtime_paths_for,
 )
@@ -70,6 +71,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.ingress_lanes import ReceiptLaneKey
     from mindroom.matrix.users import AgentMatrixUser
 
 
@@ -204,12 +206,12 @@ class TestAgentBot(AgentBotTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_media_dispatch_appends_live_event_before_enqueue(
+    async def test_media_dispatch_resolves_thread_key_before_enqueue(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Image/file media dispatch should update the live cache before enqueueing dispatch."""
+        """Image/file media dispatch should fix its conversation key before enqueueing dispatch."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -217,18 +219,13 @@ class TestAgentBot(AgentBotTestBase):
         room.room_id = "!test:localhost"
         event = self._make_handler_event("image", sender="@user:localhost", event_id="$img_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
-        bot._conversation_cache.append_live_event = AsyncMock()
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value=None)
-        bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
+        bot._turn_controller._precheck_dispatch_event = AsyncMock(return_value=prechecked_event)
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
 
         await bot._turn_controller._handle_media_message_inner(room, event)
 
-        bot._conversation_cache.append_live_event.assert_awaited_once()
-        append_args = bot._conversation_cache.append_live_event.await_args
-        assert append_args.args == ("!test:localhost", event)
-        assert append_args.kwargs["event_info"].is_edit is False
         bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(room, event)
         bot._turn_controller._enqueue_for_dispatch.assert_awaited_once()
 
@@ -248,9 +245,6 @@ class TestAgentBot(AgentBotTestBase):
         admitted_ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
         release_stt = asyncio.Event()
 
-        async def record_append(*_args: object, **_kwargs: object) -> None:
-            call_order.append("append")
-
         async def record_thread_id(_room: object, _event: object) -> str:
             call_order.append("coalescing_thread")
             return "$thread_root"
@@ -258,13 +252,12 @@ class TestAgentBot(AgentBotTestBase):
         original_enter_lane = bot._coalescing_gate.enter_lane
 
         def record_enter_lane(
+            lane_key: ReceiptLaneKey,
             *,
-            room_id: str,
-            sender_id: str,
             receipt_time: float | None = None,
         ) -> LaneSlot:
             call_order.append("reserve")
-            return original_enter_lane(room_id=room_id, sender_id=sender_id, receipt_time=receipt_time)
+            return original_enter_lane(lane_key, receipt_time=receipt_time)
 
         def record_submit(
             slot: LaneSlot,
@@ -278,7 +271,7 @@ class TestAgentBot(AgentBotTestBase):
             assert ready_task is not None
             nonlocal admitted_ready_task
             call_order.append("admit")
-            assert key == CoalescingKey("!test:localhost", "$thread_root", "@user:localhost")
+            assert key == CoalescingKey("!test:localhost", "$thread_root", RequesterCoalescingOwner("@user:localhost"))
             assert source_event_id == "$voice_event"
             assert source_kind == VOICE_SOURCE_KIND
             assert slot.released is False
@@ -288,9 +281,8 @@ class TestAgentBot(AgentBotTestBase):
             call_order.append("normalize")
             await release_stt.wait()
 
-        bot._conversation_cache.append_live_event = AsyncMock(side_effect=record_append)
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_thread_id)
-        bot._turn_controller._precheck_dispatch_event = MagicMock(
+        bot._turn_controller._precheck_dispatch_event = AsyncMock(
             return_value=SimpleNamespace(event=event, requester_user_id="@user:localhost"),
         )
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
@@ -304,7 +296,7 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._turn_controller._handle_media_message_inner(room, event)
             mock_submit.assert_called_once()
-            assert call_order == ["reserve", "append", "coalescing_thread", "admit"]
+            assert call_order == ["reserve", "coalescing_thread", "admit"]
             assert admitted_ready_task is not None
             release_stt.set()
             ready_event = await admitted_ready_task
@@ -312,8 +304,7 @@ class TestAgentBot(AgentBotTestBase):
         bot._coalescing_gate.release_lane_slot(admitted_slot)
         await asyncio.wait_for(admitted_slot.settled.wait(), timeout=1.0)
         _assert_ready_voice_claim_handoff(ready_event)
-        assert call_order == ["reserve", "append", "coalescing_thread", "admit", "normalize"]
-        bot._conversation_cache.append_live_event.assert_awaited_once()
+        assert call_order == ["reserve", "coalescing_thread", "admit", "normalize"]
         bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(
             room,
             event,
@@ -379,7 +370,7 @@ class TestAgentBot(AgentBotTestBase):
         redelivery = asyncio.create_task(controller._handle_media_message_inner(room, event))
         await asyncio.sleep(0)
 
-        controller.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
+        await controller.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
         controller.deps.turn_store.release_pending_turn_claim(active_claim)
 
         assert await redelivery is TurnDispatchOutcome.DEFERRED
@@ -403,7 +394,7 @@ class TestAgentBot(AgentBotTestBase):
         ingress.precheck_event.return_value = "@user:localhost"
         gate = MagicMock(spec=CoalescingGate, wraps=bot._coalescing_gate)
 
-        def reject_lane_reservation(**_kwargs: object) -> None:
+        def reject_lane_reservation(*_args: object, **_kwargs: object) -> None:
             assert bot._turn_store.try_claim_turn(competing_claim) is False
             msg = "lane unavailable"
             raise RuntimeError(msg)
@@ -432,7 +423,7 @@ class TestAgentBot(AgentBotTestBase):
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
 
-        bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
+        bot._turn_controller._precheck_dispatch_event = AsyncMock(return_value=prechecked_event)
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
         bot._turn_controller._resolve_ready_voice_target = AsyncMock(side_effect=asyncio.CancelledError)
 
@@ -473,11 +464,11 @@ class TestAgentBot(AgentBotTestBase):
                 await release_text_lookup.wait()
             return "$thread-root"
 
-        async def dispatch_batch(batch: CoalescedBatch) -> None:
-            dispatches.append(list(batch.source_event_ids))
+        async def dispatch_batch(batch: PreparedTurn) -> None:
+            dispatches.append(list(batch.handled_turn.source_event_ids))
 
         bot._coalescing_gate = CoalescingGate(
-            dispatch_batch=dispatch_batch,
+            dispatch_turn=dispatch_batch,
             debounce_seconds=lambda: 0.01,
             is_shutting_down=lambda: False,
         )
@@ -491,13 +482,13 @@ class TestAgentBot(AgentBotTestBase):
                     reply_to_event_id=voice_event.event_id,
                     event_source=voice_event.source,
                 ),
-                CoalescingKey(room.room_id, "$thread-root", "@user:localhost"),
+                CoalescingKey(room.room_id, "$thread-root", RequesterCoalescingOwner("@user:localhost")),
             ),
         )
         bot._turn_controller._ready_voice_event = AsyncMock(
             return_value=ReadyPendingEvent(
-                pending_event=PendingEvent(
-                    event=PreparedTextEvent(
+                pending_event=make_pending_event(
+                    PreparedIngress(
                         sender="@user:localhost",
                         event_id="$voice",
                         body="voice second",
@@ -510,7 +501,7 @@ class TestAgentBot(AgentBotTestBase):
                         },
                         source_kind_override=VOICE_SOURCE_KIND,
                     ),
-                    room=room,
+                    room,
                     source_kind=VOICE_SOURCE_KIND,
                 ),
             ),
@@ -520,7 +511,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(
-                    return_value=PreparedTextEvent(
+                    return_value=PreparedIngress(
                         sender="@user:localhost",
                         event_id="$typed",
                         body="typed first",
@@ -575,11 +566,11 @@ class TestAgentBot(AgentBotTestBase):
                 await release_media_lookup.wait()
             return "$thread-root"
 
-        async def dispatch_batch(batch: CoalescedBatch) -> None:
-            dispatches.append(list(batch.source_event_ids))
+        async def dispatch_batch(batch: PreparedTurn) -> None:
+            dispatches.append(list(batch.handled_turn.source_event_ids))
 
         bot._coalescing_gate = CoalescingGate(
-            dispatch_batch=dispatch_batch,
+            dispatch_turn=dispatch_batch,
             debounce_seconds=lambda: 0.01,
             is_shutting_down=lambda: False,
         )
@@ -590,7 +581,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(
-                    return_value=PreparedTextEvent(
+                    return_value=PreparedIngress(
                         sender="@user:localhost",
                         event_id="$typed",
                         body="typed second",
@@ -642,7 +633,7 @@ class TestAgentBot(AgentBotTestBase):
             "type": "m.room.message",
             "content": {"msgtype": "m.text", "body": "typed second"},
         }
-        prepared_sidecar = PreparedTextEvent(
+        prepared_sidecar = PreparedIngress(
             sender="@user:localhost",
             event_id="$sidecar",
             body="sidecar first",
@@ -659,15 +650,15 @@ class TestAgentBot(AgentBotTestBase):
         release_preview_normalization = asyncio.Event()
         dispatches: list[list[str]] = []
 
-        async def prepare_file_sidecar_text_event(_event: nio.RoomMessageFile) -> PreparedTextEvent:
+        async def prepare_file_sidecar_text_event(_event: nio.RoomMessageFile) -> PreparedIngress:
             await release_preview_normalization.wait()
             return prepared_sidecar
 
-        async def dispatch_batch(batch: CoalescedBatch) -> None:
-            dispatches.append(list(batch.source_event_ids))
+        async def dispatch_batch(batch: PreparedTurn) -> None:
+            dispatches.append(list(batch.handled_turn.source_event_ids))
 
         bot._coalescing_gate = CoalescingGate(
-            dispatch_batch=dispatch_batch,
+            dispatch_turn=dispatch_batch,
             debounce_seconds=lambda: 0.01,
             is_shutting_down=lambda: False,
         )
@@ -682,7 +673,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(
-                    return_value=PreparedTextEvent(
+                    return_value=PreparedIngress(
                         sender="@user:localhost",
                         event_id="$typed",
                         body="typed second",

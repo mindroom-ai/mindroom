@@ -1,39 +1,47 @@
 """Client-backed room-scan helpers for Matrix thread membership resolution.
 
 This module is the seam between pure resolution (``thread_membership``) and the homeserver transport
-(``client_thread_history``): it builds ``ThreadMembershipAccess`` adapters whose root proofs run real
+(``room_history_reads``): it builds ``ThreadMembershipAccess`` adapters whose root proofs run real
 room scans.
-It exists as its own module because ``client_thread_history`` imports ``thread_membership`` (via
+It exists as its own module because ``room_history_reads`` imports ``thread_membership`` (via
 ``thread_projection`` and for ``ThreadRoomScanRootNotFoundError``), so ``thread_membership`` itself can
 never depend on the transport.
-Cache reads here are advisory accelerators only; the authoritative root proof is always the room scan.
+Journal reads here are accelerators only; the authoritative root proof is always the room scan.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
-import nio
-from nio.responses import RoomGetEventError
-
-from mindroom.matrix.client_thread_history import fetch_thread_event_sources_via_room_messages
-from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_membership import ThreadMembershipAccess, room_scan_thread_membership_access
+from mindroom.logging_config import get_logger
+from mindroom.matrix.room_history_reads import fetch_thread_event_sources_via_room_messages
+from mindroom.matrix.thread_membership import (
+    ThreadMembershipAccess,
+    resolve_event_thread_membership,
+    room_scan_thread_membership_access,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-type _EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
+    import nio
+
+    from mindroom.matrix.event_info import EventInfo
+
+logger = get_logger(__name__)
 
 
-class RoomScanConversationCache(Protocol):
-    """Minimal cache reads needed to resolve room-scan-backed thread membership."""
+class RoomScanRelations(Protocol):
+    """The two relation facts a room scan needs, however they are answered."""
 
-    async def get_event(self, room_id: str, event_id: str) -> _EventLookupResult:
-        """Resolve one Matrix event by ID."""
+    async def admitted_thread_id(self, room_id: str, event_id: str) -> str | None:
+        """Resolve the thread from local state only, degrading to nothing on failure."""
 
-    async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
-        """Resolve one cached thread root when known."""
+    async def strict_thread_id(self, room_id: str, event_id: str) -> str | None:
+        """Resolve the thread one event belongs to, raising if that cannot be established."""
+
+    async def event_info(self, room_id: str, event_id: str) -> EventInfo | None:
+        """Resolve one event's relation metadata, raising on an unusable lookup."""
 
 
 async def _scan_thread_event_sources(
@@ -46,96 +54,60 @@ async def _scan_thread_event_sources(
     return scan_result.event_sources, True
 
 
-def _event_info_from_lookup_response(
-    response: _EventLookupResult,
-    *,
-    event_id: str,
-    strict: bool,
-) -> EventInfo | None:
-    """Normalize one room-get-event style response into EventInfo when available."""
-    if isinstance(response, nio.RoomGetEventResponse):
-        return EventInfo.from_event(response.event.source)
-    if not strict:
-        return None
-    if isinstance(response, nio.RoomGetEventError) and response.status_code == "M_NOT_FOUND":
-        return None
-    detail = response.message if isinstance(response, nio.RoomGetEventError) else "unknown error"
-    msg = f"Failed to resolve Matrix event {event_id}: {detail}"
-    raise RuntimeError(msg)
-
-
-async def lookup_thread_id_from_conversation_cache(
-    conversation_cache: RoomScanConversationCache | None,
+async def _degradable_event_info(
+    relations: RoomScanRelations,
     room_id: str,
     event_id: str,
-) -> str | None:
-    """Return one cached thread root when a conversation cache is available."""
-    if conversation_cache is None:
+) -> EventInfo | None:
+    """Return one event's relations, or nothing when the lookup could not say.
+
+    ``relations`` owns this read and memoizes it for the turn, so one turn
+    resolving the same event from several places pays for one round trip. What
+    it will not do is guess: it raises when it cannot tell a deleted event from
+    one the homeserver refused to serve, because a caller resolving a reply
+    target would otherwise attach the turn to the wrong conversation.
+
+    Normalizing a thread ID is not that caller. It has a local answer for an
+    event the homeserver cannot describe, so a failed lookup degrades to that
+    rather than taking the tool down -- but it is logged, because the fallback
+    can produce a plausible wrong thread rather than an obvious failure.
+    """
+    try:
+        return await relations.event_info(room_id, event_id)
+    except Exception:
+        logger.warning(
+            "Failed to resolve an event's relations for a room scan; falling back to local state",
+            room_id=room_id,
+            event_id=event_id,
+            exc_info=True,
+        )
         return None
-    return await conversation_cache.get_thread_id_for_event(room_id, event_id)
-
-
-async def fetch_event_info_for_client(
-    client: nio.AsyncClient,
-    room_id: str,
-    event_id: str,
-    *,
-    strict: bool,
-) -> EventInfo | None:
-    """Fetch one event directly from Matrix and parse its relation metadata."""
-    response = await client.room_get_event(room_id, event_id)
-    return _event_info_from_lookup_response(
-        response,
-        event_id=event_id,
-        strict=strict,
-    )
-
-
-async def fetch_event_info_from_conversation_cache(
-    conversation_cache: RoomScanConversationCache,
-    room_id: str,
-    event_id: str,
-    *,
-    strict: bool,
-) -> EventInfo | None:
-    """Fetch one event through the conversation cache and parse its relation metadata."""
-    response = await conversation_cache.get_event(room_id, event_id)
-    return _event_info_from_lookup_response(
-        response,
-        event_id=event_id,
-        strict=strict,
-    )
 
 
 def room_scan_membership_access_for_client(
     client: nio.AsyncClient,
     *,
-    conversation_cache: RoomScanConversationCache | None,
+    relations: RoomScanRelations,
     fetch_event_info: Callable[[str, str], Awaitable[EventInfo | None]] | None = None,
 ) -> ThreadMembershipAccess:
-    """Build client-backed membership access without widening the cache protocol."""
+    """Build client-backed membership access over the journal relation view.
 
-    async def lookup_thread_id(lookup_room_id: str, lookup_event_id: str) -> str | None:
-        return await lookup_thread_id_from_conversation_cache(
-            conversation_cache,
-            lookup_room_id,
-            lookup_event_id,
-        )
+    Both lookups used to run through the event cache, which answered from rows
+    written under whatever membership was current when they were stored. A room
+    left and rejoined after a history-visibility change would still be served
+    the old membership's copy, because nothing invalidated those rows on
+    departure. The journal fences its own rows on the membership epoch and asks
+    the homeserver for anything it has not admitted, so neither answer can
+    outlive the membership that produced it.
+    """
 
     async def resolved_fetch_event_info(lookup_room_id: str, lookup_event_id: str) -> EventInfo | None:
         if fetch_event_info is not None:
             return await fetch_event_info(lookup_room_id, lookup_event_id)
-        if conversation_cache is None:
-            return None
-        return await fetch_event_info_from_conversation_cache(
-            conversation_cache,
-            lookup_room_id,
-            lookup_event_id,
-            strict=True,
-        )
+        return await relations.event_info(lookup_room_id, lookup_event_id)
 
     return room_scan_thread_membership_access(
-        lookup_thread_id=lookup_thread_id,
+        lookup_thread_id=relations.strict_thread_id,
         fetch_event_info=resolved_fetch_event_info,
         fetch_thread_event_sources=lambda room_id, thread_root_id: _scan_thread_event_sources(
             client,
@@ -145,10 +117,44 @@ def room_scan_membership_access_for_client(
     )
 
 
+async def resolve_thread_root_event_id_for_client(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    *,
+    relations: RoomScanRelations,
+) -> str | None:
+    """Resolve one event ID into a canonical thread root when thread membership can prove one."""
+    normalized_event_id = event_id.strip() if isinstance(event_id, str) else ""
+    if not normalized_event_id:
+        return None
+
+    event_info = await _degradable_event_info(relations, room_id, normalized_event_id)
+    if event_info is None:
+        # Local state only. The homeserver was just asked for this exact
+        # event and could not answer; asking it again resolves nothing.
+        return await relations.admitted_thread_id(room_id, normalized_event_id)
+
+    resolution = await resolve_event_thread_membership(
+        room_id,
+        event_info,
+        event_id=normalized_event_id,
+        allow_current_root=True,
+        access=room_scan_membership_access_for_client(
+            client,
+            relations=relations,
+            fetch_event_info=lambda lookup_room_id, lookup_event_id: _degradable_event_info(
+                relations,
+                lookup_room_id,
+                lookup_event_id,
+            ),
+        ),
+    )
+    return resolution.thread_id
+
+
 __all__ = [
-    "RoomScanConversationCache",
-    "fetch_event_info_for_client",
-    "fetch_event_info_from_conversation_cache",
-    "lookup_thread_id_from_conversation_cache",
+    "RoomScanRelations",
+    "resolve_thread_root_event_id_for_client",
     "room_scan_membership_access_for_client",
 ]

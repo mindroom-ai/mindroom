@@ -5,12 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-import nio
-
 from mindroom.authorization import get_effective_sender_id_for_reply_permissions, is_authorized_sender
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedIngress, is_text_dispatch_event
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
@@ -31,6 +29,8 @@ from mindroom.matrix.media import is_audio_message_event
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 
 if TYPE_CHECKING:
+    import nio
+
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.commands.parsing import Command
     from mindroom.constants import RuntimePaths
@@ -38,7 +38,6 @@ if TYPE_CHECKING:
         DispatchEvent,
         DispatchIngressMetadata,
         DispatchPayloadMetadata,
-        TextDispatchEvent,
     )
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
@@ -138,12 +137,12 @@ class IngressValidator:
     @staticmethod
     def event_source_kind(event: DispatchEvent, content: dict[str, Any]) -> str | None:
         """Return canonical source-kind metadata for one dispatch event."""
-        source_kind = event.source_kind_override if isinstance(event, PreparedTextEvent) else None
+        source_kind = event.source_kind_override if isinstance(event, PreparedIngress) else None
         return source_kind if source_kind is not None else source_kind_from_content(content)
 
     def trusted_human_original_sender_for_event(self, event: DispatchEvent) -> str | None:
         """Return trusted human original-sender metadata from one dispatch event."""
-        if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
+        if not is_text_dispatch_event(event):
             return None
         if not self.sender_is_trusted_for_ingress_metadata(event.sender):
             return None
@@ -187,7 +186,7 @@ class IngressValidator:
 
     def is_trusted_internal_relay_event(self, event: DispatchEvent) -> bool:
         """Return whether one agent-authored relay should bypass user-turn coalescing."""
-        if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
+        if not is_text_dispatch_event(event):
             return False
         content = event.source.get("content") if isinstance(event.source, dict) else None
         if not isinstance(content, dict):
@@ -266,7 +265,7 @@ class IngressValidator:
             )
         return self.is_trusted_internal_relay_event(event)
 
-    def precheck_event(
+    async def precheck_event(
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent | MatrixMediaEvent,
@@ -295,16 +294,16 @@ class IngressValidator:
             room.room_id,
             self.deps.runtime_paths,
         ):
-            self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
+            await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
             return None
 
         if not self.deps.turn_policy.can_reply_to_sender(requester_user_id):
-            self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
+            await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
             return None
 
         return requester_user_id
 
-    def command_control_input(self, event: TextDispatchEvent, *, source_kind: str) -> Command | None:
+    def command_control_input(self, event: PreparedIngress, *, source_kind: str) -> Command | None:
         """Return the parsed command when one text event is a control input, not conversation."""
         if source_kind_bypasses_coalescing(source_kind):
             return None

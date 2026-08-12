@@ -11,14 +11,13 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     delivered_matrix_event,
     drain_coalescing,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
@@ -56,7 +55,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
 
     # Mock client and initialize required components
     bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
@@ -106,7 +105,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.delivery_gateway.send_message_result", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message_outcome", mock_send_message):
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 
@@ -151,7 +150,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
 
     # Mock client and initialize required components
     bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
@@ -219,19 +218,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     bot.orchestrator.thread_specific_agents = {}
 
     with (
-        patch("mindroom.delivery_gateway.send_message_result", mock_send_message),
-        patch(
-            "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
-            AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-        ),
-        patch(
-            "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
-            AsyncMock(return_value=thread_history_result([], is_full_history=False)),
-        ),
-        patch(
-            "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
-            AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-        ),
+        patch("mindroom.delivery_gateway.send_message_outcome", mock_send_message),
     ):
         await bot._on_message(room, event)
         await drain_coalescing(bot)
@@ -275,7 +262,7 @@ async def test_unknown_command_with_reply_starts_prompt_thread(tmp_path: Path) -
 
     # Mock client and initialize required components
     bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
@@ -328,7 +315,7 @@ async def test_unknown_command_with_reply_starts_prompt_thread(tmp_path: Path) -
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.delivery_gateway.send_message_result", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message_outcome", mock_send_message):
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 

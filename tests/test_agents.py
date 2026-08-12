@@ -1279,6 +1279,49 @@ def test_resolve_agent_runtime_uses_shared_agent_roots_for_shared_agents(tmp_pat
     assert runtime.file_memory_root is None
 
 
+def test_resolve_agent_runtime_routes_shared_sessions_to_explicit_session_storage(tmp_path: Path) -> None:
+    """Session state may live off the canonical workspace storage root."""
+    session_storage = tmp_path / "session-state"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SESSION_STORAGE_PATH": str(session_storage)},
+    )
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None)
+
+    assert runtime.state_root == agent_state_root_path(runtime_paths.storage_root, "general")
+    assert runtime.session_state_root == session_storage / "agents" / "general"
+
+
+def test_resolve_agent_runtime_routes_private_sessions_to_explicit_session_storage(tmp_path: Path) -> None:
+    """Private session paths preserve their stable storage-relative identity."""
+    session_storage = tmp_path / "session-state"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SESSION_STORAGE_PATH": str(session_storage)},
+    )
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user")
+    config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="s1",
+    )
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=identity)
+
+    relative_state_root = runtime.state_root.relative_to(runtime_paths.storage_root)
+    assert runtime.session_state_root == session_storage / relative_state_root
+
+
 def test_runtime_resolution_exports_public_resolved_agent_execution_contract(tmp_path: Path) -> None:
     """The runtime-resolution seam should return a public result type."""
     from mindroom import runtime_resolution  # noqa: PLC0415
@@ -2071,6 +2114,29 @@ def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: Mag
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert agent_root / "sessions" / "general.db" in db_files
     assert agent_root / "learning" / "general.db" in db_files
+
+
+@patch("mindroom.agent_storage.SqliteDb")
+def test_get_agent_routes_only_sessions_to_explicit_session_storage(
+    mock_storage: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Dedicated session storage must not move learning or workspace state."""
+    storage_root = tmp_path / "storage"
+    session_storage_root = tmp_path / "session-state"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=storage_root,
+        process_env={"MINDROOM_SESSION_STORAGE_PATH": str(session_storage_root)},
+    )
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+
+    _create_agent_for_test("general", config=config)
+
+    db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
+    assert session_storage_root / "agents" / "general" / "sessions" / "general.db" in db_files
+    assert agent_state_root_path(storage_root, "general") / "learning" / "general.db" in db_files
+    assert agent_state_root_path(storage_root, "general") / "sessions" / "general.db" not in db_files
 
 
 @patch("mindroom.agent_storage.SqliteDb")

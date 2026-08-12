@@ -22,6 +22,10 @@ ROUTER_AGENT_NAME = "router"
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
 CONFIG_CONFIRMATION_REACTION_KEY = "com.mindroom.config_confirmation_reaction"
 DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"
+# Raise the per-room Classic Sync timeline limit above the homeserver default
+# (~10) so a room has to flood much harder before the server truncates its
+# timeline and forces a limited-sync gap backfill.
+CLASSIC_SYNC_TIMELINE_LIMIT = 5000
 DEFAULT_COMPACTION_TIMEOUT_SECONDS = 600.0
 DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
 KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV = "MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"
@@ -31,7 +35,6 @@ KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_KNOWLEDGE_REFRESH_SUBPROCES
 # Generous enough for a cold full index of a large corpus, short enough that a
 # wedged child cannot outlive the day.
 DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS = 3600.0
-_MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS = 1.0
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _PROMPT_HISTORY_STORAGE_ROLES = frozenset({"system", "developer"})
 
@@ -171,6 +174,30 @@ class RuntimePaths:
         if value is None:
             return default
         return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resolve_session_state_root(state_root: Path, runtime_paths: RuntimePaths) -> Path:
+    """Map a canonical state root into optional dedicated session storage."""
+    configured_root = runtime_paths.env_value(runtime_env_policy.SESSION_STORAGE_PATH_ENV)
+    if configured_root is None or not configured_root.strip():
+        return state_root
+
+    session_storage_root = Path(configured_root).expanduser()
+    if not session_storage_root.is_absolute():
+        session_storage_root = runtime_paths.config_dir / session_storage_root
+    session_storage_root = session_storage_root.resolve()
+    canonical_storage_root = runtime_paths.storage_root.expanduser().resolve()
+    canonical_state_root = state_root.expanduser().resolve()
+    try:
+        relative_state_root = canonical_state_root.relative_to(canonical_storage_root)
+    except ValueError as exc:
+        msg = "Session state root must originate inside the canonical storage root"
+        raise ValueError(msg) from exc
+    resolved_session_state_root = (session_storage_root / relative_state_root).resolve()
+    if not resolved_session_state_root.is_relative_to(session_storage_root):
+        msg = "Session state root must stay within the session storage root"
+        raise ValueError(msg)
+    return resolved_session_state_root
 
 
 def _copy_process_env(process_env: dict[str, str] | None = None) -> dict[str, str]:
@@ -851,17 +878,6 @@ def runtime_env_flag(
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def runtime_dispatch_thread_read_timeout_seconds(runtime_paths: RuntimePaths) -> float:
-    """Return the dispatch-safe thread read wall-clock budget."""
-    raw_value = runtime_paths.env_value("MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS")
-    if raw_value is None:
-        return _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS
-    try:
-        return max(0.001, float(raw_value))
-    except ValueError:
-        return _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS
 
 
 def runtime_matrix_homeserver(runtime_paths: RuntimePaths) -> str:

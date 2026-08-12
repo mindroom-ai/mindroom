@@ -27,7 +27,11 @@ _TRUNCATED = "... [truncated]"
 _MAX_TEXT_INPUT_LENGTH = 64 * 1024
 _MAX_LOG_COLLECTION_ITEMS = 100
 _MAX_DEPTH = 32
-_URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
+# Any scheme, not just the web ones. Userinfo credentials are a property of the
+# URI grammar rather than of HTTP, and the schemes that carry the most damaging
+# ones here are database URLs: `postgresql://user:password@host/db` reaches logs
+# and audit records through exactly the same paths an API URL does.
+_URL_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
 _BEARER_TOKEN_PATTERN = re.compile(
     r"(?P<prefix>(?:authorization(?:\s+header)?(?:\s*:)?\s+)?bearer(?:\s+token)?\s+)"
     r"(?P<token>[A-Za-z0-9._~+/=-]+)",
@@ -403,7 +407,7 @@ def _redact_url(value: str) -> str:
         parsed = urlparse(value)
     except ValueError:
         return value
-    if parsed.scheme not in {"http", "https"}:
+    if not parsed.scheme:
         return value
 
     netloc = parsed.netloc
@@ -478,7 +482,7 @@ def _redact_url_match(match: re.Match[str]) -> str:
 def _redact_sensitive_text(value: str, *, max_length: int | None) -> str:
     bounded_value = _bounded_redaction_input(value, max_length=max_length)
     has_assignment = "=" in bounded_value or ":" in bounded_value
-    has_url = "http://" in bounded_value or "https://" in bounded_value
+    has_url = "://" in bounded_value
     lowered_value = bounded_value.lower()
     has_bearer = "bearer" in lowered_value
     has_api_key_message = "api key" in lowered_value

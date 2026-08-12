@@ -22,7 +22,6 @@ from mindroom.hooks import (
     ToolBeforeCallContext,
     hook,
 )
-from mindroom.matrix.cache.thread_writes import ThreadOutboundWritePolicy
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.media_inputs import MediaInputs
 from mindroom.streaming import _queue_delivery_request
@@ -212,80 +211,6 @@ async def test_send_message_result_marks_prepare_and_send_phases() -> None:
                 "cache_bypass": False,
                 "outcome": "sent",
                 "event_id": "$evt:localhost",
-            },
-        ),
-    ]
-
-
-def test_notify_outbound_message_marks_cache_schedule() -> None:
-    """Outbound Matrix cache notifications should mark the cache-barrier scheduling point."""
-    timing_events: list[tuple[str, dict[str, object]]] = []
-
-    class CacheOps:
-        def __init__(self) -> None:
-            self.logger = Mock()
-            self.thread_updates: list[tuple[str, str, dict[str, object]]] = []
-
-        def cache_runtime_available(self) -> bool:
-            return True
-
-        def queue_thread_cache_update(
-            self,
-            room_id: str,
-            thread_id: str,
-            update_coro_factory: object,
-            **kwargs: object,
-        ) -> object:
-            del update_coro_factory
-            self.thread_updates.append((room_id, thread_id, dict(kwargs)))
-            return object()
-
-        def queue_room_cache_update(
-            self,
-            room_id: str,
-            update_coro_factory: object,
-            **kwargs: object,
-        ) -> object:
-            del update_coro_factory
-            msg = f"Unexpected room cache update for {room_id}: {kwargs}"
-            raise AssertionError(msg)
-
-    cache_ops = CacheOps()
-    policy = ThreadOutboundWritePolicy(
-        resolver=Mock(),
-        cache_ops=cache_ops,
-        require_client=lambda: SimpleNamespace(user_id="@mindroom_code:localhost"),
-    )
-
-    with patch(
-        "mindroom.matrix.cache.thread_writes.emit_timing_event",
-        side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
-    ):
-        policy.notify_outbound_message(
-            "!room:localhost",
-            "$tool_use",
-            {
-                "body": "tool started",
-                "msgtype": "m.text",
-                "m.relates_to": {
-                    "rel_type": "m.thread",
-                    "event_id": "$thread",
-                    "is_falling_back": True,
-                },
-            },
-        )
-
-    assert cache_ops.thread_updates
-    assert timing_events == [
-        (
-            "Event cache outbound schedule timing",
-            {
-                "operation": "matrix_cache_notify_outbound_event",
-                "barrier_kind": "thread",
-                "event_type": "m.room.message",
-                "is_edit": False,
-                "is_reaction": False,
-                "has_coalesce_key": False,
             },
         ),
     ]

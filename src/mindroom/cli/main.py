@@ -59,12 +59,14 @@ app = typer.Typer(
 )
 avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
 threads_app = typer.Typer(help="Export Matrix threads to local files.")
+journal_app = typer.Typer(help="Inspect and rebind the durable event journal.")
 config_app.command("migrate")(config_migrate)
 app.add_typer(config_app, name="config")
 app.add_typer(plugins_app, name="plugins")
 app.add_typer(desktop_app, name="desktop")
 app.add_typer(avatars_app, name="avatars")
 app.add_typer(threads_app, name="threads")
+app.add_typer(journal_app, name="journal")
 app.add_typer(service_app, name="service")
 app.add_typer(trigger_app, name="trigger")
 
@@ -352,12 +354,6 @@ def _threads_export_command(
         "--max-thread-roots",
         help="Maximum thread roots to enumerate per room.",
     ),
-    prefer_cache: bool = typer.Option(
-        False,
-        "--prefer-cache",
-        help="Serve thread bodies from the durable event cache and only fetch from the homeserver "
-        "on miss or invalidation. Use alongside a running MindRoom that keeps the cache fresh.",
-    ),
     invited_rooms: bool = typer.Option(
         True,
         "--invited-rooms/--no-invited-rooms",
@@ -374,10 +370,91 @@ def _threads_export_command(
             watch=watch,
             interval=interval,
             max_thread_roots=max_thread_roots,
-            prefer_cache=prefer_cache,
             include_invited_rooms=invited_rooms,
         ),
     )
+
+
+async def _journal_adopt(
+    *,
+    config_path: Path | None,
+    storage_path: Path | None,
+    yes: bool,
+    force: bool,
+) -> None:
+    """Bind this install to whatever event-journal database is configured right now."""
+    from mindroom.event_journal_open import (  # noqa: PLC0415 - keeps the journal store out of CLI import time
+        EventJournalBindingError,
+        adopt_event_journal,
+        current_binding_description,
+        describe_event_journal,
+    )
+
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    config = _load_active_config_or_exit(runtime_paths)
+    description = describe_event_journal(config.event_journal, runtime_paths)
+    # Read for the prompt only. What is actually replaced is decided again
+    # under the binding lock, where nothing else can be publishing.
+    previous = current_binding_description(runtime_paths.storage_root)
+    if previous is not None and not yes:
+        console.print(f"This install is bound to [bold]{previous}[/bold].")
+        console.print(
+            f"Adopting [bold]{description}[/bold] gives up the deduplication, delivery, and recovery "
+            "history held in the bound journal.",
+        )
+        console.print("Stop MindRoom first: a runtime that is still up keeps writing to the journal it started on.")
+        if not typer.confirm("Adopt the configured event journal?"):
+            raise typer.Exit(1)
+
+    try:
+        generation = await adopt_event_journal(
+            config.event_journal,
+            runtime_paths=runtime_paths,
+            storage_path=runtime_paths.storage_root,
+            force=force,
+        )
+    except EventJournalBindingError as exc:
+        # The previous binding is still in place, which is the point: a failed
+        # adoption must leave the install exactly as usable as it was.
+        console.print(f"[red]Not adopted:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]Bound[/green] this install to {description} (generation {generation}).")
+
+
+@journal_app.command("adopt")
+def _journal_adopt_command(
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Base directory for persistent MindRoom data.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Adopt without confirming, even when another journal is already bound.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Adopt even though another process still has this install's journal open.",
+    ),
+) -> None:
+    """Bind this install to the configured event-journal database.
+
+    MindRoom refuses to start against a journal it is not bound to, because
+    using a different one loses turn deduplication, delivery ownership, and
+    recovery ownership without any error. This is how you say the change was
+    deliberate.
+    """
+    asyncio.run(_journal_adopt(config_path=config_path, storage_path=storage_path, yes=yes, force=force))
 
 
 def _print_thread_export_stats(stats: ThreadExportStats) -> None:
@@ -421,7 +498,6 @@ async def _threads_export(
     watch: bool,
     interval: int,
     max_thread_roots: int,
-    prefer_cache: bool,
     include_invited_rooms: bool,
 ) -> None:
     """Run one thread export command."""
@@ -444,7 +520,6 @@ async def _threads_export(
                 output_dir=output,
                 room_filter=room,
                 max_thread_roots=max_thread_roots,
-                prefer_cache=prefer_cache,
                 include_invited_rooms=include_invited_rooms,
             )
         except (OSError, RuntimeError) as exc:
