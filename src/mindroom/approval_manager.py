@@ -1100,8 +1100,9 @@ class _ApprovalManager:
         decision = self._new_decision(status="expired", reason=reason, resolved_by=resolved_by)
         with self._claimed_resolution(claimed_waiter.card_event_id):
             delivered = await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
-            with self._live_lock:
-                self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
+            if delivered:
+                with self._live_lock:
+                    self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
             return delivered
 
     async def _settle_waiter_with_terminal_edit(
