@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -60,3 +61,34 @@ async def test_a_write_from_a_second_event_loop_comes_back(tmp_path: Path) -> No
     assert returned.is_set(), "the write committed but its caller was never woken"
 
     await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_a_cross_loop_write_racing_close_is_refused_not_stranded(tmp_path: Path) -> None:
+    """A write admitted across loops must end, even if close() beats it to the queue."""
+    backend = SqliteBackend.open(tmp_path / "journal.db")
+    await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
+
+    outcome: list[BaseException | None] = []
+
+    def write_from_its_own_loop() -> None:
+        async def claim() -> None:
+            await backend.write(lambda transaction: transaction.execute("INSERT INTO claim VALUES (1)"))
+
+        try:
+            asyncio.run(claim())
+        except BaseException as error:  # the point is only that something ends the wait
+            outcome.append(error)
+        else:
+            outcome.append(None)
+
+    bridge = threading.Thread(target=write_from_its_own_loop, name="second-loop-writer", daemon=True)
+    bridge.start()
+    # Blocking rather than awaiting, so this loop cannot run the admission the
+    # bridge is scheduling on it: close() then reaches the queue first, which
+    # is the race the caller must survive.
+    time.sleep(0.2)  # noqa: ASYNC251 - blocking this loop is the point of the test
+    await backend.close()
+
+    await asyncio.to_thread(bridge.join, _RETURN_TIMEOUT_SECONDS)
+    assert outcome, "the write was neither admitted nor refused, so its caller is stranded"

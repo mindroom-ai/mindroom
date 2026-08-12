@@ -287,11 +287,25 @@ class SqliteBackend:
         if writer_loop is None or writer_loop is caller_loop:
             queue.put_nowait(queued)
         else:
-            writer_loop.call_soon_threadsafe(queue.put_nowait, queued)
+            writer_loop.call_soon_threadsafe(self._admit, queue, queued)
         # Cancelling this await must not report an outcome the writer has not
         # reached yet: the statement runs on a thread regardless, so the caller
         # learns how it ended before its cancellation propagates.
         return await settled(future)
+
+    def _admit(self, queue: asyncio.Queue[_QueuedWrite], queued: _QueuedWrite) -> None:
+        """Put one handed-across write in the queue, or refuse it if ``close()`` got there first.
+
+        A write from another loop cannot be admitted where it is decided, so
+        the decision is re-made here, on the writer's own loop, where
+        ``close()`` also runs. Without this the two can interleave the one way
+        that strands a caller: ``close()`` drains the queue, and the admission
+        it never saw arrives afterwards, into a queue nothing will read again.
+        """
+        if self._closed:
+            _refuse(queued.future, RuntimeError(_CLOSED_MESSAGE))
+            return
+        queue.put_nowait(queued)
 
     async def read[T](self, operation: Operation[T]) -> T:
         """Run one read on a WAL reader, concurrently with the writer."""
@@ -374,6 +388,18 @@ def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:
         future.set_exception(error)
     else:
         future.set_result(work.result())
+
+
+def _refuse(future: asyncio.Future[Any], error: BaseException) -> None:
+    """Tell one caller its write was never admitted, on the caller's own loop."""
+    caller_loop = future.get_loop()
+    if caller_loop is not _running_loop():
+        if not caller_loop.is_closed():
+            with contextlib.suppress(RuntimeError):
+                caller_loop.call_soon_threadsafe(_refuse, future, error)
+        return
+    if not future.done():
+        future.set_exception(error)
 
 
 def _running_loop() -> asyncio.AbstractEventLoop | None:
