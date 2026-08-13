@@ -802,9 +802,9 @@ class DeliveryGateway:
         # row holding the oversized original while Matrix received an MXC
         # reference, and a recovery resend would upload again -- minting a new
         # MXC, and new encrypted-file keys, under a transaction ID the
-        # homeserver had already accepted. Preparing twice is harmless: an
-        # already-prepared payload is below the size limit, so this is a no-op
-        # for it, including on the recovery path.
+        # homeserver had already accepted. An attempted row is already frozen,
+        # so preparation is skipped and `enqueue` leaves that stored payload
+        # untouched for the claimed send below.
         content = await self._prepared_for_the_wire(
             room_id,
             content,
@@ -941,8 +941,9 @@ class DeliveryGateway:
         # is built here: the row has to hold the finished wire event. A sidecar
         # uploaded after the claim would leave the row holding the oversized
         # original while Matrix received an MXC reference, and a resend would
-        # upload again under a transaction ID already accepted. Preparing an
-        # already-prepared payload is a no-op, so the recovery path is safe.
+        # upload again under a transaction ID already accepted. An attempted
+        # row is already frozen, so preparation is skipped and
+        # `enqueue` leaves that stored envelope untouched for the claimed send.
         envelope = await self._prepared_for_the_wire(
             room_id,
             envelope,
