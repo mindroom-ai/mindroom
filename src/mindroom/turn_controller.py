@@ -1200,16 +1200,20 @@ class TurnController:
             raise
 
         async def run_owned_response() -> None:
+            response_claim_transferred = False
             try:
                 with response_lifecycle_reservation_context(reservation):
                     await reservation.wait_until_acquired()
-                    await response_factory()
+                    response = response_factory()
+                    response_claim_transferred = True
+                    await response
                 # Terminal delivery normally settles the discovery alias in its
                 # outbox transaction. This idempotent fallback also handles an
                 # already-terminal replay that has no new delivery to enqueue.
                 await self.deps.settle_dispatch_sources((source_event_id,))
             except BaseException:
-                on_failure()
+                if not response_claim_transferred:
+                    on_failure()
                 raise
             finally:
                 await reservation.release()

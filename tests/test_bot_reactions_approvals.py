@@ -54,6 +54,7 @@ from tests.conftest import (
     install_relation_lookup,
     make_matrix_client_mock,
     replace_reaction_dispatcher_deps,
+    replace_turn_controller_deps,
     request_envelope,
     runtime_paths_for,
     unwrap_extracted_collaborator,
@@ -809,6 +810,61 @@ class TestAgentBot(AgentBotTestBase):
 
         assert await bot._response_runner.drain_inbox_responses(cancel_after_seconds=0.01) is False
         assert not bot._response_runner.has_active_response_for_target(target)
+
+    def test_replaced_turn_controller_rebinds_interactive_reaction_callbacks(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Reaction dispatch must use the controller rebuilt by test dependency swaps."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+        controller = replace_turn_controller_deps(bot)
+
+        assert bot._reaction_dispatcher.deps.enqueue_interactive_selection == controller.enqueue_interactive_selection
+        assert bot._reaction_dispatcher.deps.start_interactive_selection == controller.start_interactive_selection
+
+    @pytest.mark.asyncio
+    async def test_interactive_postresponse_settlement_failure_does_not_run_prestart_cleanup(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Journal cleanup after a completed response must not restore its selection."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        settlement_error = OSError("simulated journal settlement failure")
+        settle_dispatch_sources = AsyncMock(side_effect=settlement_error)
+        controller = replace_turn_controller_deps(
+            bot,
+            settle_dispatch_sources=settle_dispatch_sources,
+            retry_dispatch_sources=MagicMock(),
+        )
+        response_completed = asyncio.Event()
+        prestart_cleanup = MagicMock()
+
+        async def response() -> None:
+            response_completed.set()
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!test:localhost",
+            thread_id="$thread-a",
+            reply_to_event_id="$question",
+        )
+        await controller.start_interactive_selection(
+            response,
+            response_target=target,
+            source_event_id="$reaction",
+            user_id="@user:localhost",
+            selected_value="Selected",
+            on_failure=prestart_cleanup,
+        )
+        await bot._response_runner.drain_inbox_responses()
+
+        assert response_completed.is_set()
+        settle_dispatch_sources.assert_awaited_once_with(("$reaction",))
+        prestart_cleanup.assert_not_called()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_stage", ["acquire", "queued_cancel"])
