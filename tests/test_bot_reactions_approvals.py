@@ -32,6 +32,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.message_target import MessageTarget
+from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, _shutdown_approval_store
 from tests.approval_test_support import FakeApprovalCards
 from tests.bot_helpers import (
@@ -47,6 +48,7 @@ from tests.conftest import (
     install_relation_lookup,
     make_matrix_client_mock,
     replace_reaction_dispatcher_deps,
+    request_envelope,
     runtime_paths_for,
     unwrap_extracted_collaborator,
 )
@@ -178,6 +180,19 @@ async def _dispatch_message(bot: AgentBot, room: nio.MatrixRoom, event: nio.Room
     event.decrypted = False
     await bot._journal_dispatcher.admit_out_of_band(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
     await bot._journal_dispatcher.drain_once()
+
+
+def _direct_response_request(target: MessageTarget, prompt: str, source_event_id: str) -> ResponseRequest:
+    return ResponseRequest(
+        prompt=prompt,
+        thread_history=[],
+        user_id="@user:localhost",
+        response_envelope=request_envelope(
+            target=target,
+            reply_to_event_id=source_event_id,
+            prompt=prompt,
+        ),
+    )
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -409,6 +424,8 @@ class TestAgentBot(AgentBotTestBase):
                 assert "$question" in interactive._active_questions
                 assert event.event_id in await bot._journal_dispatcher.unsettled_event_ids()
                 assert not bot._journal_dispatcher.callbacks.source_has_live_owner(event.event_id)
+                target = MessageTarget.resolve(room.room_id, None, "$question")
+                assert not bot._response_runner.has_active_response_for_target(target)
 
                 await bot._journal_dispatcher.drain_once()
                 await bot._response_runner.drain_inbox_responses()
@@ -520,6 +537,134 @@ class TestAgentBot(AgentBotTestBase):
             release_selection.set()
             await bot._response_runner.drain_inbox_responses()
             await bot._journal_dispatcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_interactive_preparation_releases_same_thread_reservation(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Cancelling detached preparation must release its early lifecycle reservation."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        preparation_started = asyncio.Event()
+
+        async def prepare_forever() -> None:
+            preparation_started.set()
+            await asyncio.Event().wait()
+
+        await bot._turn_controller.start_interactive_selection(
+            prepare_forever(),
+            room_id="!test:localhost",
+            question_event_id="$question",
+            source_event_id="$reaction",
+            thread_id="$thread-a",
+        )
+        await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
+        target = MessageTarget.resolve("!test:localhost", "$thread-a", "$question")
+        assert bot._response_runner.has_active_response_for_target(target)
+
+        assert await bot._response_runner.drain_inbox_responses(cancel_after_seconds=0.01) is False
+        assert not bot._response_runner.has_active_response_for_target(target)
+
+    @pytest.mark.asyncio
+    async def test_interactive_reaction_reserves_same_thread_lifecycle_before_preparation(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A newer same-thread response must wait behind selection preparation."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        reaction = _reaction_event("👍", "$interactive-reaction")
+        selection = interactive.InteractiveSelection(
+            question_event_id="$question",
+            question_text="Choose one",
+            selection_key="👍",
+            selected_label="Selected",
+            selected_value="Selected",
+            thread_id="$thread-a",
+        )
+        target = MessageTarget.resolve(room.room_id, selection.thread_id, "$question")
+        (
+            preparation_started,
+            release_preparation,
+            interactive_entered,
+            release_interactive,
+            newer_lock_attempted,
+            newer_entered,
+        ) = (asyncio.Event() for _ in range(6))
+        lifecycle_lock = unwrap_extracted_collaborator(
+            bot._response_runner,
+        )._lifecycle_coordinator._response_lifecycle_lock(target)
+        acquire_lifecycle_lock = lifecycle_lock.acquire
+
+        async def tracked_acquire() -> bool:
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.get_name() == "newer-same-thread-response":
+                newer_lock_attempted.set()
+            return await acquire_lifecycle_lock()
+
+        lifecycle_lock.acquire = tracked_acquire  # type: ignore[method-assign]
+
+        async def handle_selection(*_args: object, **_kwargs: object) -> None:
+            preparation_started.set()
+            await release_preparation.wait()
+            await bot._response_runner.generate_response(
+                _direct_response_request(target, "interactive", reaction.event_id),
+            )
+
+        async def generate_locked(
+            _self: ResponseRunner,
+            request: ResponseRequest,
+            *,
+            resolved_target: MessageTarget,
+            early_placeholder_state: object,
+        ) -> str:
+            del resolved_target, early_placeholder_state
+            if request.prompt == "interactive":
+                interactive_entered.set()
+                await release_interactive.wait()
+                return "$interactive-response"
+            newer_entered.set()
+            return "$newer-response"
+
+        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=handle_selection)
+        newer_task: asyncio.Task[str | None] | None = None
+        try:
+            with (
+                patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
+                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+            ):
+                await _dispatch_reaction(bot, room, reaction)
+                await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
+
+                newer_target = MessageTarget.resolve(room.room_id, selection.thread_id, "$newer")
+                newer_task = asyncio.create_task(
+                    bot._response_runner.generate_response(
+                        _direct_response_request(newer_target, "newer", "$newer"),
+                    ),
+                    name="newer-same-thread-response",
+                )
+                await asyncio.wait_for(newer_lock_attempted.wait(), timeout=1.0)
+                assert not newer_entered.is_set()
+
+                release_preparation.set()
+                await asyncio.wait_for(interactive_entered.wait(), timeout=1.0)
+                assert not newer_entered.is_set()
+
+                release_interactive.set()
+                await asyncio.wait_for(newer_entered.wait(), timeout=1.0)
+                assert await newer_task == "$newer-response"
+                await bot._response_runner.drain_inbox_responses()
+        finally:
+            release_preparation.set()
+            release_interactive.set()
+            if newer_task is not None:
+                await asyncio.gather(newer_task, return_exceptions=True)
+            await bot._response_runner.drain_inbox_responses()
 
     @pytest.mark.asyncio
     async def test_checkmark_interactive_reaction_reserves_before_tool_approval_lookup(

@@ -92,6 +92,7 @@ from .response_lifecycle import (
     ResponseLifecycle,
     ResponseLifecycleCoordinator,
     ResponseLifecycleDeps,
+    ResponseLifecycleReservation,
 )
 
 if TYPE_CHECKING:
@@ -937,6 +938,10 @@ class ResponseRunner:
             target=target,
             response_envelope=response_envelope,
         )
+
+    async def reserve_response_lifecycle(self, target: MessageTarget) -> ResponseLifecycleReservation:
+        """Reserve one canonical response lifecycle before detached preparation starts."""
+        return await self._lifecycle_coordinator.reserve_response_lifecycle(target)
 
     async def _run_in_tool_context(
         self,

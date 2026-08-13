@@ -182,6 +182,8 @@ class ReactionDispatcher:
                 user_id=event.sender,
                 source_event_id=event.event_id,
             ),
+            room_id=room.room_id,
+            question_event_id=selection.question_event_id,
             source_event_id=event.event_id,
             thread_id=selection.thread_id,
         )

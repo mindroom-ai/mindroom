@@ -87,7 +87,9 @@ from mindroom.matrix.media import (
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
+from mindroom.message_target import MessageTarget
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
+from mindroom.response_lifecycle import response_lifecycle_reservation_context
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
@@ -134,7 +136,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.relation_lookup import RelationLookup
-    from mindroom.message_target import MessageTarget, ResponseLifecycleKey
+    from mindroom.message_target import ResponseLifecycleKey
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.sync_restart_retry import InterruptedTurnRooms
@@ -1135,27 +1137,50 @@ class TurnController:
         self,
         response: Coroutine[Any, Any, None],
         *,
+        room_id: str,
+        question_event_id: str,
         source_event_id: str,
         thread_id: str | None,
     ) -> None:
         """Transfer one selection response from journal dispatch to runner ownership."""
+        response_target = MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=question_event_id,
+        )
+        try:
+            reservation = await self.deps.response_runner.reserve_response_lifecycle(response_target)
+        except BaseException:
+            response.close()
+            raise
 
         async def run_owned_response() -> None:
-            await response
-            # Terminal delivery normally settles the discovery alias in its
-            # outbox transaction. This idempotent fallback also handles an
-            # already-terminal replay that has no new delivery to enqueue.
-            await self.deps.settle_dispatch_sources((source_event_id,))
+            try:
+                with response_lifecycle_reservation_context(reservation):
+                    await response
+                # Terminal delivery normally settles the discovery alias in its
+                # outbox transaction. This idempotent fallback also handles an
+                # already-terminal replay that has no new delivery to enqueue.
+                await self.deps.settle_dispatch_sources((source_event_id,))
+            finally:
+                await reservation.release()
 
-        self.deps.response_runner.track_inbox_response(
-            run_owned_response(),
-            name=f"interactive_selection_response:{source_event_id}",
-            recovery_proof_ready=lambda: (
-                thread_id is not None and self.deps.interrupted_turn_rooms.contains(source_event_id)
-            ),
-            on_failure=lambda: self.deps.retry_dispatch_sources((source_event_id,)),
-            source_event_ids=(source_event_id,),
-        )
+        owned_response = run_owned_response()
+        try:
+            self.deps.response_runner.track_inbox_response(
+                owned_response,
+                name=f"interactive_selection_response:{source_event_id}",
+                recovery_proof_ready=lambda: (
+                    thread_id is not None and self.deps.interrupted_turn_rooms.contains(source_event_id)
+                ),
+                on_failure=lambda: self.deps.retry_dispatch_sources((source_event_id,)),
+                source_event_ids=(source_event_id,),
+            )
+        except BaseException:
+            owned_response.close()
+            response.close()
+            await reservation.release()
+            raise
         # Ownership registration is synchronous, and the task cannot execute
         # until this callback yields after reporting its deferred handoff.
 

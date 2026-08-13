@@ -33,10 +33,10 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
-from mindroom.message_target import ResponseLifecycleKey
+from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
-from mindroom.response_lifecycle import ResponseLifecycleCoordinator
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
@@ -84,7 +84,6 @@ if TYPE_CHECKING:
     from nio import AsyncClient
 
     from mindroom.hooks import MessageEnvelope
-    from mindroom.message_target import MessageTarget
 
 
 def _preparation(target: MessageTarget, envelope: MessageEnvelope) -> ResponsePayloadPreparation:
@@ -1345,6 +1344,76 @@ def test_reserve_waiting_human_message_requires_active_turn() -> None:
     envelope = _queued_envelope("$first")
 
     assert coordinator.reserve_waiting_human_message(target=envelope.target, response_envelope=envelope) is None
+
+
+@pytest.mark.asyncio
+async def test_response_lifecycle_reservation_is_not_its_own_queued_human_turn() -> None:
+    """An early reservation must not signal the interactive response about itself."""
+    coordinator = ResponseLifecycleCoordinator()
+    envelope = _queued_envelope("$interactive")
+    reservation = await coordinator.reserve_response_lifecycle(envelope.target)
+    observed_pending: list[int] = []
+
+    async def locked_operation(_target: MessageTarget) -> str:
+        queued_signal = coordinator._get_or_create_queued_signal(envelope.target)
+        observed_pending.append(queued_signal.pending_human_messages)
+        return "interactive"
+
+    with response_lifecycle_reservation_context(reservation):
+        result = await coordinator.run_locked_response(
+            target=envelope.target,
+            response_envelope=envelope,
+            pipeline_timing=None,
+            locked_operation=locked_operation,
+        )
+
+    assert result == "interactive"
+    assert observed_pending == [0]
+
+
+@pytest.mark.asyncio
+async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_lock() -> None:
+    """Cancelling a queued reservation removes it without stealing the released lock."""
+    coordinator = ResponseLifecycleCoordinator()
+    envelope = _queued_envelope("$interactive")
+    lifecycle_lock = coordinator._response_lifecycle_lock(envelope.target)
+    await lifecycle_lock.acquire()
+    reservation = await coordinator.reserve_response_lifecycle(envelope.target)
+
+    await reservation.release()
+    await reservation.release()
+    lifecycle_lock.release()
+
+    assert (
+        await asyncio.wait_for(
+            coordinator.run_locked_response(
+                target=envelope.target,
+                response_envelope=envelope,
+                pipeline_timing=None,
+                locked_operation=lambda _target: asyncio.sleep(0, result="next"),
+            ),
+            timeout=1.0,
+        )
+        == "next"
+    )
+
+
+@pytest.mark.asyncio
+async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinator() -> None:
+    """A reservation can only enter its creating coordinator and lifecycle key."""
+    coordinator = ResponseLifecycleCoordinator()
+    other_coordinator = ResponseLifecycleCoordinator()
+    envelope = _queued_envelope("$interactive")
+    other_target = MessageTarget.resolve("!room:localhost", "$other-thread", "$other")
+    reservation = await coordinator.reserve_response_lifecycle(envelope.target)
+
+    try:
+        with pytest.raises(ValueError, match="different coordinator"):
+            reservation.consume(other_coordinator, envelope.target)
+        with pytest.raises(ValueError, match="target does not match"):
+            reservation.consume(coordinator, other_target)
+    finally:
+        await reservation.release()
 
 
 @pytest.mark.asyncio
