@@ -62,6 +62,14 @@ _RUNNING_EVENT: ContextVar[JournalEvent | None] = ContextVar("running_journal_ev
 # walk continues past it; this only bounds how much is held at once.
 _LIFECYCLE_PAGE_SIZE = 256
 
+
+def _needs_turn_replay(event: JournalEvent) -> bool:
+    """Return whether replay needs responders and turn recovery semantics."""
+    return event.kind in TURN_BACKED_KINDS or (
+        event.kind is EventKind.REACTION and event.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
+    )
+
+
 type _MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageFormatted], Awaitable[TurnDispatchOutcome]]
 type _MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[TurnDispatchOutcome]]
 type _ReactionCallback = Callable[[nio.MatrixRoom, nio.ReactionEvent], Awaitable[TurnDispatchOutcome]]
@@ -296,11 +304,12 @@ class JournalDispatcher:
         this replaces; a wrong "gone" costs a re-dispatch that ``TurnStore``
         then has to refuse.
         """
-        if event.kind not in TURN_BACKED_KINDS and event.event_id not in self._deferred_reaction_ids:
+        needs_turn_replay = _needs_turn_replay(event)
+        if not needs_turn_replay and event.event_id not in self._deferred_reaction_ids:
             # A completing callback settles or raises. It never defers, so a
             # deferral for one of these kinds cannot exist to begin with.
             return True
-        if not self._turn_replay_released and event.event_id not in self._live_events:
+        if needs_turn_replay and not self._turn_replay_released and event.event_id not in self._live_events:
             # Replay is parked on the fleet, and it is released by draining
             # rather than by calling back, so nothing here has died.
             return True
@@ -321,16 +330,13 @@ class JournalDispatcher:
         journal was meant to remove, and it answered the wrong question: a turn
         can be terminal with nothing durable behind it.
         """
-        if (
-            event.kind in TURN_BACKED_KINDS
-            and not self._turn_replay_released
-            and event.event_id not in self._live_events
-        ):
+        needs_turn_replay = _needs_turn_replay(event)
+        if needs_turn_replay and not self._turn_replay_released and event.event_id not in self._live_events:
             # A turn replayed from a previous process needs responders that may
             # not exist yet. Live events are unaffected: their responders are
             # whatever is running now.
             return False
-        has_deferrable_owner = event.kind in TURN_BACKED_KINDS or event.event_id in self._deferred_reaction_ids
+        has_deferrable_owner = needs_turn_replay or event.event_id in self._deferred_reaction_ids
         if has_deferrable_owner and self._has_live_owner(event.event_id):
             # A coalescing batch or a running turn already holds this source
             # and will hand it back. Starting a second turn on it does not
@@ -359,7 +365,7 @@ class JournalDispatcher:
                 return True
         if room is None:
             room = self.room_for_id(event.room_id)
-        with turn_dispatch_recovery_scope(active=replaying and event.kind in TURN_BACKED_KINDS):
+        with turn_dispatch_recovery_scope(active=replaying and needs_turn_replay):
             return await self._invoke(event, room, matrix_event)
 
     async def _invoke(
@@ -386,13 +392,18 @@ class JournalDispatcher:
                 payload_type=type(matrix_event).__name__,
             )
             return True
+        if event.kind is EventKind.REACTION and event.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION:
+            self._deferred_reaction_ids.add(event.event_id)
         token = _RUNNING_EVENT.set(event)
         try:
             settles = await binding.run(self, room, matrix_event)
             if event.kind is EventKind.REACTION:
                 if settles:
                     self._deferred_reaction_ids.discard(event.event_id)
-                else:
+                elif self.semantic_consumer() is not SemanticConsumer.INTERACTIVE_REACTION:
+                    # The real interactive path registered before starting its
+                    # detached owner, so terminal settlement can safely remove
+                    # it even if that owner finishes before this callback.
                     self._deferred_reaction_ids.add(event.event_id)
             return settles
         finally:
@@ -414,6 +425,11 @@ class JournalDispatcher:
             msg = f"Journal event is already owned by {claimed.value!r}"
             raise RuntimeError(msg)
         _RUNNING_EVENT.set(replace(event, semantic_consumer=consumer))
+        if event.kind is EventKind.REACTION and consumer is SemanticConsumer.INTERACTIVE_REACTION:
+            # Register before the detached response can start and settle. If
+            # registration waited for the callback's deferred return, a fast
+            # response could discard nothing and then be added back forever.
+            self._deferred_reaction_ids.add(event.event_id)
 
     async def receipt_order(self) -> int:
         """Return the durable admission order of the running event."""

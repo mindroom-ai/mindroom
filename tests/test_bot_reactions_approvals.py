@@ -285,7 +285,9 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await _dispatch_reaction(bot, room, event)
 
+        await bot._response_runner.drain_inbox_responses()
         assert seen == []
+        assert event.event_id not in bot._journal_dispatcher._deferred_reaction_ids
 
     @pytest.mark.asyncio
     async def test_recovered_interactive_reaction_keeps_its_durable_consumer(
