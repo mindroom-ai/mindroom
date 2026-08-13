@@ -1666,6 +1666,33 @@ class ResponseRunner:
         """Wait until one canonical room/thread has no active response turn."""
         await self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)
 
+    async def _settle_user_stopped_approval(
+        self,
+        *,
+        source_event_id: str,
+        target: MessageTarget,
+    ) -> bool | None:
+        """Settle a stopped approval, returning ``None`` while frozen success remains unresolved."""
+        continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
+        if continuation is None:
+            return False
+        if continuation.state == "claimed":
+            owns_final, event_id = await self._recover_frozen_approval_final(
+                continuation,
+                target=target,
+            )
+            if owns_final:
+                return True if event_id is not None else None
+        failing = await self._approval_responses.request_failure(
+            continuation,
+            "cancelled_by_user",
+        )
+        if failing is None:
+            failing = await self.deps.approval_store.approval_continuation(continuation.approval_id)
+        if failing is None:
+            return False
+        return True if await self._approval_responses.settle_failure(failing, "cancelled_by_user") else None
+
     async def finalize_user_stop(
         self,
         message_id: str,
@@ -1686,22 +1713,12 @@ class ResponseRunner:
             cancellation_requested = self.deps.stop_manager.request_stop_if(message_id, should_cancel)
 
         async def finalize_locked() -> bool:
-            continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
-            approval_settled = False
-            if continuation is not None:
-                failing = await self._approval_responses.request_failure(
-                    continuation,
-                    "cancelled_by_user",
-                )
-                if failing is None:
-                    failing = await self.deps.approval_store.approval_continuation(continuation.approval_id)
-                if failing is not None:
-                    approval_settled = await self._approval_responses.settle_failure(
-                        failing,
-                        "cancelled_by_user",
-                    )
-                    if not approval_settled:
-                        return False
+            approval_settled = await self._settle_user_stopped_approval(
+                source_event_id=source_event_id,
+                target=target,
+            )
+            if approval_settled is None:
+                return False
             return await finalize(approval_settled)
 
         try:

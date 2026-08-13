@@ -687,6 +687,91 @@ async def test_user_stop_fences_waiting_approval_before_terminal_turn_record(tmp
 
 
 @pytest.mark.asyncio
+async def test_user_stop_preserves_a_claimed_frozen_final_until_success_recovery(tmp_path: Path) -> None:
+    """STOP cannot reclassify an attempted successful FINAL while its acknowledgement is unresolved."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-stop-final",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    await store.enqueue_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "finished", "formatted_body": "finished"},
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+
+    acknowledge_final = False
+
+    async def recover_final() -> None:
+        if acknowledge_final:
+            await store.acknowledge_delivery(
+                turn_id="$source",
+                stage=DeliveryStage.FINAL,
+                event_id="$final",
+            )
+
+    lifecycle = MagicMock(finalize=AsyncMock())
+    finalize_stop = AsyncMock(return_value=True)
+    expire_cards = AsyncMock(return_value=True)
+    with (
+        patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock(side_effect=recover_final)),
+        patch.object(runner, "_build_lifecycle", return_value=lifecycle),
+        patch("mindroom.approval_response.expire_continuation_approval_cards", new=expire_cards),
+    ):
+        assert not await runner.finalize_user_stop(
+            "$waiting",
+            "$source",
+            _target(thread_id="$thread"),
+            7,
+            Mock(return_value=True),
+            finalize_stop,
+        )
+        still_claimed = await store.approval_continuation(continuation.approval_id)
+        assert still_claimed is not None
+        assert still_claimed.state == "claimed"
+        finalize_stop.assert_not_awaited()
+        lifecycle.finalize.assert_not_awaited()
+
+        acknowledge_final = True
+        assert await runner.finalize_user_stop(
+            "$waiting",
+            "$source",
+            _target(thread_id="$thread"),
+            7,
+            Mock(return_value=True),
+            finalize_stop,
+        )
+
+    finalize_stop.assert_awaited_once_with(True)
+    lifecycle.finalize.assert_awaited_once()
+    expire_cards.assert_not_awaited()
+    assert await store.approval_continuation(continuation.approval_id) is None
+    assert not await store.is_pending("$source")
+
+
+@pytest.mark.asyncio
 async def test_begin_locked_turn_settles_external_placeholder_when_source_is_redacted(tmp_path: Path) -> None:
     """Suppression must not leave an interactive acknowledgement stuck on Processing."""
     bot = _bot(tmp_path)
