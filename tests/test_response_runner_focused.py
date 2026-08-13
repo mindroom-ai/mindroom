@@ -1450,6 +1450,29 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
 
 
 @pytest.mark.asyncio
+async def test_response_lifecycle_reservation_surfaces_lock_acquire_failure() -> None:
+    """A failed acquire task must wake reservation startup and remain observable."""
+    coordinator = ResponseLifecycleCoordinator()
+    envelope = _queued_envelope("$interactive")
+    lifecycle_lock = coordinator._response_lifecycle_lock(envelope.target)
+
+    async def fail_acquire() -> bool:
+        msg = "lock acquire failed"
+        raise RuntimeError(msg)
+
+    lifecycle_lock.acquire = fail_acquire  # type: ignore[method-assign]
+    reservation = await asyncio.wait_for(
+        coordinator.reserve_response_lifecycle(envelope),
+        timeout=0.1,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="lock acquire failed"):
+            await reservation.wait_until_acquired()
+    finally:
+        await reservation.release()
+
+
+@pytest.mark.asyncio
 async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinator() -> None:
     """A reservation can only enter its creating coordinator and lifecycle key."""
     coordinator = ResponseLifecycleCoordinator()

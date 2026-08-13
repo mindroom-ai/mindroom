@@ -52,11 +52,13 @@ class ResponseLifecycleReservation:
     _response_turn_active: bool = True
 
     async def _acquire(self) -> None:
-        if self._lifecycle_lock.locked():
+        try:
+            if self._lifecycle_lock.locked():
+                self._ready.set()
+            await self._lifecycle_lock.acquire()
+            self._owns_lock = True
+        finally:
             self._ready.set()
-        await self._lifecycle_lock.acquire()
-        self._owns_lock = True
-        self._ready.set()
 
     async def _wait_until_reserved(self) -> None:
         """Wait until this owner has acquired or queued on its lifecycle lock."""
