@@ -576,6 +576,22 @@ class ResponseRunner:
         self._incomplete_inbox_responses_recoverable &= cancelled_responses_recoverable
         return False
 
+    def _post_response_deps(
+        self,
+        request: ResponseRequest,
+        *,
+        queue_memory_persistence: Callable[[], None] | None = None,
+        persist_response_event_id: Callable[[str, str], None] | None = None,
+    ) -> PostResponseEffectsDeps:
+        """Build post-response effect deps bound to one request's room and source turn."""
+        return self.deps.post_response_effects.build_deps(
+            room_id=request.room_id,
+            interactive_agent_name=self.deps.agent_name,
+            membership_turn_id=request.response_envelope.source_event_id,
+            queue_memory_persistence=queue_memory_persistence,
+            persist_response_event_id=persist_response_event_id,
+        )
+
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for response coordination."""
         client = self.deps.runtime.client
@@ -1762,11 +1778,7 @@ class ResponseRunner:
         final_outcome = await lifecycle.finalize(
             FinalDeliveryOutcome.cancelled_for_empty_prompt(),
             build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
-            post_response_deps=lambda: self.deps.post_response_effects.build_deps(
-                room_id=request.room_id,
-                interactive_agent_name=self.deps.agent_name,
-                membership_turn_id=request.response_envelope.source_event_id,
-            ),
+            post_response_deps=lambda: self._post_response_deps(request),
         )
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
 
@@ -1884,11 +1896,7 @@ class ResponseRunner:
                 user_id=request.user_id,
                 run_id=str(uuid4()),
                 build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
-                post_response_deps=lambda: self.deps.post_response_effects.build_deps(
-                    room_id=request.room_id,
-                    interactive_agent_name=self.deps.agent_name,
-                    membership_turn_id=request.response_envelope.source_event_id,
-                ),
+                post_response_deps=lambda: self._post_response_deps(request),
             )
         requester_user_id = request.user_id or ""
         _memory_prompt, _memory_thread_history, prepared_prompt, model_thread_history = (
@@ -2322,10 +2330,8 @@ class ResponseRunner:
             user_id=requester_user_id,
             run_id=response_run_id,
             build_post_response_outcome=build_team_post_response_outcome,
-            post_response_deps=lambda: self.deps.post_response_effects.build_deps(
-                room_id=request.room_id,
-                interactive_agent_name=self.deps.agent_name,
-                membership_turn_id=request.response_envelope.source_event_id,
+            post_response_deps=lambda: self._post_response_deps(
+                request,
                 persist_response_event_id=persist_response_event_id,
             ),
             streaming_delivery_error_handler=settle_team_streaming_delivery_error,
@@ -3090,10 +3096,8 @@ class ResponseRunner:
             user_id=request.user_id,
             run_id=response_run_id,
             build_post_response_outcome=build_post_response_outcome,
-            post_response_deps=lambda: self.deps.post_response_effects.build_deps(
-                room_id=request.room_id,
-                interactive_agent_name=self.deps.agent_name,
-                membership_turn_id=request.response_envelope.source_event_id,
+            post_response_deps=lambda: self._post_response_deps(
+                request,
                 queue_memory_persistence=queue_memory_persistence,
                 persist_response_event_id=persist_response_event_id,
             ),

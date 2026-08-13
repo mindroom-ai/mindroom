@@ -53,6 +53,7 @@ from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
     ignore_final_delivery_handoff,
     make_conversation_reader_mock,
+    make_membership_stub,
     make_outbox_mock,
     make_relation_lookup,
     request_envelope,
@@ -444,7 +445,7 @@ def _build_response_runner(
         matrix_id=bot.matrix_id,
         resolver=bot._conversation_resolver,
         hook_context=hook_context,
-        membership=MagicMock(),
+        membership=make_membership_stub(),
     )
 
     post_response_effects = PostResponseEffectsSupport(
@@ -453,7 +454,7 @@ def _build_response_runner(
         runtime_paths=runtime_paths,
         delivery_gateway=delivery_gateway,
         conversation_reader=make_conversation_reader_mock(),
-        membership=MagicMock(),
+        membership=make_membership_stub(),
     )
     bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
 
