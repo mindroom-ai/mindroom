@@ -124,13 +124,12 @@ class MembershipFence:
     ) -> None:
         """Fence departures a sync reported, absorbing the report local ones are owed.
 
-        One entry per departure, not per room. A room that was left, rejoined
-        and left again inside one sync interval is two departures, and only the
-        first of them is the report the local leave is owed; offered as a set
-        it would be one observation, absorbed, and the second departure would
-        never invalidate anything. Matching observation ids make an exact
-        departure idempotent across replayed sync responses and process
-        restarts. A proven later join rearms only the epoch this report fenced.
+        One entry per distinct departure-state observation, not per room.
+        Consecutive leave/ban observations alias one ended membership, while a
+        proven join between observations rearms the fence for the next one.
+        Matching observation ids make every alias idempotent across replayed
+        sync responses and process restarts. A proven later join rearms only
+        the epoch this report owns.
         """
         reported = tuple(room_ids)
         report_observation_ids = (None,) * len(reported) if observation_ids is None else tuple(observation_ids)

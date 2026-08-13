@@ -62,14 +62,12 @@ def _sliding_sync_extensions() -> dict[str, object]:
 class OwnRoomMembership:
     """What one sync response says about this account's own room memberships.
 
-    ``departures`` is one entry per departure the response shows, not a set of
-    rooms that departed. The two differ whenever an account leaves, comes back
-    and leaves again inside one sync interval, and the difference matters
-    because the fence's bookkeeping is per departure: a local leave records
-    that it is owed one sync report, and a room id offered once can only ever
-    be read as that report. The second departure is then absorbed rather than
-    fenced, and everything the membership between them built survives into a
-    membership that has no right to it.
+    ``departures`` is one entry per distinct departure-state observation, not
+    a set of rooms that departed. Consecutive leave/ban observations can alias
+    one ended membership, while observations separated by a join describe
+    different memberships. Keeping both event ids makes either replay safe;
+    the parallel rejoin tuple decides when the next observation may fence a
+    new membership.
 
     The remaining tuples are parallel to ``departures``. An exact Matrix event
     id identifies a visible transition; the response token identifies a leave
