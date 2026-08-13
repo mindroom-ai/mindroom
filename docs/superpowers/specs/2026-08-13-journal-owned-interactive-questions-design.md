@@ -3,7 +3,7 @@
 ## Summary
 
 Interactive questions move from a process-global JSON store into the existing event journal.
-The event journal becomes the sole durable authority for question registration, selection ownership, membership invalidation, and terminal consumption.
+The event journal becomes the sole durable authority for visible prompt activation, selection ownership, membership invalidation, and terminal consumption.
 Runtime objects will continue to own executing asyncio tasks, but they will no longer own durable question state.
 
 ## Problem
@@ -21,6 +21,8 @@ The resulting implementation is heavily tested but has the wrong atomic boundary
 - Consume a stored selection atomically with terminal settlement of its source.
 - Remove departed-room questions atomically with the membership fence.
 - Remove the JSON question database, process-global claim ownership, and restore/commit reconciliation.
+- Make the admitted Matrix revision the sole authority for which prompt is active at a reusable event target.
+- Remove post-delivery question registration and edit-replacement choreography.
 - Retain only lifecycle machinery that prevents two live runtimes from executing the same source concurrently.
 - Reduce the production code and the number of cross-module invariants in PR #1825.
 
@@ -31,7 +33,7 @@ The resulting implementation is heavily tested but has the wrong atomic boundary
 - This design does not redesign Matrix departure-observation identity or ordering.
 - This design does not move interactive response parsing or Matrix reaction-button rendering into the journal.
 - This design does not add backward compatibility for `interactive_questions.json`, because the project explicitly does not require backward compatibility yet.
-- This design does not solve the pre-existing post-send registration window for direct Matrix tool messages.
+- This design does not add a second intent or staging table around Matrix delivery.
 
 ## Ownership Boundary
 
@@ -41,6 +43,8 @@ The event journal owns every durable fact about an interactive question.
 `TurnController` owns executing the selected source turn, but not restoring or consuming its durable selection.
 `ResponseRunner` owns the lifetime of the detached asyncio task, but not the durable selection.
 `MembershipFence` translates Matrix membership observations into journal transitions, but does not invoke external cleanup callbacks.
+Matrix delivery owns rendering prompt metadata into the event content, but transport completion does not activate durable question state.
+The visible-message projection owns revision ordering, and interactive-question activation follows that projection in the same admission transaction.
 
 ## Data Model
 
@@ -82,22 +86,34 @@ The source primary key makes one source unable to select multiple prompt revisio
 An edited Matrix target can therefore activate a replacement question without overwriting a pending source's earlier prompt snapshot.
 Numeric text selection orders eligible questions by `created_at_ns` and then `question_event_id` so selection remains deterministic across processes.
 
-## Registration
+## Matrix Prompt Metadata
 
-`PrincipalStore` exposes explicit registration methods for the two real proof forms.
-A turn-backed registration verifies the membership epoch recorded on the admitted source turn.
-A direct Matrix operation registration verifies the membership epoch captured before network I/O.
-Both methods insert or atomically replace the active revision only when the room remains unfenced at the expected epoch.
-The epoch check and registration happen in one writer transaction.
-Callers add Matrix reaction buttons only after the insert succeeds.
-Production code no longer accepts a synchronous callback that writes a different persistence system while the membership row is locked.
+An outbound interactive message carries `io.mindroom.interactive` metadata alongside its visible body.
+The metadata contains the creator agent, immutable question payload, and the membership proof that authorized delivery.
+Turn-backed responses carry their admitted source event ID.
+Direct Matrix operations carry the membership epoch captured before transport and may also carry a same-room source event ID.
+The source event proof takes precedence when that source exists, so a stale turn cannot borrow a newer fallback epoch.
+The metadata appears in `m.new_content` for edits because Matrix installs only that replacement content as the visible revision.
+A non-interactive edit carries no prompt metadata and therefore clears any active question at its target when admitted.
+Reaction buttons remain a transport-side convenience and never establish durable prompt ownership.
+
+## Projection-Owned Activation
+
+`PrincipalStore` exposes no question registration, replacement, or forget API.
+After admitting and projecting an actionable self-authored message or edit, the journal reads the projection's currently visible revision for that logical target.
+The journal accepts prompt metadata only when its creator and Matrix sender identify the current journal principal.
+The journal validates the embedded source event or captured epoch against the room's active unfenced membership.
+It then inserts, replaces, or deletes the active question in the same transaction that admitted the Matrix revision.
+An older concurrent edit that reaches admission later cannot reactivate its prompt because projection ordering still selects the newer visible revision.
+An edit that reaches Matrix before its transport caller returns is already authoritative when a following reaction is admitted, so there is no post-send registration window.
+An admission that applies a previously held out-of-order edit reconciles from the resulting visible projection rather than from callback completion order.
 
 ## Selection Claim
 
 Admitting an actionable reaction and snapshotting the active prompt revision it references is one store transaction.
 The later claim validates that source-bound snapshot, records `INTERACTIVE_REACTION`, consumes only that active revision, and discards competing snapshots for the same revision.
-If admission happened before the outgoing question registration completed, claim falls back to the then-active revision to preserve the existing post-send behavior.
 If the reaction already owns a stored selection, replay returns the same selection.
+If admission found no active projected prompt revision, claim does not reinterpret the reaction through a prompt that appeared later.
 If another source consumed the prompt revision first, the transaction returns no selection.
 If the source is terminal, stale, from another room, or from an old membership, the transaction returns no selection.
 Authorization and managed-agent sender checks remain outside the store because they are runtime policy rather than durable state.
@@ -152,7 +168,7 @@ After implementation, a merge-tree and focused combined test run against PR #180
 
 ## File Structure
 
-- Create `src/mindroom/interactive_models.py` for the leaf question and selection dataclasses.
+- Create `src/mindroom/interactive_models.py` for the leaf prompt metadata and selection dataclasses plus Matrix-content serialization.
 - Create `src/mindroom/event_journal/interactive_questions.py` for question and selection serialization, SQL, and transactional operations.
 - Create `src/mindroom/membership_models.py` for the leaf reported-departure record shared by sync parsing and journal fencing.
 - Modify `src/mindroom/event_journal/schema.py` for the table and lookup indexes.
@@ -161,13 +177,16 @@ After implementation, a merge-tree and focused combined test run against PR #180
 - Reduce `src/mindroom/interactive.py` to parsing, formatting, prompt construction, policy helpers, and button I/O.
 - Modify `src/mindroom/reaction_dispatch.py` to claim a selection through the journal.
 - Modify `src/mindroom/turn_controller.py` to execute durable selections without commit or restore callbacks.
-- Modify `src/mindroom/post_response_effects.py` and `src/mindroom/custom_tools/matrix_conversation_operations.py` to register through `PrincipalStore`.
+- Modify delivery and streaming formatting to include prompt metadata in terminal Matrix content.
+- Modify `src/mindroom/post_response_effects.py` so it only renders reaction buttons after successful delivery.
+- Modify `src/mindroom/custom_tools/matrix_conversation_operations.py` to include prompt metadata before send or edit and remove post-send registration.
 - Simplify `src/mindroom/event_journal/membership.py` and its bot wiring by removing external cleanup callbacks.
 - Remove interactive JSON initialization from `AgentBot.start`.
 
 ## Testing Strategy
 
-Journal-store tests cover registration guards, admission-time revision snapshots, exclusive claims, same-source replay, deterministic text selection, settlement consumption, and membership deletion on SQLite and PostgreSQL.
+Journal-store tests cover projection-owned activation, membership guards, admission-time revision snapshots, exclusive claims, same-source replay, deterministic text selection, settlement consumption, and membership deletion on SQLite and PostgreSQL.
+Revision tests prove that projection-before-callback ordering and reversed concurrent edit completion both select the Matrix-visible prompt.
 Reaction-dispatch tests use the real store boundary and prove that semantic-consumer claim and selection transfer cannot split.
 Turn-controller tests prove that failures leave the durable selection replayable without a restore callback.
 Restart tests prove that a replacement process can reload and replay a stored selection without process-global state.
@@ -182,9 +201,14 @@ Tests that exist only to exercise JSON corruption, advisory locks, dirty overlay
 - No production `commit_selection` or `restore_selection` function remains.
 - No membership transaction invokes an external question-cleanup callback.
 - No public membership boundary represents one reported departure with parallel tuples.
+- No public question registration, replacement, or forget method remains.
+- Outbound interactive messages and terminal edits carry their prompt and membership proof in Matrix content before transport.
+- Admitting a self-authored visible revision and activating or clearing its prompt is one transaction.
+- Active prompt ordering is exactly visible-projection ordering, not HTTP completion ordering.
 - Reaction admission snapshots the prompt revision and selected option in the same transaction as the source event.
 - Claiming assigns the semantic consumer and consumes the matching active revision in one transaction.
-- A later edit can atomically replace the active revision without rewriting any earlier source snapshot.
+- A later admitted edit can replace the active revision without rewriting any earlier source snapshot.
+- A stale or losing edit cannot reactivate an older prompt revision.
 - Settling a selected source and consuming its stored selection is one transaction.
 - Fencing a departure and removing its active questions and stale selections is one transaction.
 - Same-source replay returns the same selection before terminal settlement.
