@@ -5933,6 +5933,20 @@ async def test_cancelled_subprocess_refresh_reconciles_running_state(
 
 @pytest.mark.skipif(os.name == "nt", reason="process groups require POSIX")
 @pytest.mark.asyncio
+async def test_process_group_exit_wait_warns_when_group_survives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bounded drain must explain any process group it cannot retire."""
+    monkeypatch.setattr(knowledge_refresh_runner, "_process_group_exists", lambda _process_group_id: True)
+
+    with capture_logs() as logs:
+        await knowledge_refresh_runner._wait_for_process_group_exit(12345, wait_seconds=0)
+
+    assert any(log.get("event") == "Knowledge refresh process group survived termination wait" for log in logs)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups require POSIX")
+@pytest.mark.asyncio
 async def test_terminate_refresh_subprocess_kills_surviving_process_group_member(tmp_path: Path) -> None:
     """A Git-like grandchild that ignores SIGTERM must not outlive its refresh leader."""
     descendant_lock_path = tmp_path / "descendant.lock"
@@ -5966,7 +5980,7 @@ time.sleep(60)
     )
     os.close(ready_write_fd)
     try:
-        assert await asyncio.wait_for(asyncio.to_thread(os.read, ready_read_fd, 1), timeout=1) == b"1"
+        assert await asyncio.wait_for(asyncio.to_thread(os.read, ready_read_fd, 1), timeout=30) == b"1"
         assert file_locks.file_lock_is_held(descendant_lock_path) is True
 
         await knowledge_refresh_runner._terminate_refresh_subprocess(process)

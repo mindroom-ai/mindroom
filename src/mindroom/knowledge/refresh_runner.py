@@ -285,10 +285,17 @@ def _process_group_exists(process_group_id: int) -> bool:
 
 
 async def _wait_for_process_group_exit(process_group_id: int, *, wait_seconds: float = 1.0) -> None:
-    deadline = asyncio.get_running_loop().time() + wait_seconds
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait_seconds
     # There is no asyncio readiness primitive for POSIX process-group exit.
-    while _process_group_exists(process_group_id) and asyncio.get_running_loop().time() < deadline:  # noqa: ASYNC110
+    while _process_group_exists(process_group_id) and loop.time() < deadline:  # noqa: ASYNC110
         await asyncio.sleep(0.01)
+    if _process_group_exists(process_group_id):
+        logger.warning(
+            "Knowledge refresh process group survived termination wait",
+            process_group_id=process_group_id,
+            wait_seconds=wait_seconds,
+        )
 
 
 async def _terminate_refresh_subprocess(process: asyncio.subprocess.Process) -> None:
