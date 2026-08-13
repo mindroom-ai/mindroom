@@ -70,11 +70,17 @@ class OwnRoomMembership:
     be read as that report. The second departure is then absorbed rather than
     fenced, and everything the membership between them built survives into a
     membership that has no right to it.
+
+    ``departure_event_ids`` is parallel to ``departures``. Exact event ids let
+    the journal recognize an old departure after a later join has re-armed the
+    room; ``None`` represents a leave section whose truncated timeline carries
+    no transition event.
     """
 
     joined_room_ids: frozenset[str]
     left_room_ids: frozenset[str]
     departures: tuple[str, ...]
+    departure_event_ids: tuple[str | None, ...]
 
     @property
     def departed_room_ids(self) -> frozenset[str]:
@@ -92,15 +98,19 @@ def own_membership_from_sync(response: nio.SyncResponse, *, self_user_id: str) -
     """
     left_room_ids = frozenset(response.rooms.leave)
     departures: list[str] = []
+    departure_event_ids: list[str | None] = []
     for room_id, room_info in (*response.rooms.join.items(), *response.rooms.leave.items()):
-        observed = _own_departures_in(room_info.timeline.events, self_user_id)
+        observed = _own_departure_event_ids(room_info.timeline.events, self_user_id)
         # A room in the leave section departed whether or not the timeline it
         # arrived with is long enough to show the transition.
-        departures.extend([room_id] * max(observed, 1 if room_id in left_room_ids else 0))
+        count = max(len(observed), 1 if room_id in left_room_ids else 0)
+        departures.extend([room_id] * count)
+        departure_event_ids.extend(observed or (None,) * count)
     return OwnRoomMembership(
         joined_room_ids=frozenset(response.rooms.join),
         left_room_ids=left_room_ids,
         departures=tuple(departures),
+        departure_event_ids=tuple(departure_event_ids),
     )
 
 
@@ -117,37 +127,42 @@ def own_membership_from_sliding_sync(
     joined_room_ids: set[str] = set()
     left_room_ids: set[str] = set()
     departures: list[str] = []
+    departure_event_ids: list[str | None] = []
     for room_id, room in response.rooms.items():
-        observed = _own_departures_in(room.timeline, self_user_id)
+        observed = _own_departure_event_ids(room.timeline, self_user_id)
         if room.membership in _DEPARTED_MEMBERSHIPS:
             left_room_ids.add(room_id)
-            departures.extend([room_id] * max(observed, 1))
+            count = max(len(observed), 1)
+            departures.extend([room_id] * count)
+            departure_event_ids.extend(observed or (None,) * count)
             continue
         is_invite = room.membership == "invite" or (room.membership is None and bool(room.stripped_state))
         if not is_invite:
             joined_room_ids.add(room_id)
-        departures.extend([room_id] * observed)
+        departures.extend([room_id] * len(observed))
+        departure_event_ids.extend(observed)
     return OwnRoomMembership(
         joined_room_ids=frozenset(joined_room_ids),
         left_room_ids=frozenset(left_room_ids),
         departures=tuple(departures),
+        departure_event_ids=tuple(departure_event_ids),
     )
 
 
-def _own_departures_in(events: Iterable[object], self_user_id: str) -> int:
-    """Return how many distinct departures of this account one timeline shows.
+def _own_departure_event_ids(events: Iterable[object], self_user_id: str) -> tuple[str, ...]:
+    """Return the distinct departures of this account one timeline shows.
 
-    Counted by event, because one timeline can carry two of them and a repeat
-    delivery can carry the same one twice.
+    Identity matters as well as count: one timeline can carry two departures,
+    while a replay can carry the same departure again after a rejoin.
     """
-    return len(
-        {
+    return tuple(
+        dict.fromkeys(
             event.event_id
             for event in events
             if isinstance(event, nio.RoomMemberEvent)
             and event.state_key == self_user_id
             and event.membership in _DEPARTED_MEMBERSHIPS
-        },
+        ),
     )
 
 

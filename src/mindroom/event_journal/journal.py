@@ -339,6 +339,7 @@ def fence_departure(
     room_id: str,
     *,
     source: DepartureSource,
+    report_event_id: str | None = None,
 ) -> DepartureOutcome:
     """Invalidate a room's derived state once per departure, however often it is seen.
 
@@ -361,16 +362,29 @@ def fence_departure(
       of the same departure when the sync response gets there first.
 
     That asymmetry is in what each observation *records*, not in whether it may
-    fence a room that is already fenced. Neither may. A sync report is not a
-    once-only signal: a checkpoint that could not advance, an initial sync, a
-    resumed older token all present the same leave again, and a bot cannot
-    leave a room it has not rejoined. Fencing on the repeat deletes whatever
-    the membership after it has built -- the hydrated conversation, the answer
-    queued for it -- and settles the live message that provoked it as ignored
-    with its replay payload erased. A rejoin is what re-arms the fence, and
-    every path this bot takes back into a room reports one.
+    fence a room that is already fenced. Neither may. Matrix can replay an old
+    leave after the room has rejoined, so exact reported event ids are claimed
+    durably here as part of the same transaction. A replay then remains a
+    replay even though the rejoin has re-armed the room for a genuinely new
+    departure.
     """
     state = _membership_state(transaction, principal_id, room_id)
+    if source is DepartureSource.REPORTED and report_event_id is not None:
+        claimed_report = transaction.fetchone(
+            """
+            INSERT INTO reported_departures (principal_id, event_id, room_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT (principal_id, event_id) DO NOTHING
+            RETURNING event_id
+            """,
+            (principal_id, report_event_id, room_id),
+        )
+        if claimed_report is None:
+            return DepartureOutcome(
+                observation=DepartureObservation.REPEATED_REPORT,
+                membership_epoch=state.membership_epoch,
+                owed_reports=state.owed_reports,
+            )
     if source is DepartureSource.REPORTED and state.owed_reports > 0:
         # Asked before the fenced check, not after: a local departure fences
         # and *then* waits for its report, so the report always arrives at a

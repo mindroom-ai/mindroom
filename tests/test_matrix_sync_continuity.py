@@ -1188,8 +1188,15 @@ async def test_leave_fences_before_failing_call_reconciliation(
     class OrderRecordingStore(FencedRoomRecorder):
         """Record that the fence ran before call cleanup."""
 
-        async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+        async def fence_departure(
+            self,
+            room_id: str,
+            *,
+            source: DepartureSource,
+            report_event_id: str | None = None,
+        ) -> DepartureOutcome:
             """Note where this invalidation fell relative to call cleanup."""
+            del report_event_id
             operation_order.append("fence")
             return await super().fence_departure(room_id, source=source)
 

@@ -1071,9 +1071,15 @@ class FencedRoomRecorder:
 
     fenced_room_ids: list[str] = field(default_factory=list)
 
-    async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+    async def fence_departure(
+        self,
+        room_id: str,
+        *,
+        source: DepartureSource,
+        report_event_id: str | None = None,
+    ) -> DepartureOutcome:
         """Record one invalidation and hand back the room's new epoch."""
-        del source
+        del source, report_event_id
         self.fenced_room_ids.append(room_id)
         return DepartureOutcome(DepartureObservation.FENCED, len(self.fenced_room_ids), 0)
 

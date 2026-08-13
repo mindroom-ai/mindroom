@@ -308,23 +308,11 @@ def restore_selection(selection: InteractiveSelection) -> None:
         if event_id not in _claimed_questions:
             return
         if _persistence_file is not None and _persistence_lock_file is not None:
-            try:
-                with advisory_file_lock(_persistence_lock_file, exclusive=False):
-                    persisted_questions = _load_persisted_questions()
-            except Exception as exc:
-                logger.warning(
-                    "Failed to refresh persisted interactive questions while restoring a selection; "
-                    "continuing with the claimed question",
-                    path=str(_persistence_file),
-                    error=str(exc),
-                )
-                _active_questions[event_id] = _copy_question(question)
-                _claimed_questions.pop(event_id, None)
-                return
+            _active_questions[event_id] = _copy_question(question)
             _claimed_questions.pop(event_id, None)
             _dirty_question_ids.discard(event_id)
             _deleted_question_ids.discard(event_id)
-            _set_active_questions_locked(_apply_local_changes_locked(persisted_questions))
+            _refresh_active_questions_locked()
             return
         if event_id not in _active_questions:
             _store_active_question_locked(event_id, _copy_question(question))

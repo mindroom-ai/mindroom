@@ -1838,7 +1838,10 @@ class AgentBot:
 
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
-        await self._membership_fence.fence_reported_departures(membership.departures)
+        await self._membership_fence.fence_reported_departures(
+            membership.departures,
+            event_ids=membership.departure_event_ids,
+        )
         departed_room_ids = membership.departed_room_ids
         for room_id in departed_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
@@ -1846,8 +1849,6 @@ class AgentBot:
         current_joined_room_ids = (
             membership.joined_room_ids - membership.left_room_ids - self._local_departures_awaiting_sync
         )
-        for room_id in current_joined_room_ids:
-            await self._membership_fence.note_membership_restarted(room_id)
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_sync_room_membership(

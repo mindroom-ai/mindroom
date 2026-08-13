@@ -196,7 +196,13 @@ class PrincipalStore:
             lambda transaction: journal.current_membership_epoch(transaction, self._principal_id, room_id),
         )
 
-    async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+    async def fence_departure(
+        self,
+        room_id: str,
+        *,
+        source: DepartureSource,
+        report_event_id: str | None = None,
+    ) -> DepartureOutcome:
         """Apply one observation of a departure, invalidating at most once per departure."""
         return await self._backend.write(
             lambda transaction: journal.fence_departure(
@@ -204,6 +210,7 @@ class PrincipalStore:
                 self._principal_id,
                 room_id,
                 source=source,
+                report_event_id=report_event_id,
             ),
         )
 

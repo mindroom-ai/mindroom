@@ -1755,6 +1755,7 @@ def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> Non
     assert membership.joined_room_ids == {"!joined:localhost", "!window:localhost"}
     assert membership.departed_room_ids == {"!kicked:localhost", "!banned:localhost"}
     assert sorted(membership.departures) == ["!banned:localhost", "!kicked:localhost"]
+    assert membership.departure_event_ids == (None, None)
 
 
 def test_sliding_own_membership_counts_a_rejoined_room_departing_twice() -> None:
@@ -1777,6 +1778,7 @@ def test_sliding_own_membership_counts_a_rejoined_room_departing_twice() -> None
     membership = own_membership_from_sliding_sync(response, self_user_id=user_id)
 
     assert membership.departures == ("!churned:localhost", "!churned:localhost")
+    assert membership.departure_event_ids == ("$leave", "$kick")
 
 
 def _member_event(event_id: str, *, user_id: str, membership: str, ts: int) -> nio.Event:
@@ -1874,8 +1876,15 @@ async def test_sliding_sync_remote_departure_fences_and_purges(
     class BlockingStore(FencedRoomRecorder):
         """Hold the fence open so the tracked membership phase stays in flight."""
 
-        async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+        async def fence_departure(
+            self,
+            room_id: str,
+            *,
+            source: DepartureSource,
+            report_event_id: str | None = None,
+        ) -> DepartureOutcome:
             """Record the fenced room, then wait to be released."""
+            del report_event_id
             fenced_room_ids.append(room_id)
             fence_started.set()
             await allow_fence_finish.wait()

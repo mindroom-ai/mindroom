@@ -125,6 +125,16 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS reported_departures (
+        -- Matrix may replay an old leave after a later join has re-armed the
+        -- room. Exact event identity keeps that replay from fencing again.
+        principal_id TEXT NOT NULL,
+        event_id {ordered_text} NOT NULL,
+        room_id TEXT NOT NULL,
+        PRIMARY KEY (principal_id, event_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS conversation_hydration (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,

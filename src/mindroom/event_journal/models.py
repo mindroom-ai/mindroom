@@ -96,6 +96,9 @@ class DepartureObservation(StrEnum):
     # The same departure observed again, by either observer, with no rejoin in
     # between for a second departure to have happened in.
     ALREADY_FENCED = "already_fenced"
+    # The same Matrix departure event was replayed after its first observation
+    # had already committed.
+    REPEATED_REPORT = "repeated_report"
 
 
 @dataclass(frozen=True, slots=True)

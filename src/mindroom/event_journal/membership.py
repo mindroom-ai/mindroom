@@ -61,7 +61,13 @@ _OWED_REPORT_SYNC_RESPONSES = 2
 class MembershipView(Protocol):
     """One room's departure bookkeeping, and nothing else."""
 
-    async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+    async def fence_departure(
+        self,
+        room_id: str,
+        *,
+        source: DepartureSource,
+        report_event_id: str | None = None,
+    ) -> DepartureOutcome:
         """Apply one observation of a departure, invalidating at most once per departure."""
         ...
 
@@ -107,19 +113,33 @@ class MembershipFence:
         self._track(room_id, outcome)
         await self._clear_room(room_id, outcome)
 
-    async def fence_reported_departures(self, room_ids: Iterable[str]) -> None:
+    async def fence_reported_departures(
+        self,
+        room_ids: Iterable[str],
+        *,
+        event_ids: Iterable[str | None] | None = None,
+    ) -> None:
         """Fence departures a sync reported, absorbing the report local ones are owed.
 
         One entry per departure, not per room. A room that was left, rejoined
         and left again inside one sync interval is two departures, and only the
         first of them is the report the local leave is owed; offered as a set
         it would be one observation, absorbed, and the second departure would
-        never invalidate anything.
+        never invalidate anything. Matching event ids make an exact departure
+        idempotent across replayed sync responses and process restarts.
         """
         reported = tuple(room_ids)
+        report_event_ids = (None,) * len(reported) if event_ids is None else tuple(event_ids)
+        if len(report_event_ids) != len(reported):
+            msg = "Each reported departure must have one matching event identity"
+            raise ValueError(msg)
         await self._recover_owed_reports()
-        for room_id in reported:
-            outcome = await self.store.fence_departure(room_id, source=DepartureSource.REPORTED)
+        for room_id, event_id in zip(reported, report_event_ids, strict=True):
+            outcome = await self.store.fence_departure(
+                room_id,
+                source=DepartureSource.REPORTED,
+                report_event_id=event_id,
+            )
             self._log(room_id, outcome)
             self._track(room_id, outcome)
             await self._clear_room(room_id, outcome)

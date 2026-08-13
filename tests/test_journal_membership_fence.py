@@ -54,13 +54,23 @@ class RecordingStore:
     fails_next_owed_report_read: BaseException | None = None
     fails_next_retirement: BaseException | None = None
 
-    async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+    async def fence_departure(
+        self,
+        room_id: str,
+        *,
+        source: DepartureSource,
+        report_event_id: str | None = None,
+    ) -> DepartureOutcome:
         """Apply one departure observation, recording the ones that invalidated."""
         failure = self.fails_next_fence
         if failure is not None:
             self.fails_next_fence = None
             raise failure
-        outcome = await self.principal.fence_departure(room_id, source=source)
+        outcome = await self.principal.fence_departure(
+            room_id,
+            source=source,
+            report_event_id=report_event_id,
+        )
         if outcome.fenced:
             self.advanced.append(room_id)
         return outcome
@@ -241,6 +251,26 @@ async def test_delayed_leave_report_does_not_clean_the_rejoined_membership(
     calls.clear()
     await membership.fence_reported_departures([ROOM])
 
+    assert calls == []
+
+
+async def test_replayed_leave_event_does_not_fence_the_rejoined_membership(
+    store: RecordingStore,
+    principal: PrincipalStore,
+) -> None:
+    """One durable Matrix leave event is one report across response replays."""
+    calls: list[str] = []
+    membership = MembershipFence(store=store, clear_departed_room=calls.append)
+    await membership.fence_local_departure(ROOM)
+    await membership.note_membership_restarted(ROOM)
+    calls.clear()
+
+    await membership.fence_reported_departures([ROOM], event_ids=["$leave"])
+    restarted = MembershipFence(store=store, clear_departed_room=calls.append)
+    await restarted.fence_reported_departures([ROOM], event_ids=["$leave"])
+
+    assert store.advanced == [ROOM]
+    assert await principal.membership_epoch(ROOM) == 1
     assert calls == []
 
 

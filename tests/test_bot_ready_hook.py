@@ -27,7 +27,6 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.matrix import journal_ingress
-from mindroom.matrix.sync_loop import OwnRoomMembership
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -563,28 +562,50 @@ async def test_replaying_one_sync_response_fences_its_departures_once(
 
 @pytest.mark.asyncio
 async def test_replayed_departure_cannot_leave_a_confirmed_join_fenced(tmp_path: Path) -> None:
-    """A duplicated old leave report cannot disable a room confirmed joined."""
+    """A duplicated old leave report cannot invalidate a confirmed rejoin."""
     bot = _agent_bot(tmp_path)
     room_id = "!rejoined:localhost"
-    membership = OwnRoomMembership(
-        joined_room_ids=frozenset({room_id}),
-        left_room_ids=frozenset(),
-        departures=(room_id,),
+    user_id = bot.agent_user.user_id
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": "s-after-rejoin",
+            "rooms": {
+                "invite": {},
+                "join": {
+                    room_id: {
+                        "state": {"events": []},
+                        "timeline": {
+                            "events": [
+                                _departure_member_event("$leave", user_id=user_id, membership="leave", ts=1),
+                                {
+                                    "content": {"membership": "join"},
+                                    "event_id": "$rejoin",
+                                    "origin_server_ts": 2,
+                                    "sender": user_id,
+                                    "state_key": user_id,
+                                    "type": "m.room.member",
+                                },
+                            ],
+                            "limited": False,
+                            "prev_batch": "s-before-rejoin",
+                        },
+                    },
+                },
+                "leave": {},
+            },
+        },
     )
     await bot._membership_fence.fence_local_departure(room_id)
     await bot._membership_fence.note_membership_restarted(room_id)
+    epoch_after_rejoin = await bot._journal_principal().membership_epoch(room_id)
+    cleanup = MagicMock()
+    bot._membership_fence.clear_departed_room = cleanup
 
-    await bot._apply_own_room_membership(membership)
-    await bot._apply_own_room_membership(membership)
+    await bot._apply_own_room_membership_from_sync(response)
+    await bot._apply_own_room_membership_from_sync(response)
 
-    current_epoch = await bot._journal_principal().membership_epoch(room_id)
-    registered: list[str] = []
-    assert await bot._journal_principal().run_if_membership_epoch(
-        room_id=room_id,
-        expected_membership_epoch=current_epoch,
-        operation=lambda: registered.append(room_id),
-    )
-    assert registered == [room_id]
+    assert await bot._journal_principal().membership_epoch(room_id) == epoch_after_rejoin
+    cleanup.assert_not_called()
 
 
 @pytest.mark.asyncio
