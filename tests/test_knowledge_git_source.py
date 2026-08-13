@@ -21,11 +21,13 @@ from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_url_credentials
+from mindroom.knowledge.refresh_locks import refresh_source_root_lock
 from mindroom.knowledge.refresh_runner import refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     get_published_index,
     published_index_metadata_path,
     resolve_published_index_key,
+    source_root_for_published_index_key,
 )
 from tests.conftest import runtime_paths_for
 from tests.knowledge_test_support import (
@@ -127,6 +129,121 @@ async def test_git_source_sync_does_not_mutate_index_directly(
     assert not hasattr(manager, "index_file")
     assert result == GitSyncResult(head="rev-source-only", updated=True)
     assert manager.git_source.last_synced_head == "rev-source-only"
+
+
+@pytest.mark.asyncio
+async def test_git_source_sync_without_source_root_ownership_preserves_index_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct sync must not classify a possibly live Git lock as orphaned."""
+    manager = _git_manager(tmp_path)
+    git_dir = manager.knowledge_path / ".git"
+    git_dir.mkdir(parents=True)
+    lock_path = git_dir / "index.lock"
+    lock_path.write_text("", encoding="utf-8")
+
+    async def _sync_once(_git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
+        assert lock_path.exists() is True
+        return set(), set(), False
+
+    async def _rev_parse(_ref: str) -> str:
+        return "unchanged"
+
+    monkeypatch.setattr(manager.git_source, "_sync_once", _sync_once)
+    monkeypatch.setattr(manager.git_source, "_rev_parse", _rev_parse)
+
+    await manager.git_source.sync()
+
+    assert lock_path.exists() is True
+
+
+@pytest.mark.asyncio
+async def test_git_source_sync_with_expired_inherited_capability_preserves_index_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child task cannot retain cleanup authority after its owner's context exits."""
+    manager = _git_manager(tmp_path)
+    git_dir = manager.knowledge_path / ".git"
+    git_dir.mkdir(parents=True)
+    lock_path = git_dir / "index.lock"
+    lock_path.write_text("", encoding="utf-8")
+    released = asyncio.Event()
+
+    async def _sync_once(_git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
+        assert lock_path.exists() is True
+        return set(), set(), False
+
+    async def _rev_parse(_ref: str) -> str:
+        return "unchanged"
+
+    async def _sync_after_release() -> None:
+        await released.wait()
+        await manager.git_source.sync()
+
+    monkeypatch.setattr(manager.git_source, "_sync_once", _sync_once)
+    monkeypatch.setattr(manager.git_source, "_rev_parse", _rev_parse)
+    key = resolve_published_index_key(
+        "docs",
+        config=manager.config,
+        runtime_paths=manager.runtime_paths,
+    )
+    source_root = source_root_for_published_index_key(key)
+
+    async with refresh_source_root_lock(source_root):
+        inherited_task = asyncio.create_task(_sync_after_release())
+
+    released.set()
+    await inherited_task
+
+    assert lock_path.exists() is True
+
+
+@pytest.mark.asyncio
+async def test_run_git_inherits_owned_source_root_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Git descendant must keep refresh ownership if its Python parent exits."""
+    manager = _git_manager(tmp_path)
+
+    class _SuccessfulProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    subprocess_kwargs: dict[str, object] = {}
+
+    async def _fake_create_subprocess_exec(*_args: object, **kwargs: object) -> _SuccessfulProcess:
+        subprocess_kwargs.update(kwargs)
+        return _SuccessfulProcess()
+
+    async def _sync_once(_git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
+        await manager.git_source._run_git(["status"])
+        return set(), set(), False
+
+    async def _rev_parse(_ref: str) -> str:
+        return "unchanged"
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(manager.git_source, "_sync_once", _sync_once)
+    monkeypatch.setattr(manager.git_source, "_rev_parse", _rev_parse)
+    key = resolve_published_index_key(
+        "docs",
+        config=manager.config,
+        runtime_paths=manager.runtime_paths,
+    )
+    source_root = source_root_for_published_index_key(key)
+
+    async with refresh_source_root_lock(source_root):
+        await manager.git_source.sync()
+
+    inherited_fds = subprocess_kwargs["pass_fds"]
+    assert isinstance(inherited_fds, tuple)
+    assert len(inherited_fds) == 1
+    assert isinstance(inherited_fds[0], int)
 
 
 @pytest.mark.asyncio
@@ -497,6 +614,128 @@ async def test_existing_single_branch_checkout_switches_to_new_remote_branch(tmp
     assert release_lookup.index is not None
     assert [document.content for document in release_lookup.index.knowledge.search("branch", max_results=5)] == [
         "release branch content",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_refresh_recovers_orphaned_git_index_lock(tmp_path: Path) -> None:
+    """A crashed refresh must not leave every later Git refresh permanently wedged."""
+    remote_work = tmp_path / "remote-work"
+    remote_work.mkdir()
+
+    async def _git(cwd: Path, *args: str) -> None:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    await _git(remote_work, "init", "-b", "main")
+    await _git(remote_work, "config", "user.email", "tests@example.com")
+    await _git(remote_work, "config", "user.name", "MindRoom Tests")
+    (remote_work / "doc.md").write_text("before crash", encoding="utf-8")
+    await _git(remote_work, "add", "doc.md")
+    await _git(remote_work, "commit", "-m", "before")
+    remote_bare = tmp_path / "remote.git"
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    docs_path = tmp_path / "checkout"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url=str(remote_bare), branch="main")},
+    )
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    (remote_work / "doc.md").write_text("after crash", encoding="utf-8")
+    await _git(remote_work, "commit", "-am", "after")
+    await _git(remote_work, "push", str(remote_bare), "main")
+    lock_path = docs_path / ".git" / "index.lock"
+    lock_path.write_text("", encoding="utf-8")
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+
+    assert lock_path.exists() is False
+    assert result.index_published is True
+    assert lookup.index is not None
+    assert [document.content for document in lookup.index.knowledge.search("crash", max_results=5)] == [
+        "after crash",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_refresh_recovers_orphaned_index_lock_in_linked_worktree(tmp_path: Path) -> None:
+    """Recovery must follow a linked worktree's .git pointer to its real index lock."""
+    remote_work = tmp_path / "remote-work"
+    remote_work.mkdir()
+
+    async def _git(cwd: Path, *args: str) -> None:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    await _git(remote_work, "init", "-b", "main")
+    await _git(remote_work, "config", "user.email", "tests@example.com")
+    await _git(remote_work, "config", "user.name", "MindRoom Tests")
+    (remote_work / "doc.md").write_text("linked worktree content", encoding="utf-8")
+    await _git(remote_work, "add", "doc.md")
+    await _git(remote_work, "commit", "-m", "main")
+    remote_bare = tmp_path / "remote.git"
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    seed_checkout = tmp_path / "seed-checkout"
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "clone", str(remote_bare), str(seed_checkout)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    docs_path = tmp_path / "worktree-checkout"
+    await _git(seed_checkout, "worktree", "add", "--detach", str(docs_path), "HEAD")
+    dot_git = docs_path / ".git"
+    git_dir = Path(dot_git.read_text(encoding="utf-8").removeprefix("gitdir:").strip())
+    lock_path = git_dir / "index.lock"
+    lock_path.write_text("", encoding="utf-8")
+
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url=str(remote_bare), branch="main")},
+    )
+    runtime_paths = runtime_paths_for(config)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+
+    assert lock_path.exists() is False
+    assert result.index_published is True
+    assert lookup.index is not None
+    assert [document.content for document in lookup.index.knowledge.search("linked", max_results=5)] == [
+        "linked worktree content",
     ]
 
 

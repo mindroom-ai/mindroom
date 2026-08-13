@@ -6,10 +6,11 @@ import asyncio
 import base64
 import json
 import os
+import signal
 import subprocess
 import sys
 import traceback
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2215,6 +2216,32 @@ async def test_source_root_lock_takes_the_in_loop_half_before_the_cross_process_
         events.append("body")
 
     assert events == ["acquire in_loop", "acquire file", "body", "release file", "release in_loop"]
+
+
+@pytest.mark.asyncio
+async def test_source_root_lock_capability_expires_in_inherited_task_context(tmp_path: Path) -> None:
+    """A task created under the lock cannot retain cleanup authority after release."""
+    source_path = (tmp_path / "docs").resolve()
+    source_root = knowledge_registry.KnowledgeSourceRoot(
+        storage_root=str(tmp_path.resolve()),
+        knowledge_path=str(source_path),
+    )
+    inspect_after_release = asyncio.Event()
+    observed_fds: list[int | None] = []
+
+    async def _inspect_inherited_context() -> None:
+        capability = file_locks.current_inherited_file_lock()
+        assert capability is not None
+        await inspect_after_release.wait()
+        observed_fds.append(capability.fileno_for(source_path))
+
+    async with knowledge_refresh_locks.refresh_source_root_lock(source_root):
+        inherited_task = asyncio.create_task(_inspect_inherited_context())
+
+    inspect_after_release.set()
+    await inherited_task
+
+    assert observed_fds == [None]
 
 
 @pytest.mark.asyncio
@@ -5904,6 +5931,54 @@ async def test_cancelled_subprocess_refresh_reconciles_running_state(
     assert state.reason == "refresh_cancelled"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="process groups require POSIX")
+@pytest.mark.asyncio
+async def test_terminate_refresh_subprocess_kills_surviving_process_group_member(tmp_path: Path) -> None:
+    """A Git-like grandchild that ignores SIGTERM must not outlive its refresh leader."""
+    descendant_lock_path = tmp_path / "descendant.lock"
+    ready_read_fd, ready_write_fd = os.pipe()
+    script = f"""
+import fcntl
+import os
+import signal
+import time
+
+child_pid = os.fork()
+if child_pid == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    lock_file = open({str(descendant_lock_path)!r}, "w")
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    os.write({ready_write_fd}, b"1")
+    os.close({ready_write_fd})
+    time.sleep(60)
+    os._exit(0)
+
+os.close({ready_write_fd})
+signal.signal(signal.SIGTERM, lambda *_args: os._exit(0))
+time.sleep(60)
+"""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        start_new_session=True,
+        pass_fds=(ready_write_fd,),
+    )
+    os.close(ready_write_fd)
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(os.read, ready_read_fd, 1), timeout=1) == b"1"
+        assert file_locks.file_lock_is_held(descendant_lock_path) is True
+
+        await knowledge_refresh_runner._terminate_refresh_subprocess(process)
+
+        assert file_locks.file_lock_is_held(descendant_lock_path) is False
+    finally:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
+        os.close(ready_read_fd)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pending_reason", [None, "source_changed", "git_source_updated", "manual_reindex"])
 async def test_wedged_subprocess_refresh_is_terminated_after_timeout(
@@ -6227,7 +6302,13 @@ async def test_failed_subprocess_refresh_reconciles_running_state(
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
         return _Process()
 
+    terminated: list[_Process] = []
+
+    async def _fake_terminate(process: _Process) -> None:
+        terminated.append(process)
+
     monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
 
     with pytest.raises(RuntimeError, match="exit code 137"):
         await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
@@ -6242,6 +6323,7 @@ async def test_failed_subprocess_refresh_reconciles_running_state(
     assert state.reason == "refresh_failed"
     assert state.last_error is not None
     assert "exit code 137" in state.last_error
+    assert len(terminated) == 1
 
 
 @pytest.mark.asyncio
@@ -6295,7 +6377,11 @@ async def test_failed_subprocess_refresh_does_not_overwrite_newer_success(
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
         return _Process()
 
+    async def _fake_terminate(_process: _Process) -> None:
+        pass
+
     monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
 
     with pytest.raises(RuntimeError, match="exit code 137"):
         await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
@@ -6364,7 +6450,11 @@ async def test_failed_subprocess_refresh_reconciles_running_state_after_newer_pu
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
         return _Process()
 
+    async def _fake_terminate(_process: _Process) -> None:
+        pass
+
     monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
 
     with pytest.raises(RuntimeError, match="exit code 137"):
         await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(

@@ -218,6 +218,10 @@ async def refresh_knowledge_binding_in_subprocess(
         raise
 
     if return_code != 0:
+        # The refresh leader can crash while one of its Git descendants keeps
+        # running in the session. Drain that process group before reconciliation
+        # tries to reacquire the source-root lock inherited by those descendants.
+        await _terminate_refresh_subprocess(process)
         msg = f"Knowledge refresh subprocess failed for {base_id!r} with exit code {return_code}"
         await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=msg)
         raise RuntimeError(msg)
@@ -270,23 +274,51 @@ def _subprocess_session_kwargs() -> _SubprocessSessionKwargs:
     return {"start_new_session": True}
 
 
-async def _terminate_refresh_subprocess(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        return
-    if os.name == "nt":
-        process.terminate()
-    else:
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGTERM)
+def _process_group_exists(process_group_id: int) -> bool:
     try:
-        await asyncio.wait_for(process.wait(), timeout=10)
-    except TimeoutError:
-        if os.name == "nt":
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _wait_for_process_group_exit(process_group_id: int, *, wait_seconds: float = 1.0) -> None:
+    deadline = asyncio.get_running_loop().time() + wait_seconds
+    # There is no asyncio readiness primitive for POSIX process-group exit.
+    while _process_group_exists(process_group_id) and asyncio.get_running_loop().time() < deadline:  # noqa: ASYNC110
+        await asyncio.sleep(0.01)
+
+
+async def _terminate_refresh_subprocess(process: asyncio.subprocess.Process) -> None:
+    if os.name == "nt":
+        if process.returncode is not None:
+            return
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except TimeoutError:
             process.kill()
-        else:
+            await process.wait()
+        return
+
+    process_group_id = process.pid
+    with suppress(ProcessLookupError):
+        os.killpg(process_group_id, signal.SIGTERM)
+    if process.returncode is None:
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except TimeoutError:
             with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-        await process.wait()
+                os.killpg(process_group_id, signal.SIGKILL)
+            await process.wait()
+            await _wait_for_process_group_exit(process_group_id)
+            return
+    if _process_group_exists(process_group_id):
+        with suppress(ProcessLookupError):
+            os.killpg(process_group_id, signal.SIGKILL)
+        await _wait_for_process_group_exit(process_group_id)
 
 
 async def _drain_owned_cleanup_task(cleanup_task: asyncio.Task[None]) -> asyncio.CancelledError | None:
