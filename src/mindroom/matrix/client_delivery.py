@@ -354,8 +354,14 @@ async def send_message_outcome(
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
     transaction_id: str | None = None,
+    content_is_prepared: bool = False,
 ) -> MatrixSendOutcome:
-    """Send a message to a Matrix room and return the delivered payload or a typed failure."""
+    """Send a message to a Matrix room and return the delivered payload or a typed failure.
+
+    ``content_is_prepared`` is reserved for durable payloads already frozen in
+    the outbox. Those bytes must reach Matrix verbatim so the durable record
+    remains an exact description of the wire event.
+    """
     if not _can_send_to_encrypted_room(client, room_id, operation=operation):
         return MatrixDeliveryFailure(
             MatrixDeliveryFailureKind.ENCRYPTION_GUARD,
@@ -384,12 +390,14 @@ async def send_message_outcome(
         room_id=room_id,
         message_type=message_type,
     )
-    content_sent = await prepare_large_message(
-        client,
-        room_id,
-        content,
-        room_encrypted=room_encryption_override,
-    )
+    content_sent = content
+    if not content_is_prepared:
+        content_sent = await prepare_large_message(
+            client,
+            room_id,
+            content,
+            room_encrypted=room_encryption_override,
+        )
     emit_timing_event(
         "Matrix send timing",
         phase="prepare_finish",
