@@ -211,21 +211,20 @@ async def fetch_thread_event_sources_via_room_messages(
     )
 
 
-async def find_response_event_ids_via_room_messages(
+async def _find_room_message_event_ids(
     client: nio.AsyncClient,
     room_id: str,
     *,
-    response_sender: str,
     source_event_ids: Collection[str],
-    response_source_filter: Callable[[Mapping[str, Any]], bool] | None = None,
+    event_matches: Callable[[Mapping[str, Any], set[str]], bool],
+    scan_label: str,
 ) -> frozenset[str]:
-    """Find original responses to exact source events in recent room history."""
+    """Find matching events while scanning backward to exact source events."""
     sources = set(source_event_ids)
     remaining_sources = set(sources)
-    response_event_ids: set[str] = set()
+    matches: set[str] = set()
     from_token: str | None = None
     seen_pagination_tokens: set[str] = set()
-
     while remaining_sources:
         response = await client.room_messages(
             room_id,
@@ -235,7 +234,7 @@ async def find_response_event_ids_via_room_messages(
             direction=nio.MessageDirection.back,
         )
         if not isinstance(response, nio.RoomMessagesResponse):
-            msg = f"response recovery room scan failed for {room_id}: {response}"
+            msg = f"{scan_label} room scan failed for {room_id}: {response}"
             raise RuntimeError(msg)  # noqa: TRY004
         if not response.chunk:
             break
@@ -244,24 +243,45 @@ async def find_response_event_ids_via_room_messages(
                 continue
             remaining_sources.discard(event.event_id)
             event_source = event.source if isinstance(event.source, dict) else {}
-            event_info = EventInfo.from_event(event_source)
-            if (
-                event_source.get("sender") == response_sender
-                and not event_info.is_edit
-                and not event_info.is_thread_fallback
-                and event_info.reply_to_event_id in sources
-                and (response_source_filter is None or response_source_filter(event_source))
-            ):
-                response_event_ids.add(event.event_id)
+            if event_matches(event_source, sources):
+                matches.add(event.event_id)
         if not response.end:
             break
         if response.end in seen_pagination_tokens:
-            msg = f"response recovery room scan repeated pagination token for {room_id}"
+            msg = f"{scan_label} room scan repeated pagination token for {room_id}"
             raise RuntimeError(msg)
         seen_pagination_tokens.add(response.end)
         from_token = response.end
+    return frozenset(matches)
 
-    return frozenset(response_event_ids)
+
+async def find_response_event_ids_via_room_messages(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    response_sender: str,
+    source_event_ids: Collection[str],
+    response_source_filter: Callable[[Mapping[str, Any]], bool] | None = None,
+) -> frozenset[str]:
+    """Find original responses to exact source events in recent room history."""
+
+    def matches_response(event_source: Mapping[str, Any], sources: set[str]) -> bool:
+        event_info = EventInfo.from_event(dict(event_source))
+        return (
+            event_source.get("sender") == response_sender
+            and not event_info.is_edit
+            and not event_info.is_thread_fallback
+            and event_info.reply_to_event_id in sources
+            and (response_source_filter is None or response_source_filter(event_source))
+        )
+
+    return await _find_room_message_event_ids(
+        client,
+        room_id,
+        source_event_ids=source_event_ids,
+        event_matches=matches_response,
+        scan_label="response recovery",
+    )
 
 
 def _outbox_delivery_content(payload: Mapping[str, object]) -> Mapping[str, object]:
@@ -306,43 +326,22 @@ async def find_outbox_delivery_event_id_via_room_messages(
     source_event_ids: Collection[str],
 ) -> str | None:
     """Find one frozen response from another principal, or prove it absent."""
-    sources = set(source_event_ids)
-    remaining_sources = set(sources)
-    matches: set[str] = set()
-    from_token: str | None = None
-    seen_pagination_tokens: set[str] = set()
-    while remaining_sources:
-        response = await client.room_messages(
-            delivery.room_id,
-            start=from_token,
-            limit=100,
-            message_filter={"types": list(_ROOM_HISTORY_MESSAGE_TYPES)},
-            direction=nio.MessageDirection.back,
+
+    def matches_delivery(event_source: Mapping[str, Any], sources: set[str]) -> bool:
+        return _matches_outbox_delivery(
+            event_source,
+            response_sender=response_sender,
+            source_event_ids=sources,
+            delivery=delivery,
         )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            msg = f"outbox recovery room scan failed for {delivery.room_id}: {response}"
-            raise RuntimeError(msg)  # noqa: TRY004
-        if not response.chunk:
-            break
-        for event in response.chunk:
-            if not isinstance(event, nio.Event):
-                continue
-            remaining_sources.discard(event.event_id)
-            event_source = event.source if isinstance(event.source, dict) else {}
-            if _matches_outbox_delivery(
-                event_source,
-                response_sender=response_sender,
-                source_event_ids=sources,
-                delivery=delivery,
-            ):
-                matches.add(event.event_id)
-        if not response.end:
-            break
-        if response.end in seen_pagination_tokens:
-            msg = f"outbox recovery room scan repeated pagination token for {delivery.room_id}"
-            raise RuntimeError(msg)
-        seen_pagination_tokens.add(response.end)
-        from_token = response.end
+
+    matches = await _find_room_message_event_ids(
+        client,
+        delivery.room_id,
+        source_event_ids=source_event_ids,
+        event_matches=matches_delivery,
+        scan_label="outbox recovery",
+    )
     if len(matches) > 1:
         msg = (
             f"Delivery {delivery.transaction_id!r} has {len(matches)} matching Matrix events; "

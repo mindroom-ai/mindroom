@@ -38,7 +38,7 @@ from mindroom.tool_approval import (
     _shutdown_approval_store,
     evaluate_tool_approval,
     resolve_tool_approval_approver,
-    tool_requires_approval_for_openai_compat,
+    tool_may_require_approval,
 )
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from tests.approval_test_support import (
@@ -2425,7 +2425,7 @@ async def test_evaluate_tool_approval_honors_tool_approval_exemption(
 
 
 @pytest.mark.asyncio
-async def test_tool_approval_rule_matching_uses_first_matching_action_for_both_callers(tmp_path: Path) -> None:
+async def test_tool_approval_rule_matching_uses_first_matching_action_for_listing(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -2452,7 +2452,7 @@ async def test_tool_approval_rule_matching_uses_first_matching_action_for_both_c
 
     assert requires_approval is False
     assert timeout_seconds == 2 * 24 * 60 * 60
-    assert tool_requires_approval_for_openai_compat(config, "read_file") is False
+    assert tool_may_require_approval(config, "read_file") is False
 
 
 @pytest.mark.asyncio
@@ -2486,7 +2486,7 @@ async def test_tool_approval_script_rule_listing_requires_approval_but_evaluatio
 
     assert requires_approval is False
     assert timeout_seconds == 24 * 60 * 60
-    assert tool_requires_approval_for_openai_compat(config, "write_file") is True
+    assert tool_may_require_approval(config, "write_file") is True
 
 
 @pytest.mark.parametrize(
@@ -2497,7 +2497,7 @@ async def test_tool_approval_script_rule_listing_requires_approval_but_evaluatio
     ],
 )
 @pytest.mark.asyncio
-async def test_tool_approval_rule_matching_falls_back_to_default_for_both_callers(
+async def test_tool_approval_rule_matching_falls_back_to_default_for_listing(
     tmp_path: Path,
     default: str,
     expected: bool,
@@ -2525,7 +2525,7 @@ async def test_tool_approval_rule_matching_falls_back_to_default_for_both_caller
 
     assert requires_approval is expected
     assert timeout_seconds == 7 * 24 * 60 * 60
-    assert tool_requires_approval_for_openai_compat(config, "read_file") is expected
+    assert tool_may_require_approval(config, "read_file") is expected
 
 
 @pytest.mark.asyncio

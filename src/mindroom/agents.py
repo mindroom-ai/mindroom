@@ -35,7 +35,7 @@ from mindroom.runtime_resolution import (
     resolve_private_requester_scope_root,
 )
 from mindroom.timing import timed, timed_block
-from mindroom.tool_approval import tool_may_require_approval, tool_requires_approval_for_openai_compat
+from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     default_worker_routed_tools,
@@ -1253,38 +1253,6 @@ def _build_agent_tool_hook_bridge(
     )
 
 
-def _prune_openai_incompatible_tools(
-    toolkit: Toolkit,
-    *,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-) -> Toolkit | None:
-    """Hide tools from OpenAI-compatible agents when `/v1` cannot run them."""
-    if execution_identity is None or execution_identity.channel != "openai_compat":
-        return toolkit
-
-    hidden_tool_names = {
-        tool_name
-        for tool_name in (*toolkit.functions, *toolkit.async_functions)
-        if tool_requires_approval_for_openai_compat(config, tool_name)
-    }
-    if not hidden_tool_names:
-        return toolkit
-
-    toolkit.functions = {
-        tool_name: function for tool_name, function in toolkit.functions.items() if tool_name not in hidden_tool_names
-    }
-    toolkit.async_functions = {
-        tool_name: function
-        for tool_name, function in toolkit.async_functions.items()
-        if tool_name not in hidden_tool_names
-    }
-
-    if toolkit.functions or toolkit.async_functions:
-        return toolkit
-    return None
-
-
 def _prune_toolkit_functions(
     toolkit: Toolkit,
     tool_function_filter: Callable[[Function], bool] | None,
@@ -1536,12 +1504,6 @@ def _assemble_agent_toolkits(
                     delegation_depth=delegation_depth,
                     refresh_scheduler=refresh_scheduler,
                     dynamic_tool_continuation=dynamic_tool_continuation,
-                )
-            if toolkit:
-                toolkit = _prune_openai_incompatible_tools(
-                    toolkit,
-                    config=config,
-                    execution_identity=execution_identity,
                 )
             if toolkit:
                 toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)

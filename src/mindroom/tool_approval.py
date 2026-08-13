@@ -61,7 +61,6 @@ __all__ = [
     "send_suspended_tool_approval",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
-    "tool_requires_approval_for_openai_compat",
 ]
 
 _SCRIPT_CACHE: dict[tuple[str, int], ModuleType] = {}
@@ -159,20 +158,6 @@ def _clear_script_cache() -> None:
 
 def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRuleConfig | None:
     return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
-
-
-def tool_requires_approval_for_openai_compat(
-    config: Config,
-    tool_name: str,
-) -> bool:
-    """Return whether one `/v1` tool must be hidden because approval may be required."""
-    approval_config = config.tool_approval
-    rule = _matching_tool_approval_rule(config, tool_name)
-    if rule is None:
-        return approval_config.default == "require_approval"
-    if rule.action is not None:
-        return rule.action == "require_approval"
-    return True
 
 
 def tool_may_require_approval(config: Config, tool_name: str) -> bool:

@@ -928,21 +928,15 @@ class _ApprovalManager:
             content = identified.card.card.get("content")
             continuation_id = content.get("continuation_id") if isinstance(content, dict) else None
             tool_call_id = content.get("tool_call_id") if isinstance(content, dict) else None
-            recorded_status = identified.card.resolution.get("status")
-            if (
-                isinstance(continuation_id, str)
-                and isinstance(tool_call_id, str)
-                and recorded_status in ("approved", "denied", "expired")
-                and self._detached_decision_handler is not None
-            ):
-                await self._detached_decision_handler(
-                    continuation_id,
-                    tool_call_id,
-                    recorded_status,
-                    cast("str | None", identified.card.resolution.get("resolution_reason")),
+            if isinstance(continuation_id, str) and isinstance(tool_call_id, str):
+                restored = await self._restore_recorded_continuation_resolution(
+                    pending,
+                    identified.card,
+                    continuation_id=continuation_id,
+                    tool_call_id=tool_call_id,
                 )
-                if self._detached_decision_ready is not None:
-                    await self._detached_decision_ready(continuation_id, tool_call_id)
+                if restored is not None:
+                    return restored
             return await self._redeliver_recorded_resolution(pending, identified.card)
         content = identified.card.card.get("content")
         if (
@@ -969,6 +963,30 @@ class _ApprovalManager:
             resolved_by=transport_sender,
         )
         return result.resolved
+
+    async def _restore_recorded_continuation_resolution(
+        self,
+        pending: PendingApproval,
+        stored: StoredApprovalCard,
+        *,
+        continuation_id: str,
+        tool_call_id: str,
+    ) -> bool | None:
+        """Restore one durable continuation decision and redeliver its Matrix resolution."""
+        if stored.resolution is None or self._detached_decision_handler is None:
+            return None
+        recorded_status = stored.resolution.get("status")
+        if recorded_status not in ("approved", "denied", "expired"):
+            return None
+        await self._detached_decision_handler(
+            continuation_id,
+            tool_call_id,
+            recorded_status,
+            cast("str | None", stored.resolution.get("resolution_reason")),
+        )
+        if self._detached_decision_ready is not None:
+            await self._detached_decision_ready(continuation_id, tool_call_id)
+        return await self._redeliver_recorded_resolution(pending, stored)
 
     async def _redeliver_recorded_resolution(self, pending: PendingApproval, stored: StoredApprovalCard) -> bool:
         """Show a decision a previous process committed to but may not have shown.
@@ -1055,7 +1073,7 @@ class _ApprovalManager:
             resolved_by=sender_id,
         )
 
-    async def expire_detached_card(self, *, room_id: str, card_event_id: str) -> bool:  # noqa: C901, PLR0911
+    async def expire_detached_card(self, *, room_id: str, card_event_id: str) -> bool:  # noqa: PLR0911
         """Expire one continuation card, redelivering any recorded terminal decision."""
         if self.knows_in_memory_approval_card(card_event_id):
             return True
@@ -1089,18 +1107,13 @@ class _ApprovalManager:
         ):
             return False
         if stored.resolution is not None:
-            recorded_status = stored.resolution.get("status")
-            if recorded_status not in ("approved", "denied", "expired"):
-                return False
-            await self._detached_decision_handler(
-                continuation_id,
-                tool_call_id,
-                recorded_status,
-                cast("str | None", stored.resolution.get("resolution_reason")),
+            restored = await self._restore_recorded_continuation_resolution(
+                pending,
+                stored,
+                continuation_id=continuation_id,
+                tool_call_id=tool_call_id,
             )
-            if self._detached_decision_ready is not None:
-                await self._detached_decision_ready(continuation_id, tool_call_id)
-            return await self._redeliver_recorded_resolution(pending, stored)
+            return False if restored is None else restored
         committed_status, committed_reason = await self._detached_decision_handler(
             continuation_id,
             tool_call_id,
