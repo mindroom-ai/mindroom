@@ -26,6 +26,7 @@ from mindroom.event_journal import (
     DepartureSource,
     EventClass,
     EventKind,
+    PendingPage,
     SemanticConsumer,
     VisibleMessage,
 )
@@ -48,7 +49,7 @@ from tests.test_event_journal_store import corrupt
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sized
 
-    from mindroom.event_journal import EventJournalStore, JournalEvent, PendingPage, PrincipalStore
+    from mindroom.event_journal import EventJournalStore, JournalEvent, PrincipalStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -1419,13 +1420,12 @@ class TestPendingEventWorker:
                 raise
 
         await self._admit(alice, text_event("$message"))
-        event = (await alice.pending())[0]
         worker = PendingEventWorker(store=alice, handle=handle)
         lane = asyncio.create_task(existing_lane())
         worker._lanes[ROOM] = lane
         await existing_lane_started.wait()
 
-        draining = asyncio.create_task(worker._drain_room(ROOM, [event]))
+        draining = asyncio.create_task(worker.drain_once())
         await asyncio.sleep(0)
         stopping = asyncio.create_task(worker.stop())
         try:
@@ -1444,6 +1444,64 @@ class TestPendingEventWorker:
             for tracked_lane in worker._lanes.values():
                 tracked_lane.cancel()
             await asyncio.gather(stopping, draining, *worker._lanes.values(), return_exceptions=True)
+
+    async def test_a_pre_stop_recovery_drain_cannot_dispatch_after_restart(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Restarting does not make an old drain current again."""
+        first_read_started = asyncio.Event()
+        release_first_read = asyncio.Event()
+        handled = asyncio.Event()
+
+        @dataclass
+        class BlockingFirstRead:
+            inner: PrincipalStore
+            pending_calls: int = 0
+
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                after_receipt_order: int | None = None,
+            ) -> PendingPage:
+                self.pending_calls += 1
+                if self.pending_calls == 1:
+                    page = await self.inner.pending(limit=limit, after_receipt_order=after_receipt_order)
+                    first_read_started.set()
+                    await release_first_read.wait()
+                    return page
+                return PendingPage((), resume_after=None, reached_end=True, unreadable_rows=0)
+
+            async def is_pending(self, event_id: str) -> bool:
+                return await self.inner.is_pending(event_id)
+
+            async def settle(self, event_id: str) -> None:
+                await self.inner.settle(event_id)
+
+        async def handle(event: JournalEvent) -> bool:
+            del event
+            handled.set()
+            return True
+
+        await self._admit(alice, text_event("$message"))
+        worker = PendingEventWorker(store=BlockingFirstRead(alice), handle=handle)
+        stale_drain = asyncio.create_task(worker.drain_once())
+        await first_read_started.wait()
+
+        await worker.stop()
+        worker.start()
+        try:
+            release_first_read.set()
+            await asyncio.wait_for(stale_drain, timeout=1.0)
+            await asyncio.sleep(0)
+
+            assert not handled.is_set()
+        finally:
+            release_first_read.set()
+            await worker.stop()
+            stale_drain.cancel()
+            await asyncio.gather(stale_drain, return_exceptions=True)
 
     async def test_one_stalled_room_does_not_block_another(
         self,
