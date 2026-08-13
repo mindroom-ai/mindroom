@@ -122,6 +122,25 @@ def test_approval_commit_rechecks_exact_call_deadline(tmp_path: Path) -> None:
     assert resolved.calls[0].reason == "Tool approval request timed out."
 
 
+def test_approval_update_atomically_guards_exact_call_deadline(tmp_path: Path) -> None:
+    """The SQL update must reject expiry even when the earlier Python check observed validity."""
+    store = ApprovalContinuationStore(tmp_path)
+    continuation = _continuation()
+    store.create(
+        replace(
+            continuation,
+            calls=(replace(continuation.calls[0], expires_at="2000-01-01T00:00:00+00:00"),),
+        ),
+    )
+
+    with patch("mindroom.approval_continuation._call_expired", return_value=False):
+        resolved = store.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+
+    assert resolved is not None
+    assert resolved.calls[0].decision is ApprovalDecision.EXPIRED
+    assert resolved.calls[0].reason == "Tool approval request timed out."
+
+
 def test_failure_fence_cannot_take_a_claim_won_by_another_owner(tmp_path: Path) -> None:
     """A stale failure path must not invalidate a claim whose tool execution already won."""
     store = ApprovalContinuationStore(tmp_path)

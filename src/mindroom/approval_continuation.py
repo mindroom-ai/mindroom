@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from sqlalchemy import Table, select, tuple_
+from sqlalchemy import Table, func, select, tuple_
 
 from mindroom.agent_storage import create_state_storage
 from mindroom.history.types import HistoryScope
@@ -325,6 +325,8 @@ class ApprovalContinuationStore:
         updated: ApprovalContinuation,
         *,
         run_status: str | None = None,
+        approval_deadline_call_index: int | None = None,
+        expired_fallback: ApprovalContinuation | None = None,
     ) -> ApprovalContinuation | None:
         """Commit one state transition guarded by the current durable state."""
         values: dict[str, object] = {
@@ -341,15 +343,27 @@ class ApprovalContinuationStore:
             msg = "Tool approval continuation table disappeared before its guarded update"
             raise RuntimeError(msg)
         with self._db.Session() as session, session.begin():
-            result = session.execute(
-                table.update()
-                .where(
-                    table.c.id == current.approval_id,
-                    table.c.status == current.state,
-                    table.c.context == (current._stored_context or current._to_context()),
-                )
-                .values(**values),
+            guards = (
+                table.c.id == current.approval_id,
+                table.c.status == current.state,
+                table.c.context == (current._stored_context or current._to_context()),
             )
+            deadline = None
+            if approval_deadline_call_index is not None:
+                deadline = func.julianday(
+                    table.c.context["calls"][approval_deadline_call_index]["expires_at"].as_string(),
+                )
+            update = table.update().where(*guards)
+            if deadline is not None:
+                update = update.where(deadline > func.julianday("now"))
+            result = session.execute(update.values(**values))
+            if result.rowcount == 0 and deadline is not None and expired_fallback is not None:
+                expired_values = {**values, "context": expired_fallback._to_context()}
+                result = session.execute(
+                    table.update()
+                    .where(*guards, func.coalesce(deadline <= func.julianday("now"), True))
+                    .values(**expired_values),
+                )
             if result.rowcount == 0:
                 return None
             row = session.execute(select(table).where(table.c.id == current.approval_id)).fetchone()
@@ -423,7 +437,8 @@ class ApprovalContinuationStore:
                 return current
             calls: list[ApprovalCall] = []
             matched = False
-            for call in current.calls:
+            approval_deadline_call_index: int | None = None
+            for call_index, call in enumerate(current.calls):
                 if call.tool_call_id == tool_call_id:
                     matched = True
                     if call.decision is not None:
@@ -434,13 +449,31 @@ class ApprovalContinuationStore:
                     if decision is ApprovalDecision.APPROVED and _call_expired(call):
                         committed_decision = ApprovalDecision.EXPIRED
                         committed_reason = _TIMEOUT_REASON
+                    elif decision is ApprovalDecision.APPROVED:
+                        approval_deadline_call_index = call_index
                     calls.append(replace(call, decision=committed_decision, reason=committed_reason))
                 else:
                     calls.append(call)
             if not matched:
                 return current
             updated = replace(current, calls=tuple(calls))
-            return self._persist(current, updated)
+            expired_fallback = None
+            if approval_deadline_call_index is not None:
+                expired_fallback = replace(
+                    updated,
+                    calls=tuple(
+                        replace(call, decision=ApprovalDecision.EXPIRED, reason=_TIMEOUT_REASON)
+                        if call_index == approval_deadline_call_index
+                        else call
+                        for call_index, call in enumerate(updated.calls)
+                    ),
+                )
+            return self._persist(
+                current,
+                updated,
+                approval_deadline_call_index=approval_deadline_call_index,
+                expired_fallback=expired_fallback,
+            )
 
     def acknowledge_call(self, approval_id: str, tool_call_id: str) -> ApprovalContinuation | None:
         """Record that the winning decision is durable in the approval-card journal."""
