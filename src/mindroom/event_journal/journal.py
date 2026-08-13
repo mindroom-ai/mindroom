@@ -301,12 +301,12 @@ def _advance_membership_epoch(
     # survive, as everything above does, because they are still the proof that
     # these events already had their one turn.
     #
-    # Only the turn-backed kinds. A redaction, a reaction, an approval reply
-    # and a decryption failure do not enqueue an answer, so the epoch predicate
-    # never blocks them and none of them is unanswerable. A redaction in
-    # particular still owes real cleanup -- removing the redacted request from
-    # durable turn and session state -- and sweeping it up here would drop that
-    # work silently and let the redacted content survive in later context.
+    # Only the turn-backed kinds and reactions already claimed by an interactive
+    # response. Other reactions do not enqueue an answer and still owe their
+    # hook work. A redaction in particular still owes real cleanup -- removing
+    # the redacted request from durable turn and session state -- and sweeping
+    # it up here would drop that work silently and let the redacted content
+    # survive in later context.
     turn_backed = tuple(sorted(kind.value for kind in TURN_BACKED_KINDS))
     kind_placeholders = ", ".join("?" for _ in turn_backed)
     transaction.execute(
@@ -314,9 +314,19 @@ def _advance_membership_epoch(
         UPDATE journal_events
         SET state = ?, source_json = '', semantic_consumer = NULL
         WHERE principal_id = ? AND room_id = ? AND state = 'pending'
-          AND kind IN ({kind_placeholders})
+          AND (
+            kind IN ({kind_placeholders})
+            OR (kind = ? AND semantic_consumer = ?)
+          )
         """,  # noqa: S608 - placeholders are generated, values are still bound
-        (SETTLED_STATE, principal_id, room_id, *turn_backed),
+        (
+            SETTLED_STATE,
+            principal_id,
+            room_id,
+            *turn_backed,
+            EventKind.REACTION.value,
+            SemanticConsumer.INTERACTIVE_REACTION.value,
+        ),
     )
     return epoch
 
@@ -832,8 +842,8 @@ def claim_semantic_consumer(
     principal_id: str,
     event_id: str,
     consumer: SemanticConsumer,
-) -> SemanticConsumer:
-    """Record the sole consumer of one event, returning whoever holds it.
+) -> SemanticConsumer | None:
+    """Record the sole consumer, or retire a stale interactive reaction.
 
     First claim wins, durably. A replay after a crash therefore cannot let a
     second consumer act on the same reaction.
@@ -843,14 +853,22 @@ def claim_semantic_consumer(
         UPDATE journal_events
         SET semantic_consumer = COALESCE(semantic_consumer, ?)
         WHERE principal_id = ? AND event_id = ? AND state = 'pending'
-        RETURNING semantic_consumer
+        RETURNING semantic_consumer, room_id, kind, membership_epoch
         """,
         (consumer.value, principal_id, event_id),
     )
     if row is None:
         msg = f"Cannot claim a consumer for settled or missing event {event_id!r}"
         raise RuntimeError(msg)
-    return SemanticConsumer(row["semantic_consumer"])
+    claimed = SemanticConsumer(row["semantic_consumer"])
+    if (
+        claimed is SemanticConsumer.INTERACTIVE_REACTION
+        and EventKind(row["kind"]) is EventKind.REACTION
+        and int(row["membership_epoch"]) != current_membership_epoch(transaction, principal_id, row["room_id"])
+    ):
+        settle(transaction, principal_id, event_id)
+        return None
+    return claimed
 
 
 def _journal_event(row: Row) -> JournalEvent:

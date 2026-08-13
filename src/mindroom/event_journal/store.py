@@ -168,8 +168,8 @@ class PrincipalStore:
         self,
         event_id: str,
         consumer: SemanticConsumer,
-    ) -> SemanticConsumer:
-        """Record the sole consumer of one event, returning whoever holds it."""
+    ) -> SemanticConsumer | None:
+        """Record the sole consumer, or retire a stale interactive reaction."""
         return await self._backend.write(
             lambda transaction: journal.claim_semantic_consumer(
                 transaction,

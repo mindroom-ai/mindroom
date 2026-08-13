@@ -44,6 +44,7 @@ from mindroom.event_journal import (
     HistoryRecoveryOutcome,
     InboundEvent,
     ProjectedEvent,
+    SemanticConsumer,
     TerminalTurnWrite,
     delivery_transaction_id,
 )
@@ -1447,6 +1448,36 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
 
         assert transaction_id is None
         assert await alice.load_delivery(turn_id="$turn", stage=DeliveryStage.FINAL) is None
+
+    async def test_departure_retires_claimed_interactive_reactions_but_keeps_hooks(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only reactions that would start an answer become stale at departure."""
+        await admit(alice, "$interactive", kind=EventKind.REACTION)
+        await admit(alice, "$hook", kind=EventKind.REACTION)
+        await alice.claim_semantic_consumer("$interactive", SemanticConsumer.INTERACTIVE_REACTION)
+        await alice.claim_semantic_consumer("$hook", SemanticConsumer.REACTION_HOOKS)
+
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+
+        assert [event.event_id for event in await alice.pending()] == ["$hook"]
+
+    async def test_interactive_claim_after_departure_retires_the_stale_reaction(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A departure that wins the race prevents a later model-backed claim."""
+        await admit(alice, "$interactive", kind=EventKind.REACTION)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+
+        claimed = await alice.claim_semantic_consumer(
+            "$interactive",
+            SemanticConsumer.INTERACTIVE_REACTION,
+        )
+
+        assert claimed is None
+        assert await alice.pending() == ()
 
     async def test_an_unattempted_row_enqueued_before_the_fence_is_deleted_by_it(
         self,

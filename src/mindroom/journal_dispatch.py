@@ -414,13 +414,15 @@ class JournalDispatcher:
         event = _RUNNING_EVENT.get()
         return None if event is None else event.semantic_consumer
 
-    async def claim_semantic_consumer(self, consumer: SemanticConsumer) -> None:
-        """Freeze the running event's consumer before it acts on it."""
+    async def claim_semantic_consumer(self, consumer: SemanticConsumer) -> bool:
+        """Freeze the running event's consumer if it remains actionable."""
         event = _RUNNING_EVENT.get()
         if event is None:
             msg = "A semantic consumer can only be claimed inside a journal callback"
             raise RuntimeError(msg)
         claimed = await self.store.claim_semantic_consumer(event.event_id, consumer)
+        if claimed is None:
+            return False
         if claimed is not consumer:
             msg = f"Journal event is already owned by {claimed.value!r}"
             raise RuntimeError(msg)
@@ -430,6 +432,7 @@ class JournalDispatcher:
             # registration waited for the callback's deferred return, a fast
             # response could discard nothing and then be added back forever.
             self._deferred_reaction_ids.add(event.event_id)
+        return True
 
     async def receipt_order(self) -> int:
         """Return the durable admission order of the running event."""

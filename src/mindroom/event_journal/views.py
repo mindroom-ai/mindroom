@@ -108,8 +108,8 @@ class DispatchView(ReplayView, AdmissionView, Protocol):
         self,
         event_id: str,
         consumer: SemanticConsumer,
-    ) -> SemanticConsumer:
-        """Record the sole consumer of one event, returning whoever holds it."""
+    ) -> SemanticConsumer | None:
+        """Record the sole consumer, or retire a stale interactive reaction."""
         ...
 
 

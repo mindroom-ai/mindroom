@@ -27,7 +27,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.event_journal import EventClass, EventKind, SemanticConsumer
+from mindroom.event_journal import DepartureSource, EventClass, EventKind, SemanticConsumer
 from mindroom.handled_turns import TurnRecord, with_user_stop
 from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
@@ -489,6 +489,53 @@ class TestAgentBot(AgentBotTestBase):
             assert not bot._journal_dispatcher.callbacks.source_has_live_owner(event.event_id)
             target = MessageTarget.resolve(room.room_id, "$thread-a", "$question")
             assert not bot._response_runner.has_active_response_for_target(target)
+        finally:
+            interactive._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_departure_winning_interactive_claim_race_discards_selection(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A selection from an ended membership cannot start or remain active."""
+        interactive._cleanup()
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        room = MagicMock(room_id="!test:localhost")
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.source = {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$question",
+                    "key": "👍",
+                },
+            },
+        }
+        interactive._active_questions["$question"] = interactive._InteractiveQuestion(
+            room_id=room.room_id,
+            thread_id=None,
+            options={"👍": "approve"},
+            creator_agent=bot.agent_name,
+        )
+        execute = AsyncMock()
+        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=execute)
+        dispatcher = unwrap_extracted_collaborator(bot._journal_dispatcher)
+        original_claim = dispatcher.claim_semantic_consumer
+
+        async def claim_after_departure(consumer: SemanticConsumer) -> bool:
+            await bot._journal_principal().fence_departure(room.room_id, source=DepartureSource.LOCAL)
+            return await original_claim(consumer)
+
+        try:
+            with patch.object(dispatcher, "claim_semantic_consumer", side_effect=claim_after_departure):
+                await _dispatch_reaction(bot, room, event)
+
+            assert "$question" not in interactive._active_questions
+            execute.assert_not_awaited()
+            assert event.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
         finally:
             interactive._cleanup()
 

@@ -169,12 +169,15 @@ class ReactionDispatcher:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED if interactive_claimed else None
         if not interactive_claimed:
             try:
-                await self.deps.journal_dispatcher.claim_semantic_consumer(
+                claimed = await self.deps.journal_dispatcher.claim_semantic_consumer(
                     SemanticConsumer.INTERACTIVE_REACTION,
                 )
             except BaseException:
                 interactive.restore_selection(selection)
                 raise
+            if not claimed:
+                interactive.commit_selection(selection)
+                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
         try:
             response_target = self.deps.build_message_target(
