@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -150,6 +153,104 @@ def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
         "id": SENTENCE_TRANSFORMERS_DEFAULT,
         "dimensions": 384,
     }
+
+
+class _ConcurrencyProbe:
+    """Record the highest number of callers inside the embedder at once."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def observe(self) -> None:
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        # Long enough that unserialized callers overlap on any machine.
+        time.sleep(0.02)
+        with self._lock:
+            self.active -= 1
+
+
+def _probed_local_embedder(monkeypatch: pytest.MonkeyPatch, probe: _ConcurrencyProbe) -> object:
+    class DummyEmbedder:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        def get_embedding(self, text: str) -> list[float]:
+            probe.observe()
+            return [float(len(text))]
+
+        def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, int]]:
+            probe.observe()
+            return [float(len(text))], {"tokens": len(text)}
+
+    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr(
+        "mindroom.embeddings.importlib.import_module",
+        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
+    )
+    return create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
+
+
+@pytest.mark.timeout(1)
+def test_sentence_transformers_usage_delegation_does_not_deadlock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agno's usage method may delegate back through the serialized embedding entry point."""
+
+    class DelegatingEmbedder:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_embedding(self, text: str) -> list[float]:
+            return [float(len(text))]
+
+        def get_embedding_and_usage(self, text: str) -> tuple[list[float], None]:
+            return self.get_embedding(text), None
+
+    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr(
+        "mindroom.embeddings.importlib.import_module",
+        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DelegatingEmbedder),
+    )
+    embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
+
+    assert embedder.get_embedding_and_usage("chunk") == ([5.0], None)
+
+
+def test_sentence_transformers_embedder_serializes_mixed_entry_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both local embedding entry points share one process-wide serialization boundary."""
+    probe = _ConcurrencyProbe()
+    embedder = _probed_local_embedder(monkeypatch, probe)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [
+            pool.submit(embedder.get_embedding, "one"),
+            pool.submit(embedder.get_embedding_and_usage, "two"),
+            pool.submit(embedder.get_embedding, "three"),
+            pool.submit(embedder.get_embedding_and_usage, "four"),
+            pool.submit(embedder.get_embedding, "five"),
+            pool.submit(embedder.get_embedding_and_usage, "six"),
+            pool.submit(embedder.get_embedding, "seven"),
+            pool.submit(embedder.get_embedding_and_usage, "eight"),
+        ]
+        results = [future.result() for future in futures]
+
+    assert probe.max_active == 1
+    assert results == [
+        [3.0],
+        ([3.0], {"tokens": 3}),
+        [5.0],
+        ([4.0], {"tokens": 4}),
+        [4.0],
+        ([3.0], {"tokens": 3}),
+        [5.0],
+        ([5.0], {"tokens": 5}),
+    ]
 
 
 def test_mem0_and_knowledge_signatures_use_openai_model_defaults() -> None:

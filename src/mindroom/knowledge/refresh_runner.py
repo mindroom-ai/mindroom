@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import signal
 import sys
@@ -16,7 +17,13 @@ from typing import TYPE_CHECKING, TypedDict, cast
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
+from mindroom.constants import (
+    DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS,
+    KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV,
+    RuntimePaths,
+    resolve_runtime_paths,
+    runtime_env_values,
+)
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import state_for_publication
 from mindroom.knowledge.manager import KnowledgeManager
@@ -90,6 +97,22 @@ class _SubprocessSessionKwargs(TypedDict, total=False):
     start_new_session: bool
 
 
+def _refresh_subprocess_timeout_seconds(runtime_paths: RuntimePaths) -> float:
+    """Return how long one refresh child may run before it is killed."""
+    raw_value = runtime_paths.env_value(KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV)
+    if raw_value is None:
+        return DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        msg = f"{KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV} must be a number, got {raw_value!r}"
+        raise ValueError(msg) from exc
+    if not math.isfinite(value) or value <= 0:
+        msg = f"{KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV} must be a finite number greater than 0, got {value}"
+        raise ValueError(msg)
+    return value
+
+
 _REFRESH_SUBPROCESS_THREAD_ENV = {
     "OMP_NUM_THREADS": "1",
     "OPENBLAS_NUM_THREADS": "1",
@@ -98,6 +121,13 @@ _REFRESH_SUBPROCESS_THREAD_ENV = {
     "VECLIB_MAXIMUM_THREADS": "1",
     "TOKENIZERS_PARALLELISM": "false",
 }
+_REFRESH_SUBPROCESS_INTERMEDIATE_PENDING_REASONS = frozenset(
+    {
+        "git_source_updated",
+        "manual_reindex",
+        "source_changed",
+    },
+)
 
 
 async def refresh_knowledge_binding_in_subprocess(
@@ -133,6 +163,13 @@ async def refresh_knowledge_binding_in_subprocess(
     env = dict(runtime_env_values(runtime_paths))
     env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
     env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
+    # Resolved before the spawn so a malformed window rejects the refresh
+    # instead of leaving a child nobody is waiting on.
+    try:
+        timeout = _refresh_subprocess_timeout_seconds(runtime_paths)
+    except ValueError as exc:
+        await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=str(exc))
+        raise
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
@@ -142,9 +179,29 @@ async def refresh_knowledge_binding_in_subprocess(
         **_subprocess_session_kwargs(),
     )
     try:
-        with suppress(BrokenPipeError, ConnectionResetError):
-            await _send_subprocess_refresh_request(process, request_payload)
-        return_code = await process.wait()
+        async with asyncio.timeout(timeout):
+            with suppress(BrokenPipeError, ConnectionResetError):
+                await _send_subprocess_refresh_request(process, request_payload)
+            return_code = await process.wait()
+    except TimeoutError:
+        # A refresh child can wedge below Python: torch's Metal shader-library
+        # caches are unlocked, and a corrupted lookup spins forever. The child
+        # gets its own session, so nothing else would ever reap it.
+        msg = f"Knowledge refresh subprocess for {base_id!r} timed out after {timeout}s and was terminated"
+        logger.warning(msg, base_id=base_id)
+        cleanup_task = asyncio.create_task(
+            _cleanup_timed_out_refresh_subprocess(
+                process,
+                key,
+                initial_state=initial_state,
+                error=msg,
+            ),
+        )
+        cancellation = await _drain_owned_cleanup_task(cleanup_task)
+        cleanup_task.result()
+        if cancellation is not None:
+            raise cancellation from None
+        raise RuntimeError(msg) from None
     except asyncio.CancelledError:
         cleanup_task = asyncio.create_task(
             _cleanup_cancelled_refresh_subprocess(
@@ -155,9 +212,7 @@ async def refresh_knowledge_binding_in_subprocess(
                 runtime_paths=runtime_paths,
             ),
         )
-        while not cleanup_task.done():
-            with suppress(asyncio.CancelledError):
-                await asyncio.shield(cleanup_task)
+        await _drain_owned_cleanup_task(cleanup_task)
         with suppress(Exception):
             cleanup_task.result()
         raise
@@ -234,6 +289,18 @@ async def _terminate_refresh_subprocess(process: asyncio.subprocess.Process) -> 
         await process.wait()
 
 
+async def _drain_owned_cleanup_task(cleanup_task: asyncio.Task[None]) -> asyncio.CancelledError | None:
+    """Wait through repeated caller cancellation until an owned cleanup task settles."""
+    cancellation: asyncio.CancelledError | None = None
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+    return cancellation
+
+
 async def _cleanup_cancelled_refresh_subprocess(
     process: asyncio.subprocess.Process,
     key: PublishedIndexKey,
@@ -254,6 +321,18 @@ async def _cleanup_cancelled_refresh_subprocess(
             )
     except Exception:
         logger.warning("Failed to reconcile cancelled knowledge refresh subprocess", base_id=key.base_id, exc_info=True)
+
+
+async def _cleanup_timed_out_refresh_subprocess(
+    process: asyncio.subprocess.Process,
+    key: PublishedIndexKey,
+    *,
+    initial_state: PublishedIndexState | None,
+    error: str,
+) -> None:
+    """Terminate one timed-out child and persist its failure before returning."""
+    await _terminate_refresh_subprocess(process)
+    await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=error)
 
 
 async def _reconcile_failed_refresh_subprocess(
@@ -833,6 +912,32 @@ def _refresh_running_fingerprint(
     )
 
 
+def _published_state_publication_fingerprint(state: PublishedIndexState) -> tuple[object, ...]:
+    return (
+        state.settings,
+        state.status,
+        state.collection,
+        state.last_published_at,
+        state.published_revision,
+        state.indexed_count,
+        state.source_signature,
+    )
+
+
+def _refresh_start_publication_fingerprint(
+    key: PublishedIndexKey,
+    initial_state: PublishedIndexState | None,
+) -> tuple[object, ...]:
+    if initial_state is not None:
+        return _published_state_publication_fingerprint(initial_state)
+    return _published_state_publication_fingerprint(
+        PublishedIndexState(
+            settings=key.indexing_settings,
+            status="indexing",
+        ),
+    )
+
+
 def _failed_subprocess_state_can_be_reconciled(
     key: PublishedIndexKey,
     state: PublishedIndexState | None,
@@ -843,7 +948,16 @@ def _failed_subprocess_state_can_be_reconciled(
         _refresh_running_fingerprint(key, initial_state),
     }:
         return True
-    return state is not None and state.refresh_job == "running" and state.reason == "refreshing"
+    if state is None:
+        return False
+    if state.refresh_job == "running" and state.reason == "refreshing":
+        return True
+    return (
+        state.refresh_job == "pending"
+        and state.reason in _REFRESH_SUBPROCESS_INTERMEDIATE_PENDING_REASONS
+        and _published_state_publication_fingerprint(state)
+        == _refresh_start_publication_fingerprint(key, initial_state)
+    )
 
 
 async def _reconcile_cancelled_refresh(
