@@ -517,6 +517,7 @@ class TestAgentBot(AgentBotTestBase):
                 assert reaction.event_id in await bot._journal_dispatcher.unsettled_event_ids()
         finally:
             release_selection.set()
+            await bot._response_runner.drain_inbox_responses()
             await bot._journal_dispatcher.stop()
 
     @pytest.mark.asyncio
