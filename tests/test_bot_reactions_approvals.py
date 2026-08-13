@@ -508,12 +508,12 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._coalescing_gate.lanes.all_settled()
 
     @pytest.mark.asyncio
-    async def test_unknown_tool_approval_response_with_approval_id_uses_live_id_entrypoint(
+    async def test_unknown_tool_approval_response_without_card_event_is_ignored(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Approval-id-only custom events should use the live-id manager API."""
+        """Approval-id-only custom events must not enter the card-anchored approval API."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
@@ -533,17 +533,7 @@ class TestAgentBot(AgentBotTestBase):
         ) as handle_matrix_approval_action:
             await bot._on_unknown_event(room, event)
 
-        handle_matrix_approval_action.assert_awaited_once_with(
-            MatrixApprovalAction(
-                room_id="!test:localhost",
-                sender_id="@user:localhost",
-                card_event_id=None,
-                approval_id="approval-1",
-                status="approved",
-                reason=None,
-            ),
-            before_consume=None,
-        )
+        handle_matrix_approval_action.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_plain_rich_reply_falls_through_after_approval_card_point_lookup(
@@ -1447,7 +1437,6 @@ class TestAgentBot(AgentBotTestBase):
             room_id="!test:localhost",
             sender_id="@user:localhost",
             card_event_id="$approval",
-            approval_id=None,
             status="approved",
             reason=None,
         )

@@ -482,6 +482,9 @@ class _ApprovalManager:
                     self._post_cancel_cleanup_tasks.add(cleanup_task)
                 cleanup_future.add_done_callback(lambda _future: self._discard_post_cancel_cleanup_task(cleanup_task))
                 raise
+            except ToolApprovalTransportError:
+                await self._forget_card(transaction_id)
+                raise
         finally:
             with self._live_lock:
                 self._active_approval_sends.discard(active_send)
@@ -514,6 +517,7 @@ class _ApprovalManager:
         continuation_id: str,
         tool_call_id: str,
         expires_at: datetime,
+        expire_after_bind: bool = False,
     ) -> asyncio.Event:
         """Register binding and expiry owners for one delivered detached card."""
         sent_card = _sent_card_body(claimed_card, sent_event)
@@ -532,7 +536,7 @@ class _ApprovalManager:
             card=sent_card,
             continuation_id=continuation_id,
             tool_call_id=tool_call_id,
-            expire_after_bind=shutting_down,
+            expire_after_bind=expire_after_bind or shutting_down,
         )
 
     def _ensure_detached_expiry_owner(
@@ -605,6 +609,7 @@ class _ApprovalManager:
             continuation_id=continuation_id,
             tool_call_id=tool_call_id,
             expires_at=expires_at,
+            expire_after_bind=True,
         )
         await asyncio.shield(first_attempt.wait())
 
@@ -642,7 +647,12 @@ class _ApprovalManager:
                     first_attempt.set()
                     if acknowledged and attached:
                         if expire_after_bind:
-                            await self.expire_detached_card(room_id=room_id, card_event_id=card_event_id)
+                            settled = await self.expire_detached_card(room_id=room_id, card_event_id=card_event_id)
+                            self._maintain_detached_expiry_owner(
+                                room_id=room_id,
+                                card_event_id=card_event_id,
+                                outcome=_ResolutionOutcome.DELIVERED if settled else _ResolutionOutcome.RECORDED,
+                            )
                         return
                     if self._current_shutdown_reason() is not None:
                         return
@@ -843,7 +853,7 @@ class _ApprovalManager:
             dropped_never_attempted=tally.dropped_never_attempted,
         )
 
-    async def _settle_recovered_card(
+    async def _settle_recovered_card(  # noqa: PLR0911
         self,
         *,
         room_id: str,
@@ -924,7 +934,11 @@ class _ApprovalManager:
                     await self._detached_decision_ready(continuation_id, tool_call_id)
             return await self._redeliver_recorded_resolution(pending, identified.card)
         content = identified.card.card.get("content")
-        if isinstance(content, dict) and isinstance(content.get("continuation_id"), str):
+        if (
+            isinstance(content, dict)
+            and isinstance(content.get("continuation_id"), str)
+            and isinstance(content.get("tool_call_id"), str)
+        ):
             self._ensure_detached_expiry_owner(
                 room_id=room_id,
                 card_event_id=pending.card_event_id,
@@ -932,6 +946,14 @@ class _ApprovalManager:
                 task_name=f"approval-recovered-expiry-{pending.card_event_id}",
             )
             return None
+        if isinstance(content, dict) and isinstance(content.get("continuation_id"), str):
+            result = await self._discard_matrix_only_card(
+                pending=pending,
+                transaction_id=identified.card.transaction_id,
+                reason=_DETACHED_REQUEST_REASON,
+                resolved_by=transport_sender,
+            )
+            return result.resolved
         result = await self._discard_matrix_only_card(
             pending=pending,
             transaction_id=identified.card.transaction_id,

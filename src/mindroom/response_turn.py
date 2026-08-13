@@ -328,7 +328,7 @@ def paused_attempt_from_response(
     fallback_run_id: str | None,
 ) -> PausedAttempt | None:
     """Extract confirmation requirements from one persisted paused Agno run."""
-    if response.status is not RunStatus.paused:
+    if response.status != RunStatus.paused:
         return None
     return _paused_attempt(
         tools=response.tools or (),
@@ -361,14 +361,33 @@ def _paused_attempt(
     run_id: str | None,
 ) -> PausedAttempt | None:
     """Build one restartable pause from Agno's common pause fields."""
-    pending_requirements = tuple(
-        requirement
-        for requirement in requirements
-        if requirement.needs_confirmation
-        and requirement.tool_execution is not None
-        and requirement.tool_execution.tool_call_id
+    pending_requirement_candidates = tuple(
+        requirement for requirement in requirements if requirement.needs_confirmation
     )
-    pending_tools = [tool for tool in tools if tool.requires_confirmation and tool.tool_call_id]
+    if any(
+        requirement.tool_execution is None or not requirement.tool_execution.tool_call_id
+        for requirement in pending_requirement_candidates
+    ):
+        msg = "Paused approval requirement is missing its exact tool-call ID"
+        raise RuntimeError(msg)
+    requirement_call_ids = [
+        requirement.tool_execution.tool_call_id
+        for requirement in pending_requirement_candidates
+        if requirement.tool_execution is not None
+    ]
+    if len(requirement_call_ids) != len(set(requirement_call_ids)):
+        msg = "Paused approval requirements contain duplicate tool-call IDs"
+        raise RuntimeError(msg)
+    pending_tool_candidates = tuple(tool for tool in tools if tool.requires_confirmation and tool.confirmed is None)
+    if any(not tool.tool_call_id for tool in pending_tool_candidates):
+        msg = "Paused approval tool is missing its exact tool-call ID"
+        raise RuntimeError(msg)
+    tool_call_ids = [tool.tool_call_id for tool in pending_tool_candidates]
+    if len(tool_call_ids) != len(set(tool_call_ids)):
+        msg = "Paused approval tools contain duplicate tool-call IDs"
+        raise RuntimeError(msg)
+    pending_requirements = pending_requirement_candidates
+    pending_tools = list(pending_tool_candidates)
     known_call_ids = {tool.tool_call_id for tool in pending_tools}
     for requirement in pending_requirements:
         tool = requirement.tool_execution

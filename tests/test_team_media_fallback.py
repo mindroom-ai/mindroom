@@ -7,11 +7,13 @@ import inspect
 import tempfile
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent as AgnoAgent
+from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunContentEvent as AgentRunContentEvent
@@ -30,6 +32,7 @@ from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team as AgnoTeam
 from agno.team._run import _cleanup_and_store
+from agno.tools.function import Function
 from agno.utils.message import get_text_from_message
 
 from mindroom.agents import create_agent
@@ -66,6 +69,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
     materialize_exact_requested_team_members,
@@ -353,6 +357,7 @@ async def test_paused_team_scope_open_failure_closes_materialized_member_databas
             configured_team_name="research",
             model_name="default",
             decisions={"call-1": True},
+            denial_reasons={"call-1": None},
             refresh_scheduler=None,
         )
 
@@ -361,6 +366,89 @@ async def test_paused_team_scope_open_failure_closes_materialized_member_databas
         team_db=None,
         shared_scope_storage=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_team_continuation_executes_real_agno_confirmation(tmp_path: Path) -> None:
+    """Exercise the real persisted Agno team pause and continuation spine."""
+    executed: list[list[str]] = []
+
+    def run_shell_command(args: list[str]) -> str:
+        executed.append(args)
+        return "ok"
+
+    team = AgnoTeam(
+        id="research",
+        name="Research",
+        members=[],
+        model=SyntheticModel(
+            id="synthetic",
+            seed=1,
+            min_response_chars=20,
+            max_response_chars=20,
+            chars_per_second=0,
+            tool_call_probability=1,
+        ),
+        tools=[
+            Function(
+                name="run_shell_command",
+                entrypoint=run_shell_command,
+                requires_confirmation=True,
+            ),
+        ],
+        db=SqliteDb(db_file=str(tmp_path / "team-continuation.db"), session_table="sessions"),
+    )
+    paused = await team.arun("exercise the tool", session_id="session-1", user_id="@user:localhost", stream=False)
+    requirement = (paused.requirements or [])[0]
+    assert requirement.tool_execution is not None
+    tool_call_id = requirement.tool_execution.tool_call_id
+    assert tool_call_id is not None
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    members = ResolvedExactTeamMembers(
+        requested_agent_names=[],
+        agents=[],
+        display_names=[],
+        materialized_agent_names=set(),
+        failed_agent_names=[],
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="research",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    with (
+        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
+        patch(
+            "mindroom.teams.open_bound_scope_session_context",
+            return_value=nullcontext(SimpleNamespace(storage=None)),
+        ),
+        patch("mindroom.teams.build_materialized_team_instance", return_value=team),
+        patch("mindroom.teams.close_team_runtime_state_dbs"),
+    ):
+        result = await continue_paused_team_run(
+            member_names=(),
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            session_id="session-1",
+            run_id=paused.run_id,
+            user_id="@user:localhost",
+            configured_team_name="research",
+            model_name="default",
+            decisions={tool_call_id: True},
+            denial_reasons={tool_call_id: None},
+            refresh_scheduler=None,
+        )
+
+    assert isinstance(result, str)
+    assert executed == [["echo", "hi"]]
 
 
 def test_materialize_exact_team_members_closes_partial_agents_on_failure() -> None:

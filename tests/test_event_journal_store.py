@@ -2988,6 +2988,28 @@ class TestApprovalCards:
         scanned = await alice.pending_approval_cards(room_id=ROOM)
         assert [stored.card_event_id for stored in scanned] == ["$valid"]
 
+    async def test_full_page_of_malformed_legacy_cards_does_not_starve_valid_rows(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A corrupt raw page must advance internally until later valid recovery work is found."""
+        for event_id in ("$malformed-1", "$malformed-2", "$valid"):
+            await self.remember(alice, event_id)
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                """
+                UPDATE approval_cards
+                SET card_json = ?
+                WHERE principal_id = ? AND card_event_id IN (?, ?)
+                """,
+                ("{", alice._principal_id, "$malformed-1", "$malformed-2"),
+            ),
+        )
+
+        scanned = await alice.pending_approval_cards(room_id=ROOM, limit=2)
+
+        assert [stored.card_event_id for stored in scanned] == ["$valid"]
+
     async def test_wrong_shaped_legacy_resolution_does_not_crash_startup_reader(
         self,
         alice: PrincipalStore,

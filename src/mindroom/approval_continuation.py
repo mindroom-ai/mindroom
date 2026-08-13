@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
+
+from sqlalchemy import Table, select
 
 from mindroom.agent_storage import create_state_storage
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.db.base import BaseDb
+    from agno.db.sqlite import SqliteDb
 
 
 class ApprovalDecision(StrEnum):
@@ -167,16 +170,26 @@ class ApprovalContinuationStore:
     """Use Agno's approval table as a guarded continuation coordinator."""
 
     def __init__(self, storage_root: Path) -> None:
-        self._db: BaseDb = create_state_storage(
-            "tool_approval_continuations",
-            storage_root,
-            subdir="tracking",
-            session_table="tool_approval_continuation_sessions",
+        self._db = cast(
+            "SqliteDb",
+            create_state_storage(
+                "tool_approval_continuations",
+                storage_root,
+                subdir="tracking",
+                session_table="tool_approval_continuation_sessions",
+            ),
         )
         self._lock = _store_lock(storage_root)
 
+    def _approval_table(self, *, create: bool = False) -> Table | None:
+        """Return Agno's approval table while preserving database read failures."""
+        return self._db._get_table(table_type="approvals", create_table_if_not_found=create)
+
     def create(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
         """Create one durable continuation."""
+        if self._approval_table(create=True) is None:
+            msg = "Tool approval continuation table is unavailable"
+            raise RuntimeError(msg)
         first_call = continuation.calls[0]
         self._db.create_approval(
             {
@@ -198,8 +211,12 @@ class ApprovalContinuationStore:
 
     def get(self, approval_id: str) -> ApprovalContinuation | None:
         """Return one continuation by ID."""
-        row = self._db.get_approval(approval_id)
-        return None if row is None else ApprovalContinuation._from_row(row)
+        table = self._approval_table()
+        if table is None:
+            return None
+        with self._db.Session() as session:
+            result = session.execute(select(table).where(table.c.id == approval_id)).fetchone()
+        return None if result is None else ApprovalContinuation._from_row(dict(result._mapping))
 
     def _persist(
         self,
@@ -217,28 +234,46 @@ class ApprovalContinuationStore:
         }
         if run_status is not None:
             values["run_status"] = run_status
-        row = self._db.update_approval(
-            current.approval_id,
-            expected_status=current.state,
-            **values,
-        )
-        return None if row is None else ApprovalContinuation._from_row(row)
+        values["updated_at"] = int(time.time())
+        table = self._approval_table()
+        if table is None:
+            msg = "Tool approval continuation table disappeared before its guarded update"
+            raise RuntimeError(msg)
+        with self._db.Session() as session, session.begin():
+            result = session.execute(
+                table.update()
+                .where(table.c.id == current.approval_id, table.c.status == current.state)
+                .values(**values),
+            )
+            if result.rowcount == 0:
+                return None
+            row = session.execute(select(table).where(table.c.id == current.approval_id)).fetchone()
+        if row is None:
+            msg = "Tool approval continuation disappeared after its guarded update"
+            raise RuntimeError(msg)
+        return ApprovalContinuation._from_row(dict(row._mapping))
 
     def _records(self, states: tuple[str, ...]) -> tuple[ApprovalContinuation, ...]:
         records: list[ApprovalContinuation] = []
+        table = self._approval_table()
+        if table is None:
+            return ()
         for state in states:
-            page = 1
+            offset = 0
             while True:
-                rows, total = self._db.get_approvals(
-                    status=state,
-                    approval_type="mindroom",
-                    limit=_PAGE_SIZE,
-                    page=page,
+                statement = (
+                    select(table)
+                    .where(table.c.status == state, table.c.approval_type == "mindroom")
+                    .order_by(table.c.created_at.desc())
+                    .limit(_PAGE_SIZE)
+                    .offset(offset)
                 )
-                records.extend(ApprovalContinuation._from_row(row) for row in rows)
-                if page * _PAGE_SIZE >= total:
+                with self._db.Session() as session:
+                    rows = session.execute(statement).fetchall()
+                records.extend(ApprovalContinuation._from_row(dict(row._mapping)) for row in rows)
+                if len(rows) < _PAGE_SIZE:
                     break
-                page += 1
+                offset += len(rows)
         return tuple(records)
 
     def bind_response_event(
@@ -260,7 +295,7 @@ class ApprovalContinuationStore:
                 calls=current.calls if calls is None else calls,
                 state=state,
             )
-            return self._persist(current, published) or self.get(approval_id)
+            return self._persist(current, published)
 
     def resolve_call(
         self,
@@ -286,7 +321,7 @@ class ApprovalContinuationStore:
             if not matched:
                 return current
             updated = replace(current, calls=tuple(calls))
-            return self._persist(current, updated) or self.get(approval_id)
+            return self._persist(current, updated)
 
     def acknowledge_call(self, approval_id: str, tool_call_id: str) -> ApprovalContinuation | None:
         """Record that the winning decision is durable in the approval-card journal."""
@@ -304,7 +339,7 @@ class ApprovalContinuationStore:
                 "ready" if all(call.decision is not None and call.decision_recorded for call in calls) else "pending"
             )
             updated = replace(current, calls=calls, state=state)
-            return self._persist(current, updated) or self.get(approval_id)
+            return self._persist(current, updated)
 
     def for_source_event(self, source_event_id: str) -> ApprovalContinuation | None:
         """Return the continuation that durably owns one inbound journal source."""
@@ -328,7 +363,7 @@ class ApprovalContinuationStore:
                 for call in current.calls
             )
             updated = replace(current, calls=calls)
-            return self._persist(current, updated) or self.get(approval_id)
+            return self._persist(current, updated)
 
     def claim(self, approval_id: str, claimant_id: str) -> ApprovalContinuation | None:
         """Claim one ready continuation exactly once."""

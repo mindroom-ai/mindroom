@@ -14,7 +14,10 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from agno.agent import Agent as AgnoAgent
+from agno.db.sqlite import SqliteDb
 from agno.models.response import ToolExecution
+from agno.tools.function import Function
 
 from mindroom import background_tasks as background_tasks_module
 from mindroom import response_runner
@@ -59,8 +62,10 @@ from mindroom.streaming import (
     StreamingDeliveryError,
     StreamingResponse,
 )
+from mindroom.synthetic_model import SyntheticModel
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
 from tests.conftest import (
@@ -1191,6 +1196,143 @@ async def test_resume_uses_stop_aware_attempt_and_normal_final_effects(tmp_path:
     effects.assert_awaited_once()
 
 
+@pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
+@pytest.mark.asyncio
+async def test_agent_continuation_executes_real_agno_confirmation(
+    tmp_path: Path,
+    approved: bool,
+    reason: str | None,
+) -> None:
+    """Exercise the real persisted Agno pause and continuation spine without mocking it."""
+    executed: list[list[str]] = []
+
+    def run_shell_command(args: list[str]) -> str:
+        executed.append(args)
+        return "ok"
+
+    agent = AgnoAgent(
+        id="general",
+        model=SyntheticModel(
+            id="synthetic",
+            seed=1,
+            min_response_chars=20,
+            max_response_chars=20,
+            chars_per_second=0,
+            tool_call_probability=1,
+        ),
+        tools=[
+            Function(
+                name="run_shell_command",
+                entrypoint=run_shell_command,
+                requires_confirmation=True,
+            ),
+        ],
+        db=SqliteDb(db_file=str(tmp_path / "agent-continuation.db"), session_table="sessions"),
+    )
+    paused = await agent.arun("exercise the tool", session_id="session-1", user_id="@user:localhost", stream=False)
+    requirement = (paused.requirements or [])[0]
+    assert requirement.tool_execution is not None
+    tool_call_id = requirement.tool_execution.tool_call_id
+    assert tool_call_id is not None
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-real-agent",
+        run_id=paused.run_id,
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="claimed",
+    )
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continue_run = MagicMock(wraps=agent.acontinue_run)
+
+    with (
+        patch("mindroom.response_runner.create_agent", return_value=agent),
+        patch.object(agent, "acontinue_run", new=continue_run),
+        patch("mindroom.response_runner.typing_indicator", _noop_typing),
+        patch("mindroom.response_runner.close_agent_runtime_state_dbs"),
+    ):
+        result = await runner._continue_paused_agent_run(
+            continuation,
+            execution_identity=identity,
+            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            decisions={tool_call_id: approved},
+            denial_reasons={tool_call_id: reason},
+            tool_trace_collector=[],
+        )
+
+    assert isinstance(result, str)
+    assert bool(executed) is approved
+    continued_requirement = continue_run.call_args.kwargs["requirements"][0]
+    assert continued_requirement.tool_execution.confirmed is approved
+    assert continued_requirement.tool_execution.confirmation_note == (None if approved else reason)
+
+
+@pytest.mark.asyncio
+async def test_user_stop_terminalizes_claimed_approval_continuation(tmp_path: Path) -> None:
+    """A stopped resumed run must not remain claimed until another process restart."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-stopped",
+        run_id="run-paused",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.APPROVED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    runner._approval_continuations.create(continuation)
+
+    async def stopped_lifecycle(*_args: object, **kwargs: object) -> None:
+        progress = cast("response_runner._DeliveryProgress", kwargs["progress"])
+        progress.settle(
+            FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                event_id="$waiting",
+                is_visible_response=True,
+                failure_reason="cancelled_by_user",
+            ),
+        )
+
+    with patch.object(runner, "_run_and_settle_locked_response", new=stopped_lifecycle):
+        await runner.resume_approval_continuation(continuation)
+
+    settled = runner._approval_continuations.get(continuation.approval_id)
+    assert settled is not None
+    assert settled.state == "failed"
+    assert settled.failure_reason == "cancelled_by_user"
+
+
 @pytest.mark.asyncio
 async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_path: Path) -> None:
     """A crash after FINAL acknowledgement must complete instead of overwriting the response."""
@@ -1407,6 +1549,69 @@ async def test_partial_approval_card_failure_terminalizes_delivered_cards(tmp_pa
     assert failed is not None
     assert failed.state == "failed"
     expire.assert_awaited_once_with(continuation.room_id, "$card-1")
+
+
+@pytest.mark.asyncio
+async def test_card_publication_exception_terminalizes_partial_set(tmp_path: Path) -> None:
+    """An exception after one card was published must not strand the continuation or card."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target())
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-paused",
+        tools=(
+            ToolExecution(tool_call_id="call-1", tool_name="first", requires_confirmation=True),
+            ToolExecution(tool_call_id="call-2", tool_name="second", requires_confirmation=True),
+        ),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id=request.room_id,
+        thread_id=request.thread_id,
+        resolved_thread_id=request.response_envelope.target.resolved_thread_id,
+        session_id=paused.session_id,
+    )
+    send_attempt = 0
+
+    async def publish_card(*_args: object, **_kwargs: object) -> object:
+        nonlocal send_attempt
+        send_attempt += 1
+        if send_attempt == 1:
+            attached = runner._approval_continuations.attach_card(
+                "approval-publication-error",
+                "call-1",
+                "$card-1",
+            )
+            assert attached is not None
+            return MagicMock(event_id="$card-1")
+        msg = "card journal unavailable"
+        raise RuntimeError(msg)
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$waiting")),
+        patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-publication-error")),
+        patch("mindroom.response_runner.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.response_runner.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch("mindroom.response_runner.send_suspended_tool_approval", new=AsyncMock(side_effect=publish_card)),
+        patch("mindroom.response_runner.expire_suspended_tool_approval", new=AsyncMock(return_value=True)) as expire,
+        patch.object(runner, "_edit_continuation_response", new=AsyncMock(return_value=True)),
+        pytest.raises(RuntimeError, match="card journal unavailable"),
+    ):
+        await runner._suspend_for_approval(
+            paused,
+            request=request,
+            target=request.response_envelope.target,
+            progress=response_runner._DeliveryProgress(),
+            execution_identity=identity,
+            entity_kind="agent",
+        )
+
+    failed = runner._approval_continuations.get("approval-publication-error")
+    assert failed is not None
+    assert failed.state == "failed"
+    expire.assert_awaited_once_with(request.room_id, "$card-1")
 
 
 @pytest.mark.asyncio
@@ -1755,6 +1960,33 @@ async def test_stop_tracking_cleared_on_failure(tmp_path: Path) -> None:
 
     assert stop_manager.cleared == ["$placeholder"]
     assert stop_manager.tracked_messages == {}
+
+
+@pytest.mark.asyncio
+async def test_approval_suspension_is_not_logged_as_generation_failure(tmp_path: Path) -> None:
+    """A native pause is a lifecycle handoff, not an exceptional generation failure."""
+    stop_manager = RecordingStopManager()
+    logger = MagicMock()
+    runner = ResponseAttemptRunner(replace(_attempt_runner(tmp_path, stop_manager).deps, logger=logger))
+    suspension = ResponsePausedForApproval(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-paused",
+            tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+        ),
+    )
+
+    async def respond(_message_id: str | None) -> None:
+        raise suspension
+
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await runner.run(
+            ResponseAttemptRequest(target=_target(), response_function=respond, existing_event_id="$placeholder"),
+        )
+
+    assert raised.value is suspension
+    logger.exception.assert_not_called()
+    assert stop_manager.cleared == ["$placeholder"]
 
 
 @pytest.mark.asyncio

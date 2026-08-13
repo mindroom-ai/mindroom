@@ -3279,6 +3279,23 @@ def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
     assert toolkit.async_functions == {}
 
 
+def test_non_resumable_tool_surface_drops_an_empty_toolkit() -> None:
+    """A channel that hides every function must not register an unusable toolkit name."""
+    config = Config.model_validate({"tool_approval": {"default": "require_approval"}})
+    toolkit = Toolkit(
+        name="approval-test",
+        tools=[Function(name="dangerous", entrypoint=lambda: None)],
+    )
+
+    filtered = agents_module.apply_tool_approval_capability(
+        toolkit,
+        config,
+        supports_native_tool_approval=False,
+    )
+
+    assert filtered is None
+
+
 @pytest.mark.asyncio
 async def test_create_agent_tool_filter_applies_to_agno_generated_knowledge_function(tmp_path: Path) -> None:
     """The stored channel policy filters functions Agno adds after construction."""

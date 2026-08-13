@@ -1324,7 +1324,7 @@ def apply_tool_approval_capability(
         for name, function in toolkit.async_functions.items()
         if not tool_may_require_approval(config, function.name)
     }
-    return toolkit
+    return toolkit if toolkit.functions or toolkit.async_functions else None
 
 
 @timed("system_prompt_assembly.agent_create.dynamic_tool_selection")

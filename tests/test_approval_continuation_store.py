@@ -125,6 +125,24 @@ def test_distinct_store_handles_serialize_pending_context_updates(
     assert persisted.calls[0].decision is ApprovalDecision.APPROVED
 
 
+def test_decision_write_failure_never_reads_as_a_winning_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A continuation write error must surface instead of releasing a tool."""
+    store = ApprovalContinuationStore(tmp_path)
+    store.create(_continuation())
+    monkeypatch.setattr(store._db, "Session", MagicMock(side_effect=RuntimeError("database unavailable")))
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        store.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+
+    monkeypatch.undo()
+    persisted = store.get("approval-1")
+    assert persisted is not None
+    assert persisted.calls[0].decision is None
+
+
 def test_continuation_store_recovers_pending_and_claimed_without_copying_arguments(tmp_path: Path) -> None:
     """Reload recovery needs routing metadata, while exact arguments remain owned by the Agno run."""
     store = ApprovalContinuationStore(tmp_path)
@@ -223,31 +241,25 @@ def test_recovery_pages_through_every_continuation(tmp_path: Path) -> None:
     """Startup recovery must not silently strand rows beyond Agno's first result page."""
     store = ApprovalContinuationStore(tmp_path)
     template = _continuation()
-    rows = [
-        {
-            "id": f"approval-{index}",
-            "run_id": template.run_id,
-            "session_id": template.session_id,
-            "status": "pending",
-            "context": template._to_context(),
-        }
-        for index in range(101)
-    ]
-    db = MagicMock()
-
-    def get_approvals(*, status: str, page: int, **_kwargs: object) -> tuple[list[dict[str, object]], int]:
-        if status != "pending":
-            return [], 0
-        start = (page - 1) * 100
-        return rows[start : start + 100], len(rows)
-
-    db.get_approvals.side_effect = get_approvals
-    store._db = db
+    for index in range(101):
+        store.create(replace(template, approval_id=f"approval-{index}"))
 
     recovered = store.recoverable()
 
     assert len(recovered) == 101
-    assert db.get_approvals.call_count == 5
+
+
+def test_recovery_read_failure_is_not_misreported_as_an_empty_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup must retry a failed continuation read instead of replaying owned source events."""
+    store = ApprovalContinuationStore(tmp_path)
+    store.create(_continuation())
+    monkeypatch.setattr(store._db, "Session", MagicMock(side_effect=RuntimeError("database unavailable")))
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        store.recoverable()
 
 
 @pytest.mark.asyncio
@@ -335,6 +347,111 @@ async def test_duplicate_decision_waits_through_reload_gap_and_resumes_once(tmp_
     completed = transport._continuations.get("approval-1")
     assert completed is not None
     assert completed.calls[0].decision is ApprovalDecision.APPROVED
+
+
+@pytest.mark.asyncio
+async def test_unpersisted_approval_is_reported_as_denied(tmp_path: Path) -> None:
+    """The Matrix card must never show approval when the continuation write failed."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: None,
+    )
+    transport._continuations.resolve_call = MagicMock(return_value=None)
+
+    status, reason = await transport._handle_continuation_decision(
+        "approval-1",
+        "call-1",
+        "approved",
+        None,
+    )
+
+    assert status == "denied"
+    assert reason == "Approval decision could not be persisted; the tool was denied safely."
+
+
+@pytest.mark.asyncio
+async def test_unknown_exact_call_is_reported_as_denied(tmp_path: Path) -> None:
+    """A stale or forged tool-call ID must never make a card visibly approved."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: None,
+    )
+    transport._continuations.create(_continuation())
+
+    status, reason = await transport._handle_continuation_decision(
+        "approval-1",
+        "unknown-call",
+        "approved",
+        None,
+    )
+
+    assert status == "denied"
+    assert reason == "The exact paused tool call no longer exists; the tool was denied safely."
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_does_not_fail_a_live_continuation_dispatch(tmp_path: Path) -> None:
+    """A decision replayed during startup must not be mistaken for a pre-crash claim."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    claimed = asyncio.Event()
+    release = asyncio.Event()
+    transport: ApprovalMatrixTransport
+
+    async def resume(continuation: ApprovalContinuation) -> None:
+        owned = transport._continuations.claim(continuation.approval_id, "live-startup-dispatch")
+        assert owned is not None
+        claimed.set()
+        await release.wait()
+        transport._continuations.complete(continuation.approval_id, "live-startup-dispatch")
+
+    bot = SimpleNamespace(
+        running=True,
+        resume_approval_continuation=AsyncMock(side_effect=resume),
+        fail_approval_continuation=AsyncMock(),
+    )
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda _name: cast("Any", bot),
+        cards_provider=lambda: None,
+    )
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    ready = transport._continuations.acknowledge_call("approval-1", "call-1")
+    assert ready is not None
+    assert ready.state == "ready"
+    transport._schedule_continuation(ready)
+    await asyncio.wait_for(claimed.wait(), timeout=1)
+
+    assert await transport._recover_continuations() is True
+    during_resume = transport._continuations.get("approval-1")
+    assert during_resume is not None
+    assert during_resume.state == "claimed"
+    bot.fail_approval_continuation.assert_not_awaited()
+
+    release.set()
+    await asyncio.gather(*tuple(transport._continuation_tasks))
+    completed = transport._continuations.get("approval-1")
+    assert completed is not None
+    assert completed.state == "completed"
 
 
 @pytest.mark.asyncio

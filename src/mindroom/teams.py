@@ -1839,6 +1839,7 @@ async def continue_paused_team_run(  # noqa: C901
     configured_team_name: str,
     model_name: str,
     decisions: dict[str, bool],
+    denial_reasons: dict[str, str | None],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> str | PausedAttempt:
@@ -1884,7 +1885,7 @@ async def continue_paused_team_run(  # noqa: C901
         )
         session = await team.aget_session(session_id=session_id, user_id=user_id)
         persisted = None if session is None else session.get_run(run_id)
-        if not isinstance(persisted, TeamRunOutput) or persisted.status is not RunStatus.paused:
+        if not isinstance(persisted, TeamRunOutput) or persisted.status != RunStatus.paused:
             msg = f"Paused team run {run_id!r} is no longer available"
             raise RuntimeError(msg)
         requirements = [requirement for requirement in persisted.requirements or () if requirement.needs_confirmation]
@@ -1904,7 +1905,7 @@ async def continue_paused_team_run(  # noqa: C901
                 if approved:
                     requirement.confirm()
                 else:
-                    requirement.reject("Not approved by requester")
+                    requirement.reject(denial_reasons[tool_call_id] or "Not approved by requester")
         continued = await cast(
             "Any",
             team.acontinue_run(
@@ -1925,7 +1926,7 @@ async def continue_paused_team_run(  # noqa: C901
         )
         if paused is not None:
             return paused
-        if continued.status is not RunStatus.completed:
+        if continued.status != RunStatus.completed:
             raise RuntimeError(str(continued.content or "Team continuation did not complete"))
         if tool_trace_collector is not None:
             tool_trace_collector.extend(_extract_completed_team_tool_trace(continued))

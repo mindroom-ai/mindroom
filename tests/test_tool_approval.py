@@ -20,6 +20,7 @@ from mindroom.approval_manager import (
     ApprovalStartupSweep,
     PendingApproval,
     SentApprovalEvent,
+    ToolApprovalTransportError,
     _ApprovalManager,
     _build_event_arguments_preview,
     _build_full_event_arguments,
@@ -249,6 +250,37 @@ async def test_detached_card_displays_the_durable_winning_decision(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_detached_transport_refusal_forgets_the_unsent_card_row(tmp_path: Path) -> None:
+    """A fail-closed transport refusal must not block every later startup sweep."""
+    cards = FakeApprovalCards()
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(side_effect=ToolApprovalTransportError("router does not manage this room")),
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+    )
+
+    with pytest.raises(ToolApprovalTransportError, match="router does not manage"):
+        await store.create_detached_approval(
+            approval_id="approval-refused",
+            continuation_id="continuation-refused",
+            tool_call_id="call-refused",
+            tool_name="dangerous",
+            arguments={},
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        )
+
+    assert cards.rows == {}
+
+
+@pytest.mark.asyncio
 async def test_detached_approval_expiry_resolves_continuation_without_waiter(tmp_path: Path) -> None:
     """Expiry must wake the durable continuation even though no response coroutine is waiting."""
     cards = FakeApprovalCards()
@@ -313,6 +345,32 @@ async def test_startup_reclaims_expiry_for_unresolved_continuation_card(tmp_path
     assert sweep.failed == 0
     assert tuple(store._detached_expiry_tasks) == ("$approval",)
     await store.shutdown(reason="test complete")
+
+
+@pytest.mark.asyncio
+async def test_startup_terminalizes_malformed_continuation_card_without_call_id(tmp_path: Path) -> None:
+    """A malformed current-format card must fail closed instead of retrying forever."""
+    cards = FakeApprovalCards()
+    card = _approval_card()
+    card["content"]["continuation_id"] = "continuation-1"
+    card["content"].pop("tool_call_id")
+    await cards.store_card("$approval", "!room:localhost", card)
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+    )
+
+    sweep = await store.discard_pending_on_startup()
+
+    assert sweep.complete is True
+    assert cards.rows == {}
+    assert store._detached_expiry_tasks == {}
+    assert editor.await_args.args[2]["status"] == "expired"
 
 
 @pytest.mark.asyncio
@@ -465,7 +523,7 @@ async def test_cancelled_detached_card_bind_keeps_retry_owner(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_cancelled_detached_send_hands_delivered_event_to_recovery(tmp_path: Path) -> None:
-    """Cancellation during send must not strand a card whose event id arrives afterward."""
+    """Cancellation during send must terminally expire a card whose event id arrives afterward."""
     cards = FakeApprovalCards()
     send_started = asyncio.Event()
     release_send = asyncio.Event()
@@ -509,14 +567,13 @@ async def test_cancelled_detached_send_hands_delivered_event_to_recovery(tmp_pat
     with pytest.raises(asyncio.CancelledError):
         await create
     for _attempt in range(100):
-        row = next(iter(cards.rows.values()))
-        if row.card_event_id == "$approval" and card_ready.await_count:
+        if card_ready.await_count and not cards.rows and "$approval" not in store._detached_expiry_tasks:
             break
         await asyncio.sleep(0.01)
 
-    assert next(iter(cards.rows.values())).card_event_id == "$approval"
     card_ready.assert_awaited_with("continuation-send", "call-send", "$approval")
-    assert "$approval" in store._detached_expiry_tasks
+    assert "$approval" not in store._detached_expiry_tasks
+    assert cards.rows == {}
 
 
 def test_resolution_after_deadline_is_forced_to_expired() -> None:

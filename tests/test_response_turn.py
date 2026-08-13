@@ -272,8 +272,8 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
     assert paused.requirements[0].member_agent_name == "researcher"
 
 
-def test_paused_attempt_ignores_confirmation_entries_without_call_ids() -> None:
-    """A pause is restartable only when every retained tool has durable call identity."""
+def test_paused_attempt_rejects_confirmation_entries_without_call_ids() -> None:
+    """A paused call without durable identity must fail closed instead of being silently skipped."""
     invalid_tool = ToolExecution(tool_name="missing-id", requires_confirmation=True)
     invalid_requirement = RunRequirement(invalid_tool)
     valid_tool = ToolExecution(
@@ -282,16 +282,35 @@ def test_paused_attempt_ignores_confirmation_entries_without_call_ids() -> None:
         requires_confirmation=True,
     )
 
-    paused = response_turn_module._paused_attempt(
-        tools=(invalid_tool, valid_tool),
-        requirements=(invalid_requirement,),
-        session_id="session-1",
-        run_id="run-1",
+    with pytest.raises(RuntimeError, match="missing its exact tool-call ID"):
+        response_turn_module._paused_attempt(
+            tools=(invalid_tool, valid_tool),
+            requirements=(invalid_requirement,),
+            session_id="session-1",
+            run_id="run-1",
+        )
+
+
+def test_paused_attempt_rejects_duplicate_requirement_call_ids() -> None:
+    """One approval decision must never authorize two requirements sharing an ID."""
+    requirements = tuple(
+        RunRequirement(
+            ToolExecution(
+                tool_call_id="duplicate-call",
+                tool_name=tool_name,
+                requires_confirmation=True,
+            ),
+        )
+        for tool_name in ("first", "second")
     )
 
-    assert paused is not None
-    assert paused.tools == (valid_tool,)
-    assert paused.requirements == ()
+    with pytest.raises(RuntimeError, match="duplicate tool-call IDs"):
+        response_turn_module._paused_attempt(
+            tools=(),
+            requirements=requirements,
+            session_id="session-1",
+            run_id="run-1",
+        )
 
 
 @pytest.mark.asyncio

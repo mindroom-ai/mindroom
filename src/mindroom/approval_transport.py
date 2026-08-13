@@ -228,10 +228,10 @@ class ApprovalMatrixTransport:
             reason=reason,
         )
         if continuation is None:
-            return status, reason
+            return "denied", "Approval decision could not be persisted; the tool was denied safely."
         call = next((call for call in continuation.calls if call.tool_call_id == tool_call_id), None)
         if call is None or call.decision is None:
-            return status, reason
+            return "denied", "The exact paused tool call no longer exists; the tool was denied safely."
         return call.decision.value, call.reason
 
     async def _handle_continuation_decision_ready(self, approval_id: str, tool_call_id: str) -> None:
@@ -354,6 +354,11 @@ class ApprovalMatrixTransport:
             elif continuation.state == "ready":
                 self._schedule_continuation(continuation)
             else:
+                if any(
+                    not task.done() and task.get_name() == f"approval-continuation-{continuation.approval_id}"
+                    for task in self._continuation_tasks
+                ):
+                    continue
                 settled = await self._fail_recovered_continuation(
                     continuation,
                     "Tool approval continuation was interrupted after it was claimed; it was not replayed.",
@@ -778,14 +783,23 @@ class ApprovalMatrixTransport:
             ):
                 return
             self._startup_cleanup_attempts += 1
-            if not await self._discard_orphaned_approval_cards_on_startup():
-                self._schedule_startup_cleanup_retry()
-                return
             if not self._continuations_recovered:
-                if not await self._recover_continuations():
+                try:
+                    recovered = await self._recover_continuations()
+                except Exception:
+                    logger.warning(
+                        "tool_approval_continuation_recovery_failed",
+                        attempt=self._startup_cleanup_attempts,
+                        exc_info=True,
+                    )
+                    recovered = False
+                if not recovered:
                     self._schedule_startup_cleanup_retry()
                     return
                 self._continuations_recovered = True
+            if not await self._discard_orphaned_approval_cards_on_startup():
+                self._schedule_startup_cleanup_retry()
+                return
             self._startup_cleanup_done = True
             self._retire_startup_cleanup_retry()
 

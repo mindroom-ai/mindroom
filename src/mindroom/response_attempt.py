@@ -10,6 +10,7 @@ from mindroom.cancellation import request_task_cancel, task_cancel_source_from_m
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.presence import is_user_online
 from mindroom.orchestration.runtime import cancel_failure_reason, classify_cancel_source, log_cancelled_response
+from mindroom.streaming import StreamingLifecycleSuspensionError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -157,6 +158,8 @@ class ResponseAttemptRunner:
                     user_stop_message="Response cancelled by user",
                     interrupted_message="Response interrupted — traceback for diagnosis",
                 )
+            except StreamingLifecycleSuspensionError:
+                raise
             except Exception as error:
                 self.deps.logger.exception("Error during response generation", error=str(error))
                 raise

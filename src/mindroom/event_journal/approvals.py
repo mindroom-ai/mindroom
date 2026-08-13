@@ -334,27 +334,40 @@ def pending_cards(
     # the comparison itself. A server whose collation is not byte order would
     # otherwise order the rows differently from the cursor that walks them, and
     # the scan would skip rows or revisit them.
-    cursor_clause = "" if after is None else " AND (cards.created_at_ns, cards.transaction_id/*bytes*/) > (?, ?)"
-    cursor_params: tuple[object, ...] = () if after is None else after
-    rows = transaction.fetchall(
-        f"""
-        SELECT {_CARD_COLUMNS}
-        FROM approval_cards AS cards
-        LEFT JOIN room_membership AS membership
-          ON membership.principal_id = cards.principal_id
-         AND membership.room_id = cards.room_id
-        WHERE cards.principal_id = ?
-          AND cards.room_id = ?
-          AND cards.membership_epoch = COALESCE(membership.membership_epoch, 0){cursor_clause}
-        -- Two cards sent in the same nanosecond would otherwise come back in
-        -- whatever order each backend felt like, and the caller expires them
-        -- in the order it reads them.
-        ORDER BY cards.created_at_ns, cards.transaction_id/*bytes*/
-        LIMIT ?
-        """,  # noqa: S608 - a fixed column list and a fixed clause, not input
-        (principal_id, room_id, *cursor_params, limit),
-    )
-    return tuple(card for row in rows if (card := _card(row)) is not None)
+    cards: list[StoredApprovalCard] = []
+    scan_after = after
+    while len(cards) < limit:
+        cursor_clause = (
+            "" if scan_after is None else " AND (cards.created_at_ns, cards.transaction_id/*bytes*/) > (?, ?)"
+        )
+        cursor_params: tuple[object, ...] = () if scan_after is None else scan_after
+        raw_limit = limit - len(cards)
+        rows = transaction.fetchall(
+            f"""
+            SELECT {_CARD_COLUMNS}
+            FROM approval_cards AS cards
+            LEFT JOIN room_membership AS membership
+              ON membership.principal_id = cards.principal_id
+             AND membership.room_id = cards.room_id
+            WHERE cards.principal_id = ?
+              AND cards.room_id = ?
+              AND cards.membership_epoch = COALESCE(membership.membership_epoch, 0){cursor_clause}
+            -- Two cards sent in the same nanosecond would otherwise come back in
+            -- whatever order each backend felt like, and the caller expires them
+            -- in the order it reads them.
+            ORDER BY cards.created_at_ns, cards.transaction_id/*bytes*/
+            LIMIT ?
+            """,  # noqa: S608 - a fixed column list and a fixed clause, not input
+            (principal_id, room_id, *cursor_params, raw_limit),
+        )
+        if not rows:
+            break
+        last = rows[-1]
+        scan_after = (int(last["created_at_ns"]), str(last["transaction_id"]))
+        cards.extend(card for row in rows if (card := _card(row)) is not None)
+        if len(rows) < raw_limit:
+            break
+    return tuple(cards)
 
 
 def _card(row: Row) -> StoredApprovalCard | None:

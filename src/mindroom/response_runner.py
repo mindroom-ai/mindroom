@@ -94,6 +94,7 @@ from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_approval import (
     ToolApprovalCall,
+    ToolApprovalTransportError,
     evaluate_tool_approval,
     expire_suspended_tool_approval,
     resolve_tool_approval_approver,
@@ -779,22 +780,30 @@ class ResponseRunner:
             decision, timeout_seconds = plan.decisions[tool_call_id]
             if decision is not None:
                 continue
-            sent = await send_suspended_tool_approval(
-                ToolApprovalCall(
-                    config=self.deps.runtime.config,
-                    runtime_paths=self.deps.runtime_paths,
-                    tool_name=tool_name,
-                    arguments=dict(tool.tool_args or {}),
-                    agent_name=invoking_agent,
+            try:
+                sent = await send_suspended_tool_approval(
+                    ToolApprovalCall(
+                        config=self.deps.runtime.config,
+                        runtime_paths=self.deps.runtime_paths,
+                        tool_name=tool_name,
+                        arguments=dict(tool.tool_args or {}),
+                        agent_name=invoking_agent,
+                        room_id=target.room_id,
+                        thread_id=target.resolved_thread_id,
+                        requester_id=current.requester_id,
+                    ),
+                    approval_id=f"{current.approval_id}-{current.generation}-{index}",
+                    continuation_id=current.approval_id,
+                    tool_call_id=tool_call_id,
+                    timeout_seconds=timeout_seconds,
+                )
+            except ToolApprovalTransportError as error:
+                await self._fail_approval_card_creation(
+                    current.approval_id,
                     room_id=target.room_id,
-                    thread_id=target.resolved_thread_id,
-                    requester_id=current.requester_id,
-                ),
-                approval_id=f"{current.approval_id}-{current.generation}-{index}",
-                continuation_id=current.approval_id,
-                tool_call_id=tool_call_id,
-                timeout_seconds=timeout_seconds,
-            )
+                    reason=error.reason,
+                )
+                raise
             if sent is None:
                 await self._fail_approval_card_creation(
                     current.approval_id,
@@ -802,7 +811,7 @@ class ResponseRunner:
                     reason=failure_reason,
                 )
                 raise RuntimeError(failure_reason)
-            attached = self._approval_continuations.attach_card(current.approval_id, tool_call_id, sent.event_id)
+            attached = await asyncio.to_thread(self._approval_continuations.get, current.approval_id)
             if attached is not None:
                 current = attached
         return current
@@ -876,7 +885,7 @@ class ResponseRunner:
             transport_sender_id=request.response_envelope.sender_id,
             source_kind=request.response_envelope.source_kind,
         )
-        self._approval_continuations.create(publishing)
+        await asyncio.to_thread(self._approval_continuations.create, publishing)
 
         try:
             plan = await self._plan_approval_pause(identified_tools, requester_id=requester_id)
@@ -942,14 +951,23 @@ class ResponseRunner:
         continuation_state: Literal["pending", "ready"] = (
             "ready" if all(decision is not None for decision, _timeout in plan.decisions.values()) else "pending"
         )
-        continuation = self._approval_continuations.bind_response_event(
-            approval_id,
-            response_event_id,
-            state=continuation_state,
-            calls=plan.calls,
-        )
+        try:
+            continuation = await asyncio.to_thread(
+                self._approval_continuations.bind_response_event,
+                approval_id,
+                response_event_id,
+                state=continuation_state,
+                calls=plan.calls,
+            )
+        except Exception:
+            await self.fail_approval_continuation(
+                publishing,
+                "Approval continuation lost its visible response binding",
+            )
+            raise
         if continuation is None or continuation.state != continuation_state:
             msg = "Approval continuation lost its visible response binding"
+            await self.fail_approval_continuation(publishing, msg)
             raise RuntimeError(msg)
         progress.track_event(response_event_id)
         try:
@@ -958,11 +976,11 @@ class ResponseRunner:
 
             if continuation.state == "ready":
                 claimant_id = f"inline:{uuid4().hex}"
-                claimed = self._approval_continuations.claim(approval_id, claimant_id)
+                claimed = await asyncio.to_thread(self._approval_continuations.claim, approval_id, claimant_id)
                 if claimed is None:
                     msg = "Approval continuation lost its inline claim"
                     await self.fail_approval_continuation(continuation, msg)
-                    raise RuntimeError(msg)
+                    raise RuntimeError(msg)  # noqa: TRY301 - failure must settle before control leaves this branch
                 try:
                     response_text, terminal, tool_trace = await self._run_approval_chain(
                         claimed,
@@ -1017,6 +1035,13 @@ class ResponseRunner:
                 ),
             )
             raise
+        except Exception:
+            await self._fail_approval_card_creation(
+                approval_id,
+                room_id=target.room_id,
+                reason="Approval card publication failed.",
+            )
+            raise
         return FinalDeliveryOutcome(
             terminal_status="suspended",
             event_id=response_event_id,
@@ -1052,7 +1077,11 @@ class ResponseRunner:
             ),
         )
         if outcome.terminal_status == "completed":
-            completed = self._approval_continuations.complete(continuation.approval_id, claimant_id)
+            completed = await asyncio.to_thread(
+                self._approval_continuations.complete,
+                continuation.approval_id,
+                claimant_id,
+            )
             if completed is None:
                 msg = "Approval continuation lost its completion claim"
                 raise RuntimeError(msg)
@@ -1085,7 +1114,11 @@ class ResponseRunner:
             )
             if advanced.state == "pending":
                 return waiting_text, False, tool_trace
-            next_claim = self._approval_continuations.claim(advanced.approval_id, claimant_id)
+            next_claim = await asyncio.to_thread(
+                self._approval_continuations.claim,
+                advanced.approval_id,
+                claimant_id,
+            )
             if next_claim is None:
                 msg = "Approval continuation lost its chained pause claim"
                 raise RuntimeError(msg)
@@ -1117,7 +1150,8 @@ class ResponseRunner:
         ):
             msg = "Could not publish the chained approval response"
             raise RuntimeError(msg)
-        advanced = self._approval_continuations.advance_pause(
+        advanced = await asyncio.to_thread(
+            self._approval_continuations.advance_pause,
             current.approval_id,
             claimant_id,
             run_id=paused.run_id,
@@ -1137,7 +1171,7 @@ class ResponseRunner:
 
     async def _fail_approval_card_creation(self, approval_id: str, *, room_id: str, reason: str) -> None:
         """Fail a partially published approval set and terminalize every delivered card."""
-        continuation = self._approval_continuations.get(approval_id)
+        continuation = await asyncio.to_thread(self._approval_continuations.get, approval_id)
         if continuation is None:
             return
         terminalized = await asyncio.gather(
@@ -1185,7 +1219,11 @@ class ResponseRunner:
         claimant_id = f"{self.deps.agent_name}:{uuid4().hex}"
 
         async def resume_locked() -> None:
-            claimed = self._approval_continuations.claim(continuation.approval_id, claimant_id)
+            claimed = await asyncio.to_thread(
+                self._approval_continuations.claim,
+                continuation.approval_id,
+                claimant_id,
+            )
             if claimed is None:
                 return
             request = self._approval_response_request(claimed, target=target)
@@ -1197,12 +1235,17 @@ class ResponseRunner:
                 ),
                 request=request,
             )
+            post_effect_continuation = claimed
 
             async def continue_response(_message_id: str | None) -> None:
+                nonlocal post_effect_continuation
                 response_text, terminal, tool_trace = await self._run_approval_chain(
                     claimed,
                     target=target,
                     claimant_id=claimant_id,
+                )
+                post_effect_continuation = (
+                    await asyncio.to_thread(self._approval_continuations.get, claimed.approval_id) or claimed
                 )
                 if terminal:
                     progress.settle(
@@ -1238,7 +1281,7 @@ class ResponseRunner:
                     user_id=claimed.requester_id,
                     run_id=claimed.run_id,
                     build_post_response_outcome=lambda final: self._approval_post_response_outcome(
-                        claimed,
+                        post_effect_continuation,
                         target=target,
                         run_succeeded=final.terminal_status == "completed",
                     ),
@@ -1249,7 +1292,20 @@ class ResponseRunner:
                         persist_response_event_id=self._approval_response_event_persistence(claimed),
                     ),
                 )
+                outcome = progress.delivery_outcome
+                if outcome is not None and outcome.terminal_status in {"cancelled", "error"}:
+                    await asyncio.to_thread(
+                        self._approval_continuations.fail,
+                        claimed.approval_id,
+                        outcome.failure_reason or "Tool approval continuation did not complete.",
+                    )
             except asyncio.CancelledError:
+                await self._finish_cancelled_approval_settlement(
+                    self.fail_approval_continuation(
+                        claimed,
+                        "Tool approval continuation was cancelled.",
+                    ),
+                )
                 raise
             except Exception as error:
                 reason = f"Tool approval continuation failed safely: {error}"
@@ -1262,7 +1318,7 @@ class ResponseRunner:
         try:
             await self._lifecycle_coordinator.run_locked_target_operation(
                 target=target,
-                while_waiting=lambda: asyncio.sleep(0),
+                while_waiting=None,
                 locked_operation=resume_locked,
             )
         finally:
@@ -1318,10 +1374,9 @@ class ResponseRunner:
             continuation.execution_identity,
             error_prefix="Approval continuation execution_identity",
         )
-        current = self._approval_continuations.get(continuation.approval_id) or continuation
         return ResponseOutcome(
-            response_run_id=current.run_id,
-            session_id=current.session_id,
+            response_run_id=continuation.run_id,
+            session_id=continuation.session_id,
             session_type=SessionType.TEAM if continuation.entity_kind == "team" else SessionType.AGENT,
             execution_identity=execution_identity,
             run_succeeded=run_succeeded,
@@ -1414,7 +1469,7 @@ class ResponseRunner:
 
     async def fail_approval_continuation(self, continuation: ApprovalContinuation, reason: str) -> None:
         """Make an unrecoverable continuation visibly terminal."""
-        current = self._approval_continuations.get(continuation.approval_id)
+        current = await asyncio.to_thread(self._approval_continuations.get, continuation.approval_id)
         if current is None or current.state in {"completed", "failed"}:
             return
         if await self._reconcile_claimed_approval_delivery(current):
@@ -1442,13 +1497,14 @@ class ResponseRunner:
             delivered = response_event_id is not None
         if delivered and current.state == "publishing" and current.response_event_id is None:
             assert response_event_id is not None
-            self._approval_continuations.bind_response_event(
+            await asyncio.to_thread(
+                self._approval_continuations.bind_response_event,
                 current.approval_id,
                 response_event_id,
                 state="publishing",
             )
         if delivered:
-            self._approval_continuations.fail(current.approval_id, reason)
+            await asyncio.to_thread(self._approval_continuations.fail, current.approval_id, reason)
         else:
             self.deps.logger.warning(
                 "approval_continuation_failure_not_delivered",
@@ -1469,7 +1525,8 @@ class ResponseRunner:
         )
         if delivery is None or delivery.acknowledged_event_id is None:
             return continuation
-        bound = self._approval_continuations.bind_response_event(
+        bound = await asyncio.to_thread(
+            self._approval_continuations.bind_response_event,
             continuation.approval_id,
             delivery.acknowledged_event_id,
             state="publishing",
@@ -1493,8 +1550,14 @@ class ResponseRunner:
                 turn_id=turn_id,
                 stage=DeliveryStage.FINAL,
             )
-        if delivery is not None and delivery.acknowledged_event_id is not None and continuation.claimant_id is not None:
-            self._approval_continuations.complete(continuation.approval_id, continuation.claimant_id)
+        if delivery is None or delivery.acknowledged_event_id is None:
+            return False
+        if continuation.claimant_id is not None:
+            await asyncio.to_thread(
+                self._approval_continuations.complete,
+                continuation.approval_id,
+                continuation.claimant_id,
+            )
         return True
 
     async def _continue_entity_call(
@@ -1521,6 +1584,7 @@ class ResponseRunner:
             msg = "Approval continuation execution identity no longer matches its target"
             raise RuntimeError(msg)
         decisions = {call.tool_call_id: call.decision is ContinuationDecision.APPROVED for call in continuation.calls}
+        denial_reasons = {call.tool_call_id: call.reason for call in continuation.calls}
         if continuation.entity_kind == "team":
             orchestrator = self.deps.runtime.orchestrator
 
@@ -1545,6 +1609,7 @@ class ResponseRunner:
                     if continuation.runtime_model_name is None
                     else continuation.runtime_model_name,
                     decisions=decisions,
+                    denial_reasons=denial_reasons,
                     refresh_scheduler=(orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None),
                     tool_trace_collector=tool_trace_collector,
                 )
@@ -1557,17 +1622,19 @@ class ResponseRunner:
                 execution_identity=execution_identity,
                 tool_dispatch=tool_dispatch,
                 decisions=decisions,
+                denial_reasons=denial_reasons,
                 tool_trace_collector=tool_trace_collector,
             )
         return response_text
 
-    async def _continue_paused_agent_run(
+    async def _continue_paused_agent_run(  # noqa: C901
         self,
         continuation: ApprovalContinuation,
         *,
         execution_identity: ToolExecutionIdentity,
         tool_dispatch: ToolDispatchContext,
         decisions: dict[str, bool],
+        denial_reasons: dict[str, str | None],
         tool_trace_collector: list[ToolTraceEntry],
     ) -> str | PausedAttempt:
         if continuation.entity_name not in self.deps.runtime.config.agents:
@@ -1590,24 +1657,33 @@ class ResponseRunner:
                 user_id=continuation.requester_id,
             )
             persisted = None if session is None else session.get_run(continuation.run_id)
-            if not isinstance(persisted, RunOutput) or persisted.status is not RunStatus.paused:
+            if not isinstance(persisted, RunOutput) or persisted.status != RunStatus.paused:
                 msg = f"Paused run {continuation.run_id!r} is no longer available"
                 raise RuntimeError(msg)
-            paused_tools = [tool for tool in persisted.tools or () if tool.requires_confirmation]
-            paused_call_ids = {tool.tool_call_id for tool in paused_tools if tool.tool_call_id is not None}
-            if len(paused_call_ids) != len(paused_tools) or paused_call_ids != decisions.keys():
+            requirements = [
+                deepcopy(requirement) for requirement in persisted.requirements or () if requirement.needs_confirmation
+            ]
+            paused_call_ids = {
+                requirement.tool_execution.tool_call_id
+                for requirement in requirements
+                if requirement.tool_execution is not None and requirement.tool_execution.tool_call_id is not None
+            }
+            if len(paused_call_ids) != len(requirements) or paused_call_ids != decisions.keys():
                 msg = "Paused tools no longer match the approval continuation"
                 raise RuntimeError(msg)
-            updated_tools: list[ToolExecution] = deepcopy(paused_tools)
-            for tool in updated_tools:
+            for requirement in requirements:
+                tool = requirement.tool_execution
+                assert tool is not None
                 assert tool.tool_call_id is not None
-                tool.confirmed = decisions[tool.tool_call_id]
-                tool.confirmation_note = "Approved by requester" if tool.confirmed else "Not approved by requester"
+                if decisions[tool.tool_call_id]:
+                    requirement.confirm()
+                else:
+                    requirement.reject(denial_reasons[tool.tool_call_id] or "Not approved by requester")
 
             async def continue_run() -> RunOutput:
                 result = agent.acontinue_run(
                     run_id=continuation.run_id,
-                    updated_tools=updated_tools,
+                    requirements=requirements,
                     session_id=continuation.session_id,
                     user_id=continuation.requester_id,
                     stream=False,
@@ -1625,7 +1701,7 @@ class ResponseRunner:
         )
         if paused is not None:
             return paused
-        if response.status is not RunStatus.completed:
+        if response.status != RunStatus.completed:
             raise RuntimeError(str(response.content or "Approval continuation did not complete"))
         for tool in response.tools or ():
             _, trace_entry = format_tool_completed_event(tool)

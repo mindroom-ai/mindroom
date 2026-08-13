@@ -94,7 +94,6 @@ class MatrixApprovalAction:
     room_id: str
     sender_id: str
     card_event_id: str | None
-    approval_id: str | None
     status: Literal["approved", "denied"]
     reason: str | None
 

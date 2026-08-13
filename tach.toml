@@ -566,7 +566,10 @@ visibility = ["mindroom.approval_manager"]
 
 [[modules]]
 path = "mindroom.approval_continuation"
-depends_on = ["mindroom.agent_storage"]
+depends_on = [
+    "mindroom.agent_storage",
+    "sqlalchemy",
+]
 visibility = [
     "mindroom.approval_transport",
     "mindroom.bot",
@@ -1546,10 +1549,10 @@ depends_on = [
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.entity_resolution",
-    "mindroom.history.storage",
-    "mindroom.history.types",
     "mindroom.history.interrupted_replay",
+    "mindroom.history.storage",
     "mindroom.history.turn_recorder",
+    "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
     "mindroom.memory",
@@ -1557,9 +1560,9 @@ depends_on = [
     "mindroom.post_response_effects",
     "mindroom.response_admission",
     "mindroom.response_attempt",
-    "mindroom.response_turn",
     "mindroom.response_lifecycle",
     "mindroom.response_terminal",
+    "mindroom.response_turn",
     "mindroom.streaming",
     "mindroom.sync_restart_retry",
     "mindroom.teams",
@@ -1609,6 +1612,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.presence",
     "mindroom.orchestration.runtime",
+    "mindroom.streaming",
 ]
 visibility = ["mindroom.response_runner"]
 

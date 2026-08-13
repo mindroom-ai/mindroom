@@ -305,7 +305,7 @@ class ResponseLifecycleCoordinator:
         self,
         *,
         target: MessageTarget,
-        while_waiting: Callable[[], Awaitable[None]],
+        while_waiting: Callable[[], Awaitable[None]] | None,
         locked_operation: Callable[[], Awaitable[_LockedResponseResult]],
     ) -> _LockedResponseResult:
         """Run a non-response operation under one target's response lock."""
@@ -313,6 +313,10 @@ class ResponseLifecycleCoordinator:
         acquire_task = asyncio.create_task(lifecycle_lock.acquire())
         lock_acquired = False
         try:
+            if while_waiting is None:
+                await acquire_task
+                lock_acquired = True
+                return await locked_operation()
             while not acquire_task.done():
                 await while_waiting()
                 await asyncio.wait({acquire_task}, timeout=0.01)
