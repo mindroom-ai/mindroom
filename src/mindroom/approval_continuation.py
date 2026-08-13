@@ -26,6 +26,7 @@ class ApprovalDecision(StrEnum):
 type _ApprovalContinuationState = Literal["publishing", "pending", "ready", "claimed", "completed", "failed"]
 type _PublishedContinuationState = Literal["pending", "ready"]
 _PAGE_SIZE = 100
+_RECOVERABLE_STATES = ("publishing", "pending", "ready", "claimed")
 
 _STORE_LOCKS_GUARD = threading.Lock()
 _STORE_LOCKS: dict[str, threading.RLock] = {}
@@ -200,6 +201,46 @@ class ApprovalContinuationStore:
         row = self._db.get_approval(approval_id)
         return None if row is None else ApprovalContinuation._from_row(row)
 
+    def _persist(
+        self,
+        current: ApprovalContinuation,
+        updated: ApprovalContinuation,
+        *,
+        run_status: str | None = None,
+    ) -> ApprovalContinuation | None:
+        """Commit one state transition guarded by the current durable state."""
+        values: dict[str, object] = {
+            "status": updated.state,
+            "run_id": updated.run_id,
+            "session_id": updated.session_id,
+            "context": updated._to_context(),
+        }
+        if run_status is not None:
+            values["run_status"] = run_status
+        row = self._db.update_approval(
+            current.approval_id,
+            expected_status=current.state,
+            **values,
+        )
+        return None if row is None else ApprovalContinuation._from_row(row)
+
+    def _records(self, states: tuple[str, ...]) -> tuple[ApprovalContinuation, ...]:
+        records: list[ApprovalContinuation] = []
+        for state in states:
+            page = 1
+            while True:
+                rows, total = self._db.get_approvals(
+                    status=state,
+                    approval_type="mindroom",
+                    limit=_PAGE_SIZE,
+                    page=page,
+                )
+                records.extend(ApprovalContinuation._from_row(row) for row in rows)
+                if page * _PAGE_SIZE >= total:
+                    break
+                page += 1
+        return tuple(records)
+
     def bind_response_event(
         self,
         approval_id: str,
@@ -219,13 +260,7 @@ class ApprovalContinuationStore:
                 calls=current.calls if calls is None else calls,
                 state=state,
             )
-            row = self._db.update_approval(
-                approval_id,
-                expected_status="publishing",
-                status=state,
-                context=published._to_context(),
-            )
-            return self.get(approval_id) if row is None else ApprovalContinuation._from_row(row)
+            return self._persist(current, published) or self.get(approval_id)
 
     def resolve_call(
         self,
@@ -250,15 +285,8 @@ class ApprovalContinuationStore:
                     calls.append(call)
             if not matched:
                 return current
-            state: _ApprovalContinuationState = "pending"
-            updated = replace(current, calls=tuple(calls), state=state)
-            row = self._db.update_approval(
-                approval_id,
-                expected_status="pending",
-                status=state,
-                context=updated._to_context(),
-            )
-            return self.get(approval_id) if row is None else ApprovalContinuation._from_row(row)
+            updated = replace(current, calls=tuple(calls))
+            return self._persist(current, updated) or self.get(approval_id)
 
     def acknowledge_call(self, approval_id: str, tool_call_id: str) -> ApprovalContinuation | None:
         """Record that the winning decision is durable in the approval-card journal."""
@@ -276,33 +304,18 @@ class ApprovalContinuationStore:
                 "ready" if all(call.decision is not None and call.decision_recorded for call in calls) else "pending"
             )
             updated = replace(current, calls=calls, state=state)
-            row = self._db.update_approval(
-                approval_id,
-                expected_status="pending",
-                status=state,
-                context=updated._to_context(),
-            )
-            return self.get(approval_id) if row is None else ApprovalContinuation._from_row(row)
+            return self._persist(current, updated) or self.get(approval_id)
 
     def for_source_event(self, source_event_id: str) -> ApprovalContinuation | None:
         """Return the continuation that durably owns one inbound journal source."""
-        for state in ("publishing", "pending", "ready", "claimed"):
-            page = 1
-            while True:
-                rows, total = self._db.get_approvals(
-                    status=state,
-                    approval_type="mindroom",
-                    limit=_PAGE_SIZE,
-                    page=page,
-                )
-                for row in rows:
-                    continuation = ApprovalContinuation._from_row(row)
-                    if source_event_id in continuation.source_event_ids:
-                        return continuation
-                if page * _PAGE_SIZE >= total:
-                    break
-                page += 1
-        return None
+        return next(
+            (
+                continuation
+                for continuation in self._records(_RECOVERABLE_STATES)
+                if source_event_id in continuation.source_event_ids
+            ),
+            None,
+        )
 
     def attach_card(self, approval_id: str, tool_call_id: str, card_event_id: str) -> ApprovalContinuation | None:
         """Record the Matrix card that owns one still-pending call."""
@@ -315,13 +328,7 @@ class ApprovalContinuationStore:
                 for call in current.calls
             )
             updated = replace(current, calls=calls)
-            row = self._db.update_approval(
-                approval_id,
-                expected_status="pending",
-                status="pending",
-                context=updated._to_context(),
-            )
-            return self.get(approval_id) if row is None else ApprovalContinuation._from_row(row)
+            return self._persist(current, updated) or self.get(approval_id)
 
     def claim(self, approval_id: str, claimant_id: str) -> ApprovalContinuation | None:
         """Claim one ready continuation exactly once."""
@@ -330,13 +337,7 @@ class ApprovalContinuationStore:
             if current is None or current.state != "ready":
                 return None
             claimed = replace(current, state="claimed", claimant_id=claimant_id)
-            row = self._db.update_approval(
-                approval_id,
-                expected_status="ready",
-                status="claimed",
-                context=claimed._to_context(),
-            )
-            return None if row is None else ApprovalContinuation._from_row(row)
+            return self._persist(current, claimed)
 
     def complete(self, approval_id: str, claimant_id: str) -> ApprovalContinuation | None:
         """Mark the claimant's continuation complete."""
@@ -345,14 +346,7 @@ class ApprovalContinuationStore:
             if current is None or current.state != "claimed" or current.claimant_id != claimant_id:
                 return None
             completed = replace(current, state="completed")
-            row = self._db.update_approval(
-                approval_id,
-                expected_status="claimed",
-                status="completed",
-                context=completed._to_context(),
-                run_status="COMPLETED",
-            )
-            return None if row is None else ApprovalContinuation._from_row(row)
+            return self._persist(current, completed, run_status="COMPLETED")
 
     def advance_pause(
         self,
@@ -380,15 +374,7 @@ class ApprovalContinuationStore:
                 claimant_id=None,
                 generation=current.generation + 1,
             )
-            row = self._db.update_approval(
-                approval_id,
-                expected_status="claimed",
-                status=state,
-                run_id=run_id,
-                session_id=session_id,
-                context=advanced._to_context(),
-            )
-            return None if row is None else ApprovalContinuation._from_row(row)
+            return self._persist(current, advanced)
 
     def fail(self, approval_id: str, reason: str) -> ApprovalContinuation | None:
         """Make a nonterminal continuation permanently failed."""
@@ -397,32 +383,11 @@ class ApprovalContinuationStore:
             if current is None or current.state in {"completed", "failed"}:
                 return current
             failed = replace(current, state="failed", failure_reason=reason)
-            row = self._db.update_approval(
-                approval_id,
-                expected_status=current.state,
-                status="failed",
-                context=failed._to_context(),
-                run_status="ERROR",
-            )
-            return None if row is None else ApprovalContinuation._from_row(row)
+            return self._persist(current, failed, run_status="ERROR")
 
     def recoverable(self) -> tuple[ApprovalContinuation, ...]:
         """Return continuations that startup must recover or settle."""
-        records: list[ApprovalContinuation] = []
-        for state in ("publishing", "pending", "ready", "claimed"):
-            page = 1
-            while True:
-                rows, total = self._db.get_approvals(
-                    status=state,
-                    approval_type="mindroom",
-                    limit=_PAGE_SIZE,
-                    page=page,
-                )
-                records.extend(ApprovalContinuation._from_row(row) for row in rows)
-                if page * _PAGE_SIZE >= total:
-                    break
-                page += 1
-        return tuple(records)
+        return self._records(_RECOVERABLE_STATES)
 
     def close(self) -> None:
         """Close this store handle."""
