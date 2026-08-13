@@ -11,6 +11,7 @@ from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.authorization import is_authorized_sender
 from mindroom.commands import config_confirmation
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import SemanticConsumer
 
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.ingress_validation import IngressValidator
     from mindroom.journal_dispatch import JournalDispatcher
+    from mindroom.message_target import MessageTarget
     from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
     from mindroom.stop import StopManager
@@ -47,7 +49,10 @@ class ReactionDispatcherDeps:
     user_stop_reconciler: UserStopReconciler
     ingress: IngressValidator
     reserve_prompt_ingress_order: Callable[..., PromptIngressReservationOwner]
+    build_message_target: Callable[..., MessageTarget]
+    enqueue_interactive_selection: Callable[..., Awaitable[None]]
     handle_interactive_selection: Callable[..., Awaitable[None]]
+    start_interactive_selection: Callable[..., Awaitable[None]]
     emit_reaction_received_hooks: Callable[..., Awaitable[None]]
     config_confirmation: ConfigConfirmationContext
 
@@ -147,11 +152,12 @@ class ReactionDispatcher:
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
         reservation_owner: PromptIngressReservationOwner,
-    ) -> bool:
+        requester_user_id: str,
+    ) -> TurnDispatchOutcome | None:
         """Route an interactive choice only to its claimed question."""
         interactive_claimed = consumer is SemanticConsumer.INTERACTIVE_REACTION
         if consumer is not None and not interactive_claimed:
-            return False
+            return None
         selection = await interactive.handle_reaction(
             self._client(),
             event,
@@ -160,26 +166,40 @@ class ReactionDispatcher:
             self.deps.runtime_paths,
         )
         if selection is None:
-            return interactive_claimed
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED if interactive_claimed else None
         if not interactive_claimed:
             try:
-                await self.deps.journal_dispatcher.claim_semantic_consumer(
+                claimed = await self.deps.journal_dispatcher.claim_semantic_consumer(
                     SemanticConsumer.INTERACTIVE_REACTION,
                 )
             except BaseException:
                 interactive.restore_selection(selection)
                 raise
+            if not claimed:
+                interactive.commit_selection(selection)
+                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
-        # The selection's response may wait behind this conversation's active
-        # turn, so release the sender's lane before response completion.
-        await reservation_owner.release()
-        await self.deps.handle_interactive_selection(
-            room,
-            selection=selection,
-            user_id=event.sender,
-            source_event_id=event.event_id,
-        )
-        return True
+        try:
+            response_target = self.deps.build_message_target(
+                room_id=room.room_id,
+                thread_id=selection.thread_id,
+                reply_to_event_id=selection.question_event_id,
+            )
+            await self.deps.enqueue_interactive_selection(
+                reservation_owner,
+                room,
+                selection=selection,
+                requester_user_id=requester_user_id,
+                user_id=event.sender,
+                source_event_id=event.event_id,
+                response_target=response_target,
+                handle_interactive_selection=self.deps.handle_interactive_selection,
+                start_interactive_selection=self.deps.start_interactive_selection,
+            )
+        except BaseException:
+            interactive.restore_selection(selection)
+            raise
+        return TurnDispatchOutcome.DEFERRED
 
     async def _maybe_handle_nonconfig_reaction(
         self,
@@ -187,28 +207,30 @@ class ReactionDispatcher:
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
         reservation_owner: PromptIngressReservationOwner,
-    ) -> bool:
+        requester_user_id: str,
+    ) -> TurnDispatchOutcome | None:
         """Route one authorized reaction among the non-config consumers."""
         if await self._maybe_handle_approval_reaction(room, event, consumer):
-            return True
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         if consumer is None and not self.deps.turn_policy.can_reply_to_sender(event.sender):
             self.deps.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
-            return True
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         if await self._maybe_handle_stop_reaction(event, consumer):
-            return True
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         return await self._maybe_handle_interactive_reaction(
             room,
             event,
             consumer,
             reservation_owner,
+            requester_user_id,
         )
 
-    async def _route_reaction(
+    async def _route_reaction(  # noqa: PLR0911 - explicit terminal outcome for each consumer branch
         self,
         room: nio.MatrixRoom,
         event: nio.ReactionEvent,
         semantic_consumer: SemanticConsumer | None,
-    ) -> None:
+    ) -> TurnDispatchOutcome:
         """Classify and execute one reaction that has no completed hook claim."""
         pending_change = (
             await config_confirmation.resolve_reaction_pending_change(
@@ -221,7 +243,7 @@ class ReactionDispatcher:
             else None
         )
         if semantic_consumer is SemanticConsumer.CONFIG_CONFIRMATION and pending_change is None:
-            return
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         if pending_change is not None and pending_change.decision_event_id is not None:
             if semantic_consumer is None:
                 await self.deps.journal_dispatcher.claim_semantic_consumer(
@@ -233,7 +255,7 @@ class ReactionDispatcher:
                 event,
                 pending_change,
             )
-            return
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
         if semantic_consumer is None and not is_authorized_sender(
             event.sender,
@@ -242,7 +264,7 @@ class ReactionDispatcher:
             self.deps.runtime_paths,
         ):
             self.deps.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
-            return
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
         requester_user_id = self.deps.ingress.requester_user_id(
             sender=event.sender,
@@ -257,7 +279,7 @@ class ReactionDispatcher:
             if pending_change is not None:
                 if semantic_consumer is None and not self.deps.turn_policy.can_reply_to_sender(event.sender):
                     self.deps.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
-                    return
+                    return TurnDispatchOutcome.INTENTIONALLY_IGNORED
                 if semantic_consumer is None:
                     await self.deps.journal_dispatcher.claim_semantic_consumer(
                         SemanticConsumer.CONFIG_CONFIRMATION,
@@ -267,15 +289,18 @@ class ReactionDispatcher:
                     room,
                     event,
                 )
-                return
+                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
-            if await self._maybe_handle_nonconfig_reaction(
-                room,
-                event,
-                semantic_consumer,
-                reservation_owner,
-            ):
-                return
+            if (
+                outcome := await self._maybe_handle_nonconfig_reaction(
+                    room,
+                    event,
+                    semantic_consumer,
+                    reservation_owner,
+                    requester_user_id,
+                )
+            ) is not None:
+                return outcome
         finally:
             await reservation_owner.release()
 
@@ -287,8 +312,9 @@ class ReactionDispatcher:
             event=event,
             correlation_id=event.event_id,
         )
+        return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
-    async def dispatch(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
+    async def dispatch(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> TurnDispatchOutcome:
         """Route one reaction to its sole durable semantic consumer."""
         semantic_consumer = self.deps.journal_dispatcher.semantic_consumer()
         if semantic_consumer is SemanticConsumer.REACTION_HOOKS:
@@ -297,5 +323,5 @@ class ReactionDispatcher:
                 event=event,
                 correlation_id=event.event_id,
             )
-            return
-        await self._route_reaction(room, event, semantic_consumer)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+        return await self._route_reaction(room, event, semantic_consumer)

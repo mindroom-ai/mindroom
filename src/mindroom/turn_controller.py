@@ -52,6 +52,7 @@ from mindroom.dispatch_replay_guard import (
 )
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
+    INTERACTIVE_SELECTION_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -88,6 +89,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
+from mindroom.response_lifecycle import response_lifecycle_reservation_context
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
@@ -145,6 +147,20 @@ if TYPE_CHECKING:
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 _PENDING_TURN_CLAIM_METADATA_KIND = "pending_turn_claim"
+_INTERACTIVE_SELECTION_METADATA_KIND = "interactive_selection"
+
+
+@dataclass(frozen=True)
+class _InteractiveSelectionDispatch:
+    """Deferred selection work carried through receipt-ordered coalescing."""
+
+    response_factory: Callable[[], Awaitable[None]]
+    start_response: Callable[..., Awaitable[None]]
+    restore_selection: Callable[[], None]
+    response_target: MessageTarget
+    source_event_id: str
+    user_id: str
+    selected_value: str
 
 
 def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
@@ -329,6 +345,8 @@ class TurnControllerDeps:
     visible_voice_echo: VisibleVoiceEchoLifecycle
     visible_responses: VisibleResponseReconciler
     retry_dispatch_sources: Callable[[tuple[str, ...]], None]
+    settle_dispatch_sources: Callable[[tuple[str, ...]], Awaitable[None]]
+    dispatch_source_is_terminal: Callable[[str], Awaitable[bool]]
 
 
 @dataclass
@@ -1130,6 +1148,182 @@ class TurnController:
             replay_guard=replay_guard,
         )
 
+    def _interactive_selection_response_envelope(
+        self,
+        *,
+        target: MessageTarget,
+        user_id: str,
+        source_event_id: str,
+        selected_value: str,
+        attachment_ids: tuple[str, ...] = (),
+    ) -> MessageEnvelope:
+        """Build the canonical response envelope for one interactive selection."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        return MessageEnvelope(
+            source_event_id=source_event_id,
+            target=target,
+            body=f"The user selected: {selected_value}",
+            attachment_ids=attachment_ids,
+            mentioned_agents=(),
+            agent_name=self.deps.agent_name,
+            origin=classify_turn_origin(
+                transport_sender_id=user_id,
+                requester_id=user_id,
+                sender_entity_name=registry.current_entity_name_for_user_id(user_id),
+                requester_entity_name=registry.current_entity_name_for_user_id(user_id),
+                source_kind=MESSAGE_SOURCE_KIND,
+                original_sender=None,
+                trusted_user_relay=False,
+            ),
+        )
+
+    async def start_interactive_selection(
+        self,
+        response_factory: Callable[[], Awaitable[None]],
+        *,
+        response_target: MessageTarget,
+        source_event_id: str,
+        user_id: str,
+        selected_value: str,
+        on_failure: Callable[[], None],
+    ) -> None:
+        """Transfer one selection response from journal dispatch to runner ownership."""
+        response_envelope = self._interactive_selection_response_envelope(
+            target=response_target,
+            user_id=user_id,
+            source_event_id=source_event_id,
+            selected_value=selected_value,
+        )
+        try:
+            reservation = await self.deps.response_runner.reserve_response_lifecycle(response_envelope)
+        except BaseException:
+            on_failure()
+            raise
+
+        async def run_owned_response() -> None:
+            response_claim_transferred = False
+            try:
+                with response_lifecycle_reservation_context(reservation):
+                    await reservation.wait_until_acquired()
+                    response = response_factory()
+                    response_claim_transferred = True
+                    await response
+                # Terminal delivery normally settles the discovery alias in its
+                # outbox transaction. This idempotent fallback also handles an
+                # already-terminal replay that has no new delivery to enqueue.
+                await self.deps.settle_dispatch_sources((source_event_id,))
+            except BaseException:
+                if not response_claim_transferred:
+                    on_failure()
+                raise
+            finally:
+                await reservation.release()
+
+        owned_response = run_owned_response()
+        try:
+            self.deps.response_runner.track_inbox_response(
+                owned_response,
+                name=f"interactive_selection_response:{source_event_id}",
+                recovery_proof_ready=lambda: (
+                    response_target.source_thread_id is not None
+                    and self.deps.interrupted_turn_rooms.contains(source_event_id)
+                ),
+                on_failure=lambda: self.deps.retry_dispatch_sources((source_event_id,)),
+                source_event_ids=(source_event_id,),
+            )
+        except BaseException:
+            owned_response.close()
+            await reservation.release()
+            on_failure()
+            raise
+        # Ownership registration is synchronous, and the task cannot execute
+        # until this callback yields after reporting its deferred handoff.
+
+    async def enqueue_interactive_selection(
+        self,
+        reservation_owner: _PromptIngressReservationOwner,
+        room: nio.MatrixRoom,
+        *,
+        selection: interactive.InteractiveSelection,
+        requester_user_id: str,
+        user_id: str,
+        source_event_id: str,
+        response_target: MessageTarget,
+        handle_interactive_selection: Callable[..., Awaitable[None]],
+        start_interactive_selection: Callable[..., Awaitable[None]],
+    ) -> None:
+        """Queue a selection handoff as a FIFO barrier behind earlier ingress."""
+
+        def restore_selection() -> None:
+            interactive.restore_selection(selection)
+
+        dispatch = _InteractiveSelectionDispatch(
+            response_factory=lambda: handle_interactive_selection(
+                room,
+                selection=selection,
+                user_id=user_id,
+                source_event_id=source_event_id,
+                response_target=response_target,
+            ),
+            start_response=start_interactive_selection,
+            restore_selection=restore_selection,
+            response_target=response_target,
+            source_event_id=source_event_id,
+            user_id=user_id,
+            selected_value=selection.selected_value,
+        )
+        pending_event = PendingEvent(
+            event=PreparedIngress(
+                sender=user_id,
+                event_id=source_event_id,
+                body="",
+                source={},
+                source_kind_override=INTERACTIVE_SELECTION_SOURCE_KIND,
+                requester_user_id=requester_user_id,
+                source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+            ),
+            room=room,
+            dispatch_metadata=(
+                PendingDispatchMetadata(
+                    kind=_INTERACTIVE_SELECTION_METADATA_KIND,
+                    payload=dispatch,
+                    close=restore_selection,
+                    target_key=response_target.lifecycle_key,
+                ),
+            ),
+        )
+        await reservation_owner.admit(
+            requester_coalescing_key(
+                room.room_id,
+                response_target.lifecycle_key.thread_id,
+                requester_user_id,
+            ),
+            source_event_id=source_event_id,
+            source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+            ready_result=ReadyPendingEvent(pending_event=pending_event),
+        )
+
+    async def _dispatch_interactive_selection_turn(self, turn: PreparedTurn) -> bool:
+        """Start one receipt-ordered selection barrier and transfer its claim."""
+        items = [item for item in turn.dispatch_metadata if item.kind == _INTERACTIVE_SELECTION_METADATA_KIND]
+        if not items:
+            return False
+        if len(items) != 1 or len(turn.handled_turn.source_event_ids) != 1:
+            msg = "Interactive selection dispatch must be a single FIFO barrier"
+            raise ValueError(msg)
+        item = items[0]
+        dispatch = cast("_InteractiveSelectionDispatch", item.payload)
+        await dispatch.start_response(
+            dispatch.response_factory,
+            response_target=dispatch.response_target,
+            source_event_id=dispatch.source_event_id,
+            user_id=dispatch.user_id,
+            selected_value=dispatch.selected_value,
+            on_failure=dispatch.restore_selection,
+        )
+        item.finish_once(lambda: None)
+        return True
+
     async def handle_interactive_selection(
         self,
         room: nio.MatrixRoom,
@@ -1137,17 +1331,32 @@ class TurnController:
         selection: interactive.InteractiveSelection,
         user_id: str,
         source_event_id: str,
+        response_target: MessageTarget | None = None,
     ) -> None:
         """Own claim settlement around one validated interactive selection."""
+        target = response_target or self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=selection.thread_id,
+            reply_to_event_id=selection.question_event_id,
+        )
         try:
             await self._execute_interactive_selection(
                 room,
                 selection=selection,
                 user_id=user_id,
                 source_event_id=source_event_id,
+                response_target=target,
             )
             interactive.commit_selection(selection)
         except BaseException:
+            try:
+                source_is_terminal = await self.deps.dispatch_source_is_terminal(source_event_id)
+            except BaseException:
+                interactive.restore_selection(selection)
+                raise
+            if source_is_terminal:
+                interactive.commit_selection(selection)
+                return
             interactive.restore_selection(selection)
             raise
 
@@ -1158,6 +1367,7 @@ class TurnController:
         selection: interactive.InteractiveSelection,
         user_id: str,
         source_event_id: str,
+        response_target: MessageTarget,
     ) -> None:
         """Execute one selection after its caller transfers claim ownership."""
         if await self._interactive_selection_is_durably_terminal(
@@ -1175,11 +1385,6 @@ class TurnController:
             )
             if selection.thread_id
             else []
-        )
-        response_target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=selection.thread_id,
-            reply_to_event_id=selection.question_event_id,
         )
         selection_handled_turn = self.deps.turn_store.attach_response_context(
             TurnRecord.create(
@@ -1220,6 +1425,7 @@ class TurnController:
                 f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
             ),
             recovered_response_event_id=ack_event_id,
+            delivery_turn_id=source_event_id,
             # This acknowledgement is the placeholder the selection's answer
             # then edits, which is what `existing_event_is_placeholder` below
             # says, so it is the turn's initial delivery and not its answer.
@@ -1259,7 +1465,7 @@ class TurnController:
                     selection_handled_turn,
                     event_id,
                 ),
-                delivery_turn_id=selection_handled_turn.anchor_event_id,
+                delivery_turn_id=source_event_id,
             )
             if response_event_id is not None:
                 await self.deps.turn_store.record_responded_turn(
@@ -1270,23 +1476,12 @@ class TurnController:
             raise self._interactive_selection_retry_error(source_event_id) from error
         selection_attachment_ids = tuple(selection_payload.attachment_ids or ())
         selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(selection_handled_turn)
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        response_envelope = MessageEnvelope(
-            source_event_id=source_event_id,
+        response_envelope = self._interactive_selection_response_envelope(
             target=response_target,
-            body=f"The user selected: {selection.selected_value}",
+            user_id=user_id,
+            source_event_id=source_event_id,
+            selected_value=selection.selected_value,
             attachment_ids=selection_attachment_ids,
-            mentioned_agents=(),
-            agent_name=self.deps.agent_name,
-            origin=classify_turn_origin(
-                transport_sender_id=user_id,
-                requester_id=user_id,
-                sender_entity_name=registry.current_entity_name_for_user_id(user_id),
-                requester_entity_name=registry.current_entity_name_for_user_id(user_id),
-                source_kind=MESSAGE_SOURCE_KIND,
-                original_sender=None,
-                trusted_user_relay=False,
-            ),
         )
 
         record_interrupted_turn, record_deferred_outcome, record_user_stop = self._build_response_settlement_callbacks(
@@ -1333,7 +1528,9 @@ class TurnController:
         source_event_id: str,
     ) -> bool:
         """Return whether the question or exact selection source is durably terminal."""
-        return any(self.deps.turn_store.is_handled(event_id) for event_id in {question_event_id, source_event_id})
+        return any(
+            self.deps.turn_store.is_handled(event_id) for event_id in {question_event_id, source_event_id}
+        ) or await self.deps.dispatch_source_is_terminal(source_event_id)
 
     async def _require_durable_interactive_selection(
         self,
@@ -1689,6 +1886,8 @@ class TurnController:
 
     async def handle_prepared_turn(self, turn: PreparedTurn) -> None:
         """Dispatch one logical turn emitted directly by the coalescing gate."""
+        if await self._dispatch_interactive_selection_turn(turn):
+            return
         coalescing_key = turn.ingress.coalescing_key
         assert coalescing_key is not None
         _consume_queued_notice_reservations_from_metadata(

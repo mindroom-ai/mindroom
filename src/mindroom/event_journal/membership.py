@@ -34,7 +34,7 @@ from mindroom.logging_config import get_logger
 from .models import DepartureOutcome, DepartureSource
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
 logger = get_logger(__name__)
 
@@ -65,7 +65,16 @@ class MembershipView(Protocol):
         """Apply one observation of a departure, invalidating at most once per departure."""
         ...
 
-    async def note_membership_restarted(self, room_id: str) -> None:
+    async def cleanup_fenced_departure(self, room_id: str, cleanup: Callable[[], None]) -> None:
+        """Clean external state only while one room remains durably departed."""
+        ...
+
+    async def note_membership_restarted(
+        self,
+        room_id: str,
+        *,
+        cleanup: Callable[[], None] | None = None,
+    ) -> None:
         """Record a confirmed join, so the room's next departure fences again."""
         ...
 
@@ -83,6 +92,7 @@ class MembershipFence:
     """Advance a room's membership epoch exactly once per departure."""
 
     store: MembershipView
+    clear_departed_room: Callable[[str], None] | None = None
     # Rooms owing a sync report, and how many more sync responses that report
     # may still appear in. Recovered from the journal on the first sync
     # response, because a restart between a local departure and its report
@@ -95,6 +105,7 @@ class MembershipFence:
         outcome = await self.store.fence_departure(room_id, source=DepartureSource.LOCAL)
         self._log(room_id, outcome)
         self._track(room_id, outcome)
+        await self._clear_room(room_id, outcome)
 
     async def fence_reported_departures(self, room_ids: Iterable[str]) -> None:
         """Fence departures a sync reported, absorbing the report local ones are owed.
@@ -111,11 +122,23 @@ class MembershipFence:
             outcome = await self.store.fence_departure(room_id, source=DepartureSource.REPORTED)
             self._log(room_id, outcome)
             self._track(room_id, outcome)
+            await self._clear_room(room_id, outcome)
         await self._expire_unarrived_reports()
 
     async def note_membership_restarted(self, room_id: str) -> None:
         """Record a confirmed join, so this room's next departure fences again."""
-        await self.store.note_membership_restarted(room_id)
+        clear_departed_room = self.clear_departed_room
+        cleanup = None if clear_departed_room is None else lambda: clear_departed_room(room_id)
+        await self.store.note_membership_restarted(room_id, cleanup=cleanup)
+
+    async def _clear_room(self, room_id: str, outcome: DepartureOutcome) -> None:
+        """Clear external state only for the departure that advanced the epoch."""
+        clear_departed_room = self.clear_departed_room
+        if outcome.fenced and clear_departed_room is not None:
+            await self.store.cleanup_fenced_departure(
+                room_id,
+                lambda: clear_departed_room(room_id),
+            )
 
     def _track(self, room_id: str, outcome: DepartureOutcome) -> None:
         """Start, keep, or drop the window an owed report may still arrive in."""

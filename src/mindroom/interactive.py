@@ -128,7 +128,7 @@ _persistence_lock_file: Path | None = None
 _thread_lock = threading.RLock()
 _dirty_question_ids: set[str] = set()
 _deleted_question_ids: set[str] = set()
-_claimed_question_ids: set[str] = set()
+_claimed_questions: dict[str, _InteractiveQuestion] = {}
 
 # Constants
 # Match interactive code blocks
@@ -236,7 +236,7 @@ def _replace_active_questions_locked(questions: dict[str, _InteractiveQuestion])
     """Replace in-memory state after a successful load or save."""
     global _active_questions
     _active_questions = {
-        event_id: question for event_id, question in questions.items() if event_id not in _claimed_question_ids
+        event_id: question for event_id, question in questions.items() if event_id not in _claimed_questions
     }
     _dirty_question_ids.clear()
     _deleted_question_ids.clear()
@@ -246,7 +246,7 @@ def _set_active_questions_locked(questions: dict[str, _InteractiveQuestion]) -> 
     """Replace the in-memory snapshot without clearing pending local changes."""
     global _active_questions
     _active_questions = {
-        event_id: question for event_id, question in questions.items() if event_id not in _claimed_question_ids
+        event_id: question for event_id, question in questions.items() if event_id not in _claimed_questions
     }
 
 
@@ -282,7 +282,7 @@ def _claim_question_locked(event_id: str, question: _InteractiveQuestion) -> _In
         _persist_local_changes_locked(rebuild_on_read_error=False)
     claimed_question = _copy_question(question)
     del _active_questions[event_id]
-    _claimed_question_ids.add(event_id)
+    _claimed_questions[event_id] = claimed_question
     return claimed_question
 
 
@@ -293,9 +293,9 @@ def commit_selection(selection: InteractiveSelection) -> None:
     with _thread_lock:
         _deleted_question_ids.add(selection.question_event_id)
         _persist_local_changes_locked(rebuild_on_read_error=False)
-        _claimed_question_ids.discard(selection.question_event_id)
         _dirty_question_ids.discard(selection.question_event_id)
         _deleted_question_ids.discard(selection.question_event_id)
+        _claimed_questions.pop(selection.question_event_id, None)
 
 
 def restore_selection(selection: InteractiveSelection) -> None:
@@ -304,10 +304,20 @@ def restore_selection(selection: InteractiveSelection) -> None:
     if question is None:
         return
     with _thread_lock:
-        _claimed_question_ids.discard(selection.question_event_id)
-        if selection.question_event_id in _active_questions:
+        event_id = selection.question_event_id
+        if event_id not in _claimed_questions:
             return
-        _store_active_question_locked(selection.question_event_id, _copy_question(question))
+        if _persistence_file is not None and _persistence_lock_file is not None:
+            with advisory_file_lock(_persistence_lock_file, exclusive=False):
+                persisted_questions = _load_persisted_questions()
+            _claimed_questions.pop(event_id, None)
+            _dirty_question_ids.discard(event_id)
+            _deleted_question_ids.discard(event_id)
+            _set_active_questions_locked(_apply_local_changes_locked(persisted_questions))
+            return
+        if event_id not in _active_questions:
+            _store_active_question_locked(event_id, _copy_question(question))
+        _claimed_questions.pop(event_id, None)
 
 
 def _apply_local_changes_locked(
@@ -890,6 +900,48 @@ def clear_interactive_question(event_id: str) -> None:
         logger.info("Cleared interactive question", event_id=event_id)
 
 
+def clear_interactive_questions_for_room(room_id: str, creator_agent: str) -> None:
+    """Durably consume one departed agent's active and claimed questions."""
+    with _thread_lock:
+        claimed_event_ids = {
+            event_id
+            for event_id, question in _claimed_questions.items()
+            if question.room_id == room_id and question.creator_agent == creator_agent
+        }
+        if _persistence_file is None or _persistence_lock_file is None:
+            removed_event_ids = claimed_event_ids | {
+                event_id
+                for event_id, question in _active_questions.items()
+                if question.room_id == room_id and question.creator_agent == creator_agent
+            }
+            for event_id in removed_event_ids:
+                _remove_active_question_locked(event_id)
+        else:
+            _persistence_file.parent.mkdir(parents=True, exist_ok=True)
+            with advisory_file_lock(_persistence_lock_file):
+                questions = _apply_local_changes_locked(_load_persisted_questions())
+                removed_event_ids = claimed_event_ids | {
+                    event_id
+                    for event_id, question in questions.items()
+                    if question.room_id == room_id and question.creator_agent == creator_agent
+                }
+                remaining_questions = {
+                    event_id: question for event_id, question in questions.items() if event_id not in removed_event_ids
+                }
+                _write_active_questions_atomically_locked(remaining_questions)
+                _replace_active_questions_locked(remaining_questions)
+
+        for event_id in removed_event_ids:
+            _claimed_questions.pop(event_id, None)
+
+    logger.info(
+        "Cleared interactive questions for departed room",
+        room_id=room_id,
+        creator_agent=creator_agent,
+        question_count=len(removed_event_ids),
+    )
+
+
 async def add_reaction_buttons(
     client: nio.AsyncClient,
     room_id: str,
@@ -925,6 +977,6 @@ def _cleanup() -> None:
         _active_questions.clear()
         _dirty_question_ids.clear()
         _deleted_question_ids.clear()
-        _claimed_question_ids.clear()
+        _claimed_questions.clear()
         _persistence_file = None
         _persistence_lock_file = None

@@ -24,6 +24,8 @@ from mindroom.event_journal import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.event_journal import EventJournalStore, PrincipalStore
 
 pytestmark = pytest.mark.asyncio
@@ -63,9 +65,18 @@ class RecordingStore:
             self.advanced.append(room_id)
         return outcome
 
-    async def note_membership_restarted(self, room_id: str) -> None:
+    async def cleanup_fenced_departure(self, room_id: str, cleanup: Callable[[], None]) -> None:
+        """Clean external state only while one room remains durably departed."""
+        await self.principal.cleanup_fenced_departure(room_id, cleanup)
+
+    async def note_membership_restarted(
+        self,
+        room_id: str,
+        *,
+        cleanup: Callable[[], None] | None = None,
+    ) -> None:
         """Record a confirmed join."""
-        await self.principal.note_membership_restarted(room_id)
+        await self.principal.note_membership_restarted(room_id, cleanup=cleanup)
 
     async def retire_owed_departure_reports(self, room_id: str) -> None:
         """Forget reports that can no longer arrive."""
@@ -129,6 +140,120 @@ async def test_a_sync_reported_departure_fences(
 
     assert store.advanced == [ROOM]
     assert await principal.membership_epoch(ROOM) == 1
+
+
+async def test_join_retries_departure_cleanup_before_rearming_the_fence(
+    store: RecordingStore,
+    principal: PrincipalStore,
+) -> None:
+    """A failed post-commit cleanup is retried before the room becomes active."""
+    calls: list[str] = []
+
+    def cleanup(room_id: str) -> None:
+        calls.append(room_id)
+        if len(calls) == 1:
+            error_message = "question persistence failed"
+            raise OSError(error_message)
+
+    membership = MembershipFence(store=store, clear_departed_room=cleanup)
+
+    with pytest.raises(OSError, match="question persistence failed"):
+        await membership.fence_local_departure(ROOM)
+
+    assert await principal.membership_epoch(ROOM) == 1
+    assert not await principal.run_if_membership_epoch(
+        room_id=ROOM,
+        expected_membership_epoch=0,
+        operation=lambda: calls.append("stale registration"),
+    )
+
+    await membership.note_membership_restarted(ROOM)
+
+    assert calls == [ROOM, ROOM]
+    assert await principal.membership_epoch(ROOM) == 1
+
+
+async def test_restart_join_closes_the_post_fence_cleanup_gap(
+    store: RecordingStore,
+    principal: PrincipalStore,
+) -> None:
+    """A join retries cleanup when a process exited just after the fence committed."""
+    await principal.fence_departure(ROOM, source=DepartureSource.REPORTED)
+    calls: list[str] = []
+    restarted = MembershipFence(store=store, clear_departed_room=calls.append)
+
+    await restarted.note_membership_restarted(ROOM)
+
+    assert calls == [ROOM]
+    assert (await principal.fence_departure(ROOM, source=DepartureSource.REPORTED)).fenced
+
+
+async def test_departure_cleanup_runs_only_for_the_fencing_observation(
+    store: RecordingStore,
+) -> None:
+    """A replayed departure report cannot clear state from a later membership."""
+    calls: list[str] = []
+    membership = MembershipFence(store=store, clear_departed_room=calls.append)
+
+    await membership.fence_local_departure(ROOM)
+    await membership.fence_reported_departures([ROOM])
+
+    assert calls == [ROOM]
+
+
+async def test_departure_cleanup_rechecks_the_fence_after_a_concurrent_rejoin(
+    store: RecordingStore,
+) -> None:
+    """A delayed old-departure cleanup cannot erase new-membership state."""
+    calls: list[str] = []
+    membership = MembershipFence(store=store, clear_departed_room=calls.append)
+    cleanup_entered = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    original_cleanup = store.cleanup_fenced_departure
+
+    async def delayed_cleanup(room_id: str, cleanup: Callable[[], None]) -> None:
+        cleanup_entered.set()
+        await release_cleanup.wait()
+        await original_cleanup(room_id, cleanup)
+
+    store.cleanup_fenced_departure = delayed_cleanup  # type: ignore[method-assign]
+    departure = asyncio.create_task(membership.fence_reported_departures([ROOM]))
+    await cleanup_entered.wait()
+
+    await membership.note_membership_restarted(ROOM)
+    calls.clear()
+    calls.append("new-membership-question")
+    release_cleanup.set()
+    await departure
+
+    assert calls == ["new-membership-question"]
+
+
+async def test_delayed_leave_report_does_not_clean_the_rejoined_membership(
+    store: RecordingStore,
+) -> None:
+    """The owed report for an old local leave cannot clean new-membership state."""
+    calls: list[str] = []
+    membership = MembershipFence(store=store, clear_departed_room=calls.append)
+
+    await membership.fence_local_departure(ROOM)
+    await membership.note_membership_restarted(ROOM)
+    calls.clear()
+    await membership.fence_reported_departures([ROOM])
+
+    assert calls == []
+
+
+async def test_ordinary_join_does_not_clear_live_interactive_state(
+    store: RecordingStore,
+) -> None:
+    """A join with no recovery fence leaves current-membership questions alone."""
+    calls: list[str] = []
+    membership = MembershipFence(store=store, clear_departed_room=calls.append)
+
+    await membership.note_membership_restarted(ROOM)
+
+    assert calls == []
 
 
 async def test_the_echo_of_a_local_departure_does_not_fence_again(

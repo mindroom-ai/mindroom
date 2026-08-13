@@ -444,6 +444,7 @@ def _build_response_runner(
         matrix_id=bot.matrix_id,
         resolver=bot._conversation_resolver,
         hook_context=hook_context,
+        membership=MagicMock(),
     )
 
     post_response_effects = PostResponseEffectsSupport(
@@ -452,6 +453,7 @@ def _build_response_runner(
         runtime_paths=runtime_paths,
         delivery_gateway=delivery_gateway,
         conversation_reader=make_conversation_reader_mock(),
+        membership=MagicMock(),
     )
     bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
 
@@ -523,10 +525,11 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
         *,
         room_id: str,
         interactive_agent_name: str,
+        membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], None] | None = None,
     ) -> PostResponseEffectsDeps:
-        del room_id, interactive_agent_name, queue_memory_persistence, persist_response_event_id
+        del room_id, interactive_agent_name, membership_turn_id, queue_memory_persistence, persist_response_event_id
         return PostResponseEffectsDeps(logger=self.logger)
 
 
@@ -541,5 +544,6 @@ def _install_inert_post_response_effects(coordinator: ResponseRunner) -> None:
             runtime_paths=support.runtime_paths,
             delivery_gateway=support.delivery_gateway,
             conversation_reader=support.conversation_reader,
+            membership=support.membership,
         ),
     )

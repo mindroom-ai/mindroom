@@ -338,12 +338,13 @@ def claim_membership_epoch(
     room_id: str,
     expected_membership_epoch: int,
 ) -> bool:
-    """Materialize and claim the expected room membership for one write.
+    """Materialize and claim the expected active room membership for one write.
 
     A write claim rather than a ``SELECT`` takes the same row lock as the
     membership fence. The two operations therefore have a total order: rows
     committed before a fence are deleted by it, while a writer after the fence
-    observes the advanced epoch and refuses its stale work.
+    refuses work until the room has rejoined, even if it captured the advanced
+    epoch while the departure cleanup was still pending.
 
     Materializing epoch zero matters because a lock on a row that does not yet
     exist orders nothing. The inserted row says exactly what absence said while
@@ -355,7 +356,7 @@ def claim_membership_epoch(
         VALUES (?, ?, 0)
         ON CONFLICT (principal_id, room_id) DO UPDATE
             SET membership_epoch = room_membership.membership_epoch
-        RETURNING membership_epoch AS epoch
+        RETURNING membership_epoch AS epoch, departure_fenced
         """,
         (principal_id, room_id),
     )
@@ -363,7 +364,7 @@ def claim_membership_epoch(
         msg = f"Room membership for {room_id!r} is missing immediately after it was claimed"
         raise RuntimeError(msg)
     current_epoch = int(row["epoch"])
-    return current_epoch == expected_membership_epoch
+    return current_epoch == expected_membership_epoch and not bool(row["departure_fenced"])
 
 
 def mark_conversation_hydrated(

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.event_journal import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_reads import ConversationReader
@@ -74,6 +75,7 @@ class PostResponseEffectsSupport:
     runtime_paths: RuntimePaths
     delivery_gateway: DeliveryGateway
     conversation_reader: ConversationReader
+    membership: PrincipalStore
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client for interactive follow-up effects."""
@@ -115,17 +117,24 @@ class PostResponseEffectsSupport:
         target: MessageTarget,
         interactive_metadata: interactive.InteractiveMetadata,
         agent_name: str,
+        membership_turn_id: str,
     ) -> None:
         """Persist one interactive response and add its reaction buttons."""
-        interactive.register_interactive_question(
-            event_id,
-            room_id,
-            target.resolved_thread_id,
-            interactive_metadata.option_map,
-            agent_name,
-            question_text=interactive_metadata.question_text,
-            option_labels=interactive_metadata.option_labels,
+        registered = await self.membership.run_if_turn_membership_current(
+            turn_id=membership_turn_id,
+            room_id=room_id,
+            operation=lambda: interactive.register_interactive_question(
+                event_id,
+                room_id,
+                target.resolved_thread_id,
+                interactive_metadata.option_map,
+                agent_name,
+                question_text=interactive_metadata.question_text,
+                option_labels=interactive_metadata.option_labels,
+            ),
         )
+        if not registered:
+            return
         await interactive.add_reaction_buttons(
             self._client(),
             room_id,
@@ -164,6 +173,7 @@ class PostResponseEffectsSupport:
         *,
         room_id: str,
         interactive_agent_name: str,
+        membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], None] | None = None,
     ) -> PostResponseEffectsDeps:
@@ -180,6 +190,7 @@ class PostResponseEffectsSupport:
                 target=target,
                 interactive_metadata=interactive_metadata,
                 agent_name=interactive_agent_name,
+                membership_turn_id=membership_turn_id,
             )
 
         return PostResponseEffectsDeps(
