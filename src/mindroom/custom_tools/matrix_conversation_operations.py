@@ -709,9 +709,10 @@ class MatrixMessageOperations:
                 target=target,
                 message="Failed to edit message in Matrix.",
             )
-        if context.membership is not None:
-            await context.membership.forget_interactive_question(target)
-        if interactive_response.interactive_metadata is not None:
+        question_retired = (
+            await context.membership.forget_interactive_question(target) if context.membership is not None else False
+        )
+        if interactive_response.interactive_metadata is not None and question_retired:
             await self._register_interactive(
                 context,
                 event_id=target,

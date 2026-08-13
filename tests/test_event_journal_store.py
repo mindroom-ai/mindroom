@@ -1545,7 +1545,7 @@ class TestInteractiveQuestionRegistration:
                 _interactive_question(event_id),
             )
 
-        await alice.forget_interactive_question("$first")
+        assert await alice.forget_interactive_question("$first")
 
         rows = await _interactive_question_rows(journal_store)
         assert [row["question_event_id"] for row in rows] == ["$second"]
@@ -1553,6 +1553,42 @@ class TestInteractiveQuestionRegistration:
 
 class TestInteractiveQuestionClaims:
     """A journal source and its question become one replayable owner."""
+
+    async def test_edit_cleanup_cannot_forget_a_source_owned_question(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An edit cannot erase the selection a pending source must replay."""
+        await admit(alice, "$turn")
+        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$question"))
+        await admit(alice, "$reaction", kind=EventKind.REACTION)
+        expected = InteractiveSelection(
+            question_event_id="$question",
+            question_text="Choose",
+            selection_key="1",
+            selected_label="One",
+            selected_value="one",
+            thread_id="$thread",
+        )
+        assert (
+            await alice.claim_interactive_reaction(
+                source_event_id="$reaction",
+                question_event_id="$question",
+                selection_key="1",
+                creator_agent="agent",
+            )
+            == expected
+        )
+
+        forgotten = await alice.forget_interactive_question("$question")
+        replayed = await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+            question_event_id="$question",
+            selection_key="1",
+            creator_agent="agent",
+        )
+
+        assert (forgotten, replayed) == (False, expected)
 
     async def test_interactive_reaction_claim_is_atomic_and_replayable(
         self,

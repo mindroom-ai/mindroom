@@ -114,7 +114,7 @@ def _make_context(
         membership.membership_epoch = AsyncMock(return_value=0)
         membership.register_interactive_question_for_turn = AsyncMock(return_value=True)
         membership.register_interactive_question_for_epoch = AsyncMock(return_value=True)
-        membership.forget_interactive_question = AsyncMock()
+        membership.forget_interactive_question = AsyncMock(return_value=True)
     return ToolRuntimeContext(
         agent_name="general",
         target=MessageTarget(
@@ -662,7 +662,7 @@ async def test_matrix_message_does_not_register_interactive_state_after_membersh
     membership.membership_epoch = AsyncMock(side_effect=membership_epoch)
     membership.register_interactive_question_for_turn = AsyncMock(side_effect=reject_turn_registration)
     membership.register_interactive_question_for_epoch = AsyncMock(side_effect=reject_epoch_registration)
-    membership.forget_interactive_question = AsyncMock()
+    membership.forget_interactive_question = AsyncMock(return_value=True)
     ctx = _make_context(
         thread_id="$ctx-thread:localhost",
         membership=membership,
@@ -1552,6 +1552,37 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
             {"emoji": "❌", "label": "Reject", "value": "reject"},
         ],
     )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_edit_does_not_replace_a_source_owned_question() -> None:
+    """An edit cannot register a replacement while a pending source owns the question."""
+    membership = MagicMock()
+    membership.membership_epoch = AsyncMock(return_value=0)
+    membership.forget_interactive_question = AsyncMock(return_value=False)
+    membership.register_interactive_question_for_epoch = AsyncMock(return_value=True)
+    ctx = _make_context(membership=membership)
+    replacement = """```interactive json
+{"question": "Replacement?", "options": [{"label": "New", "value": "new"}]}
+```"""
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+        ),
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
+            new_callable=AsyncMock,
+        ) as add_reactions,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await MatrixMessageTools().matrix_message(action="edit", message=replacement, target="$target"),
+        )
+
+    assert payload["status"] == "ok"
+    membership.register_interactive_question_for_epoch.assert_not_awaited()
+    add_reactions.assert_not_awaited()
 
 
 @pytest.mark.asyncio

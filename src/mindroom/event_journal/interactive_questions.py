@@ -318,9 +318,25 @@ def register_if_current(
     return True
 
 
-def forget(transaction: Transaction, principal_id: str, question_event_id: str) -> None:
-    """Forget one question whose Matrix message no longer offers its options."""
-    transaction.execute(
-        "DELETE FROM interactive_questions WHERE principal_id = ? AND question_event_id = ?",
+def forget(transaction: Transaction, principal_id: str, question_event_id: str) -> bool:
+    """Forget an absent or unclaimed question, preserving a source owner."""
+    deleted = transaction.fetchone(
+        """
+        DELETE FROM interactive_questions
+        WHERE principal_id = ? AND question_event_id = ?
+          AND claimed_source_event_id IS NULL
+        RETURNING question_event_id
+        """,
         (principal_id, question_event_id),
     )
+    if deleted is not None:
+        return True
+    claimed = transaction.fetchone(
+        """
+        SELECT 1 AS present
+        FROM interactive_questions
+        WHERE principal_id = ? AND question_event_id = ?
+        """,
+        (principal_id, question_event_id),
+    )
+    return claimed is None

@@ -1615,7 +1615,7 @@ def make_membership_stub() -> PrincipalStore:
             membership_epoch=AsyncMock(return_value=0),
             register_interactive_question_for_turn=AsyncMock(return_value=True),
             register_interactive_question_for_epoch=AsyncMock(return_value=True),
-            forget_interactive_question=AsyncMock(),
+            forget_interactive_question=AsyncMock(return_value=True),
         ),
     )
 
