@@ -372,12 +372,12 @@ def fence_departure(
     if source is DepartureSource.REPORTED and report_observation_id is not None:
         claimed_report = transaction.fetchone(
             """
-            INSERT INTO reported_departures (principal_id, observation_id, room_id, rearm_epoch)
-            VALUES (?, ?, ?, NULL)
+            INSERT INTO reported_departures (principal_id, observation_id, rearm_epoch)
+            VALUES (?, ?, NULL)
             ON CONFLICT (principal_id, observation_id) DO NOTHING
             RETURNING observation_id
             """,
-            (principal_id, report_observation_id, room_id),
+            (principal_id, report_observation_id),
         )
         if claimed_report is None:
             repeated_report = transaction.fetchone(
@@ -413,14 +413,12 @@ def fence_departure(
             owed_reports=owed_reports,
         )
         reported_rearm_epoch = state.membership_epoch if owed_reports == 0 else None
-        if report_observation_id is not None and reported_rearm_epoch is not None:
-            transaction.execute(
-                """
-                UPDATE reported_departures SET rearm_epoch = ?
-                WHERE principal_id = ? AND observation_id = ?
-                """,
-                (reported_rearm_epoch, principal_id, report_observation_id),
-            )
+        _record_report_rearm_epoch(
+            transaction,
+            principal_id,
+            report_observation_id,
+            reported_rearm_epoch,
+        )
         return DepartureOutcome(
             observation=DepartureObservation.OWED_REPORT_CONSUMED,
             membership_epoch=state.membership_epoch,
@@ -430,13 +428,12 @@ def fence_departure(
     if state.departure_fenced:
         # Whoever saw this departure first already fenced it, and nothing has
         # put the bot back in the room, so there is no second departure here.
-        if source is DepartureSource.REPORTED and report_observation_id is not None:
-            transaction.execute(
-                """
-                UPDATE reported_departures SET rearm_epoch = ?
-                WHERE principal_id = ? AND observation_id = ?
-                """,
-                (state.membership_epoch, principal_id, report_observation_id),
+        if source is DepartureSource.REPORTED:
+            _record_report_rearm_epoch(
+                transaction,
+                principal_id,
+                report_observation_id,
+                state.membership_epoch,
             )
         return DepartureOutcome(
             observation=DepartureObservation.ALREADY_FENCED,
@@ -454,19 +451,36 @@ def fence_departure(
         departure_fenced=True,
         owed_reports=owed_reports,
     )
-    if source is DepartureSource.REPORTED and report_observation_id is not None:
-        transaction.execute(
-            """
-            UPDATE reported_departures SET rearm_epoch = ?
-            WHERE principal_id = ? AND observation_id = ?
-            """,
-            (membership_epoch, principal_id, report_observation_id),
+    if source is DepartureSource.REPORTED:
+        _record_report_rearm_epoch(
+            transaction,
+            principal_id,
+            report_observation_id,
+            membership_epoch,
         )
     return DepartureOutcome(
         observation=DepartureObservation.FENCED,
         membership_epoch=membership_epoch,
         owed_reports=owed_reports,
         reported_rearm_epoch=(membership_epoch if source is DepartureSource.REPORTED else None),
+    )
+
+
+def _record_report_rearm_epoch(
+    transaction: Transaction,
+    principal_id: str,
+    observation_id: str | None,
+    rearm_epoch: int | None,
+) -> None:
+    """Retain the membership one identified observation may safely rearm."""
+    if observation_id is None or rearm_epoch is None:
+        return
+    transaction.execute(
+        """
+        UPDATE reported_departures SET rearm_epoch = ?
+        WHERE principal_id = ? AND observation_id = ?
+        """,
+        (rearm_epoch, principal_id, observation_id),
     )
 
 

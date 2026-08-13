@@ -131,7 +131,6 @@ _TABLES = (
         -- keeps that replay from fencing again.
         principal_id TEXT NOT NULL,
         observation_id {ordered_text} NOT NULL,
-        room_id TEXT NOT NULL,
         -- The exact epoch this observation may rearm, retained so a replay can
         -- retry failed cleanup without touching a newer departure fence.
         rearm_epoch BIGINT,
