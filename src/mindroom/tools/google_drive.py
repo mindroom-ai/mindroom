@@ -20,7 +20,13 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="google_drive",
     display_name="Google Drive",
-    description="Search, read, upload, and organize files in the connected user's Google Drive",
+    description=(
+        "List, search, read, and download Google Drive files; upload files, create folders, move or "
+        "rename items, and trash items through requester-scoped MindRoom OAuth. Writes follow the "
+        "deployment's configured approval policy. If authorization is missing or expired, call a "
+        "Drive tool to get a fresh, short-lived MindRoom connection link for that requester; if it "
+        "expires, call again for a new link."
+    ),
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,

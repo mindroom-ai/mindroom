@@ -161,6 +161,35 @@ def test_export_tools_metadata_json() -> None:
         assert "managed_init_args" not in first_tool
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "capability_fragments"),
+    [
+        ("gmail", ("read and search", "draft", "send", "manage mailbox state")),
+        (
+            "google_calendar",
+            ("read and search", "check availability", "create", "update", "move", "respond", "delete"),
+        ),
+        (
+            "google_drive",
+            ("list", "search", "read", "download", "upload", "create folders", "move", "rename", "trash"),
+        ),
+    ],
+)
+def test_native_google_metadata_explains_capabilities_and_oauth_recovery(
+    tool_name: str,
+    capability_fragments: tuple[str, ...],
+) -> None:
+    """Native Google metadata should explain scope, approvals, and OAuth recovery."""
+    description = TOOL_METADATA[tool_name].description.lower()
+
+    for fragment in capability_fragments:
+        assert fragment in description
+    assert "requester-scoped mindroom oauth" in description
+    assert "configured approval policy" in description
+    assert "fresh, short-lived mindroom connection link" in description
+    assert "call again for a new link" in description
+
+
 def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
     """Export should ignore temporary registry contamination from earlier tests."""
     tool_name = "test_leaked_tool"

@@ -20,7 +20,13 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="google_calendar",
     display_name="Google Calendar",
-    description="View and schedule meetings with Google Calendar",
+    description=(
+        "Read and search Google Calendar and check availability; create, update, move, respond to, "
+        "and delete events through requester-scoped MindRoom OAuth. Writes follow the deployment's "
+        "configured approval policy. If authorization is missing or expired, call a Calendar tool "
+        "to get a fresh, short-lived MindRoom connection link for that requester; if it expires, "
+        "call again for a new link."
+    ),
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
