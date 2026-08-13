@@ -446,7 +446,7 @@ class _MultiAgentOrchestrator:
         bot construction supplies the real one.
         """
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        return None if router_bot is None else router_bot.approval_cards
+        return None if router_bot is None else router_bot.approval_store
 
     def _bind_started_runtime_support_services(self, bots: list[AgentBot | TeamBot]) -> None:
         """Bind current runtime support objects needed by live callbacks."""

@@ -473,6 +473,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.agents",
+    "mindroom.approval_execution",
     "mindroom.conversation_state_writer",
     "mindroom.history.interrupted_replay",
     "mindroom.history.runtime",
@@ -507,6 +508,7 @@ depends_on = [
 visibility = [
     "mindroom.ai",
     "mindroom.api.openai_compat",
+    "mindroom.approval_execution",
     "mindroom.execution_preparation",
     "mindroom.history.runtime",
     "mindroom.response_lifecycle",
@@ -611,7 +613,9 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.approval_execution"
 depends_on = [
+    "mindroom.agent_storage",
     "mindroom.agents",
+    "mindroom.ai_runtime",
     "mindroom.ai_run_metadata",
     "mindroom.event_journal",
     "mindroom.history.runtime",

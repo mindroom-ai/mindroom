@@ -2000,10 +2000,7 @@ class ResponseRunner:
         if continuation is None:
             return None
 
-        async def resume_owned_source() -> None:
-            await self.resume_approval_source(source_event_id)
-
-        resume = resume_owned_source()
+        resume = self.resume_approval_source(source_event_id)
         try:
             self.track_inbox_response(
                 resume,

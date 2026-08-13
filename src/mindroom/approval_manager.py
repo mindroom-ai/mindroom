@@ -2028,9 +2028,8 @@ class _ApprovalManager:
             return f"Expired: {subject}"
         return f"🔒 Approval required: {subject}"
 
-    @classmethod
+    @staticmethod
     def _normalized_resolution_request(
-        cls,
         pending: PendingApproval,
         *,
         status: _ResolutionStatus,

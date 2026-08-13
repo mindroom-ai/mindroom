@@ -97,12 +97,12 @@ class AgentApprovalExecution:
         except BaseException:
             history_storage.close()
             raise
-        if agent.model is not None:
-            ai_runtime.install_queued_message_notice_hook(
-                agent.model,
-                notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
-            )
         try:
+            if agent.model is not None:
+                ai_runtime.install_queued_message_notice_hook(
+                    agent.model,
+                    notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
+                )
             session = await agent.aget_session(
                 session_id=continuation.session_id,
                 user_id=continuation.requester_id,
@@ -137,19 +137,23 @@ class AgentApprovalExecution:
                     ),
                 )
         finally:
-            ai_runtime.register_queued_notice_storage(
-                storage_factory=lambda: create_session_storage(
-                    continuation.entity_name,
-                    config,
-                    self.runtime_paths,
-                    execution_identity,
-                ),
-                session_id=continuation.session_id,
-                session_type=SessionType.AGENT,
-                entity_name=continuation.entity_name,
-            )
-            close_agent_runtime_state_dbs(agent, shared_scope_storage=history_storage)
-            history_storage.close()
+            try:
+                ai_runtime.register_queued_notice_storage(
+                    storage_factory=lambda: create_session_storage(
+                        continuation.entity_name,
+                        config,
+                        self.runtime_paths,
+                        execution_identity,
+                    ),
+                    session_id=continuation.session_id,
+                    session_type=SessionType.AGENT,
+                    entity_name=continuation.entity_name,
+                )
+            finally:
+                try:
+                    close_agent_runtime_state_dbs(agent, shared_scope_storage=history_storage)
+                finally:
+                    history_storage.close()
         paused = paused_attempt_from_response(
             response,
             fallback_session_id=continuation.session_id,

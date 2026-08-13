@@ -1619,6 +1619,62 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
 
 
 @pytest.mark.asyncio
+async def test_agent_continuation_closes_runtime_when_notice_hook_setup_fails(tmp_path: Path) -> None:
+    """Reconstructed storage must close even if pre-continuation model setup raises."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    storage = MagicMock()
+    agent = MagicMock()
+    agent.model = MagicMock()
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-hook-error",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="claimed",
+    )
+
+    with (
+        patch.object(runner.deps.knowledge_access, "for_agent", return_value=MagicMock()),
+        patch("mindroom.approval_execution.create_session_storage", return_value=storage),
+        patch("mindroom.approval_execution.create_agent", return_value=agent),
+        patch(
+            "mindroom.approval_execution.ai_runtime.install_queued_message_notice_hook",
+            side_effect=RuntimeError("hook setup failed"),
+        ),
+        patch("mindroom.approval_execution.close_agent_runtime_state_dbs") as close_runtime,
+        pytest.raises(RuntimeError, match="hook setup failed"),
+    ):
+        await runner._approval_execution.continue_run(
+            continuation,
+            execution_identity=identity,
+            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            decisions={},
+            denial_reasons={},
+            tool_trace_collector=[],
+        )
+
+    close_runtime.assert_called_once_with(agent, shared_scope_storage=storage)
+    storage.close.assert_called_once_with()
+
+
+@pytest.mark.asyncio
 async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path: Path) -> None:
     """Unchanged bots must apply reloaded approval policy and agent configuration."""
     bot = _bot(tmp_path)
