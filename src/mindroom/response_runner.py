@@ -907,61 +907,6 @@ class ResponseRunner:
                 return handoff
             raise
 
-    async def _deliver_completed_approval_chain(
-        self,
-        continuation: ApprovalContinuation,
-        *,
-        request: ResponseRequest,
-        target: MessageTarget,
-        response_text: str,
-        tool_trace: list[ToolTraceEntry],
-        metadata_content: dict[str, Any],
-    ) -> FinalDeliveryOutcome:
-        """Deliver one continued answer normally before retiring its durable claim."""
-        return await self.deps.delivery_gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=target,
-                existing_event_id=continuation.response_event_id,
-                existing_event_is_placeholder=False,
-                response_text=response_text,
-                identity=self._response_identity(
-                    request,
-                    response_kind="team" if continuation.entity_kind == "team" else "ai",
-                ),
-                tool_trace=tool_trace if self._show_tool_calls() else None,
-                extra_content=_merge_response_extra_content(
-                    {**metadata_content, STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
-                    continuation.attachment_ids,
-                ),
-                defer_source_handoff=True,
-            ),
-        )
-
-    async def _run_approval_chain(
-        self,
-        claimed: ApprovalContinuation,
-        *,
-        request: ResponseRequest,
-        target: MessageTarget,
-    ) -> tuple[str, bool, list[ToolTraceEntry], dict[str, Any] | None]:
-        """Continue one persisted pause until completion or its next approval generation."""
-        tool_trace: list[ToolTraceEntry] = []
-        result = await self._continue_entity_call(
-            claimed,
-            request=request,
-            target=target,
-            tool_trace_collector=tool_trace,
-        )
-        if isinstance(result, CompletedApprovalRun):
-            return result.response_text, True, tool_trace, result.metadata_content
-        waiting_text = await self._approval_responses.advance_pause(
-            claimed,
-            result,
-            target=target,
-            tool_trace=tool_trace if self._show_tool_calls() else [],
-        )
-        return waiting_text, False, tool_trace, None
-
     async def _execute_claimed_approval(
         self,
         claimed: ApprovalContinuation,
@@ -970,30 +915,49 @@ class ResponseRunner:
         target: MessageTarget,
     ) -> tuple[FinalDeliveryOutcome, ApprovalContinuation]:
         """Run and classify one claimed continuation for either lifecycle entry path."""
-        response_text, terminal, tool_trace, metadata_content = await self._run_approval_chain(
+        tool_trace: list[ToolTraceEntry] = []
+        result = await self._continue_entity_call(
             claimed,
             request=request,
             target=target,
+            tool_trace_collector=tool_trace,
         )
-        current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
-        if terminal:
+        if isinstance(result, CompletedApprovalRun):
+            current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
             return (
-                await self._deliver_completed_approval_chain(
-                    claimed,
-                    request=request,
-                    target=target,
-                    response_text=response_text,
-                    tool_trace=tool_trace,
-                    metadata_content=metadata_content or {},
+                await self.deps.delivery_gateway.deliver_final(
+                    FinalDeliveryRequest(
+                        target=target,
+                        existing_event_id=claimed.response_event_id,
+                        existing_event_is_placeholder=False,
+                        response_text=result.response_text,
+                        identity=self._response_identity(
+                            request,
+                            response_kind="team" if claimed.entity_kind == "team" else "ai",
+                        ),
+                        tool_trace=tool_trace if self._show_tool_calls() else None,
+                        extra_content=_merge_response_extra_content(
+                            {**result.metadata_content, STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
+                            claimed.attachment_ids,
+                        ),
+                        defer_source_handoff=True,
+                    ),
                 ),
                 current,
             )
+        waiting_text = await self._approval_responses.advance_pause(
+            claimed,
+            result,
+            target=target,
+            tool_trace=tool_trace if self._show_tool_calls() else [],
+        )
+        current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
         return (
             FinalDeliveryOutcome(
                 terminal_status="suspended",
                 event_id=claimed.response_event_id,
                 is_visible_response=True,
-                final_visible_body=response_text,
+                final_visible_body=waiting_text,
                 delivery_kind="edited",
                 tool_trace=tuple(tool_trace) if self._show_tool_calls() else (),
                 extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
