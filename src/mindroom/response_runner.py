@@ -1968,7 +1968,7 @@ class ResponseRunner:
             event_id = outcome.event_id if outcome.terminal_status != "suspended" and retained is None else None
         return event_id
 
-    async def resume_approval_source(self, source_event_id: str) -> bool | None:
+    async def _resume_approval_source(self, source_event_id: str) -> bool | None:
         """Resume journal-owned approval work before normal ingress can reinterpret its source."""
         continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
         if continuation is None:
@@ -1995,7 +1995,10 @@ class ResponseRunner:
         if continuation is None:
             return None
 
-        resume = self.resume_approval_source(source_event_id)
+        async def resume_owned_source() -> None:
+            await self._resume_approval_source(source_event_id)
+
+        resume = resume_owned_source()
         try:
             self.track_inbox_response(
                 resume,

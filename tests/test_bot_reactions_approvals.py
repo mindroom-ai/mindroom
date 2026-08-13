@@ -1150,7 +1150,7 @@ class TestAgentBot(AgentBotTestBase):
             await release_resume.wait()
             return False
 
-        with patch.object(bot._response_runner, "resume_approval_source", new=resume):
+        with patch.object(bot._response_runner, "_resume_approval_source", new=resume):
             handoff = asyncio.create_task(
                 bot._journal_dispatcher.callbacks.on_approval_continuation("$source"),
             )
