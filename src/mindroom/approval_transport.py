@@ -305,6 +305,14 @@ class ApprovalMatrixTransport:
         current = await store.approval_continuation(continuation.approval_id)
         if current is None:
             return True
+        final_delivery = await store.load_delivery(
+            turn_id=current.source_event_ids[0],
+            stage=DeliveryStage.FINAL,
+        )
+        if final_delivery is not None:
+            return final_delivery.acknowledged_event_id is not None and await store.finish_approval_continuation(
+                current.approval_id,
+            )
         if current.state != "failing":
             current = await store.request_approval_failure(
                 current.approval_id,

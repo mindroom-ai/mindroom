@@ -539,6 +539,9 @@ class _ApprovalManager:
             sent_event = await asyncio.shield(send_task)
         except asyncio.CancelledError:
             raise
+        except ToolApprovalTransportError:
+            await self._forget_card(transaction_id)
+            return
         except Exception:
             logger.warning("Cancelled detached approval send failed before returning an event id", exc_info=True)
             return

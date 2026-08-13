@@ -674,6 +674,7 @@ class AgentBot:
                 on_room_lifecycle=self._on_room_member,
                 on_redaction=self._on_redaction,
                 on_decryption_failure=self._on_decryption_failure,
+                on_approval_continuation=lambda event_id: self._response_runner.resume_approval_source(event_id),
                 source_has_live_owner=lambda event_id: (
                     self._coalescing_gate.has_pending_source_event(event_id)
                     or self._response_runner.has_live_inbox_response(event_id)

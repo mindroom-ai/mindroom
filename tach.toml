@@ -1583,6 +1583,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.message_target",
     "mindroom.memory",
     "mindroom.orchestration.runtime",
     "mindroom.post_response_effects",

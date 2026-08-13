@@ -77,6 +77,7 @@ type _ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[
 type _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
 type _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
 type _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
+type _ApprovalContinuationCallback = Callable[[str], Awaitable[bool | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +91,7 @@ class JournalCallbacks:
     on_room_lifecycle: _RoomLifecycleCallback
     on_redaction: _RedactionCallback
     on_decryption_failure: _DecryptionFailureCallback
+    on_approval_continuation: _ApprovalContinuationCallback
     source_has_live_owner: Callable[[str], bool]
     turn_has_live_claim: Callable[[str], bool]
 
@@ -346,6 +348,14 @@ class JournalDispatcher:
             # settles, and it blocks holding the room's lane. Returning here
             # leaves the source deferred, which is what it already was.
             return False
+        approval_settled = await self.callbacks.on_approval_continuation(event.event_id)
+        if approval_settled is not None:
+            # A paused run already owns every prepared execution fact. Sending
+            # its source through ingress again would rerun hooks and current
+            # routing policy, either duplicating side effects or settling the
+            # source before the continuation can resume.
+            self._live_events.pop(event.event_id, None)
+            return approval_settled
         live = self._live_events.pop(event.event_id, None)
         # An event the journal loaded rather than nio just delivered is a
         # replay. Turn work behaves differently there: it defers silently

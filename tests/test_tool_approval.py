@@ -32,6 +32,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.event_journal import (
     ApprovalCall,
@@ -166,6 +167,7 @@ async def test_transient_removed_owner_cleanup_rearms_startup_retry(tmp_path: Pa
     )
     principal = MagicMock(
         approval_continuation=AsyncMock(return_value=continuation),
+        load_delivery=AsyncMock(return_value=None),
         request_approval_failure=AsyncMock(return_value=failing),
         discard_unavailable_approval_continuation=AsyncMock(),
     )
@@ -280,6 +282,7 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
 
     principal = MagicMock(
         approval_continuation=AsyncMock(return_value=continuation),
+        load_delivery=AsyncMock(return_value=None),
         request_approval_failure=AsyncMock(return_value=failing),
         principal_id="agent@removed",
         discard_unavailable_approval_continuation=AsyncMock(return_value=True),
@@ -330,6 +333,84 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
         "approval-removed",
         notice_principal_id="router@localhost",
     )
+
+
+@pytest.mark.asyncio
+async def test_removed_owner_cleanup_finishes_acknowledged_frozen_success(tmp_path: Path) -> None:
+    """An accepted original answer wins without a contradictory router failure notice."""
+    journal = EventJournalStore.open_sqlite(tmp_path / "approval-frozen-success.db")
+    principal = journal.principal("agent@removed")
+    source_event_id = "$source"
+    approval_id = "approval-frozen-success"
+    await principal.admit(
+        InboundEvent(
+            event_id=source_event_id,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1_000,
+            source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
+        ),
+    )
+    continuation = ApprovalContinuation(
+        approval_id=approval_id,
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="removed",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=(source_event_id,),
+        calls=(),
+        state="claimed",
+        runtime_generation="old-runtime",
+    )
+    assert await principal.create_approval_continuation(continuation) == continuation
+    await principal.enqueue_delivery(
+        turn_id=source_event_id,
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={
+            "msgtype": "m.text",
+            "body": "finished",
+            DURABLE_FINAL_OUTCOME_KEY: {"terminal_status": "completed"},
+        },
+    )
+    assert await principal.claim_delivery(turn_id=source_event_id, stage=DeliveryStage.FINAL) is not None
+    await principal.acknowledge_delivery(
+        turn_id=source_event_id,
+        stage=DeliveryStage.FINAL,
+        event_id="$final-edit",
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: None,
+        journal_provider=lambda: journal,
+        entity_configured=lambda name: name != "removed",
+    )
+
+    try:
+        with patch(
+            "mindroom.approval_transport.expire_continuation_approval_cards",
+            new=AsyncMock(),
+        ) as expire_cards:
+            assert await transport._discard_unavailable(
+                "agent@removed",
+                continuation,
+                "Requesting agent 'removed' is no longer available.",
+            )
+
+        expire_cards.assert_not_awaited()
+        assert await principal.approval_continuation(approval_id) is None
+        assert not await principal.is_pending(source_event_id)
+    finally:
+        await journal.close()
 
 
 @pytest.mark.asyncio
@@ -662,6 +743,54 @@ async def test_detached_transport_refusal_forgets_the_unsent_card_row(tmp_path: 
             approver_user_id="@user:localhost",
             expires_at_ns=int((datetime.now(UTC) + timedelta(seconds=30)).timestamp() * 1_000_000_000),
         )
+
+    assert cards.rows == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_detached_transport_refusal_forgets_the_unsent_card_row(tmp_path: Path) -> None:
+    """Cancellation transfers cleanup ownership without retaining a definitively unsent card."""
+    send_started = asyncio.Event()
+    finish_send = asyncio.Event()
+
+    async def refuse_after_cancellation(*_args: object) -> SentApprovalEvent:
+        send_started.set()
+        await finish_send.wait()
+        message = "router does not manage this room"
+        raise ToolApprovalTransportError(message)
+
+    cards = FakeApprovalCards()
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=refuse_after_cancellation,
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+    )
+    publication = asyncio.create_task(
+        store.create_detached_approval(
+            approval_id="approval-cancelled-refusal",
+            continuation_id="continuation-cancelled-refusal",
+            continuation_generation=0,
+            tool_call_id="call-cancelled-refusal",
+            tool_name="dangerous",
+            arguments={},
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            expires_at_ns=int((datetime.now(UTC) + timedelta(seconds=30)).timestamp() * 1_000_000_000),
+        ),
+    )
+    await send_started.wait()
+    publication.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await publication
+
+    finish_send.set()
+    await store._drain_post_cancel_cleanup_tasks()
 
     assert cards.rows == {}
 

@@ -58,6 +58,7 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
+from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     classify_cancel_source,
@@ -146,7 +147,6 @@ if TYPE_CHECKING:
     from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.identity import MatrixID
-    from mindroom.message_target import MessageTarget
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.stop import StopManager
@@ -1158,6 +1158,25 @@ class ResponseRunner:
             raise RuntimeError(msg)
         return True, recovered_outcome.event_id
 
+    async def _recover_or_request_claimed_failure(
+        self,
+        claimed: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+        reason: str,
+    ) -> tuple[bool, str | None, ApprovalContinuation | None]:
+        """Recover frozen success, or durably fence the observed claim after a recovery error."""
+        try:
+            owns_final, event_id = await self._recover_frozen_approval_final(claimed, target=target)
+        except Exception:
+            self.deps.logger.exception(
+                "approval_final_recovery_failed_before_failure_fence",
+                approval_id=claimed.approval_id,
+            )
+            owns_final, event_id = False, None
+        failing = None if owns_final else await self._approval_responses.request_failure(claimed, reason)
+        return owns_final, event_id, failing
+
     def _approval_response_request(
         self,
         continuation: ApprovalContinuation,
@@ -1905,26 +1924,29 @@ class ResponseRunner:
         try:
             outcome = await self._run_claimed_approval_lifecycle(claimed, target=target)
         except asyncio.CancelledError:
-            owns_final, event_id = await run_coroutine_until_complete(
-                self._recover_frozen_approval_final(claimed, target=target),
+            owns_final, event_id, _failing = await run_coroutine_until_complete(
+                self._recover_or_request_claimed_failure(
+                    claimed,
+                    target=target,
+                    reason="Tool approval continuation was interrupted and denied safely.",
+                ),
             )
             if owns_final:
                 return event_id
-            await self._approval_responses.request_failure(
-                claimed,
-                "Tool approval continuation was interrupted and denied safely.",
-            )
             raise
         except Exception as error:
-            owns_final, event_id = await self._recover_frozen_approval_final(claimed, target=target)
+            reason = str(error) or "Tool approval continuation failed safely."
+            owns_final, event_id, failing = await self._recover_or_request_claimed_failure(
+                claimed,
+                target=target,
+                reason=reason,
+            )
             if owns_final:
                 return event_id
             self.deps.logger.exception(
                 "approval_continuation_failed",
                 approval_id=claimed.approval_id,
             )
-            reason = str(error) or "Tool approval continuation failed safely."
-            failing = await self._approval_responses.request_failure(claimed, reason)
             if failing is not None:
                 settled = await self._approval_responses.settle_failure(failing, reason)
                 event_id = claimed.response_event_id if settled else None
@@ -1934,6 +1956,33 @@ class ResponseRunner:
             retained = await self.deps.approval_store.approval_continuation(claimed.approval_id)
             event_id = outcome.event_id if outcome.terminal_status != "suspended" and retained is None else None
         return event_id
+
+    async def resume_approval_source(self, source_event_id: str) -> bool | None:
+        """Resume journal-owned approval work before normal ingress can reinterpret its source."""
+        continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
+        if continuation is None:
+            return None
+        target = MessageTarget(
+            room_id=continuation.room_id,
+            source_thread_id=continuation.thread_id,
+            resolved_thread_id=continuation.thread_id,
+            reply_to_event_id=source_event_id,
+            session_id=continuation.session_id,
+        )
+        request = self._approval_response_request(continuation, target=target)
+
+        async def ownership_disappeared(
+            _target: MessageTarget,
+            _early_placeholder: _EarlyPlaceholderState,
+        ) -> str | None:
+            return None
+
+        await self._run_locked_response_lifecycle(
+            request,
+            response_kind="team" if continuation.entity_kind == "team" else "ai",
+            locked_operation=ownership_disappeared,
+        )
+        return not await self.deps.approval_store.is_pending(source_event_id)
 
     async def _recover_nonready_approval(
         self,
@@ -1953,6 +2002,9 @@ class ResponseRunner:
         if owned.state == "claimed":
             return True, await self._recover_claimed_approval_lifecycle(owned, target=target)
         if owned.state == "failing":
+            if await self._approval_responses.successful_final_delivery(owned, recover=True) is not None:
+                owns_final, event_id = await self._recover_frozen_approval_final(owned, target=target)
+                return True, event_id if owns_final else None
             reason = owned.failure_reason or "Tool approval continuation was interrupted and denied safely."
             settled = await self._approval_responses.settle_failure(owned, reason)
             return True, owned.response_event_id if settled else None

@@ -593,6 +593,17 @@ def request_failure(
         SET state = 'failing', failure_reason = ?
         WHERE principal_id = ? AND approval_id = ? AND state = ? AND generation = ?
           AND runtime_generation IS NOT DISTINCT FROM ?
+          AND NOT EXISTS (
+            SELECT 1 FROM response_outbox AS final
+            WHERE final.principal_id = approval_continuations.principal_id
+              AND final.turn_id = (
+                SELECT source.event_id FROM approval_continuation_sources AS source
+                WHERE source.principal_id = approval_continuations.principal_id
+                  AND source.approval_id = approval_continuations.approval_id
+                  AND source.source_ordinal = 0
+              )
+              AND final.stage = 'final'
+          )
         RETURNING approval_id
         """,
         (

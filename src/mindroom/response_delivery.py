@@ -85,6 +85,7 @@ class _FlushOutcome:
     """One locked send result and the callback it leaves for after unlock."""
 
     event_id: str | None
+    terminal_response_event_id: str | None = None
     publish_committed_terminal: bool = False
     retry_required: bool = False
     propagate_cancellation: asyncio.CancelledError | None = field(default=None, repr=False, compare=False)
@@ -316,7 +317,7 @@ class ResponseDelivery:
         if not self._transaction_id_still_deduplicates(claimed):
             already_delivered = await self._delivered_before_device_changed(claimed)
             if already_delivered is not None:
-                return await self._acknowledge(turn_id, stage, already_delivered)
+                return await self._acknowledge(claimed, already_delivered)
         # Only now, with a send actually about to happen. Writing this at claim
         # time instead loses the fact that a lookup is still owed: a room scan
         # that raises would leave the row unacknowledged but stamped with this
@@ -338,12 +339,7 @@ class ResponseDelivery:
         except asyncio.CancelledError as cancellation:
             if completed is None:
                 raise
-            return _FlushOutcome(
-                event_id=completed.event_id,
-                publish_committed_terminal=completed.publish_committed_terminal,
-                retry_required=completed.retry_required,
-                propagate_cancellation=cancellation,
-            )
+            return replace(completed, propagate_cancellation=cancellation)
 
     async def _send_and_acknowledge(self, claimed: OutboxDelivery) -> _FlushOutcome:
         """Finish an accepted Matrix attempt before propagating local cancellation."""
@@ -353,9 +349,9 @@ class ResponseDelivery:
             device_id=self.sending_device_id,
         )
         event_id = await self.send(claimed)
-        return await self._acknowledge(claimed.turn_id, claimed.stage, event_id)
+        return await self._acknowledge(claimed, event_id)
 
-    async def _acknowledge(self, turn_id: str, stage: DeliveryStage, event_id: str) -> _FlushOutcome:
+    async def _acknowledge(self, claimed: OutboxDelivery, event_id: str) -> _FlushOutcome:
         """Bind the row and report whether its record needs publishing.
 
         The record commits inside the acknowledgement, so nothing else writes
@@ -387,27 +383,34 @@ class ResponseDelivery:
         record end up naming different events even though the acknowledgement
         itself was guarded.
         """
+        terminal_response_event_id = claimed.edits_event_id or event_id
         acknowledged = await self.store.acknowledge_delivery(
-            turn_id=turn_id,
-            stage=stage,
+            turn_id=claimed.turn_id,
+            stage=claimed.stage,
             event_id=event_id,
-            terminal_turn=self._terminal_turn(turn_id, stage, event_id),
+            terminal_turn=self._terminal_turn(
+                claimed.turn_id,
+                claimed.stage,
+                terminal_response_event_id,
+            ),
         )
         if acknowledged.settled_event_id is None:
             return _FlushOutcome(event_id=event_id)
+        bound_terminal = acknowledged.bound and claimed.stage is DeliveryStage.FINAL
         return _FlushOutcome(
             event_id=acknowledged.settled_event_id,
-            publish_committed_terminal=acknowledged.bound and stage is DeliveryStage.FINAL,
+            terminal_response_event_id=terminal_response_event_id if bound_terminal else None,
+            publish_committed_terminal=bound_terminal,
         )
 
     async def _finish_flush(self, turn_id: str, outcome: _FlushOutcome) -> str | None:
         """Run post-lock bookkeeping and return the visible event."""
         if (
             outcome.publish_committed_terminal
-            and outcome.event_id is not None
+            and outcome.terminal_response_event_id is not None
             and self.terminal_turn_committed is not None
         ):
-            await self.terminal_turn_committed(turn_id, outcome.event_id)
+            await self.terminal_turn_committed(turn_id, outcome.terminal_response_event_id)
         if outcome.propagate_cancellation is not None:
             raise outcome.propagate_cancellation
         return outcome.event_id

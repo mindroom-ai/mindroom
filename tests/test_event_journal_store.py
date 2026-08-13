@@ -3907,6 +3907,36 @@ class TestApprovalContinuations:
         assert failing.state == "failing"
         assert failing.failure_reason == "entity is unavailable"
 
+    async def test_failure_request_cannot_fence_a_claim_after_final_delivery_is_enqueued(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The successful FINAL debt atomically outranks a concurrent failure request."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+        await alice.enqueue_delivery(
+            turn_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload={"msgtype": "m.text", "body": "finished"},
+        )
+
+        refused = await alice.request_approval_failure(
+            "approval-1",
+            "entity is unavailable",
+            expected_state="claimed",
+            expected_generation=claimed.generation,
+            expected_runtime_generation="runtime-a",
+        )
+
+        assert refused is None
+        retained = await alice.approval_continuation("approval-1")
+        assert retained is not None
+        assert retained.state == "claimed"
+
     async def test_card_decision_atomically_readies_the_exact_call(self, alice: PrincipalStore) -> None:
         """The card and final call decision become durable in one transaction."""
         from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415

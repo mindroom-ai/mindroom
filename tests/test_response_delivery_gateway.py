@@ -1279,6 +1279,39 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
         assert record["response_event_id"] == "$sent"
         assert record["completed"] is True
 
+    async def test_a_final_edit_acknowledgement_binds_the_edited_response(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The replacement event acknowledges delivery, while the edited event remains the response owner."""
+        outbox = FakeOutbox()
+        pending = TurnRecord.create(["$cause"], completed=False, response_owner="agent")
+        gateway = _gateway(
+            tmp_path,
+            outbox,
+            terminal_turn_for=lambda _turn_id, event_id: replace(
+                pending,
+                response_event_id=event_id,
+                completed=True,
+            ),
+        )
+        gateway.deps.response_hooks._apply_before_response = (
+            TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
+        )
+        delivered = DeliveredMatrixEvent("$replacement", {"msgtype": "m.text", "body": "answer"})
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
+            outcome = await gateway.deliver_final(
+                replace(self._final_request("answer"), existing_event_id="$waiting"),
+            )
+
+        assert outcome.event_id == "$waiting"
+        turn_id, terminal_turn = outbox.acknowledged_terminal_turns[0]
+        assert turn_id == "$cause"
+        assert terminal_turn is not None
+        record = json.loads(terminal_turn.record_json)
+        assert record["response_event_id"] == "$waiting"
+
     async def test_a_placeholder_acknowledgement_carries_no_record(
         self,
         tmp_path: Path,

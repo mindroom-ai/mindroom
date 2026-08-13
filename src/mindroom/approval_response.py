@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from mindroom.constants import STREAM_STATUS_APPROVAL_PENDING, STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY
+from mindroom.constants import (
+    DURABLE_FINAL_OUTCOME_KEY,
+    STREAM_STATUS_APPROVAL_PENDING,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_KEY,
+)
 from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
@@ -285,7 +290,7 @@ class ApprovalResponseCoordinator:
         current = await self.store.approval_continuation(continuation.approval_id)
         if current is None:
             return True
-        if current.state == "claimed" and await self.final_delivery(current) is not None:
+        if await self.successful_final_delivery(current) is not None:
             return False
         if current.state != "failing":
             current = await self.request_failure(current, reason)
@@ -312,6 +317,25 @@ class ApprovalResponseCoordinator:
             ),
         )
         return delivered and await self.store.finish_approval_continuation(current.approval_id)
+
+    async def successful_final_delivery(
+        self,
+        continuation: ApprovalContinuation,
+        *,
+        recover: bool = False,
+    ) -> OutboxDelivery | None:
+        """Return FINAL debt produced by a completed Agno continuation, not failure settlement."""
+        delivery = await self.final_delivery(continuation, recover=recover)
+        if delivery is None:
+            return None
+        payload = delivery.payload
+        nested = payload.get("m.new_content")
+        semantic = (
+            next((value for key, value in nested.items() if key == DURABLE_FINAL_OUTCOME_KEY), None)
+            if isinstance(nested, dict)
+            else payload.get(DURABLE_FINAL_OUTCOME_KEY)
+        )
+        return delivery if isinstance(semantic, dict) else None
 
     async def final_delivery(
         self,

@@ -30,7 +30,7 @@ from mindroom import response_runner
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.approval import ApprovalRuleConfig
-from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import (
     DeliveryGateway,
@@ -951,6 +951,131 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
     assert stopped_turn is not None
     assert stopped_turn.response_event_id == "$waiting"
     assert stopped_turn.user_stop_settled_receipt_order == 7
+
+
+@pytest.mark.asyncio
+async def test_failing_continuation_recovers_frozen_success_before_failure_settlement(tmp_path: Path) -> None:
+    """A failure fence racing a generated answer cannot retire that answer as a denial."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-failing-final",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    failing = await store.request_approval_failure(
+        claimed.approval_id,
+        "entity removed",
+        expected_state="claimed",
+        expected_generation=claimed.generation,
+        expected_runtime_generation=claimed.runtime_generation,
+    )
+    assert failing is not None
+    await store.enqueue_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={
+            "body": "* finished",
+            "m.new_content": {
+                "body": "finished",
+                DURABLE_FINAL_OUTCOME_KEY: {"body": "finished", "interactive": None},
+            },
+        },
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    await store.acknowledge_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        event_id="$final-edit",
+    )
+    lifecycle = MagicMock(finalize=AsyncMock())
+
+    with patch.object(runner, "_build_lifecycle", return_value=lifecycle):
+        recovered, event_id = await runner._recover_nonready_approval(
+            failing,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert recovered
+    assert event_id == "$waiting"
+    lifecycle.finalize.assert_awaited_once()
+    assert await store.approval_continuation(continuation.approval_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True], ids=("error", "cancellation"))
+async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, cancelled: bool) -> None:
+    """A failed outbox read cannot hide a same-runtime claim until restart."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id=f"approval-recovery-error-{cancelled}",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    failure = asyncio.CancelledError() if cancelled else RuntimeError("Agno continuation failed")
+
+    with (
+        patch.object(runner, "_run_claimed_approval_lifecycle", new=AsyncMock(side_effect=failure)),
+        patch.object(
+            runner._approval_responses,
+            "final_delivery",
+            new=AsyncMock(side_effect=RuntimeError("outbox temporarily unavailable")),
+        ),
+        patch.object(runner._approval_responses, "settle_failure", new=AsyncMock(return_value=False)),
+    ):
+        if cancelled:
+            with pytest.raises(asyncio.CancelledError):
+                await runner._run_owned_or_locked_response(
+                    _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
+                    target=_target(thread_id="$thread"),
+                    early_placeholder=response_runner._EarlyPlaceholderState(),
+                    locked_operation=AsyncMock(),
+                )
+        else:
+            assert (
+                await runner._run_owned_or_locked_response(
+                    _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
+                    target=_target(thread_id="$thread"),
+                    early_placeholder=response_runner._EarlyPlaceholderState(),
+                    locked_operation=AsyncMock(),
+                )
+                is None
+            )
+
+    retained = await store.approval_continuation(continuation.approval_id)
+    assert retained is not None
+    assert retained.state == "failing"
 
 
 @pytest.mark.asyncio
