@@ -1608,18 +1608,14 @@ def make_conversation_reader_mock() -> ConversationReader:
 
 
 def make_membership_stub() -> PrincipalStore:
-    """Return a membership view that treats every epoch as current and runs side effects."""
-
-    async def run_operation(*, operation: Callable[[], None], **_kwargs: object) -> bool:
-        operation()
-        return True
-
+    """Return a membership view that accepts interactive question updates."""
     return cast(
         "PrincipalStore",
         SimpleNamespace(
             membership_epoch=AsyncMock(return_value=0),
-            run_if_turn_membership_current=run_operation,
-            run_if_membership_epoch=run_operation,
+            register_interactive_question_for_turn=AsyncMock(return_value=True),
+            register_interactive_question_for_epoch=AsyncMock(return_value=True),
+            forget_interactive_question=AsyncMock(),
         ),
     )
 
@@ -2109,6 +2105,20 @@ def replace_reaction_dispatcher_deps(bot: RuntimeBot, **changes: object) -> Reac
     return rebuilt
 
 
+def replace_interactive_selection_handlers(
+    bot: RuntimeBot,
+    *,
+    handle: Callable[..., Awaitable[None]] | None = None,
+    start: Callable[..., Awaitable[None]] | None = None,
+) -> None:
+    """Replace controller-owned interactive handlers for one test bot."""
+    controller = unwrap_extracted_collaborator(bot._turn_controller)
+    if handle is not None:
+        controller._handle_interactive_selection = handle  # type: ignore[method-assign]
+    if start is not None:
+        controller._start_interactive_selection = start  # type: ignore[method-assign]
+
+
 def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnController:
     """Rebuild the turn controller after swapping collaborators captured at construction."""
     sync_bot_runtime_state(bot)
@@ -2240,8 +2250,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         stop_manager=bot.stop_manager,
         reserve_prompt_ingress_order=rebuilt.reserve_prompt_ingress_order,
         enqueue_interactive_selection=rebuilt.enqueue_interactive_selection,
-        handle_interactive_selection=rebuilt.handle_interactive_selection,
-        start_interactive_selection=rebuilt.start_interactive_selection,
         config_confirmation=replace(
             reaction_dispatcher.deps.config_confirmation,
             runtime=rebuilt.deps.runtime,

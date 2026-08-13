@@ -25,6 +25,7 @@ from tests.conftest import (
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
+    unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
@@ -117,18 +118,19 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         },
     )
 
-    # Mock interactive.handle_reaction so the test only exercises stop-vs-fallthrough behavior.
-    with patch("mindroom.bot.interactive.handle_reaction") as mock_handle_reaction:
-        mock_handle_reaction.return_value = None
-
+    claim_interactive = AsyncMock(return_value=None)
+    with patch.object(
+        unwrap_extracted_collaborator(bot._journal_dispatcher),
+        "claim_interactive_reaction",
+        new=claim_interactive,
+    ):
         # Case 1: Message is NOT being generated - should handle as interactive
         await dispatch_reaction_durably(bot, room, reaction_event)
 
-        # Should have called interactive.handle_reaction since message wasn't being tracked
-        mock_handle_reaction.assert_called_once()
+        claim_interactive.assert_awaited_once()
 
         # Reset the mock
-        mock_handle_reaction.reset_mock()
+        claim_interactive.reset_mock()
 
         # Case 2: Message IS being generated - should handle as stop button
         # Track a message as being generated
@@ -155,8 +157,7 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         )
         await dispatch_reaction_durably(bot, room, active_reaction_event)
 
-        # Should NOT have called interactive.handle_reaction since it was handled as stop
-        mock_handle_reaction.assert_not_called()
+        claim_interactive.assert_not_awaited()
         send_response.assert_not_awaited()
 
         # The task should have been cancelled
@@ -656,9 +657,12 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
         },
     )
 
-    with patch("mindroom.bot.interactive.handle_reaction") as mock_handle_reaction:
-        mock_handle_reaction.return_value = None  # No interactive result
-
+    claim_interactive = AsyncMock(return_value=None)
+    with patch.object(
+        unwrap_extracted_collaborator(bot._journal_dispatcher),
+        "claim_interactive_reaction",
+        new=claim_interactive,
+    ):
         # Track a message as being generated
         task = MagicMock()  # Use MagicMock instead of AsyncMock for the task
         task.done = MagicMock(return_value=False)  # done() is a regular method, not async
@@ -671,8 +675,8 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
         # Process the reaction from an agent
         await dispatch_reaction_durably(bot, room, reaction_event)
 
-        # Should have called interactive.handle_reaction (fell through)
-        mock_handle_reaction.assert_called_once()
+        # Managed-agent reactions cannot answer this agent's interactive prompt.
+        claim_interactive.assert_not_awaited()
 
         # Task should NOT have been cancelled (agents can't stop generation)
         task.cancel.assert_not_called()

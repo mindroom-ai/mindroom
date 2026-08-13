@@ -85,7 +85,7 @@ from mindroom.tool_approval import is_process_active_approval_card
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
-from . import constants, interactive
+from . import constants
 from .agents import create_agent, show_tool_calls_for_agent
 from .authorization import is_authorized_sender
 from .background_tasks import create_background_task, wait_for_background_tasks
@@ -574,10 +574,6 @@ class AgentBot:
         )
         self._membership_fence = MembershipFence(
             store=self._journal_store.principal(self._journal_principal_id),
-            clear_departed_room=lambda room_id: interactive.clear_interactive_questions_for_room(
-                room_id,
-                self.agent_name,
-            ),
         )
         self._relations = RelationLookup(
             store=self._journal_store.principal(self._journal_principal_id),
@@ -687,6 +683,7 @@ class AgentBot:
                 self.agent_name == ROUTER_AGENT_NAME and self._first_sync_done and self._room_member_join_hooks_armed
             ),
             runtime_generation=self._approval_runtime_generation,
+            on_own_membership_transition=self._membership_fence.observe_reported_transition,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -812,6 +809,7 @@ class AgentBot:
                 matrix_id=runtime_matrix_id,
                 relations=self._relations,
                 pending_turns=self._journal_store.principal(self._journal_principal_id),
+                interactive_questions=self._journal_store.principal(self._journal_principal_id),
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
                 command_executor=self._command_turn_executor,
@@ -846,8 +844,6 @@ class AgentBot:
                 ingress=self._ingress_validator,
                 reserve_prompt_ingress_order=self._turn_controller.reserve_prompt_ingress_order,
                 enqueue_interactive_selection=self._turn_controller.enqueue_interactive_selection,
-                handle_interactive_selection=self._turn_controller.handle_interactive_selection,
-                start_interactive_selection=self._turn_controller.start_interactive_selection,
                 emit_reaction_received_hooks=self._emit_reaction_received_hooks,
                 config_confirmation=config_confirmation.ConfigConfirmationContext(
                     runtime=self._runtime_view,
@@ -1921,7 +1917,6 @@ class AgentBot:
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await self._turn_store.warm()
-            await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
 
@@ -2075,6 +2070,11 @@ class AgentBot:
         # replacement opened the same database under the same principal.
         failures: list[Exception] = []
         await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
+        if shutdown_intent.stop_reason == "restart":
+            # Stopping the dispatcher first quiesces every journal lane that
+            # can register a detached interactive source owner. The store stays
+            # open until those owners finish restoring or committing claims.
+            await self._response_runner.wait_for_source_owned_inbox_responses()
         if self._own_journal is not None:
             await self._release("journal store", self._own_journal.close(), failures)
         if self.client is not None:

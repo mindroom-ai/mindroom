@@ -96,6 +96,9 @@ class DepartureObservation(StrEnum):
     # The same departure observed again, by either observer, with no rejoin in
     # between for a second departure to have happened in.
     ALREADY_FENCED = "already_fenced"
+    # The same stable Matrix departure observation was replayed after its first
+    # application had already committed.
+    REPEATED_REPORT = "repeated_report"
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +108,7 @@ class DepartureOutcome:
     observation: DepartureObservation
     membership_epoch: int
     owed_reports: int
+    reported_run_epoch: int | None = None
 
     @property
     def fenced(self) -> bool:

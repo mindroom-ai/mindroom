@@ -33,7 +33,7 @@ from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
     make_pending_event,
     prepared_dispatch_result,
-    replace_reaction_dispatcher_deps,
+    replace_interactive_selection_handlers,
     replace_turn_controller_deps,
     unwrap_extracted_collaborator,
 )
@@ -963,17 +963,18 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
         ack_sent.set()
         return "$ack"
 
-    with interactive._thread_lock:
-        interactive._store_active_question_locked(
-            "$question",
-            interactive._InteractiveQuestion(
-                room_id=room.room_id,
-                thread_id="$threadA",
-                options={"1": "option one"},
-                creator_agent="test_agent",
-                question_text="Pick one",
-            ),
-        )
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock(
+        return_value=interactive.InteractiveSelection(
+            question_event_id="$question",
+            question_text="Pick one",
+            selection_key="1",
+            selected_label="option one",
+            selected_value="option one",
+            thread_id="$threadA",
+        ),
+    )
+    replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
     answer_task: asyncio.Task[None] | None = None
     try:
         with (
@@ -1009,9 +1010,6 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
             answer_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await answer_task
-        with interactive._thread_lock:
-            interactive._remove_active_question_locked("$question")
-            interactive._claimed_questions.pop("$question", None)
 
 
 @pytest.mark.asyncio
@@ -1062,26 +1060,30 @@ async def test_edit_and_reaction_slots_settle_before_their_execution_finishes(tm
     reaction_event.server_timestamp = 1100
     reaction_event.source = {"content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$question"}}}
 
-    with interactive._thread_lock:
-        interactive._store_active_question_locked(
-            "$question",
-            interactive._InteractiveQuestion(
-                room_id=room.room_id,
-                thread_id="$threadA",
-                options={"👍": "yes"},
-                creator_agent="test_agent",
-                question_text="Proceed?",
-            ),
-        )
+    claim_interactive = AsyncMock(
+        return_value=interactive.InteractiveSelection(
+            question_event_id="$question",
+            question_text="Proceed?",
+            selection_key="👍",
+            selected_label="yes",
+            selected_value="yes",
+            thread_id="$threadA",
+        ),
+    )
     edit_task: asyncio.Task[None] | None = None
     reaction_task: asyncio.Task[None] | None = None
     try:
-        replace_reaction_dispatcher_deps(
+        replace_interactive_selection_handlers(
             bot,
-            handle_interactive_selection=blocked_selection,
+            handle=blocked_selection,
         )
         with (
             patch.object(bot._edit_regenerator, "handle_message_edit", new=AsyncMock(side_effect=blocked_edit)),
+            patch.object(
+                unwrap_extracted_collaborator(bot._journal_dispatcher),
+                "claim_interactive_reaction",
+                new=claim_interactive,
+            ),
         ):
             edit_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, edit_event))
             await asyncio.wait_for(edit_started.wait(), timeout=1.0)
@@ -1099,8 +1101,6 @@ async def test_edit_and_reaction_slots_settle_before_their_execution_finishes(tm
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
-        with interactive._thread_lock:
-            interactive._remove_active_question_locked("$question")
 
 
 @pytest.mark.asyncio

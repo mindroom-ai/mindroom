@@ -17,7 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import SOURCE_KIND_KEY
-from mindroom.event_journal import EventClass, EventKind
+from mindroom.event_journal import EventClass, EventKind, InteractiveQuestion
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -30,7 +30,6 @@ from mindroom.matrix import journal_ingress
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from tests.bot_helpers import FencedRoomRecorder
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -561,6 +560,65 @@ async def test_replaying_one_sync_response_fences_its_departures_once(
 
 
 @pytest.mark.asyncio
+async def test_replayed_truncated_leave_cannot_fence_a_rejoined_membership(tmp_path: Path) -> None:
+    """The response token identifies a leave whose timeline omits its event."""
+    bot = _agent_bot(tmp_path)
+    room_id = "!departed:localhost"
+    response = _sync_response_with_room_membership_section(room_id, membership="leave")
+
+    await bot._apply_own_room_membership_from_sync(response)
+    await bot._membership_fence.note_membership_restarted(room_id)
+    epoch_after_rejoin = await bot._journal_principal().membership_epoch(room_id)
+    await bot._apply_own_room_membership_from_sync(response)
+
+    assert await bot._journal_principal().membership_epoch(room_id) == epoch_after_rejoin
+
+
+@pytest.mark.asyncio
+async def test_replayed_departure_cannot_leave_a_confirmed_join_fenced(tmp_path: Path) -> None:
+    """A duplicated old leave report cannot invalidate a confirmed rejoin."""
+    bot = _agent_bot(tmp_path)
+    room_id = "!rejoined:localhost"
+    user_id = bot.agent_user.user_id
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": "s-after-rejoin",
+            "rooms": {
+                "invite": {},
+                "join": {
+                    room_id: {
+                        "state": {"events": []},
+                        "timeline": {
+                            "events": [
+                                _departure_member_event("$leave", user_id=user_id, membership="leave", ts=1),
+                                {
+                                    "content": {"membership": "join"},
+                                    "event_id": "$rejoin",
+                                    "origin_server_ts": 2,
+                                    "sender": user_id,
+                                    "state_key": user_id,
+                                    "type": "m.room.member",
+                                },
+                            ],
+                            "limited": False,
+                            "prev_batch": "s-before-rejoin",
+                        },
+                    },
+                },
+                "leave": {},
+            },
+        },
+    )
+    await bot._membership_fence.fence_local_departure(room_id)
+    await bot._membership_fence.note_membership_restarted(room_id)
+    epoch_after_rejoin = await bot._journal_principal().membership_epoch(room_id)
+    await bot._apply_own_room_membership_from_sync(response)
+    await bot._apply_own_room_membership_from_sync(response)
+
+    assert await bot._journal_principal().membership_epoch(room_id) == epoch_after_rejoin
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("membership", ["leave", "ban"])
 async def test_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(
     tmp_path: Path,
@@ -610,13 +668,22 @@ async def test_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(
             },
         },
     )
-    recorder = FencedRoomRecorder()
-    bot._membership_fence.store = recorder
-    fenced_room_ids = recorder.fenced_room_ids
-
     await bot._apply_own_room_membership_from_sync(response)
 
-    assert fenced_room_ids == [room_id]
+    principal = bot._journal_principal()
+    assert await principal.membership_epoch(room_id) == 1
+    assert await principal.register_interactive_question_for_epoch(
+        1,
+        InteractiveQuestion(
+            question_event_id="$membership-probe",
+            room_id=room_id,
+            thread_id=None,
+            creator_agent=bot.agent_name,
+            question_text="Probe",
+            options={"1": "one"},
+            option_labels={"1": "One"},
+        ),
+    )
 
 
 @pytest.mark.asyncio

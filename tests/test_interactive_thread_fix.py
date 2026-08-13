@@ -72,9 +72,13 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
             "mindroom.delivery_gateway.send_streaming_response",
             new_callable=AsyncMock,
         ) as mock_send_streaming_response,
-        patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
-        patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
-        patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock),
+        patch("mindroom.interactive.parse_and_format_interactive") as mock_parse,
+        patch(
+            "mindroom.event_journal.store.PrincipalStore.register_interactive_question_for_turn",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_register,
+        patch("mindroom.interactive.add_reaction_buttons", new_callable=AsyncMock),
         patch("mindroom.post_response_effects.maybe_generate_thread_summary", new_callable=AsyncMock),
         patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
         patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
@@ -149,11 +153,11 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
             await asyncio.gather(*scheduled_tasks)
 
         assert _handled_response_event_id(resolution) == "$agent_message_id"
-        mock_register.assert_called_once()
-        call_args = mock_register.call_args[0]
-        registered_event_id = call_args[0]
-        registered_room_id = call_args[1]
-        registered_thread_id = call_args[2]
+        mock_register.assert_awaited_once()
+        question = mock_register.await_args.args[1]
+        registered_event_id = question.question_event_id
+        registered_room_id = question.room_id
+        registered_thread_id = question.thread_id
         assert registered_event_id == "$agent_message_id", "Event ID should be the agent's message"
         assert registered_room_id == "!test:localhost", "Room ID should match"
         assert registered_thread_id == user_message_id, (
@@ -186,9 +190,13 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
             "mindroom.delivery_gateway.edit_message_outcome",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
         ),
-        patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
-        patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
-        patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock),
+        patch("mindroom.interactive.parse_and_format_interactive") as mock_parse,
+        patch(
+            "mindroom.event_journal.store.PrincipalStore.register_interactive_question_for_turn",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_register,
+        patch("mindroom.interactive.add_reaction_buttons", new_callable=AsyncMock),
         patch("mindroom.post_response_effects.maybe_generate_thread_summary", new_callable=AsyncMock),
         patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
         patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
@@ -254,11 +262,11 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
             await asyncio.gather(*scheduled_tasks)
 
         assert _handled_response_event_id(resolution) == "$agent_response_id"
-        mock_register.assert_called_once()
-        call_args = mock_register.call_args[0]
-        registered_event_id = call_args[0]
-        registered_room_id = call_args[1]
-        registered_thread_id = call_args[2]
+        mock_register.assert_awaited_once()
+        question = mock_register.await_args.args[1]
+        registered_event_id = question.question_event_id
+        registered_room_id = question.room_id
+        registered_thread_id = question.thread_id
         assert registered_event_id == "$agent_response_id", "Event ID should be the agent's message"
         assert registered_room_id == "!test:localhost", "Room ID should match"
         assert registered_thread_id == user_message_id, (
@@ -278,9 +286,13 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
             "mindroom.delivery_gateway.send_streaming_response",
             new_callable=AsyncMock,
         ) as mock_send_streaming_response,
-        patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
-        patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
-        patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock),
+        patch("mindroom.interactive.parse_and_format_interactive") as mock_parse,
+        patch(
+            "mindroom.event_journal.store.PrincipalStore.register_interactive_question_for_turn",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_register,
+        patch("mindroom.interactive.add_reaction_buttons", new_callable=AsyncMock),
     ):
 
         async def mock_stream() -> AsyncIterator[str]:
@@ -344,9 +356,9 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         )
 
         assert _handled_response_event_id(resolution) == "$standalone_message"
-        mock_register.assert_called_once()
-        call_args = mock_register.call_args[0]
-        registered_event_id = call_args[0]
-        registered_thread_id = call_args[2]
+        mock_register.assert_awaited_once()
+        question = mock_register.await_args.args[1]
+        registered_event_id = question.question_event_id
+        registered_thread_id = question.thread_id
         assert registered_event_id == "$standalone_message"
         assert registered_thread_id is None

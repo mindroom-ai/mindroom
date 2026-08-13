@@ -663,11 +663,6 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
-            patch(
-                "mindroom.turn_controller.interactive.handle_text_response",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
         ):
             await bot._on_message(room, text_event)
             await drain_coalescing(bot)
@@ -758,11 +753,6 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.router_relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
-            ),
-            patch(
-                "mindroom.turn_controller.interactive.handle_text_response",
-                new_callable=AsyncMock,
-                return_value=None,
             ),
         ):
             await bot._on_message(room, event)
@@ -926,11 +916,6 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
-            patch(
-                "mindroom.turn_controller.interactive.handle_text_response",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
         ):
             await bot._on_message(room, text_event)
             await drain_coalescing(bot)
@@ -981,11 +966,6 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch(
-                "mindroom.turn_controller.interactive.handle_text_response",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
         ):
             await bot._on_message(room, event)
             await drain_coalescing(bot)
@@ -1048,11 +1028,6 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
-            patch(
-                "mindroom.turn_controller.interactive.handle_text_response",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.responder_candidate_entities_for_room", return_value=[]),

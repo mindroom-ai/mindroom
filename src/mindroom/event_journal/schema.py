@@ -125,6 +125,46 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS reported_departures (
+        report_order {receipt_order_column},
+        -- Matrix may replay an old leave after a later join has re-armed the
+        -- room. Event identity, or the sync token when the event was omitted,
+        -- keeps that replay from fencing again.
+        principal_id TEXT NOT NULL,
+        observation_id {ordered_text} NOT NULL,
+        room_id TEXT NOT NULL,
+        -- The latest journal receipt visible when this observation arrived.
+        -- Synthetic sync-token observations have no event row of their own,
+        -- so this is what still orders a later explicit join after them.
+        journal_order BIGINT NOT NULL,
+        -- Consecutive leave/ban observations are aliases for one ended
+        -- membership. They share its epoch so only the run's first observation
+        -- consumes a locally owed report.
+        run_epoch BIGINT NOT NULL,
+        -- A join closes the whole alias run. Keeping closure beside every
+        -- alias lets any replayed subset recover the same answer.
+        run_closed INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (principal_id, observation_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS interactive_questions (
+        principal_id TEXT NOT NULL,
+        question_event_id {ordered_text} NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        creator_agent TEXT NOT NULL,
+        question_json TEXT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        claimed_source_event_id {ordered_text},
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, question_event_id),
+        UNIQUE (principal_id, claimed_source_event_id),
+        FOREIGN KEY (principal_id, claimed_source_event_id)
+            REFERENCES journal_events (principal_id, event_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS conversation_hydration (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
@@ -317,6 +357,18 @@ _TABLES = (
 
 
 _INDEXES = (
+    """
+    CREATE INDEX IF NOT EXISTS reported_departures_open
+    ON reported_departures (principal_id, room_id, report_order)
+    WHERE run_closed = 0
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS interactive_questions_active
+    ON interactive_questions (
+        principal_id, room_id, thread_id, creator_agent, created_at_ns, question_event_id/*bytes*/
+    )
+    WHERE claimed_source_event_id IS NULL
+    """,
     """
     CREATE INDEX IF NOT EXISTS journal_events_pending
     ON journal_events (principal_id, receipt_order)

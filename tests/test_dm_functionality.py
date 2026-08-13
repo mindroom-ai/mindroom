@@ -349,10 +349,6 @@ class TestDMIntegration:
         generate_response = AsyncMock()
         install_generate_response_mock(bot, generate_response)
 
-        # Mock helper functions
-        async def mock_handle(*args: object, **kwargs: object) -> None:
-            pass
-
         with (
             patch.object(
                 bot._conversation_resolver,
@@ -363,7 +359,6 @@ class TestDMIntegration:
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),
             patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=True),  # This is a DM room
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
             mock_thread_info.return_value = EventInfo(
@@ -447,9 +442,6 @@ class TestDMIntegration:
         generate_response = AsyncMock()
         install_generate_response_mock(bot, generate_response)
 
-        async def mock_handle(*args: object, **kwargs: object) -> None:
-            pass
-
         with (
             patch.object(
                 bot._conversation_resolver,
@@ -460,7 +452,6 @@ class TestDMIntegration:
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),
             patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=True),  # This is a DM room
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
             mock_thread_info.return_value = EventInfo(

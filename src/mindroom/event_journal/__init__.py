@@ -12,6 +12,7 @@ from mindroom.history_recovery import (
     HistoryRecoveryState,
     RoomHistoryRecovery,
 )
+from mindroom.interactive_models import InteractiveQuestion, InteractiveSelection
 
 from .approval_continuations import (
     ApprovalCall,
@@ -89,6 +90,8 @@ __all__ = [
     "HydrationPolicy",
     "HydrationView",
     "InboundEvent",
+    "InteractiveQuestion",
+    "InteractiveSelection",
     "JournalEvent",
     "MembershipFence",
     "MembershipView",

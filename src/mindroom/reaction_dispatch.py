@@ -6,7 +6,6 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom import interactive
 from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.authorization import is_authorized_sender
 from mindroom.commands import config_confirmation
@@ -49,8 +48,6 @@ class ReactionDispatcherDeps:
     ingress: IngressValidator
     reserve_prompt_ingress_order: Callable[..., PromptIngressReservationOwner]
     enqueue_interactive_selection: Callable[..., Awaitable[None]]
-    handle_interactive_selection: Callable[..., Awaitable[None]]
-    start_interactive_selection: Callable[..., Awaitable[None]]
     emit_reaction_received_hooks: Callable[..., Awaitable[None]]
     config_confirmation: ConfigConfirmationContext
 
@@ -156,41 +153,27 @@ class ReactionDispatcher:
         interactive_claimed = consumer is SemanticConsumer.INTERACTIVE_REACTION
         if consumer is not None and not interactive_claimed:
             return None
-        selection = await interactive.handle_reaction(
-            self._client(),
-            event,
-            self.deps.agent_name,
+        if event.sender == self._client().user_id or entity_identity_registry(
             self.deps.runtime.config,
             self.deps.runtime_paths,
+        ).is_managed_user_id(event.sender):
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED if interactive_claimed else None
+        selection = await self.deps.journal_dispatcher.claim_interactive_reaction(
+            question_event_id=event.reacts_to,
+            selection_key=event.key,
+            creator_agent=self.deps.agent_name,
         )
         if selection is None:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED if interactive_claimed else None
-        if not interactive_claimed:
-            try:
-                claimed = await self.deps.journal_dispatcher.claim_semantic_consumer(
-                    SemanticConsumer.INTERACTIVE_REACTION,
-                )
-            except BaseException:
-                interactive.restore_selection(selection)
-                raise
-            if not claimed:
-                interactive.commit_selection(selection)
-                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
-        try:
-            await self.deps.enqueue_interactive_selection(
-                reservation_owner,
-                room,
-                selection=selection,
-                requester_user_id=requester_user_id,
-                user_id=event.sender,
-                source_event_id=event.event_id,
-                handle_interactive_selection=self.deps.handle_interactive_selection,
-                start_interactive_selection=self.deps.start_interactive_selection,
-            )
-        except BaseException:
-            interactive.restore_selection(selection)
-            raise
+        await self.deps.enqueue_interactive_selection(
+            reservation_owner,
+            room,
+            selection=selection,
+            requester_user_id=requester_user_id,
+            user_id=event.sender,
+            source_event_id=event.event_id,
+        )
         return TurnDispatchOutcome.DEFERRED
 
     async def _maybe_handle_nonconfig_reaction(

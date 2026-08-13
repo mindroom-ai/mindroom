@@ -211,12 +211,14 @@ Approval replies and reactions can have several semantic consumers, so they foll
 journal event pending
   -> in-process journal execution claim
   -> SemanticConsumer durable claim selects exactly one consumer
-  -> claimed consumer runs its side effects (own replay semantics)
-  -> journal event settles to a compact terminal row
+  -> claimed consumer runs its side effects or transfers work downstream
+  -> synchronous consumers settle after their side effects
+  -> deferred interactive responses settle at terminal delivery
 ```
 
 For those callback families only, `SemanticConsumer` is the durable authority that prevents a second consumer from claiming the same callback.
 Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
+An interactive reaction remains pending while its detached response owns the selection, so a restart can replay it until response delivery becomes durable.
 
 ### Deferred callback outcome
 
