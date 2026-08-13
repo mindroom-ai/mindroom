@@ -201,6 +201,51 @@ async def test_git_source_sync_with_expired_inherited_capability_preserves_index
 
 
 @pytest.mark.asyncio
+async def test_git_source_sync_continues_when_orphaned_lock_cannot_be_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup failure must leave Git responsible for reporting the repository error."""
+    manager = _git_manager(tmp_path)
+    git_dir = manager.knowledge_path / ".git"
+    git_dir.mkdir(parents=True)
+    lock_path = git_dir / "index.lock"
+    lock_path.write_text("", encoding="utf-8")
+    sync_attempted = False
+    original_unlink = Path.unlink
+
+    def _refuse_lock_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path == lock_path:
+            msg = "refused"
+            raise PermissionError(msg)
+        original_unlink(path, *args, **kwargs)
+
+    async def _sync_once(_git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
+        nonlocal sync_attempted
+        sync_attempted = True
+        return set(), set(), False
+
+    async def _rev_parse(_ref: str) -> str:
+        return "unchanged"
+
+    monkeypatch.setattr(Path, "unlink", _refuse_lock_unlink)
+    monkeypatch.setattr(manager.git_source, "_sync_once", _sync_once)
+    monkeypatch.setattr(manager.git_source, "_rev_parse", _rev_parse)
+    key = resolve_published_index_key(
+        "docs",
+        config=manager.config,
+        runtime_paths=manager.runtime_paths,
+    )
+    source_root = source_root_for_published_index_key(key)
+
+    async with refresh_source_root_lock(source_root):
+        await manager.git_source.sync()
+
+    assert sync_attempted is True
+    assert lock_path.exists() is True
+
+
+@pytest.mark.asyncio
 async def test_run_git_inherits_owned_source_root_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -440,6 +440,14 @@ class GitKnowledgeSource:
             lock_path.unlink()
         except FileNotFoundError:
             return
+        except OSError as exc:
+            logger.warning(
+                "Could not remove orphaned knowledge Git index lock",
+                base_id=self.base_id,
+                lock_path=str(lock_path),
+                error=str(exc),
+            )
+            return
         logger.warning(
             "Removed orphaned knowledge Git index lock",
             base_id=self.base_id,
