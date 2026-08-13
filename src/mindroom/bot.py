@@ -2047,11 +2047,6 @@ class AgentBot:
             await call_manager.shutdown()
 
         await self.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
-        if shutdown_intent.stop_reason == "restart":
-            # A same-process replacement shares interactive claim ownership
-            # with this generation. It cannot safely replay while an old
-            # detached response can still restore or commit that claim.
-            await self._response_runner.wait_for_source_owned_inbox_responses()
 
         if self.agent_name == ROUTER_AGENT_NAME:
             cleared_queued_tasks = clear_deferred_overdue_tasks()
@@ -2069,6 +2064,11 @@ class AgentBot:
         # replacement opened the same database under the same principal.
         failures: list[Exception] = []
         await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
+        if shutdown_intent.stop_reason == "restart":
+            # Stopping the dispatcher first quiesces every journal lane that
+            # can register a detached interactive source owner. The store stays
+            # open until those owners finish restoring or committing claims.
+            await self._response_runner.wait_for_source_owned_inbox_responses()
         if self._own_journal is not None:
             await self._release("journal store", self._own_journal.close(), failures)
         if self.client is not None:

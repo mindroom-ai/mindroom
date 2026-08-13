@@ -1218,7 +1218,7 @@ class TestAgentBot(AgentBotTestBase):
                 await asyncio.sleep(0)
 
                 assert not stop_task.done()
-                dispatcher_stop.assert_not_awaited()
+                dispatcher_stop.assert_awaited_once_with()
                 assert selection.question_event_id in interactive._claimed_questions
 
                 finish_cleanup.set()
@@ -1227,12 +1227,62 @@ class TestAgentBot(AgentBotTestBase):
             assert selection.question_event_id in interactive._active_questions
             assert selection.question_event_id not in interactive._claimed_questions
             assert not ordinary_response_task.done()
-            dispatcher_stop.assert_awaited_once_with()
         finally:
             finish_cleanup.set()
             ordinary_response_task.cancel()
             await asyncio.gather(response_task, ordinary_response_task, return_exceptions=True)
             interactive._cleanup()
+
+    @pytest.mark.asyncio
+    async def test_restart_stop_waits_for_source_owner_registered_during_dispatcher_stop(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Quiescing journal lanes must precede the final source-owner wait."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        response_started = asyncio.Event()
+        finish_response = asyncio.Event()
+        response_tasks: list[asyncio.Task[None]] = []
+
+        async def response_owner() -> None:
+            response_started.set()
+            await finish_response.wait()
+
+        async def stop_dispatcher() -> None:
+            response_tasks.append(
+                bot._response_runner.track_inbox_response(
+                    response_owner(),
+                    name="test_late_interactive_claim_owner",
+                    recovery_proof_ready=lambda: False,
+                    source_event_ids=("$reaction",),
+                ),
+            )
+            await response_started.wait()
+
+        stop_task: asyncio.Task[None] | None = None
+        try:
+            with (
+                patch.object(bot, "prepare_for_sync_shutdown", new=AsyncMock()),
+                patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
+                patch.object(bot._journal_dispatcher, "stop", new=stop_dispatcher),
+                patch.object(bot, "_own_journal", None),
+            ):
+                stop_task = asyncio.create_task(bot.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN))
+                await response_started.wait()
+                await asyncio.sleep(0)
+
+                assert not stop_task.done()
+
+                finish_response.set()
+                await asyncio.wait_for(stop_task, timeout=1.0)
+
+            assert response_tasks[0].done()
+        finally:
+            finish_response.set()
+            cleanup_tasks = [task for task in (stop_task, *response_tasks) if task is not None]
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_stage", ["acquire", "queued_cancel"])
