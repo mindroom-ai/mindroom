@@ -50,6 +50,7 @@ class ReactionDispatcherDeps:
     ingress: IngressValidator
     reserve_prompt_ingress_order: Callable[..., PromptIngressReservationOwner]
     build_message_target: Callable[..., MessageTarget]
+    enqueue_interactive_selection: Callable[..., Awaitable[None]]
     handle_interactive_selection: Callable[..., Awaitable[None]]
     start_interactive_selection: Callable[..., Awaitable[None]]
     emit_reaction_received_hooks: Callable[..., Awaitable[None]]
@@ -150,6 +151,8 @@ class ReactionDispatcher:
         room: nio.MatrixRoom,
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
+        reservation_owner: PromptIngressReservationOwner,
+        requester_user_id: str,
     ) -> TurnDispatchOutcome | None:
         """Route an interactive choice only to its claimed question."""
         interactive_claimed = consumer is SemanticConsumer.INTERACTIVE_REACTION
@@ -179,18 +182,16 @@ class ReactionDispatcher:
                 thread_id=selection.thread_id,
                 reply_to_event_id=selection.question_event_id,
             )
-            await self.deps.start_interactive_selection(
-                self.deps.handle_interactive_selection(
-                    room,
-                    selection=selection,
-                    user_id=event.sender,
-                    source_event_id=event.event_id,
-                    response_target=response_target,
-                ),
-                response_target=response_target,
-                source_event_id=event.event_id,
+            await self.deps.enqueue_interactive_selection(
+                reservation_owner,
+                room,
+                selection=selection,
+                requester_user_id=requester_user_id,
                 user_id=event.sender,
-                selected_value=selection.selected_value,
+                source_event_id=event.event_id,
+                response_target=response_target,
+                handle_interactive_selection=self.deps.handle_interactive_selection,
+                start_interactive_selection=self.deps.start_interactive_selection,
             )
         except BaseException:
             interactive.restore_selection(selection)
@@ -202,6 +203,8 @@ class ReactionDispatcher:
         room: nio.MatrixRoom,
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
+        reservation_owner: PromptIngressReservationOwner,
+        requester_user_id: str,
     ) -> TurnDispatchOutcome | None:
         """Route one authorized reaction among the non-config consumers."""
         if await self._maybe_handle_approval_reaction(room, event, consumer):
@@ -215,6 +218,8 @@ class ReactionDispatcher:
             room,
             event,
             consumer,
+            reservation_owner,
+            requester_user_id,
         )
 
     async def _route_reaction(  # noqa: PLR0911 - explicit terminal outcome for each consumer branch
@@ -288,6 +293,8 @@ class ReactionDispatcher:
                     room,
                     event,
                     semantic_consumer,
+                    reservation_owner,
+                    requester_user_id,
                 )
             ) is not None:
                 return outcome

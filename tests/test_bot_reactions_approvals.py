@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -21,8 +21,12 @@ from mindroom.approval_manager import (
     initialize_approval_store,
 )
 from mindroom.bot import AgentBot
+from mindroom.coalescing import ReadyPendingEvent
+from mindroom.coalescing_batch import PendingEvent, PreparedTurn, requester_coalescing_key
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.dispatch_handoff import PreparedIngress
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, SemanticConsumer
 from mindroom.handled_turns import TurnRecord, with_user_stop
 from mindroom.hooks import (
@@ -56,7 +60,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.matrix.users import AgentMatrixUser
@@ -525,12 +529,12 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._coalescing_gate.lanes.all_settled()
 
     @pytest.mark.asyncio
-    async def test_interactive_reaction_reserves_lifecycle_before_releasing_prompt_lane(
+    async def test_interactive_reaction_enqueues_barrier_before_releasing_prompt_lane(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Selection startup must reserve its lifecycle before releasing ingress order."""
+        """Selection handoff must enter its FIFO barrier before releasing ingress order."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -550,9 +554,8 @@ class TestAgentBot(AgentBotTestBase):
         reservation_owner.release = AsyncMock()
         release_count_during_startup = -1
 
-        async def blocked_start(response: Coroutine[object, object, None], **_kwargs: object) -> None:
+        async def blocked_enqueue(*_args: object, **_kwargs: object) -> None:
             nonlocal release_count_during_startup
-            response.close()
             release_count_during_startup = reservation_owner.release.await_count
             startup_observed.set()
             await release_startup.wait()
@@ -560,7 +563,7 @@ class TestAgentBot(AgentBotTestBase):
         replace_reaction_dispatcher_deps(
             bot,
             reserve_prompt_ingress_order=MagicMock(return_value=reservation_owner),
-            start_interactive_selection=blocked_start,
+            enqueue_interactive_selection=blocked_enqueue,
         )
         with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)):
             dispatch = asyncio.create_task(_dispatch_reaction(bot, room, event))
@@ -570,6 +573,75 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch
 
         reservation_owner.release.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_interactive_reaction_waits_for_earlier_same_thread_ingress(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A reaction response must not overtake an earlier queued thread message."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        selection = interactive.InteractiveSelection(
+            question_event_id="$question",
+            question_text="Choose one",
+            selection_key="👍",
+            selected_label="Selected",
+            selected_value="Selected",
+            thread_id="$thread-a",
+        )
+        reaction = _reaction_event("👍", "$reaction")
+        message_dispatch_started = asyncio.Event()
+        release_message_dispatch = asyncio.Event()
+        execution_order: list[str] = []
+        original_dispatch = bot._coalescing_gate._dispatch_turn
+
+        async def dispatch_turn(turn: PreparedTurn) -> None:
+            if turn.event.event_id == "$earlier":
+                message_dispatch_started.set()
+                await release_message_dispatch.wait()
+                execution_order.append("message")
+                return
+            await original_dispatch(turn)
+
+        async def start_selection(
+            _response_factory: Callable[[], Awaitable[None]],
+            **_kwargs: object,
+        ) -> None:
+            execution_order.append("reaction")
+
+        monkeypatch.setattr(bot._coalescing_gate, "_dispatch_turn", dispatch_turn)
+        replace_reaction_dispatcher_deps(bot, start_interactive_selection=start_selection)
+        earlier_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+        earlier_event = PreparedIngress(
+            sender="@user:localhost",
+            event_id="$earlier",
+            body="Earlier message",
+            source={"content": {"msgtype": "m.text", "body": "Earlier message"}},
+            requester_user_id="@user:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+        )
+        await earlier_owner.admit(
+            requester_coalescing_key(room.room_id, "$thread-a", "@user:localhost"),
+            source_event_id=earlier_event.event_id,
+            source_kind=MESSAGE_SOURCE_KIND,
+            ready_result=ReadyPendingEvent(pending_event=PendingEvent(event=earlier_event, room=room)),
+        )
+
+        try:
+            await asyncio.wait_for(message_dispatch_started.wait(), timeout=1.0)
+            with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)):
+                await _dispatch_reaction(bot, room, reaction)
+            release_message_dispatch.set()
+            await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
+            assert execution_order == ["message", "reaction"]
+        finally:
+            release_message_dispatch.set()
+            await bot._coalescing_gate.drain_all()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_response_does_not_hold_room_journal_lane(
@@ -691,11 +763,8 @@ class TestAgentBot(AgentBotTestBase):
                 await older_entered.wait()
                 await _dispatch_reaction(bot, room, reaction)
 
-                target = MessageTarget.resolve(room.room_id, selection.thread_id, selection.question_event_id)
-                response_runner = unwrap_extracted_collaborator(bot._response_runner)
-                queued_signal = response_runner._lifecycle_coordinator._get_or_create_queued_signal(target)
                 assert not preparation_started.is_set()
-                assert queued_signal.pending_human_message_event_ids == {reaction.event_id}
+                assert bot._journal_dispatcher.callbacks.source_has_live_owner(reaction.event_id)
 
                 release_older.set()
                 assert await older == "$older-response"
@@ -728,17 +797,101 @@ class TestAgentBot(AgentBotTestBase):
             reply_to_event_id="$question",
         )
         await bot._turn_controller.start_interactive_selection(
-            prepare_forever(),
+            prepare_forever,
             response_target=target,
             source_event_id="$reaction",
             user_id="@user:localhost",
             selected_value="Selected",
+            on_failure=lambda: None,
         )
         await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
         assert bot._response_runner.has_active_response_for_target(target)
 
         assert await bot._response_runner.drain_inbox_responses(cancel_after_seconds=0.01) is False
         assert not bot._response_runner.has_active_response_for_target(target)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_stage", ["acquire", "queued_cancel"])
+    async def test_interactive_prestart_failure_restores_claimed_selection(
+        self,
+        failure_stage: str,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Outer response ownership must restore a claim before preparation starts."""
+        interactive._cleanup()
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        question = interactive._InteractiveQuestion(
+            room_id=room.room_id,
+            thread_id="$thread-a",
+            options={"👍": "Selected"},
+            creator_agent=bot.agent_name,
+        )
+        selection = interactive.InteractiveSelection(
+            question_event_id="$question",
+            question_text="Choose one",
+            selection_key="👍",
+            selected_label="Selected",
+            selected_value="Selected",
+            thread_id="$thread-a",
+            claimed_question=question,
+        )
+        interactive._claimed_question_ids.add(selection.question_event_id)
+        target = bot._conversation_resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=selection.thread_id,
+            reply_to_event_id=selection.question_event_id,
+        )
+        response_entered = asyncio.Event()
+
+        async def response() -> None:
+            response_entered.set()
+
+        lifecycle_lock = unwrap_extracted_collaborator(
+            bot._response_runner,
+        )._lifecycle_coordinator._response_lifecycle_lock(target)
+        lock_owned_by_test = False
+        if failure_stage == "acquire":
+            acquisition_error = RuntimeError("simulated lifecycle acquisition failure")
+
+            async def fail_acquire() -> bool:
+                raise acquisition_error
+
+            acquire_patch = patch.object(lifecycle_lock, "acquire", new=fail_acquire)
+        else:
+            await lifecycle_lock.acquire()
+            lock_owned_by_test = True
+            acquire_patch = nullcontext()
+
+        try:
+            with acquire_patch:
+                await bot._turn_controller.start_interactive_selection(
+                    response,
+                    response_target=target,
+                    source_event_id="$reaction",
+                    user_id="@user:localhost",
+                    selected_value=selection.selected_value,
+                    on_failure=lambda: interactive.restore_selection(selection),
+                )
+                if failure_stage == "queued_cancel":
+                    assert await bot._response_runner.drain_inbox_responses(cancel_after_seconds=0.01) is False
+                else:
+                    await bot._response_runner.drain_inbox_responses()
+
+            assert not response_entered.is_set()
+            assert selection.question_event_id in interactive._active_questions
+            assert selection.question_event_id not in interactive._claimed_question_ids
+            if lock_owned_by_test:
+                lifecycle_lock.release()
+                lock_owned_by_test = False
+            assert not bot._response_runner.has_active_response_for_target(target)
+        finally:
+            if lock_owned_by_test:
+                lifecycle_lock.release()
+            await bot._response_runner.drain_inbox_responses()
+            interactive._cleanup()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_reserves_same_thread_lifecycle_before_preparation(

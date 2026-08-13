@@ -24,6 +24,7 @@ HOOK_SOURCE_KIND = "hook"
 HOOK_DISPATCH_SOURCE_KIND = "hook_dispatch"
 EXTERNAL_TRIGGER_SOURCE_KIND = "external_trigger"
 ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND = "active_thread_follow_up"
+INTERACTIVE_SELECTION_SOURCE_KIND = "interactive_selection"
 TRUSTED_INTERNAL_RELAY_SOURCE_KIND = "trusted_internal_relay"
 AUTO_RESUME_MESSAGE = (
     "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
@@ -52,6 +53,7 @@ _AUTOMATION_SOURCE_KINDS: frozenset[str] = frozenset(
 )
 _COALESCING_BYPASS_SOURCE_KINDS: frozenset[str] = _AUTOMATION_SOURCE_KINDS | frozenset(
     {
+        INTERACTIVE_SELECTION_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     },
 )
