@@ -598,6 +598,7 @@ visibility = ["mindroom.orchestrator"]
 path = "mindroom.approval_execution"
 depends_on = [
     "mindroom.agents",
+    "mindroom.ai_run_metadata",
     "mindroom.history.runtime",
     "mindroom.matrix.typing",
     "mindroom.response_turn",

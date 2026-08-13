@@ -13,6 +13,7 @@ from sqlalchemy import Table, select, tuple_
 
 from mindroom.agent_storage import create_state_storage
 from mindroom.history.types import HistoryScope
+from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -96,6 +97,56 @@ class ApprovalCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalMemoryTurn:
+    """The only original-history fields consumed by conversation memory."""
+
+    sender: str
+    body: str
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialize one memory turn into continuation context."""
+        return {"sender": self.sender, "body": self.body}
+
+    @classmethod
+    def from_dict(cls, value: dict[str, object]) -> ApprovalMemoryTurn:
+        """Restore one memory turn from continuation context."""
+        return cls(sender=cast("str", value["sender"]), body=cast("str", value["body"]))
+
+
+def _origin_to_dict(origin: TurnOrigin) -> dict[str, object]:
+    """Serialize exact hook origin without coupling the store to response objects."""
+    return {
+        "transport_sender_id": origin.transport_sender_id,
+        "requester_id": origin.requester_id,
+        "sender_entity_name": origin.sender_entity_name,
+        "requester_entity_name": origin.requester_entity_name,
+        "sender_kind": origin.sender_kind.value,
+        "requester_kind": origin.requester_kind.value,
+        "intent": origin.intent.value,
+        "source_kind": origin.source_kind,
+        "trust": origin.trust.value,
+    }
+
+
+def _origin_from_context(value: object) -> TurnOrigin | None:
+    """Restore exact hook origin, tolerating rows written before it was persisted."""
+    if not isinstance(value, dict):
+        return None
+    stored = cast("dict[str, object]", value)
+    return TurnOrigin(
+        transport_sender_id=cast("str", stored["transport_sender_id"]),
+        requester_id=cast("str", stored["requester_id"]),
+        sender_entity_name=cast("str | None", stored.get("sender_entity_name")),
+        requester_entity_name=cast("str | None", stored.get("requester_entity_name")),
+        sender_kind=SenderKind(cast("str", stored["sender_kind"])),
+        requester_kind=SenderKind(cast("str", stored["requester_kind"])),
+        intent=TurnIntent(cast("str", stored["intent"])),
+        source_kind=cast("str", stored["source_kind"]),
+        trust=TurnTrust(cast("str", stored["trust"])),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalContinuation:
     """The small MindRoom-owned reference to one persisted paused Agno run."""
 
@@ -126,7 +177,10 @@ class ApprovalContinuation:
     history_scope: HistoryScope | None = None
     delivery_principal_id: str | None = None
     runtime_generation: str | None = None
-    settlement_id: str | None = None
+    origin: TurnOrigin | None = None
+    memory_prompt: str | None = None
+    memory_thread_history: tuple[ApprovalMemoryTurn, ...] = ()
+    thread_summary_message_count_hint: int | None = None
     _stored_context: dict[str, object] | None = field(default=None, compare=False, repr=False)
 
     def _to_context(self) -> dict[str, object]:
@@ -156,7 +210,10 @@ class ApprovalContinuation:
             "history_scope": self.history_scope.to_metadata() if self.history_scope is not None else None,
             "delivery_principal_id": self.delivery_principal_id,
             "runtime_generation": self.runtime_generation,
-            "settlement_id": self.settlement_id,
+            "origin": _origin_to_dict(self.origin) if self.origin is not None else None,
+            "memory_prompt": self.memory_prompt,
+            "memory_thread_history": [turn.to_dict() for turn in self.memory_thread_history],
+            "thread_summary_message_count_hint": self.thread_summary_message_count_hint,
         }
 
     @classmethod
@@ -192,7 +249,16 @@ class ApprovalContinuation:
             history_scope=HistoryScope.from_metadata(context.get("history_scope")),
             delivery_principal_id=cast("str | None", context.get("delivery_principal_id")),
             runtime_generation=cast("str | None", context.get("runtime_generation")),
-            settlement_id=cast("str | None", context.get("settlement_id")),
+            origin=_origin_from_context(context.get("origin")),
+            memory_prompt=cast("str | None", context.get("memory_prompt")),
+            memory_thread_history=tuple(
+                ApprovalMemoryTurn.from_dict(turn)
+                for turn in cast("list[dict[str, object]]", context.get("memory_thread_history", []))
+            ),
+            thread_summary_message_count_hint=cast(
+                "int | None",
+                context.get("thread_summary_message_count_hint"),
+            ),
             _stored_context=context,
         )
 
@@ -411,7 +477,9 @@ class ApprovalContinuationStore:
             (
                 continuation
                 for continuation in self._records(("pending",))
-                if any(call.card_event_id == card_event_id for call in continuation.calls)
+                if any(
+                    call.card_event_id == card_event_id and not call.decision_recorded for call in continuation.calls
+                )
             ),
             None,
         )
@@ -458,76 +526,67 @@ class ApprovalContinuationStore:
             completed = replace(current, state="completed")
             return self._persist(current, completed, run_status="COMPLETED")
 
-    def begin_failure(
+    def request_failure(
         self,
         approval_id: str,
         reason: str,
         *,
         claimant_id: str | None,
-        settlement_id: str,
         runtime_generation: str,
     ) -> ApprovalContinuation | None:
-        """Acquire exclusive durable ownership of terminal failure settlement."""
+        """Fence one continuation for the transport's sole settlement driver."""
         with self._lock:
             current = self.get(approval_id)
             if current is None or current.state in {"completed", "failed"}:
                 return current
             if current.state == "claimed" and current.claimant_id != claimant_id:
                 return current
-            if (
-                current.state == "settling"
-                and current.settlement_id is not None
-                and current.runtime_generation == runtime_generation
-            ):
+            if current.state == "claimed":
+                return self._persist(
+                    current,
+                    replace(
+                        current,
+                        failure_reason=current.failure_reason or reason,
+                        runtime_generation=runtime_generation,
+                    ),
+                )
+            if current.state == "settling":
                 return current
             settling = replace(
                 current,
                 state="settling",
                 failure_reason=current.failure_reason or reason,
                 runtime_generation=runtime_generation,
-                settlement_id=settlement_id,
             )
             return self._persist(current, settling)
 
-    def release_failure(self, approval_id: str, settlement_id: str) -> ApprovalContinuation | None:
-        """Release an incomplete settlement so a later retry can own it."""
+    def fence_claimed_failure(
+        self,
+        approval_id: str,
+        claimant_id: str,
+    ) -> ApprovalContinuation | None:
+        """Move a failed claim to settlement after its FINAL outbox was reconciled."""
         with self._lock:
             current = self.get(approval_id)
-            if current is None or current.state != "settling" or current.settlement_id != settlement_id:
+            if current is None or current.state != "claimed" or current.claimant_id != claimant_id:
                 return current
-            return self._persist(current, replace(current, settlement_id=None))
+            return self._persist(current, replace(current, state="settling"))
 
     def finish_failure(
         self,
         approval_id: str,
-        settlement_id: str,
         reason: str,
     ) -> ApprovalContinuation | None:
-        """Make the exclusively owned failure settlement terminal."""
+        """Make the transport-owned failure settlement terminal."""
         with self._lock:
             current = self.get(approval_id)
-            if current is None or current.state != "settling" or current.settlement_id != settlement_id:
+            if current is None or current.state != "settling":
                 return current
             failed = replace(
                 current,
                 state="failed",
                 failure_reason=current.failure_reason or reason,
-                settlement_id=None,
             )
-            return self._persist(current, failed, run_status="ERROR")
-
-    def fail_claimed(
-        self,
-        approval_id: str,
-        claimant_id: str,
-        reason: str,
-    ) -> ApprovalContinuation | None:
-        """Fail a claimed run after its normal lifecycle already settled visibly."""
-        with self._lock:
-            current = self.get(approval_id)
-            if current is None or current.state != "claimed" or current.claimant_id != claimant_id:
-                return current
-            failed = replace(current, state="failed", failure_reason=reason)
             return self._persist(current, failed, run_status="ERROR")
 
     def advance_pause(

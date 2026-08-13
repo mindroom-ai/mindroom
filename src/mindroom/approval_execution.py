@@ -11,9 +11,10 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 
 from mindroom.agents import create_agent
+from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.history.runtime import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
-from mindroom.response_turn import PausedAttempt, paused_attempt_from_response
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, paused_attempt_from_response
 from mindroom.tool_system.events import format_tool_completed_event
 from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -49,7 +50,7 @@ class AgentApprovalExecution:
         decisions: dict[str, bool],
         denial_reasons: dict[str, str | None],
         tool_trace_collector: list[ToolTraceEntry],
-    ) -> str | PausedAttempt:
+    ) -> CompletedApprovalRun | PausedAttempt:
         """Apply exact decisions and continue the matching persisted Agno run."""
         config = self.config()
         if continuation.entity_name not in config.agents:
@@ -128,4 +129,18 @@ class AgentApprovalExecution:
             _, trace_entry = format_tool_completed_event(tool)
             if trace_entry is not None:
                 tool_trace_collector.append(trace_entry)
-        return str(response.content or "Tool approval continuation completed")
+        model_name = continuation.runtime_model_name or config.resolve_entity(continuation.entity_name).model_name
+        return CompletedApprovalRun(
+            response_text=str(response.content or "Tool approval continuation completed"),
+            metadata_content=build_ai_run_metadata_content(
+                config=config,
+                model_name=model_name,
+                run_id=response.run_id,
+                session_id=response.session_id or continuation.session_id,
+                status=response.status,
+                model=response.model,
+                model_provider=response.model_provider,
+                metrics=response.metrics,
+                tool_count=len(response.tools or ()),
+            ),
+        )

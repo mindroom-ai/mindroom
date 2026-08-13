@@ -75,6 +75,7 @@ _MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
 _MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
 _DETACHED_RETRY_INITIAL_SECONDS = 0.25
 _DETACHED_RETRY_MAX_SECONDS = 30.0
+_DETACHED_EXPIRY_SWEEP_SECONDS = 60.0
 _SANITIZER_TRUNCATION_MARKER = "... [truncated]"
 _MANAGER: _ApprovalManager | None = None
 logger = get_logger(__name__)
@@ -395,7 +396,9 @@ class _ApprovalManager:
         # Recovery that outlived the request that started it, held so it is
         # not garbage collected mid-flight.
         self._detached_card_writes: set[_DetachedCardWrite] = set()
-        self._detached_expiry_tasks: dict[str, asyncio.Task[None]] = {}
+        self._detached_expiry_sweep_task: asyncio.Task[None] | None = None
+        self._detached_expiry_wakeup = asyncio.Event()
+        self._post_bind_expiry_tasks: set[asyncio.Task[None]] = set()
         self._shutdown_reason: str | None = None
 
     async def create_detached_approval(
@@ -468,7 +471,6 @@ class _ApprovalManager:
                         room_id=room_id,
                         transaction_id=transaction_id,
                         claimed_card=claimed_card,
-                        approval_id=approval_id,
                         continuation_id=continuation_id,
                         tool_call_id=tool_call_id,
                         expires_at=expires_at,
@@ -501,7 +503,6 @@ class _ApprovalManager:
             transaction_id=transaction_id,
             claimed_card=claimed_card,
             sent_event=sent_event,
-            approval_id=approval_id,
             continuation_id=continuation_id,
             tool_call_id=tool_call_id,
             expires_at=expires_at,
@@ -509,7 +510,8 @@ class _ApprovalManager:
         try:
             await asyncio.shield(first_attempt.wait())
         except asyncio.CancelledError:
-            self._schedule_detached_expiry_retry(
+            self._schedule_post_bind_expiry(
+                first_attempt=first_attempt,
                 room_id=room_id,
                 card_event_id=sent_event.event_id,
             )
@@ -523,22 +525,15 @@ class _ApprovalManager:
         transaction_id: str,
         claimed_card: dict[str, Any],
         sent_event: SentApprovalEvent,
-        approval_id: str,
         continuation_id: str,
         tool_call_id: str,
         expires_at: datetime,
-        expire_after_bind: bool = False,
     ) -> asyncio.Event:
-        """Register binding and expiry owners for one delivered detached card."""
+        """Register durable binding and wake the shared expiry sweep."""
         sent_card = _sent_card_body(claimed_card, sent_event)
-        self._ensure_detached_expiry_owner(
-            room_id=room_id,
-            card_event_id=sent_event.event_id,
-            expires_at=expires_at,
-            task_name=f"approval-expiry-{approval_id}",
-        )
-        with self._live_lock:
-            shutting_down = self._shutdown_reason is not None
+        self._ensure_detached_expiry_sweep()
+        if expires_at <= _utcnow():
+            self._detached_expiry_wakeup.set()
         return self._schedule_detached_card_binding(
             room_id=room_id,
             transaction_id=transaction_id,
@@ -546,32 +541,18 @@ class _ApprovalManager:
             card=sent_card,
             continuation_id=continuation_id,
             tool_call_id=tool_call_id,
-            expire_after_bind=expire_after_bind or shutting_down,
         )
 
-    def _ensure_detached_expiry_owner(
-        self,
-        *,
-        room_id: str,
-        card_event_id: str,
-        expires_at: datetime,
-        task_name: str,
-    ) -> None:
-        """Give one unresolved durable card its sole in-process expiry owner."""
+    def _ensure_detached_expiry_sweep(self) -> None:
+        """Keep one process-wide task responsible for every card deadline."""
         with self._live_lock:
-            if self._shutdown_reason is not None or card_event_id in self._detached_expiry_tasks:
+            if self._shutdown_reason is not None:
                 return
-            expiry_task = asyncio.create_task(
-                self._expire_detached_after(
-                    room_id=room_id,
-                    card_event_id=card_event_id,
-                    expires_at=expires_at,
-                ),
-                name=task_name,
-            )
-            self._detached_expiry_tasks[card_event_id] = expiry_task
-            expiry_task.add_done_callback(
-                lambda task: self._finish_detached_expiry_task(card_event_id, task),
+            if self._detached_expiry_sweep_task is not None and not self._detached_expiry_sweep_task.done():
+                return
+            self._detached_expiry_sweep_task = asyncio.create_task(
+                self._run_detached_expiry_sweep(),
+                name="approval-expiry-sweep",
             )
 
     @staticmethod
@@ -594,7 +575,6 @@ class _ApprovalManager:
         room_id: str,
         transaction_id: str,
         claimed_card: dict[str, Any],
-        approval_id: str,
         continuation_id: str,
         tool_call_id: str,
         expires_at: datetime,
@@ -615,13 +595,13 @@ class _ApprovalManager:
             transaction_id=transaction_id,
             claimed_card=claimed_card,
             sent_event=sent_event,
-            approval_id=approval_id,
             continuation_id=continuation_id,
             tool_call_id=tool_call_id,
             expires_at=expires_at,
-            expire_after_bind=True,
         )
         await asyncio.shield(first_attempt.wait())
+        if not await self.expire_detached_card(room_id=room_id, card_event_id=sent_event.event_id):
+            self._detached_expiry_wakeup.set()
 
     def _schedule_detached_card_binding(
         self,
@@ -632,7 +612,6 @@ class _ApprovalManager:
         card: dict[str, Any],
         continuation_id: str,
         tool_call_id: str,
-        expire_after_bind: bool,
     ) -> asyncio.Event:
         """Give post-send journal binding an owner independent of its caller."""
         first_attempt = asyncio.Event()
@@ -656,13 +635,7 @@ class _ApprovalManager:
                     )
                     first_attempt.set()
                     if acknowledged and attached:
-                        if expire_after_bind:
-                            settled = await self.expire_detached_card(room_id=room_id, card_event_id=card_event_id)
-                            self._maintain_detached_expiry_owner(
-                                room_id=room_id,
-                                card_event_id=card_event_id,
-                                outcome=_ResolutionOutcome.DELIVERED if settled else _ResolutionOutcome.RECORDED,
-                            )
+                        self._detached_expiry_wakeup.set()
                         return
                     if self._current_shutdown_reason() is not None:
                         return
@@ -733,78 +706,106 @@ class _ApprovalManager:
             )
             return False
 
-    def _finish_detached_expiry_task(self, card_event_id: str, task: asyncio.Task[None]) -> None:
-        """Retire one expiry task and consume any failure it surfaced."""
+    def _schedule_post_bind_expiry(
+        self,
+        *,
+        first_attempt: asyncio.Event,
+        room_id: str,
+        card_event_id: str,
+    ) -> None:
+        """Terminalize a delivered card after its cancelled caller hands off binding."""
+
+        async def expire_after_binding() -> None:
+            await first_attempt.wait()
+            retry_seconds = _DETACHED_RETRY_INITIAL_SECONDS
+            while self._current_shutdown_reason() is None:
+                if await self.expire_detached_card(room_id=room_id, card_event_id=card_event_id):
+                    return
+                await asyncio.sleep(retry_seconds)
+                retry_seconds = min(retry_seconds * 2, _DETACHED_RETRY_MAX_SECONDS)
+
+        task = asyncio.create_task(
+            expire_after_binding(),
+            name=f"approval-post-bind-expiry-{card_event_id}",
+        )
         with self._live_lock:
-            if self._detached_expiry_tasks.get(card_event_id) is task:
-                self._detached_expiry_tasks.pop(card_event_id)
+            self._post_bind_expiry_tasks.add(task)
+        task.add_done_callback(self._finish_post_bind_expiry)
+
+    def _finish_post_bind_expiry(self, task: asyncio.Task[None]) -> None:
+        """Retire one finite cancellation handoff and observe its failure."""
+        with self._live_lock:
+            self._post_bind_expiry_tasks.discard(task)
         if task.cancelled():
             return
         error = task.exception()
         if error is not None:
             logger.error(
-                "detached_approval_expiry_failed",
-                card_event_id=card_event_id,
+                "detached_approval_post_bind_expiry_failed",
                 error=str(error),
                 exception_type=type(error).__name__,
             )
 
-    async def _expire_detached_after(self, *, room_id: str, card_event_id: str, expires_at: datetime) -> None:
-        await asyncio.sleep(max(0.0, (expires_at - _utcnow()).total_seconds()))
-        retry_seconds = _DETACHED_RETRY_INITIAL_SECONDS
+    async def _run_detached_expiry_sweep(self) -> None:
+        """Expire and redeliver every due continuation card from one periodic owner."""
         while self._current_shutdown_reason() is None:
+            with suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self._detached_expiry_wakeup.wait(),
+                    timeout=_DETACHED_EXPIRY_SWEEP_SECONDS,
+                )
+            self._detached_expiry_wakeup.clear()
             try:
-                settled = await self.expire_detached_card(room_id=room_id, card_event_id=card_event_id)
+                await self._sweep_detached_expiries()
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.warning(
-                    "detached_approval_expiry_retry",
-                    room_id=room_id,
-                    card_event_id=card_event_id,
-                    retry_seconds=retry_seconds,
+                    "detached_approval_expiry_sweep_failed",
                     exc_info=True,
                 )
-                settled = False
-            if settled:
-                return
-            await asyncio.sleep(retry_seconds)
-            retry_seconds = min(retry_seconds * 2, _DETACHED_RETRY_MAX_SECONDS)
 
-    def _schedule_detached_expiry_retry(self, *, room_id: str, card_event_id: str) -> None:
-        """Move visible terminal settlement onto an immediate retry owner."""
-        current_task = asyncio.current_task()
-        with self._live_lock:
-            if self._shutdown_reason is not None:
-                return
-            existing = self._detached_expiry_tasks.get(card_event_id)
-            if existing is current_task:
-                return
-            if existing is not None:
-                existing.cancel()
-            retry_task = asyncio.create_task(
-                self._expire_detached_after(
-                    room_id=room_id,
-                    card_event_id=card_event_id,
-                    expires_at=_utcnow(),
-                ),
-                name=f"approval-expiry-retry-{card_event_id}",
-            )
-            self._detached_expiry_tasks[card_event_id] = retry_task
-            retry_task.add_done_callback(lambda task: self._finish_detached_expiry_task(card_event_id, task))
-
-    def _maintain_detached_expiry_owner(
-        self,
-        *,
-        room_id: str,
-        card_event_id: str,
-        outcome: _ResolutionOutcome,
-    ) -> None:
-        if outcome is _ResolutionOutcome.DELIVERED:
-            with self._live_lock:
-                expiry_task = self._detached_expiry_tasks.pop(card_event_id, None)
-            if expiry_task is not None:
-                expiry_task.cancel()
-        elif outcome is _ResolutionOutcome.RECORDED:
-            self._schedule_detached_expiry_retry(room_id=room_id, card_event_id=card_event_id)
+    async def _sweep_detached_expiries(self) -> int:
+        """Settle due or already-recorded current-format cards once."""
+        if self._cards is None:
+            return 0
+        transport_sender = self._transport_sender_id()
+        if transport_sender is None:
+            return 0
+        settled = 0
+        room_ids = self._configured_approval_room_ids()
+        room_ids.update(await self._cards.pending_approval_room_ids())
+        for room_id in room_ids:
+            cursor: tuple[int, str] | None = None
+            while True:
+                page = await self._recoverable_room_cards(room_id, after=cursor)
+                if not page:
+                    break
+                cursor = (page[-1].created_at_ns, page[-1].transaction_id)
+                for stored in page:
+                    if stored.card_event_id is None:
+                        continue
+                    pending = self._trusted_pending_from_card_event(
+                        stored.card,
+                        room_id=room_id,
+                        transport_sender=transport_sender,
+                        expected_card_event_id=stored.card_event_id,
+                    )
+                    content = stored.card.get("content")
+                    if (
+                        pending is None
+                        or not isinstance(content, dict)
+                        or not isinstance(content.get("continuation_id"), str)
+                        or not isinstance(content.get("tool_call_id"), str)
+                        or (stored.resolution is None and self._pending_expiry(pending) > _utcnow())
+                    ):
+                        continue
+                    if await self.expire_detached_card(
+                        room_id=room_id,
+                        card_event_id=stored.card_event_id,
+                    ):
+                        settled += 1
+        return settled
 
     async def discard_pending_on_startup(self) -> ApprovalStartupSweep:
         """Settle every router-authored card this bot restarted holding.
@@ -952,12 +953,9 @@ class _ApprovalManager:
             and isinstance(content.get("continuation_id"), str)
             and isinstance(content.get("tool_call_id"), str)
         ):
-            self._ensure_detached_expiry_owner(
-                room_id=room_id,
-                card_event_id=pending.card_event_id,
-                expires_at=self._pending_expiry(pending),
-                task_name=f"approval-recovered-expiry-{pending.card_event_id}",
-            )
+            self._ensure_detached_expiry_sweep()
+            if self._pending_expiry(pending) <= _utcnow():
+                self._detached_expiry_wakeup.set()
             return None
         if isinstance(content, dict) and isinstance(content.get("continuation_id"), str):
             result = await self._discard_matrix_only_card(
@@ -1044,11 +1042,8 @@ class _ApprovalManager:
                     )
                 ),
             )
-            self._maintain_detached_expiry_owner(
-                room_id=room_id,
-                card_event_id=card_event_id,
-                outcome=outcome,
-            )
+            if outcome is _ResolutionOutcome.RECORDED:
+                self._detached_expiry_wakeup.set()
             return ApprovalActionResult(
                 consumed=True,
                 resolved=outcome is _ResolutionOutcome.DELIVERED,
@@ -1063,8 +1058,10 @@ class _ApprovalManager:
             resolved_by=sender_id,
         )
 
-    async def expire_detached_card(self, *, room_id: str, card_event_id: str) -> bool:  # noqa: PLR0911
+    async def expire_detached_card(self, *, room_id: str, card_event_id: str) -> bool:  # noqa: C901, PLR0911
         """Expire one continuation card, redelivering any recorded terminal decision."""
+        if self.knows_in_memory_approval_card(card_event_id):
+            return True
         if self._cards is None:
             return False
         stored = await self._cards.pending_approval_card(room_id=room_id, card_event_id=card_event_id)
@@ -1765,11 +1762,14 @@ class _ApprovalManager:
         )
 
     async def shutdown(self, *, reason: str) -> None:
-        """Stop expiry owners and drain approval-card publication tasks."""
+        """Stop the expiry sweep and drain finite approval-card handoffs."""
         with self._live_lock:
             self._shutdown_reason = reason
-            expiry_tasks = tuple(self._detached_expiry_tasks.values())
-            self._detached_expiry_tasks.clear()
+            expiry_tasks = tuple(self._post_bind_expiry_tasks)
+            self._post_bind_expiry_tasks.clear()
+            if self._detached_expiry_sweep_task is not None:
+                expiry_tasks = (*expiry_tasks, self._detached_expiry_sweep_task)
+                self._detached_expiry_sweep_task = None
         for task in expiry_tasks:
             task.cancel()
         if expiry_tasks:
@@ -1909,8 +1909,8 @@ class _ApprovalManager:
             has_active_sends = bool(self._active_approval_sends)
             has_cleanup_tasks = bool(self._post_cancel_cleanup_tasks)
             has_detached_writes = bool(self._detached_card_writes)
-            has_detached_expiries = bool(self._detached_expiry_tasks)
-        return has_resolution or has_active_sends or has_cleanup_tasks or has_detached_writes or has_detached_expiries
+            has_post_bind_expiries = bool(self._post_bind_expiry_tasks)
+        return has_resolution or has_active_sends or has_cleanup_tasks or has_detached_writes or has_post_bind_expiries
 
     def _send_is_in_flight(self, transaction_id: str) -> bool:
         """Return whether this row is still owned by a send that has not come back.

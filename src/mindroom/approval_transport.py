@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalView
+    from mindroom.final_delivery import FinalDeliveryOutcome
 
 logger = get_logger(__name__)
 
@@ -76,9 +77,16 @@ class _ApprovalTransportBot(Protocol):
         """Return the latest event id for one Matrix thread when known."""
         ...
 
-    async def resume_approval_continuation(self, continuation: ApprovalContinuation) -> None: ...
+    async def resume_approval_continuation(
+        self,
+        continuation: ApprovalContinuation,
+    ) -> FinalDeliveryOutcome | None: ...
 
-    async def fail_approval_continuation(self, continuation: ApprovalContinuation, reason: str) -> None: ...
+    async def settle_approval_continuation_failure(
+        self,
+        continuation: ApprovalContinuation,
+        reason: str,
+    ) -> None: ...
 
 
 def _approval_relation_agent_name(content: dict[str, Any], *, fallback: str) -> str:
@@ -167,6 +175,11 @@ class ApprovalMatrixTransport:
         """Return the identifier for continuation work owned by this runtime."""
         return self._runtime_generation
 
+    @property
+    def continuations(self) -> ApprovalContinuationStore:
+        """Return the single continuation-store handle shared by managed runners."""
+        return self._continuations
+
     def capture_runtime_loop(self) -> None:
         """Remember the runtime loop that owns Matrix client I/O."""
         runtime_loop = asyncio.get_running_loop()
@@ -247,6 +260,26 @@ class ApprovalMatrixTransport:
         if continuation is not None and continuation.state == "ready":
             self._schedule_continuation(continuation)
 
+    def schedule_continuation(self, continuation: ApprovalContinuation) -> None:
+        """Wake the sole dispatcher for a newly ready continuation."""
+        self._schedule_continuation(continuation)
+
+    async def request_continuation_failure(
+        self,
+        continuation: ApprovalContinuation,
+        reason: str,
+    ) -> None:
+        """Persist failure intent and wake the sole terminal-settlement driver."""
+        requested = await asyncio.to_thread(
+            self._continuations.request_failure,
+            continuation.approval_id,
+            reason,
+            claimant_id=continuation.claimant_id,
+            runtime_generation=self.runtime_generation,
+        )
+        if requested is not None and requested.state in {"claimed", "settling"}:
+            self._schedule_continuation(requested)
+
     def _schedule_continuation(self, continuation: ApprovalContinuation) -> None:
         if any(
             not task.done() and task.get_name() == f"approval-continuation-{continuation.approval_id}"
@@ -275,63 +308,78 @@ class ApprovalMatrixTransport:
 
     async def _dispatch_continuation(self, approval_id: str) -> None:
         retry_seconds = _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS
-        waiting_logged = False
         while True:
             continuation = await self._read_continuation_with_retry(approval_id)
-            if continuation is None or continuation.state != "ready":
+            if continuation is None or continuation.state in {"completed", "failed"}:
                 return
-            bot = self.bot_provider(continuation.entity_name)
-            if bot is not None and bot.running:
-                if await self._resume_continuation_once(bot, continuation):
-                    return
-                if not waiting_logged:
-                    logger.warning(
-                        "approval_continuation_resume_deferred",
-                        approval_id=approval_id,
-                        entity_name=continuation.entity_name,
-                        retry_seconds=retry_seconds,
-                    )
-                    waiting_logged = True
-                await asyncio.sleep(retry_seconds)
-                retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
-                continue
-            permanently_unavailable = (
-                self.entity_permanently_unavailable is not None
-                and self.entity_permanently_unavailable(continuation.entity_name)
-            )
-            if not permanently_unavailable and (
-                self.entity_configured is None or self.entity_configured(continuation.entity_name)
-            ):
-                if not waiting_logged:
-                    logger.warning(
-                        "approval_continuation_waiting_for_owner",
-                        approval_id=approval_id,
-                        entity_name=continuation.entity_name,
-                        retry_seconds=retry_seconds,
-                    )
-                    waiting_logged = True
-                await asyncio.sleep(retry_seconds)
-                retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
-                continue
-            reason = (
-                f"Requesting agent '{continuation.entity_name}' could not start and is unavailable."
-                if permanently_unavailable
-                else f"Requesting agent '{continuation.entity_name}' is no longer available."
-            )
-            fallback = self.bot_provider(ROUTER_AGENT_NAME)
-            if fallback is not None and fallback.running:
-                await self._fail_continuation_until_terminal(fallback, continuation, reason)
+            if continuation.state in {"claimed", "settling"}:
+                reason = continuation.failure_reason or (
+                    "Tool approval continuation was interrupted after it was claimed; it was denied safely."
+                )
+                await self._fail_continuation_until_terminal(continuation, reason)
                 return
-            if not waiting_logged:
+            if continuation.state != "ready":
+                return
+            if await self._dispatch_ready_once(continuation, retry_seconds=retry_seconds):
+                return
+            await asyncio.sleep(retry_seconds)
+            retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
+
+    async def _dispatch_ready_once(
+        self,
+        continuation: ApprovalContinuation,
+        *,
+        retry_seconds: float,
+    ) -> bool:
+        """Try one ready row against the currently available runtime entities."""
+        bot = self.bot_provider(continuation.entity_name)
+        if bot is not None and bot.running:
+            finished = await self._resume_continuation_once(bot, continuation)
+            if not finished:
                 logger.warning(
-                    "approval_continuation_waiting_for_router",
-                    approval_id=approval_id,
+                    "approval_continuation_resume_deferred",
+                    approval_id=continuation.approval_id,
                     entity_name=continuation.entity_name,
                     retry_seconds=retry_seconds,
                 )
-                waiting_logged = True
-            await asyncio.sleep(retry_seconds)
-            retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
+            return finished
+        permanently_unavailable = (
+            self.entity_permanently_unavailable is not None
+            and self.entity_permanently_unavailable(continuation.entity_name)
+        )
+        configured = self.entity_configured is None or self.entity_configured(continuation.entity_name)
+        if configured and not permanently_unavailable:
+            logger.warning(
+                "approval_continuation_waiting_for_owner",
+                approval_id=continuation.approval_id,
+                entity_name=continuation.entity_name,
+                retry_seconds=retry_seconds,
+            )
+            return False
+        reason = (
+            f"Requesting agent '{continuation.entity_name}' could not start and is unavailable."
+            if permanently_unavailable
+            else f"Requesting agent '{continuation.entity_name}' is no longer available."
+        )
+        fallback = self.bot_provider(ROUTER_AGENT_NAME)
+        if fallback is None or not fallback.running:
+            logger.warning(
+                "approval_continuation_waiting_for_router",
+                approval_id=continuation.approval_id,
+                entity_name=continuation.entity_name,
+                retry_seconds=retry_seconds,
+            )
+            return False
+        requested = await asyncio.to_thread(
+            self._continuations.request_failure,
+            continuation.approval_id,
+            reason,
+            claimant_id=continuation.claimant_id,
+            runtime_generation=self.runtime_generation,
+        )
+        if requested is not None:
+            await self._fail_continuation_until_terminal(requested, reason)
+        return True
 
     async def _resume_continuation_once(
         self,
@@ -340,13 +388,34 @@ class ApprovalMatrixTransport:
     ) -> bool:
         """Attempt one resume, returning whether durable state says dispatch is finished."""
         error: Exception | None = None
+        outcome: FinalDeliveryOutcome | None = None
+        resume_task = asyncio.create_task(
+            bot.resume_approval_continuation(continuation),
+            name=f"approval-resume-attempt-{continuation.approval_id}",
+        )
         try:
-            await bot.resume_approval_continuation(continuation)
+            outcome = await resume_task
         except asyncio.CancelledError:
-            raise
+            dispatch_task = asyncio.current_task()
+            if dispatch_task is not None and dispatch_task.cancelling():
+                resume_task.cancel()
+                await asyncio.gather(resume_task, return_exceptions=True)
+                raise
+            error = RuntimeError("Approval continuation attempt was interrupted during entity reload")
         except Exception as caught:
             error = caught
         refreshed = await self._read_continuation_with_retry(continuation.approval_id)
+        return await self._settle_resume_result(continuation, refreshed, outcome=outcome, error=error)
+
+    async def _settle_resume_result(
+        self,
+        continuation: ApprovalContinuation,
+        refreshed: ApprovalContinuation | None,
+        *,
+        outcome: FinalDeliveryOutcome | None,
+        error: Exception | None,
+    ) -> bool:
+        """Commit one runner outcome or hand its failure to terminal settlement."""
         if refreshed is not None and refreshed.state == "ready":
             if error is not None:
                 logger.warning(
@@ -357,18 +426,78 @@ class ApprovalMatrixTransport:
                     exc_info=(type(error), error, error.__traceback__),
                 )
             return False
-        if refreshed is not None and refreshed.state in {"claimed", "settling"}:
-            reason = refreshed.failure_reason
-            if reason is None and error is not None:
-                reason = f"Tool approval continuation failed safely after it was claimed: {error}"
-            if reason is None:
-                reason = "Tool approval continuation ended without terminal settlement; it was denied safely."
-            return await self._fail_continuation_until_terminal(
-                bot,
-                refreshed,
-                reason,
+        if refreshed is not None and refreshed.state == "pending":
+            return True
+        if refreshed is None or refreshed.state not in {"claimed", "settling"}:
+            return True
+        return await self._settle_claimed_resume(refreshed, outcome=outcome, error=error)
+
+    async def _settle_claimed_resume(
+        self,
+        refreshed: ApprovalContinuation,
+        *,
+        outcome: FinalDeliveryOutcome | None,
+        error: Exception | None,
+    ) -> bool:
+        """Resolve one claimed runner return under the dispatcher claim."""
+        if (
+            refreshed.state == "claimed"
+            and outcome is not None
+            and outcome.terminal_status == "completed"
+            and refreshed.claimant_id is not None
+        ):
+            completed = await asyncio.to_thread(
+                self._continuations.complete,
+                refreshed.approval_id,
+                refreshed.claimant_id,
             )
-        return True
+            return completed is not None and completed.state == "completed"
+        reason = self._resume_failure_reason(refreshed, outcome=outcome, error=error)
+        visibly_settled = (
+            refreshed.state == "claimed"
+            and outcome is not None
+            and outcome.terminal_status in {"cancelled", "error"}
+            and (outcome.event_id is None or outcome.delivery_kind is not None)
+        )
+        requested = await asyncio.to_thread(
+            self._continuations.request_failure,
+            refreshed.approval_id,
+            reason,
+            claimant_id=refreshed.claimant_id,
+            runtime_generation=self.runtime_generation,
+        )
+        if requested is None:
+            return True
+        if visibly_settled and requested.claimant_id is not None:
+            fenced = await asyncio.to_thread(
+                self._continuations.fence_claimed_failure,
+                requested.approval_id,
+                requested.claimant_id,
+            )
+            if fenced is not None and fenced.state == "settling":
+                failed = await asyncio.to_thread(
+                    self._continuations.finish_failure,
+                    fenced.approval_id,
+                    reason,
+                )
+                return failed is not None and failed.state == "failed"
+        return await self._fail_continuation_until_terminal(requested, reason)
+
+    @staticmethod
+    def _resume_failure_reason(
+        continuation: ApprovalContinuation,
+        *,
+        outcome: FinalDeliveryOutcome | None,
+        error: Exception | None,
+    ) -> str:
+        """Choose the most specific durable reason for an unfinished claim."""
+        if continuation.failure_reason is not None:
+            return continuation.failure_reason
+        if error is not None:
+            return f"Tool approval continuation failed safely after it was claimed: {error}"
+        if outcome is not None and outcome.failure_reason is not None:
+            return outcome.failure_reason
+        return "Tool approval continuation ended without terminal settlement; it was denied safely."
 
     async def _read_continuation_with_retry(self, approval_id: str) -> ApprovalContinuation | None:
         """Read one dispatcher row without retiring its only in-process owner on outage."""
@@ -391,32 +520,48 @@ class ApprovalMatrixTransport:
 
     async def _fail_continuation_until_terminal(
         self,
-        bot: _ApprovalTransportBot,
         continuation: ApprovalContinuation,
         reason: str,
     ) -> bool:
-        """Retain failure-settlement ownership until durable state is terminal."""
+        """Retain sole settlement ownership while resolving the live bot each pass."""
         retry_seconds = _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS
         current = continuation
         while True:
-            try:
-                await bot.fail_approval_continuation(current, reason)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                logger.warning(
-                    "approval_continuation_failure_retry",
-                    approval_id=current.approval_id,
-                    retry_seconds=retry_seconds,
-                    error=str(error),
-                    exc_info=(type(error), error, error.__traceback__),
-                )
+            bot = self._failure_settlement_bot(current)
+            if bot is not None:
+                try:
+                    await bot.settle_approval_continuation_failure(current, reason)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.warning(
+                        "approval_continuation_failure_retry",
+                        approval_id=current.approval_id,
+                        retry_seconds=retry_seconds,
+                        error=str(error),
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
             refreshed = await self._read_continuation_with_retry(current.approval_id)
             if refreshed is None or refreshed.state in {"completed", "failed"}:
                 return True
             current = refreshed
             await asyncio.sleep(retry_seconds)
             retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
+
+    def _failure_settlement_bot(self, continuation: ApprovalContinuation) -> _ApprovalTransportBot | None:
+        """Resolve the live principal allowed to settle this continuation now."""
+        owner = self.bot_provider(continuation.entity_name)
+        if owner is not None and owner.running:
+            return owner
+        permanently_unavailable = (
+            self.entity_permanently_unavailable is not None
+            and self.entity_permanently_unavailable(continuation.entity_name)
+        )
+        configured = self.entity_configured is None or self.entity_configured(continuation.entity_name)
+        if configured and not permanently_unavailable:
+            return None
+        fallback = self.bot_provider(ROUTER_AGENT_NAME)
+        return fallback if fallback is not None and fallback.running else None
 
     async def _recover_continuations(self) -> bool:
         complete = True
@@ -433,11 +578,6 @@ class ApprovalMatrixTransport:
             elif continuation.state == "ready":
                 self._schedule_continuation(continuation)
             else:
-                if any(
-                    not task.done() and task.get_name() == f"approval-continuation-{continuation.approval_id}"
-                    for task in self._continuation_tasks
-                ):
-                    continue
                 settled = await self._fail_recovered_continuation(
                     continuation,
                     continuation.failure_reason
@@ -466,9 +606,7 @@ class ApprovalMatrixTransport:
 
     def _needs_startup_recovery(self, continuation: ApprovalContinuation) -> bool:
         """Return whether startup may act on this row without racing live work."""
-        if continuation.runtime_generation != self.runtime_generation:
-            return True
-        return continuation.state == "settling" and continuation.settlement_id is None
+        return continuation.runtime_generation != self.runtime_generation
 
     async def _attach_recovered_cards(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
         """Repair the crash window between durable card delivery and continuation attachment."""
@@ -531,15 +669,10 @@ class ApprovalMatrixTransport:
         )
 
     async def _fail_recovered_continuation(self, continuation: ApprovalContinuation, reason: str) -> bool:
-        """Terminalize one continuation and edit its waiting response when possible."""
-        entity_bot = self.bot_provider(continuation.entity_name)
-        router_bot = self.bot_provider(ROUTER_AGENT_NAME)
-        bot = entity_bot if entity_bot is not None and entity_bot.running else router_bot
-        if bot is None or not bot.running:
-            return False
-        await bot.fail_approval_continuation(continuation, reason)
+        """Hand one recovered failure to the normal serialized dispatcher."""
+        await self.request_continuation_failure(continuation, reason)
         refreshed = await asyncio.to_thread(self._continuations.get, continuation.approval_id)
-        return refreshed is not None and refreshed.state == "failed"
+        return refreshed is not None and refreshed.state in {"claimed", "settling", "completed", "failed"}
 
     async def _run_on_runtime_loop(
         self,
@@ -912,23 +1045,22 @@ class ApprovalMatrixTransport:
                     )
                     self._schedule_startup_cleanup_retry()
                     return
-            if not await self._discard_orphaned_approval_cards_on_startup():
-                self._schedule_startup_cleanup_retry()
-                return
+            cards_settled = await self._discard_orphaned_approval_cards_on_startup()
+            continuations_recovered = self._continuations_recovered
             if not self._continuations_recovered:
                 try:
-                    recovered = await self._recover_continuations()
+                    continuations_recovered = await self._recover_continuations()
                 except Exception:
                     logger.warning(
                         "tool_approval_continuation_recovery_failed",
                         attempt=self._startup_cleanup_attempts,
                         exc_info=True,
                     )
-                    recovered = False
-                if not recovered:
-                    self._schedule_startup_cleanup_retry()
-                    return
-                self._continuations_recovered = True
+                    continuations_recovered = False
+                self._continuations_recovered = continuations_recovered
+            if not continuations_recovered or not cards_settled:
+                self._schedule_startup_cleanup_retry()
+                return
             self._startup_cleanup_done = True
             self._retire_startup_cleanup_retry()
 

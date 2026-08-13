@@ -168,9 +168,10 @@ if TYPE_CHECKING:
     import structlog
     from agno.agent import Agent
 
-    from mindroom.approval_continuation import ApprovalContinuation
+    from mindroom.approval_continuation import ApprovalContinuation, ApprovalContinuationStore
     from mindroom.coalescing_batch import PreparedTurn
     from mindroom.config.main import Config
+    from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
@@ -261,6 +262,7 @@ def create_bot_for_entity(
     storage_path: Path,
     config_path: Path | None = None,
     journal_store: EventJournalStore | None = None,
+    approval_continuations: ApprovalContinuationStore | None = None,
 ) -> AgentBot | TeamBot | None:
     """Create appropriate bot instance for an entity (agent, team, or router).
 
@@ -272,6 +274,7 @@ def create_bot_for_entity(
         storage_path: Path for storing agent data
         config_path: Path to the YAML config file used by config-aware tools
         journal_store: Shared event-journal store to borrow, or None to open one
+        approval_continuations: Shared continuation store to borrow, or None for a standalone bot
 
     Returns:
         Bot instance or None if entity not found in config
@@ -290,6 +293,7 @@ def create_bot_for_entity(
             config_path=config_path,
             enable_streaming=enable_streaming,
             journal_store=journal_store,
+            approval_continuations=approval_continuations,
         )
 
     if entity_name in config.teams:
@@ -306,6 +310,7 @@ def create_bot_for_entity(
             team_model=team_config.model,
             enable_streaming=enable_streaming,
             journal_store=journal_store,
+            approval_continuations=approval_continuations,
         )
 
     if entity_name in config.agents:
@@ -320,6 +325,7 @@ def create_bot_for_entity(
             config_path=config_path,
             enable_streaming=enable_streaming,
             journal_store=journal_store,
+            approval_continuations=approval_continuations,
         )
 
     msg = f"Entity '{entity_name}' not found in configuration."
@@ -389,6 +395,7 @@ class AgentBot:
         config_path: Path | None = None,
         enable_streaming: bool = True,
         journal_store: EventJournalStore | None = None,
+        approval_continuations: ApprovalContinuationStore | None = None,
     ) -> None:
         """Initialize the bot with canonical runtime-backed config state.
 
@@ -400,6 +407,7 @@ class AgentBot:
         borrowed store is not closed here, because its owner outlives this bot.
         """
         self._borrowed_journal_store = journal_store
+        self._borrowed_approval_continuations = approval_continuations
         # Set when this bot opens its own, which only happens when nothing was
         # handed to it. What this bot opened is what this bot closes.
         self._own_journal: OpenEventJournal | None = None
@@ -712,6 +720,7 @@ class AgentBot:
                 request_preparer=self._request_payload_preparer,
                 journal_principal_id=self._journal_principal_id,
                 outbox_for_principal=self._journal_store.principal,
+                approval_continuations=self._borrowed_approval_continuations,
             ),
         )
         self._edit_regenerator = EditRegenerator(
@@ -1005,13 +1014,20 @@ class AgentBot:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
 
-    async def resume_approval_continuation(self, continuation: ApprovalContinuation) -> None:
+    async def resume_approval_continuation(
+        self,
+        continuation: ApprovalContinuation,
+    ) -> FinalDeliveryOutcome | None:
         """Resume one durable paused run through this bot's response serializer."""
-        await self._response_runner.resume_approval_continuation(continuation)
+        return await self._response_runner.resume_approval_continuation(continuation)
 
-    async def fail_approval_continuation(self, continuation: ApprovalContinuation, reason: str) -> None:
-        """Make one continuation visibly terminal when its owner disappeared."""
-        await self._response_runner.fail_approval_continuation(continuation, reason)
+    async def settle_approval_continuation_failure(
+        self,
+        continuation: ApprovalContinuation,
+        reason: str,
+    ) -> None:
+        """Attempt one transport-owned visible failure settlement."""
+        await self._response_runner.settle_approval_continuation_failure(continuation, reason)
 
     async def _emit_reaction_received_hooks(
         self,
@@ -2652,6 +2668,7 @@ class TeamBot(AgentBot):
         team_model: str | None = None,
         enable_streaming: bool = True,
         journal_store: EventJournalStore | None = None,
+        approval_continuations: ApprovalContinuationStore | None = None,
     ) -> None:
         """Initialize the team bot and its shared agent runtime."""
         super().__init__(
@@ -2663,6 +2680,7 @@ class TeamBot(AgentBot):
             config_path=config_path,
             enable_streaming=enable_streaming,
             journal_store=journal_store,
+            approval_continuations=approval_continuations,
         )
         self.team_mode = team_mode
         self.team_model = team_model

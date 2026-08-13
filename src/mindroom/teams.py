@@ -82,6 +82,7 @@ from mindroom.response_turn import (
     AttemptResolved,
     BlockingAttemptResolution,
     BlockingTurnAdapter,
+    CompletedApprovalRun,
     CompletedAttempt,
     DynamicContinuationRunState,
     ExcludedAttempt,
@@ -1843,7 +1844,7 @@ async def continue_paused_team_run(  # noqa: C901
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     history_scope: HistoryScope | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
-) -> str | PausedAttempt:
+) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run."""
     members = await asyncio.to_thread(
         materialize_exact_team_members,
@@ -1932,7 +1933,20 @@ async def continue_paused_team_run(  # noqa: C901
             raise RuntimeError(str(continued.content or "Team continuation did not complete"))
         if tool_trace_collector is not None:
             tool_trace_collector.extend(_extract_completed_team_tool_trace(continued))
-        return _format_terminal_team_response(continued, team_display_names=members.display_names)
+        return CompletedApprovalRun(
+            response_text=_format_terminal_team_response(continued, team_display_names=members.display_names),
+            metadata_content=build_ai_run_metadata_content(
+                config=config,
+                model_name=model_name,
+                run_id=continued.run_id,
+                session_id=continued.session_id or session_id,
+                status=continued.status,
+                model=continued.model,
+                model_provider=continued.model_provider,
+                metrics=_aggregate_team_usage_metrics(continued.metrics, continued.member_responses),
+                tool_count=len(_collect_team_tool_executions(continued)),
+            ),
+        )
     finally:
         close_team_runtime_state_dbs(
             agents=members.agents,

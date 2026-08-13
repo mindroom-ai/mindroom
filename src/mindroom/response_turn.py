@@ -62,6 +62,7 @@ __all__ = [
     "AttemptResolved",
     "BlockingAttemptResolution",
     "BlockingTurnAdapter",
+    "CompletedApprovalRun",
     "CompletedAttempt",
     "DynamicContinuationRunState",
     "EmptyRunDiscard",
@@ -82,6 +83,14 @@ __all__ = [
     "run_blocking_response_turn",
     "stream_response_turn",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedApprovalRun:
+    """One completed persisted run plus its normal Matrix response metadata."""
+
+    response_text: str
+    metadata_content: dict[str, Any]
 
 
 def _normalized_string_list(values: object) -> list[str]:

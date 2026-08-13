@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal
-from uuid import uuid4
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.approval_continuation import (
     ApprovalCall,
@@ -29,7 +28,7 @@ from mindroom.tool_approval import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Awaitable, Callable
 
     import structlog
     from agno.models.response import ToolExecution
@@ -85,6 +84,8 @@ class ApprovalResponseCoordinator:
 
     config: Callable[[], Config]
     runtime_paths: RuntimePaths
+    _store: ApprovalContinuationStore
+    owns_store: bool
     agent_name: str
     delivery_gateway: DeliveryGateway
     logger: structlog.stdlib.BoundLogger
@@ -92,11 +93,8 @@ class ApprovalResponseCoordinator:
     journal_principal_id: str
     outbox_for_principal: Callable[[str], OutboxView]
     legacy_principal_for_entity: Callable[[str], str | None]
-    _store: ApprovalContinuationStore = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        """Open the response coordinator's continuation-store handle."""
-        self._store = ApprovalContinuationStore(self.runtime_paths.storage_root)
+    failure_requester: Callable[[ApprovalContinuation, str], Awaitable[None]]
+    continuation_scheduler: Callable[[ApprovalContinuation], None]
 
     async def _write[WriteResult](
         self,
@@ -120,15 +118,15 @@ class ApprovalResponseCoordinator:
             if write.done() and not write.cancelled() and (error := write.exception()) is not None:
                 self.logger.warning(
                     "approval_continuation_cancelled_write_failed",
-                    operation_type=type(operation).__qualname__,
                     error=str(error),
                     exc_info=(type(error), error, error.__traceback__),
                 )
             raise
 
     async def close(self) -> None:
-        """Close the response coordinator's continuation-store handle."""
-        await asyncio.to_thread(self._store.close)
+        """Close only a standalone store; orchestrated runners borrow the transport's."""
+        if self.owns_store:
+            await asyncio.to_thread(self._store.close)
 
     async def create(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
         """Persist a newly publishing continuation."""
@@ -173,45 +171,59 @@ class ApprovalResponseCoordinator:
         """Complete one claimed continuation exactly once."""
         return await self._write(self._store.complete, approval_id, claimant_id)
 
-    async def fail_claimed(
-        self,
-        approval_id: str,
-        claimant_id: str,
-        reason: str,
-    ) -> ApprovalContinuation | None:
-        """Fail a claimed continuation whose visible lifecycle already settled."""
-        return await self._write(self._store.fail_claimed, approval_id, claimant_id, reason)
-
-    async def _begin_failure(
+    async def _request_failure(
         self,
         approval_id: str,
         reason: str,
         *,
         claimant_id: str | None,
-        settlement_id: str,
     ) -> ApprovalContinuation | None:
-        """Fence continuation execution before visible terminal settlement."""
+        """Persist failure intent for the transport-owned settlement driver."""
         return await self._write(
-            self._store.begin_failure,
+            self._store.request_failure,
             approval_id,
             reason,
             claimant_id=claimant_id,
-            settlement_id=settlement_id,
             runtime_generation=self.runtime_generation(),
         )
 
-    async def _release_failure(self, approval_id: str, settlement_id: str) -> ApprovalContinuation | None:
-        """Release an incomplete settlement for a later retry."""
-        return await self._write(self._store.release_failure, approval_id, settlement_id)
+    async def _fence_claimed_failure(
+        self,
+        approval_id: str,
+        claimant_id: str,
+    ) -> ApprovalContinuation | None:
+        """Fence a claim after its FINAL outbox has been proven absent."""
+        return await self._write(self._store.fence_claimed_failure, approval_id, claimant_id)
 
     async def _finish_failure(
         self,
         approval_id: str,
-        settlement_id: str,
         reason: str,
     ) -> ApprovalContinuation | None:
-        """Commit terminal failure for the exclusive settlement owner."""
-        return await self._write(self._store.finish_failure, approval_id, settlement_id, reason)
+        """Commit terminal failure after the transport delivered its settlement."""
+        return await self._write(self._store.finish_failure, approval_id, reason)
+
+    async def request_failure(self, continuation: ApprovalContinuation, reason: str) -> None:
+        """Hand failure intent to the sole transport-owned settlement driver."""
+
+        async def persist_and_schedule() -> None:
+            await self.failure_requester(continuation, reason)
+
+        request = asyncio.create_task(persist_and_schedule())
+        cancelled = False
+        while not request.done():
+            try:
+                await asyncio.shield(request)
+            except asyncio.CancelledError:
+                cancelled = True
+                continue
+        await request
+        if cancelled:
+            raise asyncio.CancelledError
+
+    def schedule(self, continuation: ApprovalContinuation) -> None:
+        """Wake the sole transport dispatcher for a newly ready continuation."""
+        self.continuation_scheduler(continuation)
 
     async def plan_pause(
         self,
@@ -359,94 +371,123 @@ class ApprovalResponseCoordinator:
             target=target,
             failure_reason="Chained approval card creation failed",
         )
+        if advanced.state == "ready":
+            self.schedule(advanced)
         return advanced, plan.waiting_text
 
     async def fail_publication(self, approval_id: str, *, reason: str) -> None:
-        """Fail a partially published approval set without losing recovery ownership."""
+        """Hand a partially published approval set to transport settlement."""
         continuation = await self.get(approval_id)
         if continuation is not None:
-            await self.fail_continuation(continuation, reason)
+            await self.request_failure(continuation, reason)
 
-    async def fail_continuation(self, continuation: ApprovalContinuation, reason: str) -> None:
-        """Make an unrecoverable continuation visibly terminal."""
+    async def settle_failure(self, continuation: ApprovalContinuation, reason: str) -> bool:
+        """Attempt transport-owned terminal settlement once."""
         current = await self.get(continuation.approval_id)
         if current is None or current.state in {"completed", "failed"}:
-            return
-        if await self._reconcile_claimed_delivery(current):
-            return
-        settlement_id = uuid4().hex
-        current = await self._begin_failure(
-            current.approval_id,
-            reason,
-            claimant_id=continuation.claimant_id,
-            settlement_id=settlement_id,
+            return True
+        preparation, current = await self._prepare_failure_settlement(current, reason)
+        if preparation != "settle":
+            return preparation == "done"
+        assert current is not None
+        current = await self._adopt_waiting_delivery(current)
+        reason = current.failure_reason or reason
+        if not await self._expire_failure_cards(current):
+            return False
+        delivered, current = await self._deliver_failure(current, reason)
+        if delivered:
+            failed = await self._finish_failure(current.approval_id, reason)
+            return failed is not None and failed.state == "failed"
+        self.logger.warning(
+            "approval_continuation_failure_not_delivered",
+            approval_id=current.approval_id,
+            response_event_id=current.response_event_id,
         )
-        if current is None or current.state != "settling" or current.settlement_id != settlement_id:
-            return
-        settlement_finished = False
-        try:
-            current = await self._adopt_waiting_delivery(current)
-            reason = current.failure_reason or reason
-            terminalized = await asyncio.gather(
-                *(
-                    expire_suspended_tool_approval(current.room_id, call.card_event_id)
-                    for call in current.calls
-                    if call.card_event_id is not None and not call.decision_recorded
+        return False
+
+    async def _prepare_failure_settlement(
+        self,
+        current: ApprovalContinuation,
+        reason: str,
+    ) -> tuple[Literal["done", "pending", "settle"], ApprovalContinuation | None]:
+        """Reconcile success debt and enter the non-executable settling state."""
+        claimed_delivery = await self._reconcile_claimed_delivery(current)
+        if claimed_delivery == "completed":
+            return "done", current
+        if claimed_delivery == "pending":
+            return "pending", current
+        updated: ApprovalContinuation | None = current
+        if current.state == "claimed":
+            if current.claimant_id is None:
+                return "pending", current
+            updated = await self._fence_claimed_failure(current.approval_id, current.claimant_id)
+        elif current.state != "settling":
+            updated = await self._request_failure(
+                current.approval_id,
+                reason,
+                claimant_id=current.claimant_id,
+            )
+        if updated is None or updated.state != "settling":
+            return "pending", updated
+        return "settle", updated
+
+    async def _expire_failure_cards(self, current: ApprovalContinuation) -> bool:
+        """Make every unresolved card non-actionable before terminal delivery."""
+        terminalized = await asyncio.gather(
+            *(
+                expire_suspended_tool_approval(current.room_id, call.card_event_id)
+                for call in current.calls
+                if call.card_event_id is not None and not call.decision_recorded
+            ),
+            return_exceptions=True,
+        )
+        incomplete = sum(result is not True for result in terminalized)
+        if incomplete:
+            self.logger.warning(
+                "approval_continuation_card_settlement_incomplete",
+                approval_id=current.approval_id,
+                incomplete_cards=incomplete,
+            )
+            return False
+        return True
+
+    async def _deliver_failure(
+        self,
+        current: ApprovalContinuation,
+        reason: str,
+    ) -> tuple[bool, ApprovalContinuation]:
+        """Edit the owner's response or send a principal-safe terminal notice."""
+        target = MessageTarget(
+            room_id=current.room_id,
+            source_thread_id=current.thread_id,
+            resolved_thread_id=current.thread_id,
+            reply_to_event_id=(current.response_event_id if self.agent_name != current.entity_name else None),
+            session_id=current.session_id,
+        )
+        if current.response_event_id is not None and self.agent_name == current.entity_name:
+            delivered = await self._edit_response(current, target=target, text=reason)
+            response_event_id = None
+        else:
+            response_event_id = await self.delivery_gateway.send_text(
+                SendTextRequest(
+                    target=target,
+                    response_text=reason,
+                    delivery_turn_id=current.source_event_ids[0],
+                    delivery_stage=DeliveryStage.FINAL,
                 ),
-                return_exceptions=True,
             )
-            incomplete = sum(result is not True for result in terminalized)
-            if incomplete:
-                self.logger.warning(
-                    "approval_continuation_card_settlement_incomplete",
-                    approval_id=current.approval_id,
-                    incomplete_cards=incomplete,
+            delivered = response_event_id is not None
+        if delivered and current.response_event_id is None:
+            assert response_event_id is not None
+            current = (
+                await self.bind_response_event(
+                    current.approval_id,
+                    response_event_id,
+                    state="settling",
                 )
-                return
-            target = MessageTarget(
-                room_id=current.room_id,
-                source_thread_id=current.thread_id,
-                resolved_thread_id=current.thread_id,
-                reply_to_event_id=(current.response_event_id if self.agent_name != current.entity_name else None),
-                session_id=current.session_id,
+                or current
             )
-            if current.response_event_id is not None and self.agent_name == current.entity_name:
-                delivered = await self._edit_response(current, target=target, text=reason)
-                response_event_id = None
-            else:
-                response_event_id = await self.delivery_gateway.send_text(
-                    SendTextRequest(
-                        target=target,
-                        response_text=reason,
-                        delivery_turn_id=current.source_event_ids[0],
-                        delivery_stage=DeliveryStage.FINAL,
-                    ),
-                )
-                delivered = response_event_id is not None
-            if delivered and current.response_event_id is None:
-                assert response_event_id is not None
-                current = (
-                    await self.bind_response_event(
-                        current.approval_id,
-                        response_event_id,
-                        state="settling",
-                    )
-                    or current
-                )
-            if delivered:
-                failed = await self._finish_failure(current.approval_id, settlement_id, reason)
-                settlement_finished = failed is not None and failed.state == "failed"
-            else:
-                self.logger.warning(
-                    "approval_continuation_failure_not_delivered",
-                    approval_id=current.approval_id,
-                    response_event_id=current.response_event_id,
-                )
-        finally:
-            if not settlement_finished:
-                await finish_cancelled_approval_settlement(
-                    self._release_failure(current.approval_id, settlement_id),
-                )
+        return delivered, current
 
     async def _adopt_waiting_delivery(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
         """Bind an acknowledged waiting event after a crash or cancellation gap."""
@@ -471,10 +512,13 @@ class ApprovalResponseCoordinator:
         )
         return continuation if bound is None else bound
 
-    async def _reconcile_claimed_delivery(self, continuation: ApprovalContinuation) -> bool:
+    async def _reconcile_claimed_delivery(
+        self,
+        continuation: ApprovalContinuation,
+    ) -> Literal["absent", "pending", "completed"]:
         """Honor a frozen FINAL outbox payload before recovered claim failure."""
         if continuation.state != "claimed":
-            return False
+            return "absent"
         turn_id = continuation.source_event_ids[0]
         outbox = self._delivery_outbox(continuation)
         delivery = await outbox.load_delivery(
@@ -482,14 +526,16 @@ class ApprovalResponseCoordinator:
             stage=DeliveryStage.FINAL,
         )
         if delivery is None:
-            return False
+            return "absent"
         if delivery.acknowledged_event_id is None:
             delivery = await self._reconcile_unacknowledged_delivery(continuation, delivery, outbox=outbox)
-        if delivery is None or delivery.acknowledged_event_id is None:
-            return False
+        if delivery is None:
+            return "absent"
+        if delivery.acknowledged_event_id is None:
+            return "pending"
         if continuation.claimant_id is not None:
             await self.complete(continuation.approval_id, continuation.claimant_id)
-        return True
+        return "completed"
 
     def _delivery_outbox(self, continuation: ApprovalContinuation) -> OutboxView:
         """Return the principal-bound outbox that owns this continuation's delivery."""
@@ -536,12 +582,7 @@ class ApprovalResponseCoordinator:
             )
             persisted = await outbox.load_delivery(turn_id=delivery.turn_id, stage=delivery.stage)
             return replace(delivery, acknowledged_event_id=event_id) if persisted is None else persisted
-        await outbox.retire_unacknowledged_delivery(
-            turn_id=delivery.turn_id,
-            stage=delivery.stage,
-            transaction_id=delivery.transaction_id,
-        )
-        return await outbox.load_delivery(turn_id=delivery.turn_id, stage=delivery.stage)
+        return delivery
 
     async def _edit_response(
         self,
@@ -562,14 +603,3 @@ class ApprovalResponseCoordinator:
                 delivery_turn_id=continuation.source_event_ids[0],
             ),
         )
-
-
-async def finish_cancelled_approval_settlement(operation: Coroutine[Any, Any, object]) -> None:
-    """Finish durable approval settlement despite repeated task cancellation."""
-    settlement = asyncio.create_task(operation)
-    while not settlement.done():
-        try:
-            await asyncio.shield(settlement)
-        except asyncio.CancelledError:
-            continue
-    await settlement

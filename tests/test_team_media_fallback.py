@@ -68,7 +68,7 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -449,7 +449,8 @@ async def test_team_continuation_executes_real_agno_confirmation(tmp_path: Path)
             history_scope=persisted_scope,
         )
 
-    assert isinstance(result, str)
+    assert isinstance(result, CompletedApprovalRun)
+    assert AI_RUN_METADATA_KEY in result.metadata_content
     assert executed == [["echo", "hi"]]
     assert open_scope.call_args.kwargs["scope"] == persisted_scope
 

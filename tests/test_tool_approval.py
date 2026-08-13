@@ -365,7 +365,7 @@ async def test_startup_reclaims_expiry_for_unresolved_continuation_card(tmp_path
     sweep = await store.discard_pending_on_startup()
 
     assert sweep.failed == 0
-    assert tuple(store._detached_expiry_tasks) == ("$approval",)
+    assert store._detached_expiry_sweep_task is not None
     await store.shutdown(reason="test complete")
 
 
@@ -391,7 +391,7 @@ async def test_startup_terminalizes_malformed_continuation_card_without_call_id(
 
     assert sweep.complete is True
     assert cards.rows == {}
-    assert store._detached_expiry_tasks == {}
+    assert store._detached_expiry_sweep_task is None
     assert editor.await_args.args[2]["status"] == "expired"
 
 
@@ -425,9 +425,10 @@ async def test_detached_approval_retries_recorded_expiry_until_card_edit_lands(t
         timeout_seconds=0,
     )
     for _attempt in range(100):
-        if editor.await_count == 2:
+        if editor.await_count == 1:
             break
         await asyncio.sleep(0.01)
+    await store._sweep_detached_expiries()
 
     assert editor.await_count == 2
     assert cards.rows == {}
@@ -469,10 +470,7 @@ async def test_detached_decision_retries_terminal_edit_without_waiting_for_deadl
         status="approved",
         reason=None,
     )
-    for _attempt in range(100):
-        if editor.await_count == 2:
-            break
-        await asyncio.sleep(0.01)
+    await store._sweep_detached_expiries()
 
     assert result.resolved is False
     assert editor.await_count == 2
@@ -589,12 +587,11 @@ async def test_cancelled_detached_send_hands_delivered_event_to_recovery(tmp_pat
     with pytest.raises(asyncio.CancelledError):
         await create
     for _attempt in range(100):
-        if card_ready.await_count and not cards.rows and "$approval" not in store._detached_expiry_tasks:
+        if card_ready.await_count and not cards.rows:
             break
         await asyncio.sleep(0.01)
 
     card_ready.assert_awaited_with("continuation-send", "call-send", "$approval")
-    assert "$approval" not in store._detached_expiry_tasks
     assert cards.rows == {}
 
 
@@ -660,7 +657,7 @@ async def test_detached_expiry_registration_cannot_escape_shutdown(tmp_path: Pat
     await create
     await shutdown
     try:
-        assert store._detached_expiry_tasks == {}
+        assert store._detached_expiry_sweep_task is None
     finally:
         await store.shutdown(reason="test cleanup")
 

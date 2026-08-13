@@ -17,11 +17,14 @@ from mindroom.approval_continuation import (
     ApprovalContinuation,
     ApprovalContinuationStore,
     ApprovalDecision,
+    ApprovalMemoryTurn,
 )
 from mindroom.approval_manager import ApprovalStartupSweep
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.constants import RuntimePaths
 from mindroom.event_journal import DepartureSource, EventJournalStore, StoredApprovalCard
+from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -63,16 +66,21 @@ def _continuation() -> ApprovalContinuation:
 
 
 def _finish_test_failure(store: ApprovalContinuationStore, approval_id: str, reason: str) -> None:
-    fenced = store.begin_failure(
-        approval_id,
-        reason,
-        claimant_id=None,
-        settlement_id="test-settler",
-        runtime_generation="test-runtime",
+    current = store.get(approval_id)
+    assert current is not None
+    requested = (
+        store.fence_claimed_failure(approval_id, current.claimant_id)
+        if current.state == "claimed" and current.claimant_id is not None
+        else store.request_failure(
+            approval_id,
+            reason,
+            claimant_id=current.claimant_id,
+            runtime_generation="test-runtime",
+        )
     )
-    assert fenced is not None
-    assert fenced.settlement_id == "test-settler"
-    failed = store.finish_failure(approval_id, "test-settler", reason)
+    assert requested is not None
+    assert requested.state == "settling"
+    failed = store.finish_failure(approval_id, reason)
     assert failed is not None
     assert failed.state == "failed"
 
@@ -124,11 +132,10 @@ def test_failure_fence_cannot_take_a_claim_won_by_another_owner(tmp_path: Path) 
     claimed = store.claim("approval-1", "resume-owner")
     assert claimed is not None
 
-    fenced = store.begin_failure(
+    fenced = store.request_failure(
         "approval-1",
         "stale publication failure",
         claimant_id=None,
-        settlement_id="settler",
         runtime_generation="runtime-current",
     )
 
@@ -137,74 +144,54 @@ def test_failure_fence_cannot_take_a_claim_won_by_another_owner(tmp_path: Path) 
     assert fenced.claimant_id == "resume-owner"
 
 
-def test_failure_settlement_has_one_releasable_owner_per_runtime(tmp_path: Path) -> None:
-    """Only one coroutine may deliver terminal failure for a settling continuation."""
+def test_claim_failure_waits_for_final_outbox_reconciliation_before_settling(tmp_path: Path) -> None:
+    """A failed runner records its reason without overwriting a possibly frozen successful FINAL."""
+    store = ApprovalContinuationStore(tmp_path)
+    store.create(_continuation())
+    store.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    store.acknowledge_call("approval-1", "call-1")
+    claimed = store.claim("approval-1", "resume-owner")
+    assert claimed is not None
+
+    noted = store.request_failure(
+        "approval-1",
+        "final delivery failed",
+        claimant_id="resume-owner",
+        runtime_generation="runtime-current",
+    )
+    fenced = store.fence_claimed_failure("approval-1", "resume-owner")
+
+    assert noted is not None
+    assert noted.state == "claimed"
+    assert noted.failure_reason == "final delivery failed"
+    assert fenced is not None
+    assert fenced.state == "settling"
+    assert fenced.failure_reason == "final delivery failed"
+
+
+def test_failure_request_is_idempotent_and_preserves_its_first_reason(tmp_path: Path) -> None:
+    """The transport's one dispatcher may safely repeat one durable settlement request."""
     store = ApprovalContinuationStore(tmp_path)
     store.create(_continuation())
 
-    first = store.begin_failure(
+    first = store.request_failure(
         "approval-1",
         "first reason",
         claimant_id=None,
-        settlement_id="settler-1",
         runtime_generation="runtime-current",
     )
-    competing = store.begin_failure(
+    repeated = store.request_failure(
         "approval-1",
-        "competing reason",
+        "replacement reason",
         claimant_id=None,
-        settlement_id="settler-2",
         runtime_generation="runtime-current",
     )
 
     assert first is not None
-    assert first.settlement_id == "settler-1"
+    assert first.state == "settling"
     assert first.failure_reason == "first reason"
-    assert competing is not None
-    assert competing.settlement_id == "settler-1"
-    assert competing.failure_reason == "first reason"
-
-    released = store.release_failure("approval-1", "settler-1")
-    acquired = store.begin_failure(
-        "approval-1",
-        "competing reason",
-        claimant_id=None,
-        settlement_id="settler-2",
-        runtime_generation="runtime-current",
-    )
-
-    assert released is not None
-    assert released.settlement_id is None
-    assert acquired is not None
-    assert acquired.settlement_id == "settler-2"
-    assert acquired.failure_reason == "first reason"
-
-
-def test_new_runtime_takes_over_crashed_failure_settlement(tmp_path: Path) -> None:
-    """A durable settlement owner from a dead runtime must not block restart recovery."""
-    store = ApprovalContinuationStore(tmp_path)
-    store.create(_continuation())
-    store.begin_failure(
-        "approval-1",
-        "original reason",
-        claimant_id=None,
-        settlement_id="dead-settler",
-        runtime_generation="runtime-old",
-    )
-
-    recovered = store.begin_failure(
-        "approval-1",
-        "replacement reason",
-        claimant_id=None,
-        settlement_id="restart-settler",
-        runtime_generation="runtime-new",
-    )
-
-    assert recovered is not None
-    assert recovered.state == "settling"
-    assert recovered.runtime_generation == "runtime-new"
-    assert recovered.settlement_id == "restart-settler"
-    assert recovered.failure_reason == "original reason"
+    assert repeated is not None
+    assert repeated == first
 
 
 def test_distinct_store_handles_serialize_pending_context_updates(
@@ -277,12 +264,20 @@ def test_legacy_context_without_additive_fields_remains_mutable(tmp_path: Path) 
         legacy_context = dict(row._mapping["context"])
         legacy_context.pop("history_scope")
         legacy_context.pop("delivery_principal_id")
+        legacy_context.pop("origin")
+        legacy_context.pop("memory_prompt")
+        legacy_context.pop("memory_thread_history")
+        legacy_context.pop("thread_summary_message_count_hint")
         session.execute(table.update().where(table.c.id == "approval-1").values(context=legacy_context))
 
     loaded = store.get("approval-1")
     assert loaded is not None
     assert loaded.history_scope is None
     assert loaded.delivery_principal_id is None
+    assert loaded.origin is None
+    assert loaded.memory_prompt is None
+    assert loaded.memory_thread_history == ()
+    assert loaded.thread_summary_message_count_hint is None
     resolved = store.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
 
     assert resolved is not None
@@ -331,6 +326,41 @@ def test_continuation_store_preserves_runtime_model_snapshot(tmp_path: Path) -> 
     store.create(continuation)
 
     assert store.get(continuation.approval_id) == continuation
+
+
+def test_continuation_store_preserves_resumed_lifecycle_inputs(tmp_path: Path) -> None:
+    """Restart must preserve the exact hook identity and memory inputs of the paused turn."""
+    store = ApprovalContinuationStore(tmp_path)
+    origin = TurnOrigin(
+        transport_sender_id="@mindroom_router:example.org",
+        requester_id="@owner:example.org",
+        sender_entity_name="router",
+        requester_entity_name=None,
+        sender_kind=SenderKind.MANAGED_ENTITY,
+        requester_kind=SenderKind.USER,
+        intent=TurnIntent.ROUTER_HANDOFF,
+        source_kind="message",
+        trust=TurnTrust.TRUSTED_INTERNAL,
+    )
+    continuation = replace(
+        _continuation(),
+        origin=origin,
+        memory_prompt="Remember the deployment outcome",
+        memory_thread_history=(
+            ApprovalMemoryTurn(sender="@owner:example.org", body="Ship it"),
+            ApprovalMemoryTurn(sender="@mindroom_general:example.org", body="Checking"),
+        ),
+        thread_summary_message_count_hint=7,
+    )
+
+    store.create(continuation)
+    restored = store.get(continuation.approval_id)
+
+    assert restored is not None
+    assert restored.origin == origin
+    assert restored.memory_prompt == "Remember the deployment outcome"
+    assert restored.memory_thread_history == continuation.memory_thread_history
+    assert restored.thread_summary_message_count_hint == 7
 
 
 def test_claimed_continuation_atomically_advances_to_next_pause(tmp_path: Path) -> None:
@@ -644,7 +674,7 @@ async def test_startup_recovery_does_not_fail_a_live_continuation_dispatch(tmp_p
     bot = SimpleNamespace(
         running=True,
         resume_approval_continuation=AsyncMock(side_effect=resume),
-        fail_approval_continuation=AsyncMock(),
+        settle_approval_continuation_failure=AsyncMock(),
     )
     transport = ApprovalMatrixTransport(
         runtime_paths=runtime_paths,
@@ -663,7 +693,7 @@ async def test_startup_recovery_does_not_fail_a_live_continuation_dispatch(tmp_p
     during_resume = transport._continuations.get("approval-1")
     assert during_resume is not None
     assert during_resume.state == "claimed"
-    bot.fail_approval_continuation.assert_not_awaited()
+    bot.settle_approval_continuation_failure.assert_not_awaited()
 
     release.set()
     await asyncio.gather(*tuple(transport._continuation_tasks))
@@ -681,7 +711,7 @@ async def test_startup_retry_ignores_rows_owned_by_the_current_runtime(tmp_path:
         env_path=tmp_path / ".env",
         storage_root=tmp_path,
     )
-    bot = SimpleNamespace(running=True, fail_approval_continuation=AsyncMock())
+    bot = SimpleNamespace(running=True, settle_approval_continuation_failure=AsyncMock())
     transport = ApprovalMatrixTransport(
         runtime_paths=runtime_paths,
         bot_provider=lambda _name: cast("Any", bot),
@@ -699,9 +729,9 @@ async def test_startup_retry_ignores_rows_owned_by_the_current_runtime(tmp_path:
     transport._continuations.create(
         replace(
             _continuation(),
-            approval_id="live-inline-claim",
+            approval_id="live-dispatch-claim",
             state="claimed",
-            claimant_id="inline:live",
+            claimant_id="research:live",
             runtime_generation=transport.runtime_generation,
         ),
     )
@@ -709,12 +739,12 @@ async def test_startup_retry_ignores_rows_owned_by_the_current_runtime(tmp_path:
     assert await transport._recover_continuations() is True
 
     publishing = transport._continuations.get("live-publishing")
-    claimed = transport._continuations.get("live-inline-claim")
+    claimed = transport._continuations.get("live-dispatch-claim")
     assert publishing is not None
     assert publishing.state == "publishing"
     assert claimed is not None
     assert claimed.state == "claimed"
-    bot.fail_approval_continuation.assert_not_awaited()
+    bot.settle_approval_continuation_failure.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -861,28 +891,12 @@ async def test_resume_exception_after_claim_fails_closed(tmp_path: Path) -> None
     async def fail(continuation: ApprovalContinuation, reason: str) -> None:
         assert continuation.state == "claimed"
         assert "failed after claim" in reason
-        fenced = transport._continuations.begin_failure(
-            continuation.approval_id,
-            reason,
-            claimant_id=continuation.claimant_id,
-            settlement_id="test-settler",
-            runtime_generation="test-runtime",
-        )
-        assert fenced is not None
-        assert fenced.settlement_id == "test-settler"
-        assert (
-            transport._continuations.finish_failure(
-                continuation.approval_id,
-                "test-settler",
-                reason,
-            )
-            is not None
-        )
+        _finish_test_failure(transport._continuations, continuation.approval_id, reason)
 
     bot = SimpleNamespace(
         running=True,
         resume_approval_continuation=AsyncMock(side_effect=resume),
-        fail_approval_continuation=AsyncMock(side_effect=fail),
+        settle_approval_continuation_failure=AsyncMock(side_effect=fail),
     )
     transport = ApprovalMatrixTransport(
         runtime_paths=runtime_paths,
@@ -900,7 +914,7 @@ async def test_resume_exception_after_claim_fails_closed(tmp_path: Path) -> None
     assert failed is not None
     assert failed.state == "failed"
     bot.resume_approval_continuation.assert_awaited_once()
-    bot.fail_approval_continuation.assert_awaited_once()
+    bot.settle_approval_continuation_failure.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -922,25 +936,12 @@ async def test_failure_settlement_exception_retries_claimed_continuation(tmp_pat
         if settlement_attempts == 1:
             msg = "temporary failure delivery outage"
             raise RuntimeError(msg)
-        fenced = transport._continuations.begin_failure(
-            continuation.approval_id,
-            reason,
-            claimant_id=continuation.claimant_id,
-            settlement_id="test-settler",
-            runtime_generation="test-runtime",
-        )
-        assert fenced is not None
-        failed = transport._continuations.finish_failure(
-            continuation.approval_id,
-            "test-settler",
-            reason,
-        )
-        assert failed is not None
+        _finish_test_failure(transport._continuations, continuation.approval_id, reason)
 
     bot = SimpleNamespace(
         running=True,
         resume_approval_continuation=AsyncMock(side_effect=resume),
-        fail_approval_continuation=AsyncMock(side_effect=fail),
+        settle_approval_continuation_failure=AsyncMock(side_effect=fail),
     )
     transport = ApprovalMatrixTransport(
         runtime_paths=RuntimePaths(
@@ -966,47 +967,22 @@ async def test_failure_settlement_exception_retries_claimed_continuation(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_incomplete_runner_settlement_retries_unowned_settling_continuation(tmp_path: Path) -> None:
-    """A normal runner return must not strand settlement after transient Matrix failure."""
+async def test_normal_runner_return_with_claim_is_settled_by_transport(tmp_path: Path) -> None:
+    """The dispatcher, not the runner, terminalizes an otherwise unfinished claim."""
     transport: ApprovalMatrixTransport
 
     async def resume(continuation: ApprovalContinuation) -> None:
         claimed = transport._continuations.claim(continuation.approval_id, "worker")
         assert claimed is not None
-        settling = transport._continuations.begin_failure(
-            continuation.approval_id,
-            "temporary Matrix failure",
-            claimant_id="worker",
-            settlement_id="runner-settler",
-            runtime_generation="runtime-current",
-        )
-        assert settling is not None
-        released = transport._continuations.release_failure(continuation.approval_id, "runner-settler")
-        assert released is not None
-        assert released.state == "settling"
-        assert released.settlement_id is None
 
     async def fail(continuation: ApprovalContinuation, reason: str) -> None:
-        assert continuation.state == "settling"
-        assert reason == "temporary Matrix failure"
-        fenced = transport._continuations.begin_failure(
-            continuation.approval_id,
-            reason,
-            claimant_id=continuation.claimant_id,
-            settlement_id="retry-settler",
-            runtime_generation="runtime-current",
-        )
-        assert fenced is not None
-        assert transport._continuations.finish_failure(
-            continuation.approval_id,
-            "retry-settler",
-            reason,
-        )
+        assert continuation.state == "claimed"
+        _finish_test_failure(transport._continuations, continuation.approval_id, reason)
 
     bot = SimpleNamespace(
         running=True,
         resume_approval_continuation=AsyncMock(side_effect=resume),
-        fail_approval_continuation=AsyncMock(side_effect=fail),
+        settle_approval_continuation_failure=AsyncMock(side_effect=fail),
     )
     transport = ApprovalMatrixTransport(
         runtime_paths=RuntimePaths(
@@ -1028,7 +1004,181 @@ async def test_incomplete_runner_settlement_retries_unowned_settling_continuatio
     failed = transport._continuations.get("approval-1")
     assert failed is not None
     assert failed.state == "failed"
-    bot.fail_approval_continuation.assert_awaited_once()
+    bot.settle_approval_continuation_failure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_completed_runner_outcome_is_committed_only_by_transport(tmp_path: Path) -> None:
+    """A successful runner outcome becomes durable only after dispatcher reconciliation."""
+    transport: ApprovalMatrixTransport
+
+    async def resume(continuation: ApprovalContinuation) -> FinalDeliveryOutcome:
+        claimed = transport._continuations.claim(continuation.approval_id, "worker")
+        assert claimed is not None
+        return FinalDeliveryOutcome(terminal_status="completed", event_id="$answer")
+
+    bot = SimpleNamespace(running=True, resume_approval_continuation=AsyncMock(side_effect=resume))
+    transport = ApprovalMatrixTransport(
+        runtime_paths=RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path,
+        ),
+        bot_provider=lambda _name: cast("Any", bot),
+        cards_provider=lambda: None,
+    )
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    ready = transport._continuations.acknowledge_call("approval-1", "call-1")
+    assert ready is not None
+
+    await transport._dispatch_continuation("approval-1")
+
+    completed = transport._continuations.get("approval-1")
+    assert completed is not None
+    assert completed.state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_failure_settlement_re_resolves_replacement_bot_after_reload(tmp_path: Path) -> None:
+    """A config reload must not pin settlement to the stopped runner."""
+    transport: ApprovalMatrixTransport
+    bots: dict[str, Any] = {}
+
+    async def resume(continuation: ApprovalContinuation) -> None:
+        claimed = transport._continuations.claim(continuation.approval_id, "worker")
+        assert claimed is not None
+        requested = transport._continuations.request_failure(
+            continuation.approval_id,
+            "temporary Matrix failure",
+            claimant_id="worker",
+            runtime_generation=transport.runtime_generation,
+        )
+        assert requested is not None
+        old_bot.running = False
+        bots["research"] = replacement_bot
+
+    async def settle(continuation: ApprovalContinuation, reason: str) -> None:
+        assert continuation.claimant_id is not None
+        fenced = transport._continuations.fence_claimed_failure(
+            continuation.approval_id,
+            continuation.claimant_id,
+        )
+        assert fenced is not None
+        assert transport._continuations.finish_failure(continuation.approval_id, reason) is not None
+
+    old_bot = SimpleNamespace(
+        running=True,
+        resume_approval_continuation=AsyncMock(side_effect=resume),
+        settle_approval_continuation_failure=AsyncMock(),
+    )
+    replacement_bot = SimpleNamespace(
+        running=True,
+        resume_approval_continuation=AsyncMock(),
+        settle_approval_continuation_failure=AsyncMock(side_effect=settle),
+    )
+    bots["research"] = old_bot
+    transport = ApprovalMatrixTransport(
+        runtime_paths=RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path,
+        ),
+        bot_provider=lambda name: cast("Any", bots.get(name)),
+        cards_provider=lambda: None,
+        entity_configured=lambda name: name == "research",
+    )
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    assert transport._continuations.acknowledge_call("approval-1", "call-1") is not None
+
+    await asyncio.wait_for(transport._dispatch_continuation("approval-1"), timeout=2)
+
+    failed = transport._continuations.get("approval-1")
+    assert failed is not None
+    assert failed.state == "failed"
+    old_bot.settle_approval_continuation_failure.assert_not_awaited()
+    replacement_bot.settle_approval_continuation_failure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_entity_attempt_keeps_transport_dispatch_alive(tmp_path: Path) -> None:
+    """Per-bot shutdown may cancel its child attempt without cancelling durable dispatch."""
+    transport: ApprovalMatrixTransport
+    bots: dict[str, Any] = {}
+    resume_started = asyncio.Event()
+    resume_tasks: list[asyncio.Task[FinalDeliveryOutcome | None]] = []
+
+    async def resume(continuation: ApprovalContinuation) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        resume_tasks.append(cast("asyncio.Task[FinalDeliveryOutcome | None]", task))
+        claimed = transport._continuations.claim(continuation.approval_id, "worker")
+        assert claimed is not None
+        requested = transport._continuations.request_failure(
+            continuation.approval_id,
+            "temporary Matrix failure",
+            claimant_id="worker",
+            runtime_generation=transport.runtime_generation,
+        )
+        assert requested is not None
+        resume_started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            old_bot.running = False
+            bots["research"] = replacement_bot
+
+    async def settle(continuation: ApprovalContinuation, reason: str) -> None:
+        assert continuation.claimant_id is not None
+        assert (
+            transport._continuations.fence_claimed_failure(
+                continuation.approval_id,
+                continuation.claimant_id,
+            )
+            is not None
+        )
+        assert transport._continuations.finish_failure(continuation.approval_id, reason) is not None
+
+    old_bot = SimpleNamespace(
+        running=True,
+        resume_approval_continuation=AsyncMock(side_effect=resume),
+        settle_approval_continuation_failure=AsyncMock(),
+    )
+    replacement_bot = SimpleNamespace(
+        running=True,
+        resume_approval_continuation=AsyncMock(),
+        settle_approval_continuation_failure=AsyncMock(side_effect=settle),
+    )
+    bots["research"] = old_bot
+    transport = ApprovalMatrixTransport(
+        runtime_paths=RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path,
+        ),
+        bot_provider=lambda name: cast("Any", bots.get(name)),
+        cards_provider=lambda: None,
+        entity_configured=lambda name: name == "research",
+    )
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    ready = transport._continuations.acknowledge_call("approval-1", "call-1")
+    assert ready is not None
+    transport.schedule_continuation(ready)
+
+    await asyncio.wait_for(resume_started.wait(), timeout=2)
+    resume_tasks[0].cancel()
+    await asyncio.wait_for(asyncio.gather(*tuple(transport._continuation_tasks)), timeout=2)
+
+    failed = transport._continuations.get("approval-1")
+    assert failed is not None
+    assert failed.state == "failed"
+    old_bot.settle_approval_continuation_failure.assert_not_awaited()
+    replacement_bot.settle_approval_continuation_failure.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1063,7 +1213,7 @@ async def test_removed_owner_waits_for_router_before_retiring_ready_continuation
         _finish_test_failure(transport._continuations, owned.approval_id, reason)
 
     fail_mock = AsyncMock(side_effect=fail)
-    bots["router"] = SimpleNamespace(running=True, fail_approval_continuation=fail_mock)
+    bots["router"] = SimpleNamespace(running=True, settle_approval_continuation_failure=fail_mock)
     await asyncio.wait_for(dispatch, timeout=2)
 
     failed = transport._continuations.get("approval-1")
@@ -1081,7 +1231,7 @@ async def test_permanently_failed_configured_owner_is_terminalized_by_router(tmp
         assert "could not start" in reason
         _finish_test_failure(transport._continuations, owned.approval_id, reason)
 
-    router = SimpleNamespace(running=True, fail_approval_continuation=AsyncMock(side_effect=fail))
+    router = SimpleNamespace(running=True, settle_approval_continuation_failure=AsyncMock(side_effect=fail))
     transport = ApprovalMatrixTransport(
         runtime_paths=RuntimePaths(
             config_path=tmp_path / "config.yaml",
@@ -1105,7 +1255,7 @@ async def test_permanently_failed_configured_owner_is_terminalized_by_router(tmp
     settled = transport._continuations.get("approval-1")
     assert settled is not None
     assert settled.state == "failed"
-    router.fail_approval_continuation.assert_awaited_once()
+    router.settle_approval_continuation_failure.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1139,7 +1289,7 @@ async def test_startup_fails_closed_when_attached_card_was_membership_fenced(tmp
         assert "no longer exists" in reason
         _finish_test_failure(transport._continuations, continuation.approval_id, reason)
 
-    bot = SimpleNamespace(running=True, fail_approval_continuation=AsyncMock(side_effect=fail))
+    bot = SimpleNamespace(running=True, settle_approval_continuation_failure=AsyncMock(side_effect=fail))
     transport = ApprovalMatrixTransport(
         runtime_paths=RuntimePaths(
             config_path=tmp_path / "config.yaml",
@@ -1168,6 +1318,7 @@ async def test_startup_fails_closed_when_attached_card_was_membership_fenced(tmp
     )
 
     assert await transport._recover_continuations() is True
+    await asyncio.gather(*tuple(transport._continuation_tasks))
 
     failed = transport._continuations.get("approval-1")
     assert failed is not None
