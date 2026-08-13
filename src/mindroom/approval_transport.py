@@ -277,7 +277,7 @@ class ApprovalMatrixTransport:
         retry_seconds = _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS
         waiting_logged = False
         while True:
-            continuation = await asyncio.to_thread(self._continuations.get, approval_id)
+            continuation = await self._read_continuation_with_retry(approval_id)
             if continuation is None or continuation.state != "ready":
                 return
             bot = self.bot_provider(continuation.entity_name)
@@ -320,7 +320,7 @@ class ApprovalMatrixTransport:
             )
             fallback = self.bot_provider(ROUTER_AGENT_NAME)
             if fallback is not None and fallback.running:
-                await fallback.fail_approval_continuation(continuation, reason)
+                await self._fail_continuation_until_terminal(fallback, continuation, reason)
                 return
             if not waiting_logged:
                 logger.warning(
@@ -346,7 +346,7 @@ class ApprovalMatrixTransport:
             raise
         except Exception as caught:
             error = caught
-        refreshed = await asyncio.to_thread(self._continuations.get, continuation.approval_id)
+        refreshed = await self._read_continuation_with_retry(continuation.approval_id)
         if refreshed is not None and refreshed.state == "ready":
             if error is not None:
                 logger.warning(
@@ -358,11 +358,60 @@ class ApprovalMatrixTransport:
                 )
             return False
         if error is not None and refreshed is not None and refreshed.state == "claimed":
-            await bot.fail_approval_continuation(
+            return await self._fail_continuation_until_terminal(
+                bot,
                 refreshed,
                 f"Tool approval continuation failed safely after it was claimed: {error}",
             )
         return True
+
+    async def _read_continuation_with_retry(self, approval_id: str) -> ApprovalContinuation | None:
+        """Read one dispatcher row without retiring its only in-process owner on outage."""
+        retry_seconds = _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS
+        while True:
+            try:
+                return await asyncio.to_thread(self._continuations.get, approval_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning(
+                    "approval_continuation_dispatch_read_retry",
+                    approval_id=approval_id,
+                    retry_seconds=retry_seconds,
+                    error=str(error),
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+                await asyncio.sleep(retry_seconds)
+                retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
+
+    async def _fail_continuation_until_terminal(
+        self,
+        bot: _ApprovalTransportBot,
+        continuation: ApprovalContinuation,
+        reason: str,
+    ) -> bool:
+        """Retain failure-settlement ownership until durable state is terminal."""
+        retry_seconds = _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS
+        current = continuation
+        while True:
+            try:
+                await bot.fail_approval_continuation(current, reason)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning(
+                    "approval_continuation_failure_retry",
+                    approval_id=current.approval_id,
+                    retry_seconds=retry_seconds,
+                    error=str(error),
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+            refreshed = await self._read_continuation_with_retry(current.approval_id)
+            if refreshed is None or refreshed.state in {"completed", "failed"}:
+                return True
+            current = refreshed
+            await asyncio.sleep(retry_seconds)
+            retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
 
     async def _recover_continuations(self) -> bool:
         complete = True

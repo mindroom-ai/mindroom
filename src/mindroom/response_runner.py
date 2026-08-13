@@ -42,7 +42,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
-from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
+from mindroom.entity_resolution import current_entity_id, current_internal_sender_ids, entity_identity_registry
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
@@ -540,6 +540,9 @@ class ResponseRunner:
             runtime_generation=self._approval_runtime_generation,
             journal_principal_id=self.deps.journal_principal_id,
             outbox_for_principal=self.deps.outbox_for_principal,
+            legacy_principal_for_entity=lambda entity_name: (
+                f"{entity_name}@{current_entity_id(entity_name, self.deps.runtime_paths).full_id}"
+            ),
         )
         self._approval_execution = AgentApprovalExecution(
             config=lambda: self.deps.runtime.config,
@@ -1297,7 +1300,11 @@ class ResponseRunner:
         )
         if execution_identity is None:
             return None
-        history_scope = continuation.history_scope or self.deps.state_writer.history_scope()
+        history_scope = continuation.history_scope
+        if history_scope is None:
+            if continuation.entity_kind == "team":
+                return None
+            history_scope = self.deps.state_writer.history_scope()
         return self._build_persist_response_event_id_effect(
             session_id=continuation.session_id,
             session_type=self.deps.state_writer.session_type_for_scope(history_scope),
@@ -1366,6 +1373,7 @@ class ResponseRunner:
                     decisions=decisions,
                     denial_reasons=denial_reasons,
                     refresh_scheduler=(orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None),
+                    history_scope=continuation.history_scope,
                     tool_trace_collector=tool_trace_collector,
                 )
 

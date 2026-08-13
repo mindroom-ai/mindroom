@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -127,6 +127,7 @@ class ApprovalContinuation:
     delivery_principal_id: str | None = None
     runtime_generation: str | None = None
     settlement_id: str | None = None
+    _stored_context: dict[str, object] | None = field(default=None, compare=False, repr=False)
 
     def _to_context(self) -> dict[str, object]:
         """Serialize the continuation into Agno approval context."""
@@ -192,6 +193,7 @@ class ApprovalContinuation:
             delivery_principal_id=cast("str | None", context.get("delivery_principal_id")),
             runtime_generation=cast("str | None", context.get("runtime_generation")),
             settlement_id=cast("str | None", context.get("settlement_id")),
+            _stored_context=context,
         )
 
 
@@ -236,7 +238,11 @@ class ApprovalContinuationStore:
                 "run_status": "PAUSED",
             },
         )
-        return continuation
+        created = self.get(continuation.approval_id)
+        if created is None:
+            msg = "Tool approval continuation disappeared immediately after creation"
+            raise RuntimeError(msg)
+        return created
 
     def get(self, approval_id: str) -> ApprovalContinuation | None:
         """Return one continuation by ID."""
@@ -274,7 +280,7 @@ class ApprovalContinuationStore:
                 .where(
                     table.c.id == current.approval_id,
                     table.c.status == current.state,
-                    table.c.context == current._to_context(),
+                    table.c.context == (current._stored_context or current._to_context()),
                 )
                 .values(**values),
             )

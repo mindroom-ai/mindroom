@@ -310,6 +310,16 @@ class OutboxView(Protocol):
         """Return one delivery without claiming it."""
         ...
 
+    async def retire_unacknowledged_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        transaction_id: str,
+    ) -> bool:
+        """Retire an exact row after its Matrix absence was established."""
+        ...
+
     async def acknowledge_delivery(
         self,
         *,

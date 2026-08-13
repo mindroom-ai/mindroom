@@ -57,7 +57,7 @@ from mindroom.history.interrupted_replay import _render_interrupted_replay_conte
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import CompactionDecision, CompactionReplyOutcome, PreparedHistoryState
+from mindroom.history.types import CompactionDecision, CompactionReplyOutcome, HistoryScope, PreparedHistoryState
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.media_fallback import (
@@ -421,13 +421,14 @@ async def test_team_continuation_executes_real_agno_confirmation(tmp_path: Path)
         resolved_thread_id="$thread",
         session_id="session-1",
     )
+    persisted_scope = HistoryScope(kind="team", scope_id="ad_hoc_original_scope")
 
     with (
         patch("mindroom.teams.materialize_exact_team_members", return_value=members),
         patch(
             "mindroom.teams.open_bound_scope_session_context",
             return_value=nullcontext(SimpleNamespace(storage=None)),
-        ),
+        ) as open_scope,
         patch("mindroom.teams.build_materialized_team_instance", return_value=team),
         patch("mindroom.teams.close_team_runtime_state_dbs"),
     ):
@@ -445,10 +446,12 @@ async def test_team_continuation_executes_real_agno_confirmation(tmp_path: Path)
             decisions={tool_call_id: True},
             denial_reasons={tool_call_id: None},
             refresh_scheduler=None,
+            history_scope=persisted_scope,
         )
 
     assert isinstance(result, str)
     assert executed == [["echo", "hi"]]
+    assert open_scope.call_args.kwargs["scope"] == persisted_scope
 
 
 def test_materialize_exact_team_members_closes_partial_agents_on_failure() -> None:

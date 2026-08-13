@@ -4182,6 +4182,7 @@ expose = [
     "parse_room_message_event",
     "fetch_thread_event_sources_via_room_messages",
     "find_approval_card_event_id_via_room_messages",
+    "find_outbox_delivery_event_id_via_room_messages",
     "find_response_event_ids_via_room_messages",
     "get_room_threads_page",
     "is_room_message_event",

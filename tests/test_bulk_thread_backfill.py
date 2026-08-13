@@ -10,13 +10,14 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom.event_journal import replacement_target
+from mindroom.event_journal import DeliveryStage, OutboxDelivery, replacement_target
 from mindroom.matrix.room_history_reads import (
     _MAX_APPROVAL_CARD_SCAN_PAGES,
     OpaqueEncryptedThreadHistoryError,
     fetch_thread_event_sources_via_room_messages,
     fetch_thread_messages_from_source,
     find_approval_card_event_id_via_room_messages,
+    find_outbox_delivery_event_id_via_room_messages,
     find_response_event_ids_via_room_messages,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
@@ -195,6 +196,74 @@ async def test_response_recovery_scan_finds_exact_original_before_source() -> No
 
     assert response_event_ids == frozenset({response_event_id})
     assert client.room_messages.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_edit", [False, True])
+async def test_outbox_recovery_scan_finds_exact_original_principal_delivery(is_edit: bool) -> None:
+    """Cross-principal recovery adopts the exact frozen send or replacement event."""
+    source_event_id = "$source:localhost"
+    waiting_event_id = "$waiting:localhost"
+    delivered_event_id = "$delivered:localhost"
+    payload: dict[str, object] = {
+        "body": "Final answer",
+        "msgtype": "m.text",
+        "io.mindroom.stream_status": "completed",
+    }
+    event = (
+        _edit_event(
+            delivered_event_id,
+            waiting_event_id,
+            timestamp=3000,
+            thread_root_id=source_event_id,
+            sender="@original:localhost",
+            new_body="Final answer",
+            extra_content={"io.mindroom.stream_status": "completed"},
+        )
+        if is_edit
+        else _message_event(
+            delivered_event_id,
+            "Final answer",
+            timestamp=3000,
+            reply_to_event_id=source_event_id,
+            sender="@original:localhost",
+            extra_content={"io.mindroom.stream_status": "completed"},
+        )
+    )
+    if is_edit:
+        payload = {
+            **payload,
+            "m.new_content": payload,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": waiting_event_id},
+        }
+    delivery = OutboxDelivery(
+        turn_id=source_event_id,
+        stage=DeliveryStage.FINAL,
+        room_id=_ROOM_ID,
+        thread_id=source_event_id,
+        transaction_id="frozen-transaction",
+        payload=payload,
+        edits_event_id=waiting_event_id if is_edit else None,
+        acknowledged_event_id=None,
+        created_at_ns=1,
+        attempted=True,
+    )
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [event, _message_event(source_event_id, "question", timestamp=1000)],
+            end=None,
+        ),
+    )
+
+    found = await find_outbox_delivery_event_id_via_room_messages(
+        client,
+        delivery,
+        response_sender="@original:localhost",
+        source_event_ids=(source_event_id,),
+    )
+
+    assert found == delivered_event_id
 
 
 @pytest.mark.asyncio

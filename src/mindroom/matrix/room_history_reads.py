@@ -60,6 +60,8 @@ from mindroom.timing import elapsed_ms_since
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable
 
+    from mindroom.event_journal import OutboxDelivery
+
 logger = get_logger(__name__)
 
 _ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
@@ -260,6 +262,94 @@ async def find_response_event_ids_via_room_messages(
         from_token = response.end
 
     return frozenset(response_event_ids)
+
+
+def _outbox_delivery_content(payload: Mapping[str, object]) -> Mapping[str, object]:
+    """Return the visible content frozen into one send or edit payload."""
+    new_content = payload.get("m.new_content")
+    return cast("Mapping[str, object]", new_content) if isinstance(new_content, Mapping) else payload
+
+
+def _matches_outbox_delivery(
+    event_source: Mapping[str, Any],
+    *,
+    response_sender: str,
+    source_event_ids: set[str],
+    delivery: OutboxDelivery,
+) -> bool:
+    """Return whether one room event is the exact frozen outbox delivery."""
+    if event_source.get("sender") != response_sender:
+        return False
+    event_info = EventInfo.from_event(dict(event_source))
+    if delivery.edits_event_id is not None:
+        if not event_info.is_edit or event_info.original_event_id != delivery.edits_event_id:
+            return False
+    elif event_info.is_edit or event_info.is_thread_fallback or event_info.reply_to_event_id not in source_event_ids:
+        return False
+    content = event_source.get("content")
+    if not isinstance(content, Mapping):
+        return False
+    expected = _outbox_delivery_content(delivery.payload)
+    actual = _outbox_delivery_content(content)
+    expected_body = expected.get("body")
+    if isinstance(expected_body, str) and actual.get("body") != expected_body:
+        return False
+    expected_status = expected.get("io.mindroom.stream_status")
+    return expected_status is None or actual.get("io.mindroom.stream_status") == expected_status
+
+
+async def find_outbox_delivery_event_id_via_room_messages(
+    client: nio.AsyncClient,
+    delivery: OutboxDelivery,
+    *,
+    response_sender: str,
+    source_event_ids: Collection[str],
+) -> str | None:
+    """Find one frozen response from another principal, or prove it absent."""
+    sources = set(source_event_ids)
+    remaining_sources = set(sources)
+    matches: set[str] = set()
+    from_token: str | None = None
+    seen_pagination_tokens: set[str] = set()
+    while remaining_sources:
+        response = await client.room_messages(
+            delivery.room_id,
+            start=from_token,
+            limit=100,
+            message_filter={"types": list(_ROOM_HISTORY_MESSAGE_TYPES)},
+            direction=nio.MessageDirection.back,
+        )
+        if not isinstance(response, nio.RoomMessagesResponse):
+            msg = f"outbox recovery room scan failed for {delivery.room_id}: {response}"
+            raise RuntimeError(msg)  # noqa: TRY004
+        if not response.chunk:
+            break
+        for event in response.chunk:
+            if not isinstance(event, nio.Event):
+                continue
+            remaining_sources.discard(event.event_id)
+            event_source = event.source if isinstance(event.source, dict) else {}
+            if _matches_outbox_delivery(
+                event_source,
+                response_sender=response_sender,
+                source_event_ids=sources,
+                delivery=delivery,
+            ):
+                matches.add(event.event_id)
+        if not response.end:
+            break
+        if response.end in seen_pagination_tokens:
+            msg = f"outbox recovery room scan repeated pagination token for {delivery.room_id}"
+            raise RuntimeError(msg)
+        seen_pagination_tokens.add(response.end)
+        from_token = response.end
+    if len(matches) > 1:
+        msg = (
+            f"Delivery {delivery.transaction_id!r} has {len(matches)} matching Matrix events; "
+            "no unique event can be adopted"
+        )
+        raise RuntimeError(msg)
+    return next(iter(matches), None)
 
 
 def _is_approval_card_for(event_source: Mapping[str, Any], *, card_sender: str, approval_id: str) -> bool:

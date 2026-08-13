@@ -123,7 +123,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
     from mindroom.history.turn_recorder import TurnRecorder
-    from mindroom.history.types import CompactionLifecycle, PreparedHistoryState
+    from mindroom.history.types import CompactionLifecycle, HistoryScope, PreparedHistoryState
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
@@ -1841,6 +1841,7 @@ async def continue_paused_team_run(  # noqa: C901
     decisions: dict[str, bool],
     denial_reasons: dict[str, str | None],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
+    history_scope: HistoryScope | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> str | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run."""
@@ -1867,6 +1868,7 @@ async def continue_paused_team_run(  # noqa: C901
                 config=config,
                 execution_identity=execution_identity,
                 team_name=configured_team_name,
+                scope=history_scope,
             ),
         )
         if scope is None:

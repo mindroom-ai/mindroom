@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 
 from mindroom.approval_continuation import (
     ApprovalCall,
@@ -262,6 +263,30 @@ def test_same_state_write_rejects_a_stale_context_revision(tmp_path: Path) -> No
     assert store._persist(original, first) == first
     assert store._persist(original, stale_second) is None
     assert store.get(original.approval_id) == first
+
+
+def test_legacy_context_without_additive_fields_remains_mutable(tmp_path: Path) -> None:
+    """Additive metadata must not make rows written by an earlier release immutable."""
+    store = ApprovalContinuationStore(tmp_path)
+    store.create(_continuation())
+    table = store._approval_table()
+    assert table is not None
+    with store._db.Session() as session, session.begin():
+        row = session.execute(select(table).where(table.c.id == "approval-1")).fetchone()
+        assert row is not None
+        legacy_context = dict(row._mapping["context"])
+        legacy_context.pop("history_scope")
+        legacy_context.pop("delivery_principal_id")
+        session.execute(table.update().where(table.c.id == "approval-1").values(context=legacy_context))
+
+    loaded = store.get("approval-1")
+    assert loaded is not None
+    assert loaded.history_scope is None
+    assert loaded.delivery_principal_id is None
+    resolved = store.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+
+    assert resolved is not None
+    assert resolved.calls[0].decision is ApprovalDecision.APPROVED
 
 
 def test_decision_write_failure_never_reads_as_a_winning_decision(
@@ -770,6 +795,53 @@ async def test_transient_resume_exception_retries_ready_continuation(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_transient_dispatch_store_read_retries_ready_continuation(tmp_path: Path) -> None:
+    """A detached dispatcher must retain its retry owner across a transient read failure."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    transport: ApprovalMatrixTransport
+
+    async def resume(continuation: ApprovalContinuation) -> None:
+        claimed = transport._continuations.claim(continuation.approval_id, "worker")
+        assert claimed is not None
+        completed = transport._continuations.complete(continuation.approval_id, "worker")
+        assert completed is not None
+
+    bot = SimpleNamespace(running=True, resume_approval_continuation=AsyncMock(side_effect=resume))
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda _name: cast("Any", bot),
+        cards_provider=lambda: None,
+    )
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    ready = transport._continuations.acknowledge_call("approval-1", "call-1")
+    assert ready is not None
+    original_get = transport._continuations.get
+    reads = 0
+
+    def flaky_get(approval_id: str) -> ApprovalContinuation | None:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            msg = "temporary continuation read failure"
+            raise RuntimeError(msg)
+        return original_get(approval_id)
+
+    with patch.object(transport._continuations, "get", side_effect=flaky_get):
+        await asyncio.wait_for(transport._dispatch_continuation("approval-1"), timeout=2)
+
+    completed = transport._continuations.get("approval-1")
+    assert completed is not None
+    assert completed.state == "completed"
+    bot.resume_approval_continuation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_resume_exception_after_claim_fails_closed(tmp_path: Path) -> None:
     """An exception after claim must settle failure instead of retrying possible execution."""
     runtime_paths = RuntimePaths(
@@ -829,6 +901,68 @@ async def test_resume_exception_after_claim_fails_closed(tmp_path: Path) -> None
     assert failed.state == "failed"
     bot.resume_approval_continuation.assert_awaited_once()
     bot.fail_approval_continuation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failure_settlement_exception_retries_claimed_continuation(tmp_path: Path) -> None:
+    """A transient terminal-settlement failure must not strand a claimed continuation."""
+    transport: ApprovalMatrixTransport
+
+    async def resume(continuation: ApprovalContinuation) -> None:
+        claimed = transport._continuations.claim(continuation.approval_id, "worker")
+        assert claimed is not None
+        msg = "failed after claim"
+        raise RuntimeError(msg)
+
+    settlement_attempts = 0
+
+    async def fail(continuation: ApprovalContinuation, reason: str) -> None:
+        nonlocal settlement_attempts
+        settlement_attempts += 1
+        if settlement_attempts == 1:
+            msg = "temporary failure delivery outage"
+            raise RuntimeError(msg)
+        fenced = transport._continuations.begin_failure(
+            continuation.approval_id,
+            reason,
+            claimant_id=continuation.claimant_id,
+            settlement_id="test-settler",
+            runtime_generation="test-runtime",
+        )
+        assert fenced is not None
+        failed = transport._continuations.finish_failure(
+            continuation.approval_id,
+            "test-settler",
+            reason,
+        )
+        assert failed is not None
+
+    bot = SimpleNamespace(
+        running=True,
+        resume_approval_continuation=AsyncMock(side_effect=resume),
+        fail_approval_continuation=AsyncMock(side_effect=fail),
+    )
+    transport = ApprovalMatrixTransport(
+        runtime_paths=RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path,
+        ),
+        bot_provider=lambda _name: cast("Any", bot),
+        cards_provider=lambda: None,
+    )
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    ready = transport._continuations.acknowledge_call("approval-1", "call-1")
+    assert ready is not None
+
+    await asyncio.wait_for(transport._dispatch_continuation("approval-1"), timeout=2)
+
+    failed = transport._continuations.get("approval-1")
+    assert failed is not None
+    assert failed.state == "failed"
+    assert settlement_attempts == 2
 
 
 @pytest.mark.asyncio

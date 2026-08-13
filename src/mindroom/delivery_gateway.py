@@ -49,7 +49,10 @@ from mindroom.matrix.client_delivery import (
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
+from mindroom.matrix.room_history_reads import (
+    find_outbox_delivery_event_id_via_room_messages,
+    find_response_event_ids_via_room_messages,
+)
 from mindroom.response_delivery import (
     DeliveryStage,
     RecoveryOutcome,
@@ -774,6 +777,21 @@ class DeliveryGateway:
             return delivered.event_id
 
         return await self._response_delivery(send, handoff=None).recover()
+
+    async def locate_delivery_from_sender(
+        self,
+        delivery: OutboxDelivery,
+        *,
+        response_sender: str,
+        source_event_ids: tuple[str, ...],
+    ) -> str | None:
+        """Locate a frozen delivery through the current bot's read access."""
+        return await find_outbox_delivery_event_id_via_room_messages(
+            self._client(),
+            delivery,
+            response_sender=response_sender,
+            source_event_ids=source_event_ids,
+        )
 
     async def _send_content(
         self,

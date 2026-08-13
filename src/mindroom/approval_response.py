@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.event_journal import OutboxView
+    from mindroom.event_journal import OutboxDelivery, OutboxView
     from mindroom.response_turn import PausedAttempt
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -91,6 +91,7 @@ class ApprovalResponseCoordinator:
     runtime_generation: Callable[[], str]
     journal_principal_id: str
     outbox_for_principal: Callable[[str], OutboxView]
+    legacy_principal_for_entity: Callable[[str], str | None]
     _store: ApprovalContinuationStore = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -454,10 +455,13 @@ class ApprovalResponseCoordinator:
         binding_state: Literal["publishing", "settling"] = (
             "publishing" if continuation.state == "publishing" else "settling"
         )
-        delivery = await self._delivery_outbox(continuation).load_delivery(
+        outbox = self._delivery_outbox(continuation)
+        delivery = await outbox.load_delivery(
             turn_id=continuation.source_event_ids[0],
             stage=DeliveryStage.INITIAL,
         )
+        if delivery is not None and delivery.acknowledged_event_id is None:
+            delivery = await self._reconcile_unacknowledged_delivery(continuation, delivery, outbox=outbox)
         if delivery is None or delivery.acknowledged_event_id is None:
             return continuation
         bound = await self.bind_response_event(
@@ -480,21 +484,7 @@ class ApprovalResponseCoordinator:
         if delivery is None:
             return False
         if delivery.acknowledged_event_id is None:
-            if delivery.attempted and continuation.delivery_principal_id not in {
-                None,
-                self.journal_principal_id,
-            }:
-                self.logger.warning(
-                    "approval_continuation_original_final_unresolved",
-                    approval_id=continuation.approval_id,
-                    delivery_principal_id=continuation.delivery_principal_id,
-                )
-                return True
-            await self.delivery_gateway.recover_deliveries()
-            delivery = await outbox.load_delivery(
-                turn_id=turn_id,
-                stage=DeliveryStage.FINAL,
-            )
+            delivery = await self._reconcile_unacknowledged_delivery(continuation, delivery, outbox=outbox)
         if delivery is None or delivery.acknowledged_event_id is None:
             return False
         if continuation.claimant_id is not None:
@@ -503,8 +493,55 @@ class ApprovalResponseCoordinator:
 
     def _delivery_outbox(self, continuation: ApprovalContinuation) -> OutboxView:
         """Return the principal-bound outbox that owns this continuation's delivery."""
-        principal_id = continuation.delivery_principal_id
+        principal_id = self._delivery_principal_id(continuation)
         return self.delivery_gateway.deps.outbox if principal_id is None else self.outbox_for_principal(principal_id)
+
+    def _delivery_principal_id(self, continuation: ApprovalContinuation) -> str | None:
+        """Return explicit delivery ownership, deriving it for additive legacy rows."""
+        return continuation.delivery_principal_id or self.legacy_principal_for_entity(continuation.entity_name)
+
+    async def _reconcile_unacknowledged_delivery(
+        self,
+        continuation: ApprovalContinuation,
+        delivery: OutboxDelivery,
+        *,
+        outbox: OutboxView,
+    ) -> OutboxDelivery | None:
+        """Resolve one frozen delivery without ever sending as the wrong principal."""
+        principal_id = self._delivery_principal_id(continuation)
+        if principal_id in {None, self.journal_principal_id}:
+            await self.delivery_gateway.recover_deliveries()
+            return await outbox.load_delivery(turn_id=delivery.turn_id, stage=delivery.stage)
+        if not delivery.attempted:
+            await outbox.retire_unacknowledged_delivery(
+                turn_id=delivery.turn_id,
+                stage=delivery.stage,
+                transaction_id=delivery.transaction_id,
+            )
+            return await outbox.load_delivery(turn_id=delivery.turn_id, stage=delivery.stage)
+        _entity_name, separator, response_sender = principal_id.partition("@")
+        if not separator or not response_sender.startswith("@"):
+            msg = f"Invalid approval delivery principal: {principal_id!r}"
+            raise RuntimeError(msg)
+        event_id = await self.delivery_gateway.locate_delivery_from_sender(
+            delivery,
+            response_sender=response_sender,
+            source_event_ids=continuation.source_event_ids,
+        )
+        if event_id is not None:
+            await outbox.acknowledge_delivery(
+                turn_id=delivery.turn_id,
+                stage=delivery.stage,
+                event_id=event_id,
+            )
+            persisted = await outbox.load_delivery(turn_id=delivery.turn_id, stage=delivery.stage)
+            return replace(delivery, acknowledged_event_id=event_id) if persisted is None else persisted
+        await outbox.retire_unacknowledged_delivery(
+            turn_id=delivery.turn_id,
+            stage=delivery.stage,
+            transaction_id=delivery.transaction_id,
+        )
+        return await outbox.load_delivery(turn_id=delivery.turn_id, stage=delivery.stage)
 
     async def _edit_response(
         self,

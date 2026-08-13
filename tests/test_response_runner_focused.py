@@ -1633,6 +1633,94 @@ def test_ad_hoc_team_continuation_persists_response_in_original_history_scope(tm
 
 
 @pytest.mark.asyncio
+async def test_team_continuation_reopens_persisted_history_scope(tmp_path: Path) -> None:
+    """The runner must pass the original ad-hoc scope into paused-run reconstruction."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    target = _target(thread_id="$thread")
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=target,
+        user_id="@user:localhost",
+        agent_name="general",
+    )
+    history_scope = HistoryScope(kind="team", scope_id="ad_hoc_original_scope")
+    continuation = ApprovalContinuation(
+        approval_id="approval-ad-hoc-team-resume",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="team",
+        entity_name="general",
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="research",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.APPROVED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity=serialize_tool_execution_identity(identity),
+        source_event_ids=("$source",),
+        team_member_names=("general", "research"),
+        team_mode="coordinate",
+        history_scope=history_scope,
+        state="claimed",
+    )
+
+    with (
+        patch("mindroom.response_runner.continue_paused_team_run", new=AsyncMock(return_value="done")) as resume,
+        patch("mindroom.response_runner.typing_indicator", _noop_typing),
+    ):
+        result = await runner._continue_entity_call(
+            continuation,
+            request=_plain_request(target),
+            target=target,
+            tool_trace_collector=[],
+        )
+
+    assert result == "done"
+    assert resume.await_args.kwargs["history_scope"] == history_scope
+
+
+def test_legacy_team_continuation_without_scope_skips_incorrect_run_linkage(tmp_path: Path) -> None:
+    """An additive legacy row must not write team linkage into the bot's agent scope."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-legacy-team-linkage",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="team",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="removed-agent",
+                expires_at="2026-08-12T00:00:00+00:00",
+            ),
+        ),
+        execution_identity=serialize_tool_execution_identity(
+            runner.deps.tool_runtime.build_execution_identity(
+                target=_target(thread_id="$thread"),
+                user_id="@user:localhost",
+                agent_name="general",
+            ),
+        ),
+        source_event_ids=("$source",),
+    )
+
+    assert runner._approval_response_event_persistence(continuation) is None
+
+
+@pytest.mark.asyncio
 async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path: Path) -> None:
     """Unchanged bots must apply reloaded approval policy and agent configuration."""
     bot = _bot(tmp_path)
@@ -2248,12 +2336,15 @@ async def test_router_failure_uses_terminal_notice_instead_of_cross_sender_edit(
     assert failed.state == "failed"
 
 
-@pytest.mark.asyncio
-async def test_router_recovery_honors_original_principal_acknowledged_final(tmp_path: Path) -> None:
-    """An unavailable owner's acknowledged FINAL must win over a router failure notice."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    continuation = ApprovalContinuation(
-        approval_id="approval-original-final",
+def _original_principal_continuation(
+    approval_id: str,
+    *,
+    state: Literal["publishing", "claimed"] = "claimed",
+    response_event_id: str | None = "$waiting",
+) -> ApprovalContinuation:
+    """Build one removed-owner continuation for principal-bound recovery tests."""
+    return ApprovalContinuation(
+        approval_id=approval_id,
         run_id="run-1",
         session_id="session-1",
         entity_kind="agent",
@@ -2261,29 +2352,53 @@ async def test_router_recovery_honors_original_principal_acknowledged_final(tmp_
         room_id="!room:localhost",
         thread_id="$thread",
         requester_id="@user:localhost",
-        response_event_id="$waiting",
+        response_event_id=response_event_id,
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
                 tool_name="dangerous",
                 invoking_agent="removed-agent",
                 expires_at="2026-08-12T00:00:00+00:00",
-                decision=response_runner.ContinuationDecision.APPROVED,
-                decision_recorded=True,
+                decision=(response_runner.ContinuationDecision.APPROVED if state == "claimed" else None),
+                decision_recorded=state == "claimed",
             ),
         ),
         execution_identity={},
         source_event_ids=("$source",),
-        state="claimed",
-        claimant_id="removed-agent:worker",
+        state=state,
+        claimant_id="removed-agent:worker" if state == "claimed" else None,
         delivery_principal_id="removed-agent@@removed-agent:localhost",
     )
+
+
+def _original_principal_delivery(
+    stage: response_runner.DeliveryStage,
+    *,
+    attempted: bool,
+    acknowledged_event_id: str | None = None,
+) -> SimpleNamespace:
+    """Build one frozen delivery row for original-principal recovery tests."""
+    return SimpleNamespace(
+        turn_id="$source",
+        stage=stage,
+        transaction_id=f"original-{stage.value}",
+        acknowledged_event_id=acknowledged_event_id,
+        attempted=attempted,
+    )
+
+
+@pytest.mark.asyncio
+async def test_router_recovery_honors_original_principal_acknowledged_final(tmp_path: Path) -> None:
+    """An unavailable owner's acknowledged FINAL must win over a router failure notice."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = _original_principal_continuation("approval-original-final")
     runner._approval_responses._store.create(continuation)
     original_outbox = SimpleNamespace(
         load_delivery=AsyncMock(
-            return_value=SimpleNamespace(
-                acknowledged_event_id="$final",
+            return_value=_original_principal_delivery(
+                response_runner.DeliveryStage.FINAL,
                 attempted=True,
+                acknowledged_event_id="$final",
             ),
         ),
     )
@@ -2299,40 +2414,52 @@ async def test_router_recovery_honors_original_principal_acknowledged_final(tmp_
 
 
 @pytest.mark.asyncio
+async def test_router_recovery_adopts_original_principal_attempted_final(tmp_path: Path) -> None:
+    """A located original-principal FINAL completes without a conflicting router notice."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = _original_principal_continuation("approval-original-final-attempted")
+    runner._approval_responses._store.create(continuation)
+    attempted = _original_principal_delivery(response_runner.DeliveryStage.FINAL, attempted=True)
+    acknowledged = _original_principal_delivery(
+        response_runner.DeliveryStage.FINAL,
+        attempted=True,
+        acknowledged_event_id="$final",
+    )
+    original_outbox = SimpleNamespace(
+        load_delivery=AsyncMock(side_effect=(attempted, acknowledged)),
+        acknowledge_delivery=AsyncMock(),
+    )
+    runner._approval_responses.outbox_for_principal = MagicMock(return_value=original_outbox)
+
+    with (
+        patch.object(DeliveryGateway, "locate_delivery_from_sender", new=AsyncMock(return_value="$final")),
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock()) as send,
+    ):
+        await runner.fail_approval_continuation(continuation, "Agent removed")
+
+    completed = runner._approval_responses._store.get(continuation.approval_id)
+    assert completed is not None
+    assert completed.state == "completed"
+    original_outbox.acknowledge_delivery.assert_awaited_once()
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_router_recovery_adopts_original_principal_waiting_event(tmp_path: Path) -> None:
     """An unavailable owner's acknowledged INITIAL anchors the router's terminal notice."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    continuation = ApprovalContinuation(
-        approval_id="approval-original-initial",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="removed-agent",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id=None,
-        calls=(
-            ApprovalCall(
-                tool_call_id="call-1",
-                tool_name="dangerous",
-                invoking_agent="removed-agent",
-                expires_at="2026-08-12T00:00:00+00:00",
-                decision=response_runner.ContinuationDecision.DENIED,
-                decision_recorded=True,
-            ),
-        ),
-        execution_identity={},
-        source_event_ids=("$source",),
+    continuation = _original_principal_continuation(
+        "approval-original-initial",
         state="publishing",
-        delivery_principal_id="removed-agent@@removed-agent:localhost",
+        response_event_id=None,
     )
     runner._approval_responses._store.create(continuation)
     original_outbox = SimpleNamespace(
         load_delivery=AsyncMock(
-            return_value=SimpleNamespace(
-                acknowledged_event_id="$waiting",
+            return_value=_original_principal_delivery(
+                response_runner.DeliveryStage.INITIAL,
                 attempted=True,
+                acknowledged_event_id="$waiting",
             ),
         ),
     )
@@ -2350,49 +2477,129 @@ async def test_router_recovery_adopts_original_principal_waiting_event(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_router_recovery_leaves_original_principal_attempted_final_recoverable(tmp_path: Path) -> None:
-    """An unresolved original FINAL must not be overwritten by a router failure notice."""
+async def test_router_recovery_retires_unattempted_original_principal_waiting_delivery(tmp_path: Path) -> None:
+    """A never-sent original waiting message must not survive the router's terminal notice."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    continuation = ApprovalContinuation(
-        approval_id="approval-original-final-unresolved",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="removed-agent",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        calls=(
-            ApprovalCall(
-                tool_call_id="call-1",
-                tool_name="dangerous",
-                invoking_agent="removed-agent",
-                expires_at="2026-08-12T00:00:00+00:00",
-                decision=response_runner.ContinuationDecision.APPROVED,
-                decision_recorded=True,
-            ),
-        ),
-        execution_identity={},
-        source_event_ids=("$source",),
-        state="claimed",
-        claimant_id="removed-agent:worker",
-        delivery_principal_id="removed-agent@@removed-agent:localhost",
+    continuation = _original_principal_continuation(
+        "approval-original-initial-unattempted",
+        state="publishing",
+        response_event_id=None,
     )
     runner._approval_responses._store.create(continuation)
     original_outbox = SimpleNamespace(
         load_delivery=AsyncMock(
-            return_value=SimpleNamespace(
-                acknowledged_event_id=None,
-                attempted=True,
+            side_effect=(
+                _original_principal_delivery(response_runner.DeliveryStage.INITIAL, attempted=False),
+                None,
             ),
+        ),
+        retire_unacknowledged_delivery=AsyncMock(return_value=True),
+    )
+    runner._approval_responses.outbox_for_principal = MagicMock(return_value=original_outbox)
+
+    with patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$terminal")) as send:
+        await runner.fail_approval_continuation(continuation, "Agent removed")
+
+    failed = runner._approval_responses._store.get(continuation.approval_id)
+    assert failed is not None
+    assert failed.state == "failed"
+    original_outbox.retire_unacknowledged_delivery.assert_awaited_once()
+    send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_router_recovery_adopts_attempted_original_principal_waiting_delivery(tmp_path: Path) -> None:
+    """A waiting message found under the original sender anchors the router's notice."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = _original_principal_continuation(
+        "approval-original-initial-attempted",
+        state="publishing",
+        response_event_id=None,
+    )
+    runner._approval_responses._store.create(continuation)
+    waiting = _original_principal_delivery(response_runner.DeliveryStage.INITIAL, attempted=True)
+    acknowledged = _original_principal_delivery(
+        response_runner.DeliveryStage.INITIAL,
+        attempted=True,
+        acknowledged_event_id="$waiting",
+    )
+    original_outbox = SimpleNamespace(
+        load_delivery=AsyncMock(side_effect=(waiting, acknowledged)),
+        acknowledge_delivery=AsyncMock(),
+    )
+    runner._approval_responses.outbox_for_principal = MagicMock(return_value=original_outbox)
+
+    with (
+        patch.object(DeliveryGateway, "locate_delivery_from_sender", new=AsyncMock(return_value="$waiting")),
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$terminal")) as send,
+    ):
+        await runner.fail_approval_continuation(continuation, "Agent removed")
+
+    failed = runner._approval_responses._store.get(continuation.approval_id)
+    assert failed is not None
+    assert failed.state == "failed"
+    assert failed.response_event_id == "$waiting"
+    original_outbox.acknowledge_delivery.assert_awaited_once()
+    assert send.await_args.args[0].target.reply_to_event_id == "$waiting"
+
+
+@pytest.mark.asyncio
+async def test_router_recovery_retires_original_principal_final_proven_absent(tmp_path: Path) -> None:
+    """A router may fail a frozen original FINAL only after proving it absent."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = _original_principal_continuation("approval-original-final-unresolved")
+    runner._approval_responses._store.create(continuation)
+    original_outbox = SimpleNamespace(
+        load_delivery=AsyncMock(
+            side_effect=(
+                _original_principal_delivery(response_runner.DeliveryStage.FINAL, attempted=True),
+                None,
+            ),
+        ),
+        retire_unacknowledged_delivery=AsyncMock(return_value=True),
+    )
+    runner._approval_responses.outbox_for_principal = MagicMock(return_value=original_outbox)
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$failure")) as send,
+        patch.object(DeliveryGateway, "locate_delivery_from_sender", new=AsyncMock(return_value=None)) as locate,
+        patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock()) as recover,
+    ):
+        await runner.fail_approval_continuation(continuation, "Agent removed")
+
+    failed = runner._approval_responses._store.get(continuation.approval_id)
+    assert failed is not None
+    assert failed.state == "failed"
+    locate.assert_awaited_once()
+    original_outbox.retire_unacknowledged_delivery.assert_awaited_once()
+    send.assert_awaited_once()
+    recover.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_recovery_leaves_original_principal_attempted_final_recoverable_on_scan_failure(
+    tmp_path: Path,
+) -> None:
+    """An inconclusive room scan must leave the original FINAL durably recoverable."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = _original_principal_continuation("approval-original-final-unresolved")
+    runner._approval_responses._store.create(continuation)
+    original_outbox = SimpleNamespace(
+        load_delivery=AsyncMock(
+            return_value=_original_principal_delivery(response_runner.DeliveryStage.FINAL, attempted=True),
         ),
     )
     runner._approval_responses.outbox_for_principal = MagicMock(return_value=original_outbox)
 
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock()) as send,
+        patch.object(
+            DeliveryGateway,
+            "locate_delivery_from_sender",
+            new=AsyncMock(side_effect=RuntimeError("room scan unavailable")),
+        ),
         patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock()) as recover,
+        pytest.raises(RuntimeError, match="room scan unavailable"),
     ):
         await runner.fail_approval_continuation(continuation, "Agent removed")
 
@@ -2400,6 +2607,37 @@ async def test_router_recovery_leaves_original_principal_attempted_final_recover
     assert recoverable is not None
     assert recoverable.state == "claimed"
     send.assert_not_awaited()
+    recover.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_recovery_retires_original_principal_unattempted_final(tmp_path: Path) -> None:
+    """A never-attempted original FINAL is retired before router failure settlement."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = _original_principal_continuation("approval-original-final-unattempted")
+    runner._approval_responses._store.create(continuation)
+    original_outbox = SimpleNamespace(
+        load_delivery=AsyncMock(
+            side_effect=(
+                _original_principal_delivery(response_runner.DeliveryStage.FINAL, attempted=False),
+                None,
+            ),
+        ),
+        retire_unacknowledged_delivery=AsyncMock(return_value=True),
+    )
+    runner._approval_responses.outbox_for_principal = MagicMock(return_value=original_outbox)
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$failure")) as send,
+        patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock()) as recover,
+    ):
+        await runner.fail_approval_continuation(continuation, "Agent removed")
+
+    recoverable = runner._approval_responses._store.get(continuation.approval_id)
+    assert recoverable is not None
+    assert recoverable.state == "failed"
+    original_outbox.retire_unacknowledged_delivery.assert_awaited_once()
+    send.assert_awaited_once()
     recover.assert_not_awaited()
 
 

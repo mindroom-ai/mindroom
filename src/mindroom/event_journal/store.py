@@ -542,6 +542,24 @@ class PrincipalStore:
             ),
         )
 
+    async def retire_unacknowledged_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        transaction_id: str,
+    ) -> bool:
+        """Retire an exact row after its Matrix absence was established."""
+        return await self._backend.write(
+            lambda transaction: outbox.retire_unacknowledged(
+                transaction,
+                self._principal_id,
+                turn_id=turn_id,
+                stage=stage,
+                transaction_id=transaction_id,
+            ),
+        )
+
     async def acknowledge_delivery(
         self,
         *,

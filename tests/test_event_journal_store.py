@@ -2586,6 +2586,52 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
 class TestOutbox:
     """Delivery survives a crash at every point around the network call."""
 
+    async def test_only_exact_unacknowledged_delivery_can_be_retired(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Absence reconciliation cannot delete another or already-acknowledged send."""
+        alice = journal_store.principal("agent@alice")
+        transaction_id = await alice.enqueue_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+        assert transaction_id is not None
+
+        assert not await alice.retire_unacknowledged_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            transaction_id="wrong-transaction",
+        )
+        assert await alice.retire_unacknowledged_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            transaction_id=transaction_id,
+        )
+        assert await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL) is None
+
+        transaction_id = await alice.enqueue_delivery(
+            turn_id="turn-2",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+        assert transaction_id is not None
+        await alice.acknowledge_delivery(
+            turn_id="turn-2",
+            stage=DeliveryStage.FINAL,
+            event_id="$answer",
+        )
+        assert not await alice.retire_unacknowledged_delivery(
+            turn_id="turn-2",
+            stage=DeliveryStage.FINAL,
+            transaction_id=transaction_id,
+        )
+
     async def test_a_losing_acknowledgement_writes_neither_the_row_nor_the_record(
         self,
         journal_store: EventJournalStore,
