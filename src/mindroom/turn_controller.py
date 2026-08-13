@@ -172,6 +172,7 @@ class _InteractiveResponseHandoff:
     ownership_ready: asyncio.Event = field(default_factory=asyncio.Event)
     handoff_released: asyncio.Event = field(default_factory=asyncio.Event)
     ownership_entered: bool = False
+    _cleanup_task: asyncio.Task[None] | None = None
 
     async def wait_for_release(self) -> None:
         """Enter owned cleanup, then wait for the caller to finish handoff."""
@@ -179,15 +180,36 @@ class _InteractiveResponseHandoff:
         self.ownership_ready.set()
         await self.handoff_released.wait()
 
+    async def _run_unstarted_cleanup(self) -> None:
+        try:
+            await self.reservation.release()
+        finally:
+            self.on_failure()
+
     async def _cleanup_unstarted(self) -> None:
         if self.ownership_entered:
             return
-        await self.reservation.release()
-        self.on_failure()
+        if self._cleanup_task is None:
+            self._cleanup_task = asyncio.create_task(self._run_unstarted_cleanup())
+        cancellation_requested = False
+        while not self._cleanup_task.done():
+            try:
+                await asyncio.shield(self._cleanup_task)
+            except asyncio.CancelledError:
+                cancellation_requested = True
+        self._cleanup_task.result()
+        if cancellation_requested:
+            raise asyncio.CancelledError
 
     async def _cancel_task(self, task: asyncio.Task[None]) -> None:
         task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
         await self._cleanup_unstarted()
 
     async def finish(self, task: asyncio.Task[None]) -> None:
@@ -199,11 +221,11 @@ class _InteractiveResponseHandoff:
             await self._cancel_task(task)
             raise
         if task.done():
-            await asyncio.gather(task, return_exceptions=True)
+            task_cancelled = task.cancelled()
+            error = None if task_cancelled else task.exception()
             await self._cleanup_unstarted()
-            if task.cancelled():
+            if task_cancelled:
                 raise asyncio.CancelledError
-            error = task.exception()
             if error is not None:
                 raise error
             msg = "Interactive response task finished before handoff release"
