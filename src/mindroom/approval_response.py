@@ -78,6 +78,21 @@ def identify_approval_tools(
     return tuple(identified)
 
 
+def continuation_target(
+    continuation: ApprovalContinuation,
+    *,
+    reply_to_event_id: str | None = None,
+) -> MessageTarget:
+    """Return the canonical Matrix conversation target for one continuation."""
+    return MessageTarget(
+        room_id=continuation.room_id,
+        source_thread_id=continuation.thread_id,
+        resolved_thread_id=continuation.thread_id,
+        reply_to_event_id=reply_to_event_id,
+        session_id=continuation.session_id,
+    )
+
+
 @dataclass
 class ApprovalResponseCoordinator:
     """Own approval policy, card publication, and visible terminal settlement."""
@@ -295,13 +310,7 @@ class ApprovalResponseCoordinator:
         if not await expire_continuation_approval_cards(current.approval_id):
             return False
         visible_reason = _USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else reason
-        target = MessageTarget(
-            room_id=current.room_id,
-            source_thread_id=current.thread_id,
-            resolved_thread_id=current.thread_id,
-            reply_to_event_id=None,
-            session_id=current.session_id,
-        )
+        target = continuation_target(current)
         delivered = await self.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,

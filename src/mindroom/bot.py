@@ -1959,7 +1959,7 @@ class AgentBot:
                     self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
             raise
 
-    async def open_approval_recovery_client(self) -> None:
+    async def _open_approval_recovery_client(self) -> None:
         """Open only the original Matrix sender needed to recover a frozen FINAL."""
         if self.client is not None:
             return
@@ -1982,10 +1982,17 @@ class AgentBot:
             raise
 
     async def recover_approval_final(self, approval_id: str) -> bool:
-        """Recover one frozen approval answer through the normal final lifecycle."""
-        return await self._response_runner.recover_approval_final(approval_id)
+        """Recover one frozen approval answer, owning any recovery-only client lifetime."""
+        opened_recovery_client = self.client is None
+        try:
+            if opened_recovery_client:
+                await self._open_approval_recovery_client()
+            return await self._response_runner.recover_approval_final(approval_id)
+        finally:
+            if opened_recovery_client:
+                await self._close_approval_recovery_client()
 
-    async def close_approval_recovery_client(self) -> None:
+    async def _close_approval_recovery_client(self) -> None:
         """Close a recovery-only Matrix client without starting normal bot services."""
         client = self.client
         if client is not None:

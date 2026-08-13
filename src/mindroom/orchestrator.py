@@ -423,14 +423,7 @@ class _MultiAgentOrchestrator:
                 )
                 return False
 
-        opened_recovery_client = bot.client is None
-        try:
-            if opened_recovery_client:
-                await bot.open_approval_recovery_client()
-            return await bot.recover_approval_final(continuation.approval_id)
-        finally:
-            if opened_recovery_client:
-                await bot.close_approval_recovery_client()
+        return await bot.recover_approval_final(continuation.approval_id)
 
     def _bind_response_admission_gate(self, bot: AgentBot | TeamBot) -> None:
         """Share the orchestrator-owned response admission gate with one managed bot."""

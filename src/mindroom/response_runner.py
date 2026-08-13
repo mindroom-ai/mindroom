@@ -19,6 +19,7 @@ from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.approval_execution import AgentApprovalExecution
 from mindroom.approval_response import (
     ApprovalResponseCoordinator,
+    continuation_target,
     identify_approval_tools,
 )
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
@@ -58,7 +59,6 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
-from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     classify_cancel_source,
@@ -147,6 +147,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.identity import MatrixID
+    from mindroom.message_target import MessageTarget
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.stop import StopManager
@@ -1972,13 +1973,7 @@ class ResponseRunner:
         continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
         if continuation is None:
             return None
-        target = MessageTarget(
-            room_id=continuation.room_id,
-            source_thread_id=continuation.thread_id,
-            resolved_thread_id=continuation.thread_id,
-            reply_to_event_id=source_event_id,
-            session_id=continuation.session_id,
-        )
+        target = continuation_target(continuation, reply_to_event_id=source_event_id)
         request = self._approval_response_request(continuation, target=target)
 
         async def ownership_disappeared(
@@ -2018,12 +2013,9 @@ class ResponseRunner:
         continuation = await self.deps.approval_store.approval_continuation(approval_id)
         if continuation is None:
             return True
-        target = MessageTarget(
-            room_id=continuation.room_id,
-            source_thread_id=continuation.thread_id,
-            resolved_thread_id=continuation.thread_id,
+        target = continuation_target(
+            continuation,
             reply_to_event_id=continuation.source_event_ids[0],
-            session_id=continuation.session_id,
         )
         request = self._approval_response_request(continuation, target=target)
 

@@ -783,7 +783,7 @@ async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_s
 
 @pytest.mark.asyncio
 async def test_removed_entity_reconciles_live_approval_continuations(tmp_path: Path) -> None:
-    """Config removal must notify approval recovery after the old bot is stopped."""
+    """Config removal delegates live recovery to the removal owner before outer cleanup."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     new_config = Config.validate_with_runtime({}, _runtime_paths(tmp_path))
     orchestrator.config = new_config
@@ -804,7 +804,7 @@ async def test_removed_entity_reconciles_live_approval_continuations(tmp_path: P
     with (
         patch("mindroom.orchestrator.stop_entities", new=AsyncMock()),
         patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock(return_value=EntityStartResults())),
-        patch.object(orchestrator, "_remove_deleted_entities", new=AsyncMock()),
+        patch.object(orchestrator, "_remove_deleted_entities", new=AsyncMock()) as remove_deleted,
         patch.object(
             orchestrator._approval_transport,
             "reconcile_unavailable_entities",
@@ -813,7 +813,8 @@ async def test_removed_entity_reconciles_live_approval_continuations(tmp_path: P
     ):
         await orchestrator._restart_changed_entities(plan)
 
-    reconcile.assert_awaited_once_with({"code"})
+    remove_deleted.assert_awaited_once_with({"code"})
+    reconcile.assert_awaited_once_with(set())
 
 
 @pytest.mark.asyncio

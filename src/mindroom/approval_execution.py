@@ -143,7 +143,7 @@ class AgentApprovalExecution:
                         continuation.entity_name,
                         config,
                         self.runtime_paths,
-                        execution_identity,
+                        execution_identity=execution_identity,
                     ),
                     session_id=continuation.session_id,
                     session_type=SessionType.AGENT,

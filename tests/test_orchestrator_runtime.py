@@ -157,9 +157,7 @@ async def test_unavailable_final_recovery_restores_offline_owner_account(tmp_pat
     recovery_bot = MagicMock()
     recovery_bot.client = None
     recovery_bot.approval_store.principal_id = "removed@@removed:localhost"
-    recovery_bot.open_approval_recovery_client = AsyncMock()
     recovery_bot.recover_approval_final = AsyncMock(return_value=True)
-    recovery_bot.close_approval_recovery_client = AsyncMock()
 
     with (
         patch("mindroom.orchestrator.load_agent_user", return_value=account) as load_account,
@@ -169,9 +167,7 @@ async def test_unavailable_final_recovery_restores_offline_owner_account(tmp_pat
 
     load_account.assert_called_once_with("removed", orchestrator.runtime_paths)
     create_recovery_bot.assert_called_once()
-    recovery_bot.open_approval_recovery_client.assert_awaited_once()
     recovery_bot.recover_approval_final.assert_awaited_once_with("approval-1")
-    recovery_bot.close_approval_recovery_client.assert_awaited_once()
 
 
 @pytest.mark.asyncio

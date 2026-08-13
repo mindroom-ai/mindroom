@@ -58,6 +58,7 @@ from mindroom.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     ApprovalActionResult,
     MatrixApprovalAction,
+    SentApprovalEvent,
     shutdown_approval_runtime,
 )
 from tests.approval_test_support import FakeApprovalCards
@@ -260,6 +261,27 @@ class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
 
     @pytest.mark.asyncio
+    async def test_recover_approval_final_owns_recovery_client_lifetime(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """The bot that mutates a recovery-only client must own its full lifetime."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+        with (
+            patch.object(bot, "_open_approval_recovery_client", new=AsyncMock()) as open_client,
+            patch.object(bot._response_runner, "recover_approval_final", new=AsyncMock(return_value=True)) as recover,
+            patch.object(bot, "_close_approval_recovery_client", new=AsyncMock()) as close_client,
+        ):
+            assert await bot.recover_approval_final("approval-1")
+
+        open_client.assert_awaited_once_with()
+        recover.assert_awaited_once_with("approval-1")
+        close_client.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
     async def test_recovery_client_waits_for_post_effects_before_close(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -278,7 +300,7 @@ class TestAgentBot(AgentBotTestBase):
             return True
 
         with patch("mindroom.bot.wait_for_background_tasks", side_effect=wait_for_effects) as wait:
-            await bot.close_approval_recovery_client()
+            await bot._close_approval_recovery_client()
 
         assert order == ["effects", "close"]
         wait.assert_awaited_once_with(timeout=5.0, owner=bot._runtime_view)
@@ -1151,13 +1173,15 @@ class TestAgentBot(AgentBotTestBase):
                 await bot._response_runner.wait_for_source_owned_inbox_responses()
                 assert "$source" not in bot._journal_dispatcher._worker._deferred
 
+    @pytest.mark.parametrize("requires_human", [False, True], ids=["automatic", "human"])
     @pytest.mark.asyncio
-    async def test_persisted_pause_resumes_once_in_fresh_bot_runtime(
+    async def test_persisted_pause_resumes_once_in_fresh_bot_runtime(  # noqa: PLR0915 - full restart boundary
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        requires_human: bool,
     ) -> None:
-        """The real suspend transaction must let a fresh bot execute the exact tool once."""
+        """A fresh bot must execute the exact persisted tool once after policy or human approval."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         session_db = tmp_path / "persisted-approval-agent.db"
@@ -1209,6 +1233,17 @@ class TestAgentBot(AgentBotTestBase):
         first = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         first.client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
         first.client.room_send.return_value = nio.RoomSendResponse("$waiting", "!test:localhost")
+        router_principal_id = "router@@mindroom_router:localhost"
+        if requires_human:
+            initialize_approval_store(
+                runtime_paths,
+                sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+                editor=AsyncMock(return_value=True),
+                cards=first._journal_store.principal(router_principal_id),
+                approval_room_ids=lambda: {"!test:localhost"},
+                transport_sender=lambda: "@mindroom_router:localhost",
+                sending_device=lambda: "DEVICE",
+            )
         source = InboundEvent(
             event_id="$source",
             room_id="!test:localhost",
@@ -1239,7 +1274,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with patch(
             "mindroom.approval_response.evaluate_tool_approval",
-            new=AsyncMock(return_value=(False, 60.0)),
+            new=AsyncMock(return_value=(requires_human, 60.0)),
         ):
             suspended = await first._response_runner._suspend_for_approval(
                 paused,
@@ -1254,19 +1289,50 @@ class TestAgentBot(AgentBotTestBase):
         assert suspended.terminal_status == "suspended"
         assert executed == []
         persisted = await first.approval_store.approval_continuation_for_source("$source")
+        if requires_human:
+            await shutdown_approval_runtime()
         assert persisted is not None
-        assert persisted.state == "ready"
+        assert persisted.state == ("waiting" if requires_human else "ready")
         if first_agent.db is not None:
             first_agent.db.close()
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
         restarted.client.room_send.return_value = nio.RoomSendResponse("$final", "!test:localhost")
-        with patch("mindroom.approval_execution.create_agent", side_effect=lambda *_args, **_kwargs: new_agent()):
+
+        async def drain_restarted_runtime() -> None:
             restarted._journal_dispatcher.release_turn_replay()
             await restarted._journal_dispatcher.drain_once()
             await restarted._response_runner.wait_for_source_owned_inbox_responses()
             await restarted._journal_dispatcher.drain_once()
+
+        with patch("mindroom.approval_execution.create_agent", side_effect=lambda *_args, **_kwargs: new_agent()):
+            if requires_human:
+                manager = initialize_approval_store(
+                    runtime_paths,
+                    editor=AsyncMock(return_value=True),
+                    cards=restarted._journal_store.principal(router_principal_id),
+                    approval_room_ids=lambda: {"!test:localhost"},
+                    transport_sender=lambda: "@mindroom_router:localhost",
+                    sending_device=lambda: "DEVICE",
+                    continuation_ready=lambda _entity_name, source_ids: restarted.retry_approval_sources(source_ids),
+                )
+                restarted._journal_dispatcher.release_turn_replay()
+                try:
+                    resolved = await manager.handle_card_response(
+                        room_id="!test:localhost",
+                        sender_id="@user:localhost",
+                        card_event_id="$approval",
+                        status="approved",
+                        reason=None,
+                    )
+                    assert resolved.consumed is True
+                    assert resolved.resolved is True
+                    await drain_restarted_runtime()
+                finally:
+                    await shutdown_approval_runtime()
+            else:
+                await drain_restarted_runtime()
 
         remaining = await restarted.approval_store.approval_continuation_for_source("$source")
         assert len(executed) == 1, remaining
