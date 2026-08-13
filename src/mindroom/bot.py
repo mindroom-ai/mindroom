@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from dataclasses import dataclass, replace
 from functools import cached_property, partial
@@ -2175,11 +2174,6 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
-        if os.environ.get("MINDROOM_INGESTION_CANARY_AGENT") == self.agent_name:
-            from .matrix import durable_ingestion  # noqa: PLC0415
-
-            await durable_ingestion.run_durable_ingestion(self)
-            return
         while True:
             try:
                 await run_matrix_sync_forever(
