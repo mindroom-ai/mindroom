@@ -1349,12 +1349,22 @@ async def test_router_removal_unbinds_external_trigger_runtime_before_cleanup(tm
         order.append("unbind")
         external_trigger_runtime_bound = False
 
-    with patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime):
+    async def reconcile_before_cleanup(_removed_entities: set[str]) -> None:
+        order.append("reconcile")
+
+    with (
+        patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime),
+        patch.object(
+            orchestrator._approval_transport,
+            "reconcile_unavailable_entities",
+            side_effect=reconcile_before_cleanup,
+        ),
+    ):
         await orchestrator._remove_deleted_entities({ROUTER_AGENT_NAME})
 
     assert ROUTER_AGENT_NAME not in orchestrator.agent_bots
     assert external_trigger_runtime_bound is False
-    assert order == ["unbind", "cleanup"]
+    assert order == ["unbind", "reconcile", "cleanup"]
 
 
 @pytest.mark.asyncio
