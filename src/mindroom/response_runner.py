@@ -1081,10 +1081,11 @@ class ResponseRunner:
     @staticmethod
     def _approval_outcome_from_delivery(delivery: OutboxDelivery) -> FinalDeliveryOutcome:
         """Restore semantic lifecycle facts from one frozen approval FINAL."""
-        event_id = delivery.acknowledged_event_id
-        if event_id is None:
+        acknowledged_event_id = delivery.acknowledged_event_id
+        if acknowledged_event_id is None:
             msg = "Approval final delivery is not acknowledged"
             raise RuntimeError(msg)
+        event_id = delivery.edits_event_id or acknowledged_event_id
         payload = dict(delivery.payload)
         nested = payload.get("m.new_content")
         visible = cast("dict[str, Any]", nested) if isinstance(nested, dict) else payload

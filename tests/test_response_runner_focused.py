@@ -52,6 +52,7 @@ from mindroom.event_journal import (
     ProjectedEvent,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.handled_turns import TurnRecord
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -87,6 +88,7 @@ from mindroom.tool_system.approval_exemptions import register_tool_approval_exem
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
+from mindroom.turn_record import canonicalize_turn_record
 from tests.conftest import (
     make_matrix_client_mock,
     make_visible_message,
@@ -835,7 +837,7 @@ async def test_user_stop_retry_preserves_success_completed_by_source_worker(tmp_
                 claimed,
                 target=_target(thread_id="$thread"),
             )
-            == "$final"
+            == "$waiting"
         )
         assert await runner.finalize_user_stop(
             "$waiting",
@@ -849,6 +851,106 @@ async def test_user_stop_retry_preserves_success_completed_by_source_worker(tmp_
     finalize_stop.assert_awaited_once_with(True)
     lifecycle.finalize.assert_awaited_once()
     assert await store.approval_continuation(continuation.approval_id) is None
+
+
+@pytest.mark.asyncio
+async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_path: Path) -> None:
+    """A recovered edit remains owned by the response bubble targeted by the pending STOP."""
+    bot = _bot(tmp_path)
+    await bot._turn_store.warm()
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    turn_store = unwrap_extracted_collaborator(bot._turn_store)
+    store = runner.deps.approval_store
+    target = _target(thread_id="$thread", reply_to_event_id="$source")
+    pending_turn = TurnRecord.create(
+        ("$source",),
+        response_event_id="$waiting",
+        completed=False,
+        response_owner="general",
+        requester_id="@user:localhost",
+        conversation_target=target,
+    )
+    await turn_store.record_pending_turn(pending_turn)
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-stop-turn-owner",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    await store.enqueue_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "finished", "formatted_body": "finished"},
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+
+    lifecycle = MagicMock(finalize=AsyncMock())
+    finalize_stopped_response = AsyncMock(return_value=True)
+    on_current_stop_finalized = AsyncMock()
+    with (
+        patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock()),
+        patch.object(runner, "_build_lifecycle", return_value=lifecycle),
+        patch.object(
+            DeliveryGateway,
+            "finalize_user_stopped_response",
+            new=finalize_stopped_response,
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="did not become durable"):
+            await bot._user_stop_reconciler.finalize(
+                "$waiting",
+                7,
+                on_current_stop_finalized,
+            )
+
+        await store.acknowledge_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$final-edit",
+        )
+        recovered_response_event_id = await runner._recover_claimed_approval_lifecycle(
+            claimed,
+            target=target,
+        )
+        assert recovered_response_event_id == "$waiting"
+        await turn_store.record_responded_turn(
+            canonicalize_turn_record(
+                pending_turn,
+                response_event_id=recovered_response_event_id,
+                completed=True,
+            ),
+        )
+
+        assert await bot._user_stop_reconciler.finalize(
+            "$waiting",
+            7,
+            on_current_stop_finalized,
+        )
+
+    finalize_stopped_response.assert_not_awaited()
+    on_current_stop_finalized.assert_awaited_once()
+    stopped_turn = turn_store.get_turn_record("$source")
+    assert stopped_turn is not None
+    assert stopped_turn.response_event_id == "$waiting"
+    assert stopped_turn.user_stop_settled_receipt_order == 7
 
 
 @pytest.mark.asyncio
@@ -1624,7 +1726,7 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
-    assert event_id == "$final"
+    assert event_id == "$waiting"
     continue_entity.assert_not_awaited()
     build_lifecycle.return_value.finalize.assert_awaited_once()
     assert await store.approval_continuation(continuation.approval_id) is None
@@ -1688,7 +1790,7 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
-    assert event_id == "$final"
+    assert event_id == "$waiting"
     final = lifecycle.finalize.await_args.args[0]
     assert final.final_visible_body == "plain final"
     assert final.interactive_metadata is not None
@@ -1752,7 +1854,7 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
         )
 
     assert outcome.terminal_status == "completed"
-    assert outcome.event_id == "$final"
+    assert outcome.event_id == "$waiting"
     assert await store.approval_continuation(continuation.approval_id) is None
     finalized = [call.args[0] for call in lifecycle.finalize.await_args_list]
     assert [item.terminal_status for item in finalized] == ["completed"]
@@ -1812,7 +1914,7 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
             locked_operation=AsyncMock(return_value="$duplicate"),
         )
 
-    assert event_id == "$final"
+    assert event_id == "$waiting"
     assert await store.approval_continuation(continuation.approval_id) is None
     assert not await store.is_pending("$source")
 
