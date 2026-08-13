@@ -1625,6 +1625,30 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
         )
         assert registered == []
 
+    async def test_current_epoch_cannot_register_until_membership_restarts(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A departed room's advanced epoch is not an active membership."""
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        fenced_epoch = await alice.membership_epoch(ROOM)
+        registered: list[str] = []
+
+        assert not await alice.run_if_membership_epoch(
+            room_id=ROOM,
+            expected_membership_epoch=fenced_epoch,
+            operation=lambda: registered.append("departed"),
+        )
+
+        await alice.note_membership_restarted(ROOM)
+
+        assert await alice.run_if_membership_epoch(
+            room_id=ROOM,
+            expected_membership_epoch=fenced_epoch,
+            operation=lambda: registered.append("rejoined"),
+        )
+        assert registered == ["rejoined"]
+
     async def test_one_rooms_fence_does_not_silence_another_room(self, alice: PrincipalStore) -> None:
         """Leaving one room says nothing about a turn running in a different one."""
         await admit(alice, "$turn")
@@ -1781,6 +1805,7 @@ class TestMembershipEpoch:
         )
 
         await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
         await alice.install_hydrated_conversation(
             room_id=ROOM,
             thread_id=None,
