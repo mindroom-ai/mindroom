@@ -104,7 +104,7 @@ _._handle_vector_db_insert  # Agno insertion callback override (src/mindroom/str
 _.generate_image  # Agno toolkit override (src/mindroom/custom_tools/gemini_media.py)
 DEEPSEEK_V4_PRO  # used by scripts/utilities/rewrite_git_commits_ai.py
 EXPIRED  # dynamically restored ApprovalDecision enum value (src/mindroom/approval_continuation.py)
-_.confirmation_note  # Agno ToolExecution continuation input (src/mindroom/response_runner.py)
+_.confirmation_note  # Set by Agno requirement rejection (approval_execution.py, teams.py)
 SAAS_MODEL_PRESETS  # used by scripts/sync_config.py
 _.to_config_dict  # used by scripts/sync_config.py
 _.serialize_datetime  # unused method (src/mindroom/matrix/state.py)

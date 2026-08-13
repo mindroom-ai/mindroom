@@ -312,6 +312,24 @@ def pending_card(
     return None if row is None else _card(row)
 
 
+def pending_room_ids(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
+    """Return every current-membership room with recoverable approval cards."""
+    rows = transaction.fetchall(
+        """
+        SELECT DISTINCT cards.room_id/*bytes*/ AS room_id
+        FROM approval_cards AS cards
+        LEFT JOIN room_membership AS membership
+          ON membership.principal_id = cards.principal_id
+         AND membership.room_id = cards.room_id
+        WHERE cards.principal_id = ?
+          AND cards.membership_epoch = COALESCE(membership.membership_epoch, 0)
+        ORDER BY cards.room_id/*bytes*/
+        """,
+        (principal_id,),
+    )
+    return tuple(str(row["room_id"]) for row in rows)
+
+
 def pending_cards(
     transaction: Transaction,
     principal_id: str,

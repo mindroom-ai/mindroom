@@ -683,7 +683,7 @@ async def _aexecute_ephemeral_agent_participant(
     execution_identity = build_execution_identity_from_runtime_context(context)
     model = model_loading.get_model_instance(context.config, context.runtime_paths, model_name, execution_identity)
     run_config = _participant_run_config(context, toolkits_by_name)
-    toolkits_by_name = _filter_nonresumable_toolkits(toolkits_by_name, run_config)
+    _reject_nonresumable_toolkits(toolkits_by_name, run_config)
     bridge = build_tool_hook_bridge(
         context.hook_registry,
         agent_name=context.agent_name,
@@ -712,7 +712,7 @@ async def _aexecute_ephemeral_agent_participant(
     return await _arun_agent(participant_context, agent, prompt)
 
 
-def _filter_nonresumable_toolkits(toolkits: dict[str, Toolkit], config: Config) -> dict[str, Toolkit]:
+def _reject_nonresumable_toolkits(toolkits: dict[str, Toolkit], config: Config) -> None:
     """Reject gated functions for embedded agents that cannot resume paused runs."""
     unavailable = sorted(
         {
@@ -726,7 +726,6 @@ def _filter_nonresumable_toolkits(toolkits: dict[str, Toolkit], config: Config) 
         names = ", ".join(unavailable)
         msg = f"Dynamic Workflow participant functions {names} require approval and cannot suspend for approval."
         raise DynamicWorkflowExecutionError(msg)
-    return toolkits
 
 
 def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict[str, object]) -> dict[str, Toolkit]:

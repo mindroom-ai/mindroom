@@ -61,6 +61,21 @@ def _continuation() -> ApprovalContinuation:
     )
 
 
+def _finish_test_failure(store: ApprovalContinuationStore, approval_id: str, reason: str) -> None:
+    fenced = store.begin_failure(
+        approval_id,
+        reason,
+        claimant_id=None,
+        settlement_id="test-settler",
+        runtime_generation="test-runtime",
+    )
+    assert fenced is not None
+    assert fenced.settlement_id == "test-settler"
+    failed = store.finish_failure(approval_id, "test-settler", reason)
+    assert failed is not None
+    assert failed.state == "failed"
+
+
 def test_continuation_store_commits_first_call_decision_and_one_claim(tmp_path: Path) -> None:
     """Removing either guard would let duplicate Matrix actions execute a tool twice."""
     store = ApprovalContinuationStore(tmp_path)
@@ -90,11 +105,87 @@ def test_failure_fence_cannot_take_a_claim_won_by_another_owner(tmp_path: Path) 
     claimed = store.claim("approval-1", "resume-owner")
     assert claimed is not None
 
-    fenced = store.begin_failure("approval-1", "stale publication failure", claimant_id=None)
+    fenced = store.begin_failure(
+        "approval-1",
+        "stale publication failure",
+        claimant_id=None,
+        settlement_id="settler",
+        runtime_generation="runtime-current",
+    )
 
     assert fenced is not None
     assert fenced.state == "claimed"
     assert fenced.claimant_id == "resume-owner"
+
+
+def test_failure_settlement_has_one_releasable_owner_per_runtime(tmp_path: Path) -> None:
+    """Only one coroutine may deliver terminal failure for a settling continuation."""
+    store = ApprovalContinuationStore(tmp_path)
+    store.create(_continuation())
+
+    first = store.begin_failure(
+        "approval-1",
+        "first reason",
+        claimant_id=None,
+        settlement_id="settler-1",
+        runtime_generation="runtime-current",
+    )
+    competing = store.begin_failure(
+        "approval-1",
+        "competing reason",
+        claimant_id=None,
+        settlement_id="settler-2",
+        runtime_generation="runtime-current",
+    )
+
+    assert first is not None
+    assert first.settlement_id == "settler-1"
+    assert first.failure_reason == "first reason"
+    assert competing is not None
+    assert competing.settlement_id == "settler-1"
+    assert competing.failure_reason == "first reason"
+
+    released = store.release_failure("approval-1", "settler-1")
+    acquired = store.begin_failure(
+        "approval-1",
+        "competing reason",
+        claimant_id=None,
+        settlement_id="settler-2",
+        runtime_generation="runtime-current",
+    )
+
+    assert released is not None
+    assert released.settlement_id is None
+    assert acquired is not None
+    assert acquired.settlement_id == "settler-2"
+    assert acquired.failure_reason == "first reason"
+
+
+def test_new_runtime_takes_over_crashed_failure_settlement(tmp_path: Path) -> None:
+    """A durable settlement owner from a dead runtime must not block restart recovery."""
+    store = ApprovalContinuationStore(tmp_path)
+    store.create(_continuation())
+    store.begin_failure(
+        "approval-1",
+        "original reason",
+        claimant_id=None,
+        settlement_id="dead-settler",
+        runtime_generation="runtime-old",
+    )
+
+    recovered = store.begin_failure(
+        "approval-1",
+        "replacement reason",
+        claimant_id=None,
+        settlement_id="restart-settler",
+        runtime_generation="runtime-new",
+    )
+
+    assert recovered is not None
+    assert recovered.state == "settling"
+    assert recovered.runtime_generation == "runtime-new"
+    assert recovered.settlement_id == "restart-settler"
+    assert recovered.failure_reason == "original reason"
 
 
 def test_distinct_store_handles_serialize_pending_context_updates(
@@ -262,7 +353,7 @@ def test_terminal_continuation_releases_source_replay_ownership(tmp_path: Path) 
     store = ApprovalContinuationStore(tmp_path)
     continuation = _continuation()
     store.create(continuation)
-    store.fail(continuation.approval_id, "settled")
+    _finish_test_failure(store, continuation.approval_id, "settled")
 
     assert store.for_source_event("$source") is None
 
@@ -539,6 +630,51 @@ async def test_startup_recovery_does_not_fail_a_live_continuation_dispatch(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_startup_retry_ignores_rows_owned_by_the_current_runtime(tmp_path: Path) -> None:
+    """A repeated startup sweep must not terminalize live publication or inline execution."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    bot = SimpleNamespace(running=True, fail_approval_continuation=AsyncMock())
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda _name: cast("Any", bot),
+        cards_provider=lambda: None,
+    )
+    transport._continuations.create(
+        replace(
+            _continuation(),
+            approval_id="live-publishing",
+            response_event_id=None,
+            state="publishing",
+            runtime_generation=transport.runtime_generation,
+        ),
+    )
+    transport._continuations.create(
+        replace(
+            _continuation(),
+            approval_id="live-inline-claim",
+            state="claimed",
+            claimant_id="inline:live",
+            runtime_generation=transport.runtime_generation,
+        ),
+    )
+
+    assert await transport._recover_continuations() is True
+
+    publishing = transport._continuations.get("live-publishing")
+    claimed = transport._continuations.get("live-inline-claim")
+    assert publishing is not None
+    assert publishing.state == "publishing"
+    assert claimed is not None
+    assert claimed.state == "claimed"
+    bot.fail_approval_continuation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_running_owner_that_cannot_claim_is_polled_with_backoff(tmp_path: Path) -> None:
     """A stopping bot that returns without claiming must not create a tight dispatcher loop."""
     runtime_paths = RuntimePaths(
@@ -602,7 +738,7 @@ async def test_removed_owner_waits_for_router_before_retiring_ready_continuation
     assert still_ready.state == "ready"
 
     async def fail(owned: ApprovalContinuation, reason: str) -> None:
-        transport._continuations.fail(owned.approval_id, reason)
+        _finish_test_failure(transport._continuations, owned.approval_id, reason)
 
     fail_mock = AsyncMock(side_effect=fail)
     bots["router"] = SimpleNamespace(running=True, fail_approval_continuation=fail_mock)
@@ -621,7 +757,7 @@ async def test_permanently_failed_configured_owner_is_terminalized_by_router(tmp
 
     async def fail(owned: ApprovalContinuation, reason: str) -> None:
         assert "could not start" in reason
-        transport._continuations.fail(owned.approval_id, reason)
+        _finish_test_failure(transport._continuations, owned.approval_id, reason)
 
     router = SimpleNamespace(running=True, fail_approval_continuation=AsyncMock(side_effect=fail))
     transport = ApprovalMatrixTransport(

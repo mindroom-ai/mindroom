@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from sqlalchemy import Table, select
+from sqlalchemy import Table, select, tuple_
 
 from mindroom.agent_storage import create_state_storage
 
@@ -120,6 +120,8 @@ class ApprovalContinuation:
     source_kind: str = "message"
     attachment_ids: tuple[str, ...] = ()
     message_received_depth: int = 0
+    runtime_generation: str | None = None
+    settlement_id: str | None = None
 
     def _to_context(self) -> dict[str, object]:
         """Serialize the continuation into Agno approval context."""
@@ -145,6 +147,8 @@ class ApprovalContinuation:
             "source_kind": self.source_kind,
             "attachment_ids": list(self.attachment_ids),
             "message_received_depth": self.message_received_depth,
+            "runtime_generation": self.runtime_generation,
+            "settlement_id": self.settlement_id,
         }
 
     @classmethod
@@ -177,6 +181,8 @@ class ApprovalContinuation:
             source_kind=cast("str", context.get("source_kind", "message")),
             attachment_ids=tuple(cast("list[str]", context.get("attachment_ids", []))),
             message_received_depth=cast("int", context.get("message_received_depth", 0)),
+            runtime_generation=cast("str | None", context.get("runtime_generation")),
+            settlement_id=cast("str | None", context.get("settlement_id")),
         )
 
 
@@ -277,21 +283,23 @@ class ApprovalContinuationStore:
         if table is None:
             return ()
         for state in states:
-            offset = 0
+            cursor: tuple[int, str] | None = None
             while True:
                 statement = (
                     select(table)
                     .where(table.c.status == state, table.c.approval_type == "mindroom")
-                    .order_by(table.c.created_at.desc())
+                    .order_by(table.c.created_at.desc(), table.c.id.desc())
                     .limit(_PAGE_SIZE)
-                    .offset(offset)
                 )
+                if cursor is not None:
+                    statement = statement.where(tuple_(table.c.created_at, table.c.id) < cursor)
                 with self._db.Session() as session:
                     rows = session.execute(statement).fetchall()
                 records.extend(ApprovalContinuation._from_row(dict(row._mapping)) for row in rows)
                 if len(rows) < _PAGE_SIZE:
                     break
-                offset += len(rows)
+                last = rows[-1]._mapping
+                cursor = (int(last["created_at"]), str(last["id"]))
         return tuple(records)
 
     def bind_response_event(
@@ -387,13 +395,24 @@ class ApprovalContinuationStore:
             updated = replace(current, calls=calls)
             return self._persist(current, updated)
 
-    def claim(self, approval_id: str, claimant_id: str) -> ApprovalContinuation | None:
+    def claim(
+        self,
+        approval_id: str,
+        claimant_id: str,
+        *,
+        runtime_generation: str | None = None,
+    ) -> ApprovalContinuation | None:
         """Claim one ready continuation exactly once."""
         with self._lock:
             current = self.get(approval_id)
             if current is None or current.state != "ready":
                 return None
-            claimed = replace(current, state="claimed", claimant_id=claimant_id)
+            claimed = replace(
+                current,
+                state="claimed",
+                claimant_id=claimant_id,
+                runtime_generation=runtime_generation or current.runtime_generation,
+            )
             return self._persist(current, claimed)
 
     def complete(self, approval_id: str, claimant_id: str) -> ApprovalContinuation | None:
@@ -411,16 +430,71 @@ class ApprovalContinuationStore:
         reason: str,
         *,
         claimant_id: str | None,
+        settlement_id: str,
+        runtime_generation: str,
     ) -> ApprovalContinuation | None:
-        """Fence claims and decision callbacks before terminal failure settlement."""
+        """Acquire exclusive durable ownership of terminal failure settlement."""
         with self._lock:
             current = self.get(approval_id)
-            if current is None or current.state in {"settling", "completed", "failed"}:
+            if current is None or current.state in {"completed", "failed"}:
                 return current
             if current.state == "claimed" and current.claimant_id != claimant_id:
                 return current
-            settling = replace(current, state="settling", failure_reason=reason)
+            if (
+                current.state == "settling"
+                and current.settlement_id is not None
+                and current.runtime_generation == runtime_generation
+            ):
+                return current
+            settling = replace(
+                current,
+                state="settling",
+                failure_reason=current.failure_reason or reason,
+                runtime_generation=runtime_generation,
+                settlement_id=settlement_id,
+            )
             return self._persist(current, settling)
+
+    def release_failure(self, approval_id: str, settlement_id: str) -> ApprovalContinuation | None:
+        """Release an incomplete settlement so a later retry can own it."""
+        with self._lock:
+            current = self.get(approval_id)
+            if current is None or current.state != "settling" or current.settlement_id != settlement_id:
+                return current
+            return self._persist(current, replace(current, settlement_id=None))
+
+    def finish_failure(
+        self,
+        approval_id: str,
+        settlement_id: str,
+        reason: str,
+    ) -> ApprovalContinuation | None:
+        """Make the exclusively owned failure settlement terminal."""
+        with self._lock:
+            current = self.get(approval_id)
+            if current is None or current.state != "settling" or current.settlement_id != settlement_id:
+                return current
+            failed = replace(
+                current,
+                state="failed",
+                failure_reason=current.failure_reason or reason,
+                settlement_id=None,
+            )
+            return self._persist(current, failed, run_status="ERROR")
+
+    def fail_claimed(
+        self,
+        approval_id: str,
+        claimant_id: str,
+        reason: str,
+    ) -> ApprovalContinuation | None:
+        """Fail a claimed run after its normal lifecycle already settled visibly."""
+        with self._lock:
+            current = self.get(approval_id)
+            if current is None or current.state != "claimed" or current.claimant_id != claimant_id:
+                return current
+            failed = replace(current, state="failed", failure_reason=reason)
+            return self._persist(current, failed, run_status="ERROR")
 
     def advance_pause(
         self,
@@ -449,15 +523,6 @@ class ApprovalContinuationStore:
                 generation=current.generation + 1,
             )
             return self._persist(current, advanced)
-
-    def fail(self, approval_id: str, reason: str) -> ApprovalContinuation | None:
-        """Make a nonterminal continuation permanently failed."""
-        with self._lock:
-            current = self.get(approval_id)
-            if current is None or current.state in {"completed", "failed"}:
-                return current
-            failed = replace(current, state="failed", failure_reason=reason)
-            return self._persist(current, failed, run_status="ERROR")
 
     def recoverable(self) -> tuple[ApprovalContinuation, ...]:
         """Return continuations that startup must recover or settle."""

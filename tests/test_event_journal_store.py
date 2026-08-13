@@ -2963,6 +2963,13 @@ class TestApprovalCards:
             card=card,
         )
 
+    async def test_pending_rooms_are_discoverable_without_live_config(self, alice: PrincipalStore) -> None:
+        """Startup can find durable cards without already knowing their room IDs."""
+        await alice.claim_approval_card(room_id=OTHER_ROOM, transaction_id="txn-other", card=self.card("$other"))
+        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn-room", card=self.card("$room"))
+
+        assert await alice.pending_approval_room_ids() == tuple(sorted((OTHER_ROOM, ROOM)))
+
     async def test_a_remembered_card_reads_back_whole(self, alice: PrincipalStore) -> None:
         """A remembered card reads back whole, and unanswered."""
         await self.remember(alice, "$card")

@@ -2068,7 +2068,7 @@ def test_non_resumable_participant_rejects_gated_functions(tmp_path: Path) -> No
     )
 
     with pytest.raises(DynamicWorkflowExecutionError, match=r"dangerous.*cannot suspend"):
-        dynamic_workflow_module._filter_nonresumable_toolkits(
+        dynamic_workflow_module._reject_nonresumable_toolkits(
             {"mixed": toolkit},
             run_config,
         )

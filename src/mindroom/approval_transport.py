@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
+from uuid import uuid4
 
 import nio
 
@@ -155,10 +156,16 @@ class ApprovalMatrixTransport:
     _continuations: ApprovalContinuationStore = field(init=False, repr=False)
     _continuation_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _startup_cleanup_attempts: int = field(default=0, init=False, repr=False)
+    _runtime_generation: str = field(default_factory=lambda: uuid4().hex, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Open the shared durable continuation coordinator."""
         self._continuations = ApprovalContinuationStore(self.runtime_paths.storage_root)
+
+    @property
+    def runtime_generation(self) -> str:
+        """Return the identifier for continuation work owned by this runtime."""
+        return self._runtime_generation
 
     def capture_runtime_loop(self) -> None:
         """Remember the runtime loop that owns Matrix client I/O."""
@@ -329,7 +336,8 @@ class ApprovalMatrixTransport:
 
     async def _recover_continuations(self) -> bool:
         complete = True
-        for continuation in await asyncio.to_thread(self._continuations.recoverable):
+        recoverable = await asyncio.to_thread(self._continuations.recoverable)
+        for continuation in filter(self._needs_startup_recovery, recoverable):
             if continuation.state == "publishing":
                 settled = await self._fail_recovered_continuation(
                     continuation,
@@ -361,10 +369,17 @@ class ApprovalMatrixTransport:
                     continue
                 settled = await self._fail_recovered_continuation(
                     continuation,
-                    "Tool approval continuation was interrupted after it was claimed; it was not replayed.",
+                    continuation.failure_reason
+                    or "Tool approval continuation was interrupted after it was claimed; it was not replayed.",
                 )
                 complete = settled and complete
         return complete
+
+    def _needs_startup_recovery(self, continuation: ApprovalContinuation) -> bool:
+        """Return whether startup may act on this row without racing live work."""
+        if continuation.runtime_generation != self.runtime_generation:
+            return True
+        return continuation.state == "settling" and continuation.settlement_id is None
 
     async def _attach_recovered_cards(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
         """Repair the crash window between durable card delivery and continuation attachment."""
@@ -771,6 +786,8 @@ class ApprovalMatrixTransport:
             self._startup_cleanup_attempts += 1
             if not self._continuations_recovered:
                 try:
+                    # This health read must succeed before the card sweep can
+                    # safely classify any current-format approval as orphaned.
                     await asyncio.to_thread(self._continuations.recoverable)
                 except Exception:
                     logger.warning(

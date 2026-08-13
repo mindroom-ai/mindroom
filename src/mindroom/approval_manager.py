@@ -825,7 +825,10 @@ class _ApprovalManager:
         discarded = 0
         failed = 0
         tally = _SweepTally()
-        for room_id in self._configured_approval_room_ids():
+        room_ids = self._configured_approval_room_ids()
+        if self._cards is not None:
+            room_ids.update(await self._cards.pending_approval_room_ids())
+        for room_id in room_ids:
             # A card whose settlement failed keeps its row deliberately, so it
             # stays inside the scan's window. Skipping it in memory is not
             # enough -- a whole page of failures would be read again on every

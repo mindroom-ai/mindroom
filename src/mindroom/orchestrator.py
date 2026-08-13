@@ -317,6 +317,11 @@ class _MultiAgentOrchestrator:
         """Return the orchestrator-owned background knowledge refresh scheduler."""
         return self._knowledge_refresh_scheduler
 
+    @property
+    def approval_runtime_generation(self) -> str:
+        """Return the current process generation for live approval ownership."""
+        return self._approval_transport.runtime_generation
+
     def entity_first_sync_complete(self, entity_name: str) -> bool | None:
         """Return first-sync readiness for the current entity generation."""
         bot = self.agent_bots.get(entity_name)

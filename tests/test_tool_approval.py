@@ -1768,6 +1768,31 @@ async def test_discard_pending_on_startup_emits_replace_for_each_unresolved_card
 
 
 @pytest.mark.asyncio
+async def test_startup_discovers_pending_rooms_no_longer_in_runtime_config(tmp_path: Path) -> None:
+    """Durable cards must re-arm cleanup even when their room left the configured set."""
+    cards = FakeApprovalCards()
+    await cards.store_card(
+        "$approval",
+        "!former-room:localhost",
+        _approval_card(room_id="!former-room:localhost"),
+    )
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: set(),
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    sweep = await store.discard_pending_on_startup()
+
+    assert sweep.discarded == 1
+    editor.assert_awaited_once()
+    assert editor.await_args.args[:2] == ("!former-room:localhost", "$approval")
+
+
+@pytest.mark.asyncio
 async def test_discard_pending_on_startup_uses_cached_cards_without_history_scan(tmp_path: Path) -> None:
     cards = FakeApprovalCards()
     cached_card = _approval_card(approval_id="cached-approval", event_id="$cached-approval")

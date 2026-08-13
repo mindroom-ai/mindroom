@@ -729,6 +729,12 @@ class PrincipalStore:
             ),
         )
 
+    async def pending_approval_room_ids(self) -> tuple[str, ...]:
+        """Return every current room where this principal still owns a card."""
+        return await self._backend.read(
+            lambda transaction: approvals.pending_room_ids(transaction, self._principal_id),
+        )
+
     async def pending_approval_cards(
         self,
         *,

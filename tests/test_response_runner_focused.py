@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -828,6 +829,7 @@ async def test_suspension_owns_source_before_waiting_response_delivery(tmp_path:
     assert owned is not None
     assert owned.state == "failed"
     assert owned.response_event_id == "$terminal"
+    assert owned.runtime_generation == runner._approval_runtime_generation()
     assert send_text.await_count == 2
     assert send_text.await_args_list[1].args[0].delivery_stage is response_runner.DeliveryStage.FINAL
 
@@ -1636,6 +1638,25 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Path) -> None:
+    """A policy denial must explain that no human approval recipient was available."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    tool = ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={})
+
+    with (
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value=None),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+    ):
+        plan = await runner._approval_responses.plan_pause(
+            ((tool, "call-1", "dangerous", "general"),),
+            requester_id="@user:localhost",
+        )
+
+    assert plan.calls[0].decision is response_runner.ContinuationDecision.DENIED
+    assert plan.calls[0].reason == "No approval recipient is configured; the tool was denied safely."
+
+
+@pytest.mark.asyncio
 async def test_user_stop_terminalizes_claimed_approval_continuation(tmp_path: Path) -> None:
     """A stopped resumed run must not remain claimed until another process restart."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -2233,6 +2254,112 @@ async def test_interrupted_publication_keeps_source_when_terminal_notice_fails(t
     assert owned is not None
     assert owned.state == "settling"
     assert owned.response_event_id is None
+
+
+@pytest.mark.asyncio
+async def test_settling_retry_adopts_late_acknowledged_waiting_event(tmp_path: Path) -> None:
+    """A retry must edit the acknowledged INITIAL instead of adding a second terminal message."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-settling-adoption",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id=None,
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.DENIED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="settling",
+        failure_reason="Publication interrupted",
+    )
+    runner._approval_responses._store.create(continuation)
+    outbox = runner._approval_responses.delivery_gateway.deps.outbox
+
+    with (
+        patch.object(
+            type(outbox),
+            "load_delivery",
+            new=AsyncMock(return_value=SimpleNamespace(acknowledged_event_id="$waiting")),
+        ),
+        patch.object(runner._approval_responses, "_edit_response", new=AsyncMock(return_value=True)) as edit,
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock()) as send,
+    ):
+        await runner.fail_approval_continuation(continuation, "replacement reason")
+
+    settled = runner._approval_responses._store.get(continuation.approval_id)
+    assert settled is not None
+    assert settled.state == "failed"
+    assert settled.response_event_id == "$waiting"
+    assert settled.failure_reason == "Publication interrupted"
+    edit.assert_awaited_once()
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_only_one_failure_settler_delivers_a_terminal_notice(tmp_path: Path) -> None:
+    """Concurrent recovery and live cleanup must not send two FINAL responses."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-single-settler",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id=None,
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.DENIED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="publishing",
+    )
+    runner._approval_responses._store.create(continuation)
+    sending = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_send(*_args: object, **_kwargs: object) -> str:
+        sending.set()
+        await release.wait()
+        return "$terminal"
+
+    send = AsyncMock(side_effect=slow_send)
+    with patch.object(DeliveryGateway, "send_text", new=send):
+        first = asyncio.create_task(runner.fail_approval_continuation(continuation, "first reason"))
+        await asyncio.wait_for(sending.wait(), timeout=2)
+        second = asyncio.create_task(runner.fail_approval_continuation(continuation, "second reason"))
+        await asyncio.sleep(0)
+        assert send.await_count == 1
+        release.set()
+        await asyncio.gather(first, second)
+
+    settled = runner._approval_responses._store.get(continuation.approval_id)
+    assert settled is not None
+    assert settled.state == "failed"
+    assert settled.failure_reason == "first reason"
+    assert send.await_count == 1
 
 
 @pytest.mark.asyncio

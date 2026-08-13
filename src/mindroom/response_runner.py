@@ -522,6 +522,7 @@ class ResponseRunner:
     _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _user_stop_receipt_orders: dict[str, set[int]] = field(default_factory=dict, init=False, repr=False)
+    _standalone_approval_runtime_generation: str = field(default_factory=lambda: uuid4().hex, init=False, repr=False)
     _approval_responses: ApprovalResponseCoordinator = field(init=False, repr=False)
     _approval_execution: AgentApprovalExecution = field(init=False, repr=False)
 
@@ -533,6 +534,7 @@ class ResponseRunner:
             agent_name=self.deps.agent_name,
             delivery_gateway=self.deps.delivery_gateway,
             logger=self.deps.logger,
+            runtime_generation=self._approval_runtime_generation,
         )
         self._approval_execution = AgentApprovalExecution(
             config=lambda: self.deps.runtime.config,
@@ -540,6 +542,13 @@ class ResponseRunner:
             client=self._client,
             tool_runtime=self.deps.tool_runtime,
         )
+
+    def _approval_runtime_generation(self) -> str:
+        """Return the orchestrator generation that owns live continuation work."""
+        orchestrator = self.deps.runtime.orchestrator
+        if orchestrator is None:
+            return self._standalone_approval_runtime_generation
+        return orchestrator.approval_runtime_generation
 
     async def close(self) -> None:
         """Close this runner's continuation-store handle."""
@@ -1114,8 +1123,9 @@ class ResponseRunner:
                 )
                 outcome = progress.delivery_outcome
                 if outcome is not None and outcome.terminal_status in {"cancelled", "error"}:
-                    await self._approval_responses.fail(
+                    await self._approval_responses.fail_claimed(
                         claimed.approval_id,
+                        claimant_id,
                         outcome.failure_reason or "Tool approval continuation did not complete.",
                     )
             except asyncio.CancelledError:

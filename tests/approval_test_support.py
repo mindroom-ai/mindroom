@@ -175,6 +175,10 @@ class FakeApprovalCards:
         )
         return None if entry is None else _stored(*entry)
 
+    async def pending_approval_room_ids(self) -> tuple[str, ...]:
+        """Return every room represented by a pending fake row."""
+        return tuple(sorted({row.room_id for row in self.rows.values()}))
+
     async def pending_approval_cards(
         self,
         *,

@@ -402,6 +402,10 @@ class ApprovalView(Protocol):
         """Return one card this bot still owes work on under this membership."""
         ...
 
+    async def pending_approval_room_ids(self) -> tuple[str, ...]:
+        """Return current-membership rooms containing unfinished approval cards."""
+        ...
+
     async def pending_approval_cards(
         self,
         *,
