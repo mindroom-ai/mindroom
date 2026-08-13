@@ -1968,11 +1968,11 @@ class ResponseRunner:
             event_id = outcome.event_id if outcome.terminal_status != "suspended" and retained is None else None
         return event_id
 
-    async def _resume_approval_source(self, source_event_id: str) -> bool | None:
+    async def _resume_approval_source(self, source_event_id: str) -> None:
         """Resume journal-owned approval work before normal ingress can reinterpret its source."""
         continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
         if continuation is None:
-            return None
+            return
         target = continuation_target(continuation, reply_to_event_id=source_event_id)
         request = self._approval_response_request(continuation, target=target)
 
@@ -1987,7 +1987,6 @@ class ResponseRunner:
             response_kind="team" if continuation.entity_kind == "team" else "ai",
             locked_operation=ownership_disappeared,
         )
-        return not await self.deps.approval_store.is_pending(source_event_id)
 
     async def handoff_approval_source(self, source_event_id: str) -> bool | None:
         """Transfer one durable continuation out of the journal lane and into response ownership."""
@@ -1995,10 +1994,7 @@ class ResponseRunner:
         if continuation is None:
             return None
 
-        async def resume_owned_source() -> None:
-            await self._resume_approval_source(source_event_id)
-
-        resume = resume_owned_source()
+        resume = self._resume_approval_source(source_event_id)
         try:
             self.track_inbox_response(
                 resume,
@@ -2012,7 +2008,7 @@ class ResponseRunner:
         return False
 
     async def recover_approval_final(self, approval_id: str) -> bool:
-        """Finalize one frozen successful FINAL under its original bot principal."""
+        """Finalize one frozen FINAL under its original bot principal."""
         continuation = await self.deps.approval_store.approval_continuation(approval_id)
         if continuation is None:
             return True
@@ -2023,6 +2019,11 @@ class ResponseRunner:
         request = self._approval_response_request(continuation, target=target)
 
         async def recover(_target: MessageTarget) -> bool:
+            delivery = await self._approval_responses.final_delivery(continuation, recover=True)
+            if delivery is None or delivery.acknowledged_event_id is None:
+                return False
+            if await self._approval_responses.successful_final_delivery(continuation) is None:
+                return await self.deps.approval_store.finish_approval_continuation(continuation.approval_id)
             owns_final, event_id = await self._recover_frozen_approval_final(
                 continuation,
                 target=target,

@@ -347,8 +347,9 @@ def _resolved_continuation_content(
     stored["resolution_reason"] = reason
     stored["resolved_by"] = None
     body = stored.get("body")
-    if isinstance(body, str) and body.startswith("Approved:"):
-        stored["body"] = f"{decision.title()}:{body.removeprefix('Approved:')}"
+    requested_prefix = f"{requested_status.title()}:"
+    if isinstance(body, str) and body.startswith(requested_prefix):
+        stored["body"] = f"{decision.title()}:{body.removeprefix(requested_prefix)}"
     return stored
 
 

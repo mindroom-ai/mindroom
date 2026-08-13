@@ -2008,6 +2008,48 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
 
 
 @pytest.mark.asyncio
+async def test_original_owner_recovery_retires_acknowledged_failure_without_success_effects(tmp_path: Path) -> None:
+    """A frozen failure FINAL must not be replayed through the successful response lifecycle."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-failure-final",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="failing",
+        failure_reason="Tool approval continuation failed safely.",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    await store.enqueue_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "Tool approval continuation failed safely."},
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    await store.acknowledge_delivery(turn_id="$source", stage=DeliveryStage.FINAL, event_id="$failure-edit")
+
+    with patch.object(runner, "_build_lifecycle", return_value=MagicMock(finalize=AsyncMock())) as build_lifecycle:
+        assert await runner.recover_approval_final(continuation.approval_id)
+
+    build_lifecycle.assert_not_called()
+    assert await store.approval_continuation(continuation.approval_id) is None
+    assert not await store.is_pending("$source")
+
+
+@pytest.mark.asyncio
 async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_path: Path) -> None:
     """A visible successful FINAL must complete even if the live caller is cancelled afterward."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)

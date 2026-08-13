@@ -4359,6 +4359,31 @@ class TestApprovalContinuations:
         assert continuation.state == "ready"
         assert continuation.calls[0].decision is ApprovalDecision.EXPIRED
 
+    async def test_late_denial_atomically_expires_the_call_and_visible_card(self, alice: PrincipalStore) -> None:
+        """A denial crossing the exact deadline must display the durable expiry winner."""
+        await self.admit_sources(alice)
+        expired = replace(
+            self.continuation(state="waiting"),
+            calls=(replace(self.continuation(state="waiting").calls[0], expires_at_ns=1),),
+        )
+        await alice.create_approval_continuation(expired)
+        await self.remember_card(alice)
+
+        recorded = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="denied",
+            reason="Unsafe.",
+            resolution={"status": "denied", "body": "Denied: shell", "resolved_by": ALICE},
+        )
+
+        assert recorded.recorded is True
+        assert recorded.resolution == {
+            "status": "expired",
+            "body": "Expired: shell",
+            "resolution_reason": "Tool approval request timed out.",
+            "resolved_by": None,
+        }
+
     async def test_approval_cannot_authorize_a_failure_fenced_continuation(self, alice: PrincipalStore) -> None:
         """A late click terminalizes the card but cannot approve work fenced for failure."""
         from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
