@@ -881,9 +881,12 @@ class ResponseRunner:
         try:
             plan = await self._plan_approval_pause(identified_tools, requester_id=requester_id)
         except asyncio.CancelledError:
-            await self._settle_cancelled_approval_publication(
-                approval_id,
-                room_id=target.room_id,
+            await self._finish_cancelled_approval_settlement(
+                self._fail_approval_card_creation(
+                    approval_id,
+                    room_id=target.room_id,
+                    reason="Tool approval publication was cancelled.",
+                ),
             )
             raise
         except Exception as error:
@@ -917,9 +920,12 @@ class ResponseRunner:
             ):
                 response_event_id = None
         except asyncio.CancelledError:
-            await self._settle_cancelled_approval_publication(
-                approval_id,
-                room_id=target.room_id,
+            await self._finish_cancelled_approval_settlement(
+                self._fail_approval_card_creation(
+                    approval_id,
+                    room_id=target.room_id,
+                    reason="Tool approval publication was cancelled.",
+                ),
             )
             raise
         except Exception as error:
@@ -964,8 +970,11 @@ class ResponseRunner:
                         claimant_id=claimant_id,
                     )
                 except asyncio.CancelledError:
-                    await self._settle_cancelled_approval_continuation(
-                        claimed,
+                    await self._finish_cancelled_approval_settlement(
+                        self.fail_approval_continuation(
+                            claimed,
+                            "Tool approval continuation was cancelled.",
+                        ),
                     )
                     raise
                 except Exception as error:
@@ -1000,9 +1009,12 @@ class ResponseRunner:
                 failure_reason="Approval card creation failed",
             )
         except asyncio.CancelledError:
-            await self._settle_cancelled_approval_publication(
-                approval_id,
-                room_id=target.room_id,
+            await self._finish_cancelled_approval_settlement(
+                self._fail_approval_card_creation(
+                    approval_id,
+                    room_id=target.room_id,
+                    reason="Tool approval publication was cancelled.",
+                ),
             )
             raise
         return FinalDeliveryOutcome(
@@ -1146,30 +1158,10 @@ class ResponseRunner:
             return
         await self.fail_approval_continuation(continuation, reason)
 
-    async def _settle_cancelled_approval_publication(self, approval_id: str, *, room_id: str) -> None:
-        """Finish durable approval settlement even when the publishing task was cancelled."""
-        settlement = asyncio.create_task(
-            self._fail_approval_card_creation(
-                approval_id,
-                room_id=room_id,
-                reason="Tool approval publication was cancelled.",
-            ),
-        )
-        while not settlement.done():
-            try:
-                await asyncio.shield(settlement)
-            except asyncio.CancelledError:
-                continue
-        await settlement
-
-    async def _settle_cancelled_approval_continuation(self, continuation: ApprovalContinuation) -> None:
-        """Make a cancelled inline continuation terminal before releasing its source."""
-        settlement = asyncio.create_task(
-            self.fail_approval_continuation(
-                continuation,
-                "Tool approval continuation was cancelled.",
-            ),
-        )
+    @staticmethod
+    async def _finish_cancelled_approval_settlement(operation: Coroutine[Any, Any, None]) -> None:
+        """Finish durable approval settlement despite repeated task cancellation."""
+        settlement = asyncio.create_task(operation)
         while not settlement.done():
             try:
                 await asyncio.shield(settlement)
@@ -1351,34 +1343,52 @@ class ResponseRunner:
         )
         if execution_identity is None:
             return None
-        memory_prompt = continuation.request_body
+        return self._memory_persistence(
+            agent_name=continuation.entity_name,
+            session_id=continuation.session_id,
+            execution_identity=execution_identity,
+            prompt=continuation.request_body,
+            thread_history=(),
+            user_id=continuation.requester_id,
+        )
 
-        def queue_memory_persistence() -> None:
+    def _memory_persistence(
+        self,
+        *,
+        agent_name: str,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity,
+        prompt: str,
+        thread_history: Sequence[ResolvedVisibleMessage],
+        user_id: str | None,
+    ) -> Callable[[], None]:
+        """Build the shared completed-agent memory handoff."""
+        def queue() -> None:
             mark_auto_flush_dirty_session(
                 self.deps.storage_path,
                 self.deps.runtime.config,
-                agent_name=continuation.entity_name,
-                session_id=continuation.session_id,
+                agent_name=agent_name,
+                session_id=session_id,
                 execution_identity=execution_identity,
             )
-            if self.deps.runtime.config.resolve_entity(continuation.entity_name).memory_backend == "mem0":
+            if self.deps.runtime.config.resolve_entity(agent_name).memory_backend == "mem0":
                 create_background_task(
                     store_conversation_memory(
-                        memory_prompt,
-                        continuation.entity_name,
+                        prompt,
+                        agent_name,
                         self.deps.storage_path,
-                        continuation.session_id,
+                        session_id,
                         self.deps.runtime.config,
                         self.deps.runtime_paths,
-                        (),
-                        continuation.requester_id,
+                        thread_history,
+                        user_id,
                         execution_identity=execution_identity,
                     ),
-                    name=f"memory_save_{continuation.entity_name}_{continuation.session_id}",
+                    name=f"memory_save_{agent_name}_{session_id}",
                     owner=self.deps.runtime,
                 )
 
-        return queue_memory_persistence
+        return queue
 
     def _approval_response_event_persistence(
         self,
@@ -4049,30 +4059,14 @@ class ResponseRunner:
             request=request,
         )
 
-        def queue_memory_persistence() -> None:
-            mark_auto_flush_dirty_session(
-                self.deps.storage_path,
-                self.deps.runtime.config,
-                agent_name=self.deps.agent_name,
-                session_id=session_id,
-                execution_identity=execution_identity,
-            )
-            if self.deps.runtime.config.resolve_entity(self.deps.agent_name).memory_backend == "mem0":
-                create_background_task(
-                    store_conversation_memory(
-                        memory_prompt,
-                        self.deps.agent_name,
-                        self.deps.storage_path,
-                        session_id,
-                        self.deps.runtime.config,
-                        self.deps.runtime_paths,
-                        memory_thread_history,
-                        request.user_id,
-                        execution_identity=execution_identity,
-                    ),
-                    name=f"memory_save_{self.deps.agent_name}_{session_id}",
-                    owner=self.deps.runtime,
-                )
+        queue_memory_persistence = self._memory_persistence(
+            agent_name=self.deps.agent_name,
+            session_id=session_id,
+            execution_identity=execution_identity,
+            prompt=memory_prompt,
+            thread_history=memory_thread_history,
+            user_id=request.user_id,
+        )
 
         persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
