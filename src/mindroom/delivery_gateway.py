@@ -1563,13 +1563,13 @@ class DeliveryGateway:
         """Prepare a payload for the wire, unless a frozen one already exists.
 
         Preparation can upload a sidecar, so it must not run for a turn whose
-        answer is already acknowledged. That row is what `flush` returns, its
-        payload is frozen and `enqueue` refuses to overwrite it, so preparing
-        again would upload an attachment nothing can ever reference -- or fail,
-        and take down a rerun whose answer is already durable and visible.
+        row has already been attempted. That row is frozen and `enqueue`
+        refuses to overwrite it, so preparing again would upload an attachment
+        nothing can ever reference -- or fail before the durable payload gets
+        another chance to reach Matrix.
         """
         existing = await self.deps.outbox.load_delivery(turn_id=turn_id, stage=stage)
-        if existing is not None and existing.acknowledged_event_id is not None:
+        if existing is not None and existing.attempted:
             return content
         return await prepare_large_message(self._client(), room_id, content)
 
