@@ -435,10 +435,12 @@ def note_membership_restarted_after(
     room_id: str,
     cleanup: Callable[[], None],
 ) -> None:
-    """Clear external departure state before atomically rearming one room."""
-    if not _claim_departure_fence(transaction, principal_id, room_id):
-        return
-    cleanup()
+    """Clear external departure state before atomically rearming one room.
+
+    Rearming unconditionally is safe: clearing an unfenced flag is a no-op,
+    and the fence claim above still gates the cleanup itself.
+    """
+    cleanup_fenced_departure(transaction, principal_id, room_id, cleanup)
     note_membership_restarted(transaction, principal_id, room_id)
 
 
