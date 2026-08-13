@@ -1437,6 +1437,74 @@ Just let me know your preference!"""
         assert json.loads(persistence_file.read_text()) == {}
         assert interactive._active_questions == {}
 
+    def test_clear_departed_agent_questions_uses_one_exclusive_file_lock(self, tmp_path: Path) -> None:
+        """The persisted snapshot must stay locked from its read through filtering and replacement."""
+        interactive.init_persistence(tmp_path)
+        interactive.register_interactive_question(
+            "$question",
+            "!departed:localhost",
+            None,
+            {"✅": "yes"},
+            "test_agent",
+        )
+
+        with patch(
+            "mindroom.interactive.advisory_file_lock",
+            wraps=interactive.advisory_file_lock,
+        ) as persistence_lock:
+            interactive.clear_interactive_questions_for_room("!departed:localhost", "test_agent")
+
+        assert persistence_lock.call_count == 1
+        assert persistence_lock.call_args.kwargs.get("exclusive", True)
+
+    @pytest.mark.asyncio
+    async def test_restore_does_not_resurrect_a_question_another_process_removed(
+        self,
+        mock_client: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """A durable external deletion wins over one process's in-flight claim."""
+        interactive.init_persistence(tmp_path)
+        persistence_file = tmp_path / "tracking" / "interactive_questions.json"
+        interactive.register_interactive_question(
+            "$claimed",
+            "!departed:localhost",
+            None,
+            {"✅": "yes"},
+            "test_agent",
+        )
+        event = MagicMock(spec=nio.ReactionEvent)
+        event.sender = "@user:localhost"
+        event.reacts_to = "$claimed"
+        event.key = "✅"
+        selection = await interactive.handle_reaction(
+            mock_client,
+            event,
+            "test_agent",
+            self.config,
+            runtime_paths_for(self.config),
+        )
+        assert selection is not None
+
+        assert interactive._persistence_lock_file is not None
+        with interactive.advisory_file_lock(interactive._persistence_lock_file):
+            interactive._write_active_questions_atomically_locked({})
+
+        interactive.restore_selection(selection)
+        interactive.register_interactive_question(
+            "$current",
+            "!current:localhost",
+            None,
+            {"✅": "yes"},
+            "test_agent",
+        )
+
+        interactive._cleanup()
+        interactive.init_persistence(tmp_path)
+
+        assert set(json.loads(persistence_file.read_text())) == {"$current"}
+        assert set(interactive._active_questions) == {"$current"}
+
     @pytest.mark.asyncio
     async def test_failed_commit_keeps_claim_recoverable(
         self,

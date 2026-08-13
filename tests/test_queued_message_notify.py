@@ -849,10 +849,12 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         runtime_paths=runtime_paths,
         delivery_gateway=MagicMock(),
         conversation_reader=conversation_reader,
+        membership=MagicMock(),
     )
     deps = support.build_deps(
         room_id="!room:localhost",
         interactive_agent_name="general",
+        membership_turn_id="$source",
     )
     thread_history = [
         ResolvedVisibleMessage.synthetic(
@@ -953,10 +955,12 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         runtime_paths=runtime_paths,
         delivery_gateway=MagicMock(),
         conversation_reader=conversation_reader,
+        membership=MagicMock(),
     )
     deps = support.build_deps(
         room_id="!adhoc:localhost",
         interactive_agent_name="general",
+        membership_turn_id="$source",
     )
     thread_history = [
         ResolvedVisibleMessage.synthetic(

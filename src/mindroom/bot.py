@@ -650,6 +650,7 @@ class AgentBot:
             matrix_id=runtime_matrix_id,
             resolver=self._conversation_resolver,
             hook_context=self._hook_context_support,
+            membership=self._journal_store.principal(self._journal_principal_id),
         )
         self._turn_store = TurnStore(
             TurnStoreDeps(
@@ -690,6 +691,7 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             delivery_gateway=self._delivery_gateway,
             conversation_reader=self._conversation_reader,
+            membership=self._journal_store.principal(self._journal_principal_id),
         )
         self._ingress_hook_runner = IngressHookRunner(
             hook_context=self._hook_context_support,

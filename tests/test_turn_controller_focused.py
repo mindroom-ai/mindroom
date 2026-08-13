@@ -412,6 +412,7 @@ def _build_harness(
         matrix_id=matrix_id,
         resolver=resolver,
         hook_context=hook_context,
+        membership=MagicMock(),
     )
     journal_store = open_event_journal(
         config.event_journal,

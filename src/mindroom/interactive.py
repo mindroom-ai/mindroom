@@ -304,13 +304,20 @@ def restore_selection(selection: InteractiveSelection) -> None:
     if question is None:
         return
     with _thread_lock:
-        if selection.question_event_id not in _claimed_questions:
+        event_id = selection.question_event_id
+        if event_id not in _claimed_questions:
             return
-        if selection.question_event_id in _active_questions:
-            _claimed_questions.pop(selection.question_event_id, None)
+        if _persistence_file is not None and _persistence_lock_file is not None:
+            with advisory_file_lock(_persistence_lock_file, exclusive=False):
+                persisted_questions = _load_persisted_questions()
+            _claimed_questions.pop(event_id, None)
+            _dirty_question_ids.discard(event_id)
+            _deleted_question_ids.discard(event_id)
+            _set_active_questions_locked(_apply_local_changes_locked(persisted_questions))
             return
-        _store_active_question_locked(selection.question_event_id, _copy_question(question))
-        _claimed_questions.pop(selection.question_event_id, None)
+        if event_id not in _active_questions:
+            _store_active_question_locked(event_id, _copy_question(question))
+        _claimed_questions.pop(event_id, None)
 
 
 def _apply_local_changes_locked(
@@ -896,21 +903,33 @@ def clear_interactive_question(event_id: str) -> None:
 def clear_interactive_questions_for_room(room_id: str, creator_agent: str) -> None:
     """Durably consume one departed agent's active and claimed questions."""
     with _thread_lock:
-        _refresh_active_questions_locked()
-        removed_event_ids = {
-            event_id
-            for event_id, question in _active_questions.items()
-            if question.room_id == room_id and question.creator_agent == creator_agent
-        }
-        removed_event_ids.update(
+        claimed_event_ids = {
             event_id
             for event_id, question in _claimed_questions.items()
             if question.room_id == room_id and question.creator_agent == creator_agent
-        )
-        for event_id in removed_event_ids:
-            _remove_active_question_locked(event_id)
-            _deleted_question_ids.add(event_id)
-        _persist_local_changes_locked(rebuild_on_read_error=False)
+        }
+        if _persistence_file is None or _persistence_lock_file is None:
+            removed_event_ids = claimed_event_ids | {
+                event_id
+                for event_id, question in _active_questions.items()
+                if question.room_id == room_id and question.creator_agent == creator_agent
+            }
+            for event_id in removed_event_ids:
+                _remove_active_question_locked(event_id)
+        else:
+            _persistence_file.parent.mkdir(parents=True, exist_ok=True)
+            with advisory_file_lock(_persistence_lock_file):
+                questions = _apply_local_changes_locked(_load_persisted_questions())
+                removed_event_ids = claimed_event_ids | {
+                    event_id
+                    for event_id, question in questions.items()
+                    if question.room_id == room_id and question.creator_agent == creator_agent
+                }
+                remaining_questions = {
+                    event_id: question for event_id, question in questions.items() if event_id not in removed_event_ids
+                }
+                _write_active_questions_atomically_locked(remaining_questions)
+                _replace_active_questions_locked(remaining_questions)
 
         for event_id in removed_event_ids:
             _claimed_questions.pop(event_id, None)

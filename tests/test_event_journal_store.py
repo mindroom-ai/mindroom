@@ -1581,6 +1581,50 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
 
         assert not await alice.turn_membership_is_current(turn_id="$turn", room_id=ROOM)
 
+    async def test_stale_turn_cannot_register_after_rejoin(self, alice: PrincipalStore) -> None:
+        """A post-delivery side effect must retain the membership that authorized its turn."""
+        await admit(alice, "$turn")
+        registered: list[str] = []
+
+        assert await alice.run_if_turn_membership_current(
+            turn_id="$turn",
+            room_id=ROOM,
+            operation=lambda: registered.append("current"),
+        )
+
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        assert not await alice.run_if_turn_membership_current(
+            turn_id="$turn",
+            room_id=ROOM,
+            fallback_membership_epoch=await alice.membership_epoch(ROOM),
+            operation=lambda: registered.append("stale"),
+        )
+        assert registered == ["current"]
+
+    async def test_stale_epoch_cannot_register_after_rejoin(self, alice: PrincipalStore) -> None:
+        """Direct Matrix tools retain the target-room epoch captured before transport."""
+        expected_epoch = await alice.membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+        registered: list[str] = []
+
+        accepted = await alice.run_if_membership_epoch(
+            room_id=ROOM,
+            expected_membership_epoch=expected_epoch,
+            operation=lambda: registered.append("stale"),
+        )
+
+        assert not accepted
+        assert not await alice.run_if_turn_membership_current(
+            turn_id="$synthetic-turn",
+            room_id=ROOM,
+            fallback_membership_epoch=expected_epoch,
+            operation=lambda: registered.append("stale synthetic"),
+        )
+        assert registered == []
+
     async def test_one_rooms_fence_does_not_silence_another_room(self, alice: PrincipalStore) -> None:
         """Leaving one room says nothing about a turn running in a different one."""
         await admit(alice, "$turn")
@@ -2525,6 +2569,69 @@ class TestDepartureCleanupAndRejoinAreCrossProcessOrdered:
             await asyncio.gather(cleanup, return_exceptions=True)
 
         assert operation_order == ["departure cleanup", "rejoin cleanup"]
+
+
+class TestInteractiveRegistrationAndDepartureAreCrossProcessOrdered:
+    """Question registration and departure share one PostgreSQL membership-row lock."""
+
+    async def test_departure_waits_for_a_current_turn_registration(
+        self,
+        rival_stores: RivalStores,
+    ) -> None:
+        """A registration that wins the row claim is subsequently removed by the fence."""
+        principal_id = "agent@alice"
+        first = rival_stores.first.principal(principal_id)
+        second = rival_stores.second.principal(principal_id)
+        await admit(first, "$turn")
+        registration_claimed = threading.Event()
+        release_registration = threading.Event()
+        operation_order: list[str] = []
+
+        def pause_after_claim() -> None:
+            registration_claimed.set()
+            assert release_registration.wait(_WORKER_WAIT_SECONDS), "the registration was never released"
+
+        registering = EventJournalStore(
+            backend=_PausingBackend(
+                rival_stores.first.backend,
+                pause_after_claim,
+                statement_matches=lambda sql: "INSERT INTO room_membership" in sql,
+            ),
+        ).principal(principal_id)
+        registration = asyncio.create_task(
+            registering.run_if_turn_membership_current(
+                turn_id="$turn",
+                room_id=ROOM,
+                operation=lambda: operation_order.append("registration"),
+            ),
+        )
+        try:
+            await asyncio.to_thread(registration_claimed.wait, _WORKER_WAIT_SECONDS)
+            assert registration_claimed.is_set(), "the registration never claimed the membership row"
+
+            async def fence_and_cleanup() -> None:
+                await second.fence_departure(ROOM, source=DepartureSource.REPORTED)
+                await second.cleanup_fenced_departure(
+                    ROOM,
+                    lambda: operation_order.append("departure cleanup"),
+                )
+
+            departure = asyncio.create_task(fence_and_cleanup())
+            await _await_queued_racers(
+                rival_stores.database_url,
+                application_name=rival_stores.racer_application_name,
+                expected=1,
+            )
+            assert not departure.done()
+
+            release_registration.set()
+            accepted, _ = await asyncio.gather(registration, departure)
+        finally:
+            release_registration.set()
+            await asyncio.gather(registration, return_exceptions=True)
+
+        assert accepted
+        assert operation_order == ["registration", "departure cleanup"]
 
 
 class TestAFenceCannotBeSteppedOverByAConcurrentWalk:

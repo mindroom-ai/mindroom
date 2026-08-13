@@ -218,6 +218,44 @@ class PrincipalStore:
             ),
         )
 
+    async def run_if_turn_membership_current(
+        self,
+        *,
+        turn_id: str,
+        room_id: str,
+        operation: Callable[[], None],
+        fallback_membership_epoch: int | None = None,
+    ) -> bool:
+        """Run a side effect only while its admitted turn still owns the room membership."""
+        return await self._backend.write(
+            lambda transaction: _run_if_turn_membership_current(
+                transaction,
+                self._principal_id,
+                turn_id=turn_id,
+                room_id=room_id,
+                operation=operation,
+                fallback_membership_epoch=fallback_membership_epoch,
+            ),
+        )
+
+    async def run_if_membership_epoch(
+        self,
+        *,
+        room_id: str,
+        expected_membership_epoch: int,
+        operation: Callable[[], None],
+    ) -> bool:
+        """Run a side effect only while one captured room membership remains current."""
+        return await self._backend.write(
+            lambda transaction: _run_if_membership_epoch(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                expected_membership_epoch=expected_membership_epoch,
+                operation=operation,
+            ),
+        )
+
     async def note_membership_restarted(
         self,
         room_id: str,
@@ -787,6 +825,57 @@ def _turn_membership_is_current(
         # Nothing the journal admitted, so nothing a rejoin invalidated.
         return True
     return admitted == journal.current_membership_epoch(transaction, principal_id, room_id)
+
+
+def _run_if_membership_epoch(
+    transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
+    principal_id: str,
+    *,
+    room_id: str,
+    expected_membership_epoch: int,
+    operation: Callable[[], None],
+) -> bool:
+    """Claim one membership row and run a synchronous side effect if its epoch matches."""
+    if not reads.claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    ):
+        return False
+    operation()
+    return True
+
+
+def _run_if_turn_membership_current(
+    transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
+    principal_id: str,
+    *,
+    turn_id: str,
+    room_id: str,
+    operation: Callable[[], None],
+    fallback_membership_epoch: int | None = None,
+) -> bool:
+    """Claim a turn's admitted membership before running one synchronous side effect."""
+    admitted = journal.admitted_membership_epoch(transaction, principal_id, turn_id)
+    if admitted is None:
+        if fallback_membership_epoch is not None:
+            return _run_if_membership_epoch(
+                transaction,
+                principal_id,
+                room_id=room_id,
+                expected_membership_epoch=fallback_membership_epoch,
+                operation=operation,
+            )
+        operation()
+        return True
+    return _run_if_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        expected_membership_epoch=admitted,
+        operation=operation,
+    )
 
 
 def _enqueue_delivery(

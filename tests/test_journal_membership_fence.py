@@ -161,6 +161,11 @@ async def test_join_retries_departure_cleanup_before_rearming_the_fence(
         await membership.fence_local_departure(ROOM)
 
     assert await principal.membership_epoch(ROOM) == 1
+    assert not await principal.run_if_membership_epoch(
+        room_id=ROOM,
+        expected_membership_epoch=0,
+        operation=lambda: calls.append("stale registration"),
+    )
 
     await membership.note_membership_restarted(ROOM)
 

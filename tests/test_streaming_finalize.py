@@ -26,7 +26,7 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -49,7 +49,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
 
@@ -899,6 +899,13 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
         _room_send_response("$reaction-no"),
         _room_send_response("$reaction-test"),
     ]
+    membership = MagicMock()
+
+    def register_if_current(*, operation: Callable[[], None], **_kwargs: object) -> bool:
+        operation()
+        return True
+
+    membership.run_if_turn_membership_current = AsyncMock(side_effect=register_if_current)
     interactive._cleanup()
     try:
         support = PostResponseEffectsSupport(
@@ -907,6 +914,7 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
             runtime_paths=runtime_paths_for(config),
             delivery_gateway=Mock(),
             conversation_reader=make_conversation_reader_mock(),
+            membership=membership,
         )
         await apply_post_response_effects(
             final_outcome,
@@ -914,6 +922,7 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
             support.build_deps(
                 room_id=target.room_id,
                 interactive_agent_name="code",
+                membership_turn_id="$source",
             ),
         )
 
@@ -927,6 +936,59 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
         assert reaction_targets == ["$displayed-root", "$displayed-root", "$displayed-root"]
         assert "$obsolete-edit" not in reaction_targets
         assert reaction_keys == ["✅", "❌", "🧪"]
+        membership.run_if_turn_membership_current.assert_awaited_once()
+    finally:
+        interactive._cleanup()
+
+
+@pytest.mark.asyncio
+async def test_stale_response_skips_interactive_registration_and_buttons(tmp_path: Path) -> None:
+    """A response that finished after its membership ended cannot create a live question."""
+    config = _config(tmp_path)
+    client = make_matrix_client_mock()
+    membership = MagicMock()
+    membership.run_if_turn_membership_current = AsyncMock(return_value=False)
+    target = MessageTarget.resolve("!room:localhost", None, "$source")
+    formatted = interactive.parse_and_format_interactive(
+        """Choose one.
+
+```interactive
+{"question":"Pick","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
+```""",
+        extract_mapping=True,
+    )
+    assert formatted.interactive_metadata is not None
+    outcome = FinalDeliveryOutcome(
+        terminal_status="completed",
+        event_id="$question",
+        is_visible_response=True,
+        final_visible_body=formatted.formatted_text,
+        delivery_kind="sent",
+        interactive_metadata=formatted.interactive_metadata,
+    )
+    support = PostResponseEffectsSupport(
+        runtime=SimpleNamespace(client=client, config=config),
+        logger=get_logger("tests.post_response"),
+        runtime_paths=runtime_paths_for(config),
+        delivery_gateway=Mock(),
+        conversation_reader=make_conversation_reader_mock(),
+        membership=membership,
+    )
+
+    interactive._cleanup()
+    try:
+        await apply_post_response_effects(
+            outcome,
+            ResponseOutcome(interactive_target=target),
+            support.build_deps(
+                room_id=target.room_id,
+                interactive_agent_name="code",
+                membership_turn_id="$source",
+            ),
+        )
+
+        assert "$question" not in interactive._active_questions
+        client.room_send.assert_not_awaited()
     finally:
         interactive._cleanup()
 

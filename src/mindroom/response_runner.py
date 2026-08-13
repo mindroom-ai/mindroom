@@ -1765,6 +1765,7 @@ class ResponseRunner:
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
                 interactive_agent_name=self.deps.agent_name,
+                membership_turn_id=request.response_envelope.source_event_id,
             ),
         )
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
@@ -1886,6 +1887,7 @@ class ResponseRunner:
                 post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                     room_id=request.room_id,
                     interactive_agent_name=self.deps.agent_name,
+                    membership_turn_id=request.response_envelope.source_event_id,
                 ),
             )
         requester_user_id = request.user_id or ""
@@ -2323,6 +2325,7 @@ class ResponseRunner:
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
                 interactive_agent_name=self.deps.agent_name,
+                membership_turn_id=request.response_envelope.source_event_id,
                 persist_response_event_id=persist_response_event_id,
             ),
             streaming_delivery_error_handler=settle_team_streaming_delivery_error,
@@ -3090,6 +3093,7 @@ class ResponseRunner:
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
                 interactive_agent_name=self.deps.agent_name,
+                membership_turn_id=request.response_envelope.source_event_id,
                 queue_memory_persistence=queue_memory_persistence,
                 persist_response_event_id=persist_response_event_id,
             ),
