@@ -451,7 +451,7 @@ def fence_departure(
     )
 
 
-def note_membership_restarted(
+def _note_membership_restarted(
     transaction: Transaction,
     principal_id: str,
     room_id: str,
@@ -488,16 +488,19 @@ def note_membership_restarted_after(
     *,
     expected_membership_epoch: int | None = None,
 ) -> None:
-    """Clear external departure state before atomically rearming one room."""
-    if not _claim_departure_fence(
+    """Clear external departure state before atomically rearming one room.
+
+    Without an expected epoch, clearing an unfenced flag is a harmless no-op.
+    With one, both cleanup and rearming apply only to that exact membership.
+    """
+    cleanup_fenced_departure(
         transaction,
         principal_id,
         room_id,
+        cleanup,
         expected_membership_epoch=expected_membership_epoch,
-    ):
-        return
-    cleanup()
-    note_membership_restarted(
+    )
+    _note_membership_restarted(
         transaction,
         principal_id,
         room_id,
@@ -510,9 +513,16 @@ def cleanup_fenced_departure(
     principal_id: str,
     room_id: str,
     cleanup: Callable[[], None],
+    *,
+    expected_membership_epoch: int | None = None,
 ) -> None:
     """Clean external state only while this room is still durably departed."""
-    if _claim_departure_fence(transaction, principal_id, room_id):
+    if _claim_departure_fence(
+        transaction,
+        principal_id,
+        room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    ):
         cleanup()
 
 

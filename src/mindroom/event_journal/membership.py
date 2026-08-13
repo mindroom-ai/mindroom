@@ -100,7 +100,7 @@ class MembershipFence:
     """Advance a room's membership epoch exactly once per departure."""
 
     store: MembershipView
-    clear_departed_room: Callable[[str], None] | None = None
+    clear_departed_room: Callable[[str], None] = lambda _room_id: None
     # Rooms owing a sync report, and how many more sync responses that report
     # may still appear in. Recovered from the journal on the first sync
     # response, because a restart between a local departure and its report
@@ -153,11 +153,9 @@ class MembershipFence:
             self._log(room_id, outcome)
             self._track(room_id, outcome)
             if rejoined and outcome.reported_fence_epoch is not None:
-                clear_departed_room = self.clear_departed_room
-                cleanup = None if clear_departed_room is None else partial(clear_departed_room, room_id)
                 await self.store.note_membership_restarted(
                     room_id,
-                    cleanup=cleanup,
+                    cleanup=partial(self.clear_departed_room, room_id),
                     expected_membership_epoch=outcome.reported_fence_epoch,
                 )
             else:
@@ -166,17 +164,14 @@ class MembershipFence:
 
     async def note_membership_restarted(self, room_id: str) -> None:
         """Record a confirmed join, so this room's next departure fences again."""
-        clear_departed_room = self.clear_departed_room
-        cleanup = None if clear_departed_room is None else lambda: clear_departed_room(room_id)
-        await self.store.note_membership_restarted(room_id, cleanup=cleanup)
+        await self.store.note_membership_restarted(room_id, cleanup=lambda: self.clear_departed_room(room_id))
 
     async def _clear_room(self, room_id: str, outcome: DepartureOutcome) -> None:
         """Clear external state only for the departure that advanced the epoch."""
-        clear_departed_room = self.clear_departed_room
-        if outcome.fenced and clear_departed_room is not None:
+        if outcome.fenced:
             await self.store.cleanup_fenced_departure(
                 room_id,
-                lambda: clear_departed_room(room_id),
+                lambda: self.clear_departed_room(room_id),
             )
 
     def _track(self, room_id: str, outcome: DepartureOutcome) -> None:

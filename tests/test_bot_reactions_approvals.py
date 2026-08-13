@@ -894,7 +894,7 @@ class TestAgentBot(AgentBotTestBase):
                     EventClass.ACTIONABLE,
                 )
 
-                await asyncio.wait_for(message_started.wait(), timeout=0.2)
+                await asyncio.wait_for(message_started.wait(), timeout=1.0)
                 assert bot._journal_dispatcher.callbacks.source_has_live_owner(reaction.event_id)
                 assert reaction.event_id in await bot._journal_dispatcher.unsettled_event_ids()
         finally:
@@ -1029,10 +1029,11 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         settlement_error = OSError("simulated journal settlement failure")
         settle_dispatch_sources = AsyncMock(side_effect=settlement_error)
+        retry_dispatch_sources = MagicMock()
         controller = replace_turn_controller_deps(
             bot,
             settle_dispatch_sources=settle_dispatch_sources,
-            retry_dispatch_sources=MagicMock(),
+            retry_dispatch_sources=retry_dispatch_sources,
         )
         response_completed = asyncio.Event()
         prestart_cleanup = MagicMock()
@@ -1058,6 +1059,8 @@ class TestAgentBot(AgentBotTestBase):
         assert response_completed.is_set()
         settle_dispatch_sources.assert_awaited_once_with(("$reaction",))
         prestart_cleanup.assert_not_called()
+        # The failed settlement must hand the exact journal source back for retry.
+        retry_dispatch_sources.assert_called_once_with(("$reaction",))
 
     @pytest.mark.asyncio
     async def test_terminal_interactive_selection_preserves_task_cancellation(

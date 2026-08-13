@@ -899,31 +899,32 @@ def clear_interactive_question(event_id: str) -> None:
         logger.info("Cleared interactive question", event_id=event_id)
 
 
+def _question_ids_for_room(
+    questions: dict[str, _InteractiveQuestion],
+    room_id: str,
+    creator_agent: str,
+) -> set[str]:
+    """Return the questions one agent created in one room."""
+    return {
+        event_id
+        for event_id, question in questions.items()
+        if question.room_id == room_id and question.creator_agent == creator_agent
+    }
+
+
 def clear_interactive_questions_for_room(room_id: str, creator_agent: str) -> None:
     """Durably consume one departed agent's active and claimed questions."""
     with _thread_lock:
-        claimed_event_ids = {
-            event_id
-            for event_id, question in _claimed_questions.items()
-            if question.room_id == room_id and question.creator_agent == creator_agent
-        }
+        claimed_event_ids = _question_ids_for_room(_claimed_questions, room_id, creator_agent)
         if _persistence_file is None or _persistence_lock_file is None:
-            removed_event_ids = claimed_event_ids | {
-                event_id
-                for event_id, question in _active_questions.items()
-                if question.room_id == room_id and question.creator_agent == creator_agent
-            }
+            removed_event_ids = claimed_event_ids | _question_ids_for_room(_active_questions, room_id, creator_agent)
             for event_id in removed_event_ids:
                 _remove_active_question_locked(event_id)
         else:
             _persistence_file.parent.mkdir(parents=True, exist_ok=True)
             with advisory_file_lock(_persistence_lock_file):
                 questions = _apply_local_changes_locked(_load_persisted_questions())
-                removed_event_ids = claimed_event_ids | {
-                    event_id
-                    for event_id, question in questions.items()
-                    if question.room_id == room_id and question.creator_agent == creator_agent
-                }
+                removed_event_ids = claimed_event_ids | _question_ids_for_room(questions, room_id, creator_agent)
                 remaining_questions = {
                     event_id: question for event_id, question in questions.items() if event_id not in removed_event_ids
                 }

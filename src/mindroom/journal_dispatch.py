@@ -397,14 +397,11 @@ class JournalDispatcher:
         token = _RUNNING_EVENT.set(event)
         try:
             settles = await binding.run(self, room, matrix_event)
-            if event.kind is EventKind.REACTION:
-                if settles:
-                    self._deferred_reaction_ids.discard(event.event_id)
-                elif self.semantic_consumer() is not SemanticConsumer.INTERACTIVE_REACTION:
-                    # The real interactive path registered before starting its
-                    # detached owner, so terminal settlement can safely remove
-                    # it even if that owner finishes before this callback.
-                    self._deferred_reaction_ids.add(event.event_id)
+            if event.kind is EventKind.REACTION and settles:
+                # A deferring reaction is never re-added here: the interactive
+                # path registered before starting its detached owner, so a fast
+                # owner's terminal settlement is not undone by this callback.
+                self._deferred_reaction_ids.discard(event.event_id)
             return settles
         finally:
             _RUNNING_EVENT.reset(token)
@@ -457,13 +454,11 @@ class JournalDispatcher:
         the worker still lists these events as deferred to a turn that has now
         ended, and nothing else would ever clear them.
         """
-        self._deferred_reaction_ids.difference_update(event_ids)
-        self._worker.release(event_ids)
+        self._release_sources(event_ids)
 
     async def settle_intentionally_ignored_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Settle turn-backed events that produced no dispatch payload."""
-        self._deferred_reaction_ids.difference_update(event_ids)
-        self._worker.release(event_ids)
+        self._release_sources(event_ids)
         await self.store.settle_many(event_ids)
 
     def retry_turn_source(self, event_id: str) -> None:
@@ -472,9 +467,13 @@ class JournalDispatcher:
 
     def retry_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Return several undelivered turn sources to the worker."""
+        self._release_sources(event_ids)
+        self._worker.wake()
+
+    def _release_sources(self, event_ids: tuple[str, ...]) -> None:
+        """Release worker ownership and forget any deferred-reaction markers."""
         self._deferred_reaction_ids.difference_update(event_ids)
         self._worker.release(event_ids)
-        self._worker.wake()
 
     async def unsettled_event_ids(self) -> frozenset[str]:
         """Return every event that still owes semantic work."""
