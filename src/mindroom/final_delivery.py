@@ -82,7 +82,12 @@ class FinalDeliveryOutcome:  # noqa: D101
 
     @property
     def mark_handled(self) -> bool:  # noqa: D102
-        return self.event_id is not None and self.is_visible_response and not self.suppressed
+        return (
+            self.terminal_status != "suspended"
+            and self.event_id is not None
+            and self.is_visible_response
+            and not self.suppressed
+        )
 
     @property
     def delivered_substantive_content(self) -> bool:

@@ -2689,7 +2689,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
             patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()) as effects,
         ):
-            assert await bot._response_runner.generate_response(request) == "$waiting"
+            assert await bot._response_runner.generate_response(request) is None
             assert not bot._response_runner.has_active_response_for_target(target.target)
 
         suspend.assert_awaited_once()

@@ -799,6 +799,28 @@ class PrincipalStore:
             ),
         )
 
+    async def finish_approval_card(self, *, transaction_id: str, card_event_id: str) -> bool:
+        """Retire delivered payload while preserving durable approval-only classification."""
+        return await self._backend.write(
+            lambda transaction: approvals.finish(
+                transaction,
+                self._principal_id,
+                transaction_id=transaction_id,
+                card_event_id=card_event_id,
+            ),
+        )
+
+    async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool:
+        """Return whether one delivered approval action is durably terminal."""
+        return await self._backend.read(
+            lambda transaction: approvals.is_terminal_card(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                card_event_id=card_event_id,
+            ),
+        )
+
     async def pending_approval_card(
         self,
         *,
@@ -910,6 +932,22 @@ class PrincipalStore:
                 run_id=run_id,
                 session_id=session_id,
                 calls=calls,
+            ),
+        )
+
+    async def activate_approval_continuation(
+        self,
+        approval_id: str,
+        *,
+        expected_generation: int,
+    ) -> ApprovalContinuation | None:
+        """Expose one generation only after every approval card is durable."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.activate(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                expected_generation=expected_generation,
             ),
         )
 

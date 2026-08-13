@@ -453,20 +453,21 @@ def advance(
         return None
     next_generation = claimant_generation + 1
     state: ApprovalContinuationState = "ready" if all(call.decision is not None for call in calls) else "waiting"
+    publication_owner = None if state == "ready" else current.runtime_generation
     advanced = replace(
         current,
         run_id=run_id,
         session_id=session_id,
         calls=calls,
         state=state,
-        runtime_generation=None,
+        runtime_generation=publication_owner,
         failure_reason=None,
         generation=next_generation,
     )
     updated = transaction.fetchone(
         """
         UPDATE approval_continuations
-        SET state = ?, generation = ?, runtime_generation = NULL,
+        SET state = ?, generation = ?, runtime_generation = ?,
             failure_reason = NULL, context_json = ?
         WHERE principal_id = ? AND approval_id = ?
           AND state = 'claimed' AND generation = ?
@@ -475,6 +476,7 @@ def advance(
         (
             state,
             next_generation,
+            publication_owner,
             _json(_context(advanced)),
             principal_id,
             approval_id,
@@ -485,6 +487,35 @@ def advance(
         return None
     _insert_calls(transaction, principal_id, approval_id, next_generation, calls)
     return _load(transaction, principal_id, approval_id=approval_id)
+
+
+def activate(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    expected_generation: int,
+) -> ApprovalContinuation | None:
+    """Release one publication lease and make its generation decidable or executable."""
+    undecided = transaction.fetchone(
+        """
+        SELECT 1 AS present FROM approval_continuation_calls
+        WHERE principal_id = ? AND approval_id = ? AND generation = ? AND decision IS NULL
+        LIMIT 1
+        """,
+        (principal_id, approval_id, expected_generation),
+    )
+    state: Literal["waiting", "ready"] = "waiting" if undecided is not None else "ready"
+    updated = transaction.fetchone(
+        """
+        UPDATE approval_continuations SET state = ?, runtime_generation = NULL
+        WHERE principal_id = ? AND approval_id = ? AND state = 'waiting'
+          AND generation = ? AND runtime_generation IS NOT NULL
+        RETURNING approval_id
+        """,
+        (state, principal_id, approval_id, expected_generation),
+    )
+    return None if updated is None else _load(transaction, principal_id, approval_id=approval_id)
 
 
 def request_failure(

@@ -3403,6 +3403,18 @@ class TestApprovalCards:
         await alice.forget_approval_card(transaction_id=self.transaction("$sent"))
         assert await alice.pending_approval_cards(room_id=ROOM) == ()
 
+    async def test_terminal_card_identity_survives_payload_retirement(self, alice: PrincipalStore) -> None:
+        """Every bot must keep classifying a delivered approval action as approval-only."""
+        await self.remember(alice, "$card")
+
+        await alice.finish_approval_card(
+            transaction_id=self.transaction("$card"),
+            card_event_id="$card",
+        )
+
+        assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
+        assert await alice.is_terminal_approval_card(room_id=ROOM, card_event_id="$card")
+
     async def test_a_recorded_decision_reads_back_with_the_card(self, alice: PrincipalStore) -> None:
         """A card keeps its decision until the room is known to show it.
 
@@ -3759,6 +3771,20 @@ class TestApprovalContinuations:
         failing = await alice.pending(runtime_generation="runtime-a")
         assert [event.event_id for event in failing] == ["$source-1"]
 
+    async def test_abandoned_publication_exposes_its_primary_source_for_failure_cleanup(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A crash before every card is durable cannot hide the paused source forever."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(
+            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
+        )
+
+        recovered = await alice.pending(runtime_generation="runtime-b")
+
+        assert [event.event_id for event in recovered] == ["$source-1"]
+
     async def test_current_claim_is_hidden_and_old_runtime_claim_is_recoverable(self, alice: PrincipalStore) -> None:
         """A restart recovers delivery debt without replaying the coalesced source twice."""
         await self.admit_sources(alice)
@@ -3825,8 +3851,40 @@ class TestApprovalContinuations:
         assert advanced.state == "waiting"
         assert advanced.generation == 1
         assert advanced.run_id == "run-2"
-        assert advanced.runtime_generation is None
+        assert advanced.runtime_generation == "runtime-a"
         assert advanced.calls == calls
+
+    async def test_publication_activation_uses_decisions_recorded_while_cards_were_sent(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An immediate click is durable but cannot make a run executable before publication finishes."""
+        from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
+
+        await self.admit_sources(alice)
+        publishing = replace(self.continuation(state="waiting"), runtime_generation="runtime-a")
+        await alice.create_approval_continuation(publishing)
+        await self.remember_card(alice)
+
+        recorded = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="approved",
+            reason=None,
+            resolution={"status": "approved"},
+        )
+        before_activation = await alice.approval_continuation(publishing.approval_id)
+        activated = await alice.activate_approval_continuation(
+            publishing.approval_id,
+            expected_generation=0,
+        )
+
+        assert recorded.recorded
+        assert recorded.continuation_ready is False
+        assert before_activation is not None
+        assert before_activation.state == "waiting"
+        assert before_activation.calls[0].decision is ApprovalDecision.APPROVED
+        assert activated is not None
+        assert activated.state == "ready"
 
     async def test_failure_request_is_guarded_by_observed_state(self, alice: PrincipalStore) -> None:
         """A stale failure observer cannot fence work that already made progress."""
@@ -4053,6 +4111,26 @@ class TestApprovalContinuations:
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
         assert await alice.pending_approval_cards(room_id=ROOM) == ()
+
+    async def test_room_departure_terminalizes_router_owned_cards_before_discarding_the_continuation(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """The responder's membership fence must preserve the router's visible card cleanup debt."""
+        router = journal_store.principal("router@shared")
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await self.remember_card(router)
+
+        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+
+        assert await alice.approval_continuation("approval-1") is None
+        stored = await router.pending_approval_card(room_id=ROOM, card_event_id="$approval")
+        assert stored is not None
+        assert stored.resolution is not None
+        assert stored.resolution["status"] == "expired"
+        assert stored.resolution["resolution_reason"] == "Requesting agent left the room."
 
 
 class TestConcurrency:
@@ -4405,6 +4483,119 @@ class TestConnectionSecretsStayOutOfLogs:
         assert "hunter2" not in rendered
         assert "someone" not in rendered
         assert "db.example" not in rendered
+
+
+class TestSchemaUpgrades:
+    """Opening the journal upgrades additive columns without losing old rows."""
+
+    async def test_opening_main_schema_adds_native_continuation_card_identity(self, tmp_path: Path) -> None:
+        """A card written by main remains readable after native continuation columns are added."""
+        database_path = tmp_path / "main-schema.db"
+        with sqlite3.connect(database_path) as database:
+            database.execute(
+                """
+                CREATE TABLE approval_cards (
+                    principal_id TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    transaction_id TEXT NOT NULL,
+                    card_event_id TEXT,
+                    attempted INTEGER NOT NULL,
+                    sending_device_id TEXT,
+                    card_json TEXT NOT NULL,
+                    resolution_json TEXT,
+                    membership_epoch BIGINT NOT NULL,
+                    created_at_ns BIGINT NOT NULL,
+                    PRIMARY KEY (principal_id, transaction_id)
+                )
+                """,
+            )
+            database.execute(
+                """
+                INSERT INTO approval_cards (
+                    principal_id, room_id, transaction_id, card_event_id, attempted,
+                    sending_device_id, card_json, resolution_json, membership_epoch, created_at_ns
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("agent@alice", ROOM, "legacy", "$legacy", 1, DEVICE, '{"body":"old"}', None, 1, 1),
+            )
+
+        backend = SqliteBackend.open(database_path)
+        try:
+            row = await backend.read(
+                lambda transaction: transaction.fetchone(
+                    """
+                    SELECT card_event_id, continuation_id, continuation_generation, tool_call_id
+                    FROM approval_cards WHERE principal_id = ? AND transaction_id = ?
+                    """,
+                    ("agent@alice", "legacy"),
+                ),
+            )
+        finally:
+            await backend.close()
+
+        assert row is not None
+        assert row["card_event_id"] == "$legacy"
+        assert row["continuation_id"] is None
+        assert row["continuation_generation"] is None
+        assert row["tool_call_id"] is None
+
+    async def test_postgres_opening_main_schema_adds_native_continuation_card_identity(
+        self,
+        postgres_journal_url: str,
+    ) -> None:
+        """PostgreSQL upgrades the same shipped card row without a destructive migration."""
+        import psycopg  # noqa: PLC0415 - optional backend exercised only by this test
+
+        from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        with psycopg.connect(database_url) as database:
+            database.execute(
+                """
+                CREATE TABLE approval_cards (
+                    principal_id TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    transaction_id TEXT NOT NULL,
+                    card_event_id TEXT,
+                    attempted INTEGER NOT NULL,
+                    sending_device_id TEXT,
+                    card_json TEXT NOT NULL,
+                    resolution_json TEXT,
+                    membership_epoch BIGINT NOT NULL,
+                    created_at_ns BIGINT NOT NULL,
+                    PRIMARY KEY (principal_id, transaction_id)
+                )
+                """,
+            )
+            database.execute(
+                """
+                INSERT INTO approval_cards (
+                    principal_id, room_id, transaction_id, card_event_id, attempted,
+                    sending_device_id, card_json, resolution_json, membership_epoch, created_at_ns
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                ("agent@alice", ROOM, "legacy", "$legacy", 1, DEVICE, '{"body":"old"}', None, 1, 1),
+            )
+
+        backend = PostgresBackend.open(database_url)
+        try:
+            row = await backend.read(
+                lambda transaction: transaction.fetchone(
+                    """
+                    SELECT card_event_id, continuation_id, continuation_generation, tool_call_id
+                    FROM approval_cards WHERE principal_id = ? AND transaction_id = ?
+                    """,
+                    ("agent@alice", "legacy"),
+                ),
+            )
+        finally:
+            await backend.close()
+
+        assert row is not None
+        assert row["card_event_id"] == "$legacy"
+        assert row["continuation_id"] is None
+        assert row["continuation_generation"] is None
+        assert row["tool_call_id"] is None
 
 
 class TestHotQueriesAreIndexCovered:

@@ -32,6 +32,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
+from mindroom.event_journal import StoredApprovalCard
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
     ToolApprovalScriptError,
@@ -1028,6 +1029,32 @@ async def test_a_restart_adopts_and_expires_the_card_a_previous_device_left(tmp_
     assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
 
 
+def test_adopted_native_card_keeps_exact_continuation_identity() -> None:
+    """Device-change recovery must not reinterpret a native card as legacy."""
+    stored = StoredApprovalCard(
+        card=_approval_card(),
+        resolution=None,
+        transaction_id="txn-native",
+        card_event_id=None,
+        attempted=True,
+        sending_device_id="OLDDEVICE",
+        created_at_ns=1,
+        continuation_id="continuation-1",
+        continuation_generation=3,
+        tool_call_id="call-7",
+    )
+
+    adopted = _ApprovalManager._adopted_card(
+        stored,
+        card_event_id="$adopted",
+        card={**stored.card, "event_id": "$adopted"},
+    )
+
+    assert adopted.continuation_id == "continuation-1"
+    assert adopted.continuation_generation == 3
+    assert adopted.tool_call_id == "call-7"
+
+
 @pytest.mark.asyncio
 async def test_a_restart_keeps_a_card_whose_room_lookup_could_not_run(tmp_path: Path) -> None:
     """A question that could not be put is not an answer of "no card".
@@ -1305,6 +1332,40 @@ async def test_response_for_unknown_card_does_not_emit_terminal_edit(tmp_path: P
 
     assert result.consumed is False
     assert result.resolved is False
+    editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_response_for_durably_terminal_card_is_consumed_after_restart(tmp_path: Path) -> None:
+    """Other bot principals must not reinterpret a delivered approval reply as AI input."""
+    cards = FakeApprovalCards()
+    card = _approval_card()
+    await cards.store_card("$approval", "!room:localhost", card)
+    assert await cards.finish_approval_card(
+        transaction_id=transaction_id_for("$approval"),
+        card_event_id="$approval",
+    )
+    before_consume = AsyncMock()
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="denied",
+        reason="already handled",
+        before_consume=before_consume,
+    )
+
+    assert result.consumed
+    assert result.resolved is False
+    before_consume.assert_awaited_once_with()
     editor.assert_not_awaited()
 
 
@@ -1808,11 +1869,12 @@ async def test_a_restart_redelivers_a_decision_instead_of_expiring_it(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_a_click_on_an_already_decided_card_does_not_re_resolve_it(tmp_path: Path) -> None:
-    """A recorded decision closes the card to further answers.
+    """A recorded decision consumes later actions without resolving again.
 
     Its live waiter is gone with the process that made the decision, so the
     click arrives at the recovery path. Treating it as a fresh resolution would
-    replace a decision whose tool may already have run.
+    replace a decision whose tool may already have run; declining it would let
+    another bot reinterpret the same action as ordinary input.
     """
     cards = FakeApprovalCards()
     await cards.store_card("$approval", "!room:localhost", _approval_card())
@@ -1833,7 +1895,7 @@ async def test_a_click_on_an_already_decided_card_does_not_re_resolve_it(tmp_pat
         reason="Changed my mind.",
     )
 
-    assert result.consumed is False
+    assert result.consumed is True
     assert result.resolved is False
     editor.assert_not_awaited()
 

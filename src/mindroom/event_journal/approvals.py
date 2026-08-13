@@ -279,6 +279,7 @@ def resolve_continuation(
         """
         UPDATE approval_continuations SET state = 'ready'
         WHERE principal_id = ? AND approval_id = ? AND generation = ? AND state = 'waiting'
+          AND runtime_generation IS NULL
           AND NOT EXISTS (
               SELECT 1 FROM approval_continuation_calls
               WHERE principal_id = ? AND approval_id = ? AND generation = ? AND decision IS NULL
@@ -348,6 +349,64 @@ def _resolved_continuation_content(
     if isinstance(body, str) and body.startswith("Approved:"):
         stored["body"] = f"{decision.title()}:{body.removeprefix('Approved:')}"
     return stored
+
+
+def expire_cards_for_departed_continuations(
+    transaction: Transaction,
+    continuation_principal_id: str,
+    *,
+    room_id: str,
+    reason: str,
+) -> None:
+    """Preserve router-owned Matrix cleanup when a responder leaves the room."""
+    rows = transaction.fetchall(
+        """
+        SELECT cards.principal_id, cards.transaction_id, cards.card_json
+        FROM approval_cards AS cards
+        JOIN approval_continuations AS continuations
+          ON continuations.approval_id = cards.continuation_id
+        WHERE continuations.principal_id = ? AND cards.resolution_json IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM approval_continuation_sources AS sources
+              JOIN journal_events AS events
+                ON events.principal_id = sources.principal_id
+               AND events.event_id = sources.event_id
+              WHERE sources.principal_id = continuations.principal_id
+                AND sources.approval_id = continuations.approval_id
+                AND events.room_id = ?
+          )
+        """,
+        (continuation_principal_id, room_id),
+    )
+    for row in rows:
+        try:
+            card = json.loads(str(row["card_json"]))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        content = card.get("content") if isinstance(card, dict) else None
+        if not isinstance(content, dict):
+            continue
+        resolution = {
+            **content,
+            "status": "expired",
+            "approvable": False,
+            "resolution_reason": reason,
+            "resolved_by": None,
+        }
+        tool_name = resolution.get("tool_name")
+        resolution["body"] = f"Expired: {tool_name}" if isinstance(tool_name, str) else "Approval expired"
+        transaction.execute(
+            """
+            UPDATE approval_cards SET resolution_json = ?
+            WHERE principal_id = ? AND transaction_id = ? AND resolution_json IS NULL
+            """,
+            (
+                json.dumps(resolution, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+                str(row["principal_id"]),
+                str(row["transaction_id"]),
+            ),
+        )
 
 
 def claim(
@@ -490,6 +549,59 @@ def forget(
         "DELETE FROM approval_cards WHERE principal_id = ? AND transaction_id = ?",
         (principal_id, transaction_id),
     )
+
+
+def finish(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    transaction_id: str,
+    card_event_id: str,
+) -> bool:
+    """Retire delivered card payload while keeping its shared approval-only identity."""
+    remembered = transaction.fetchone(
+        """
+        INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id, created_at_ns)
+        SELECT principal_id, room_id, card_event_id, ?
+        FROM approval_cards
+        WHERE principal_id = ? AND transaction_id = ? AND card_event_id = ?
+        ON CONFLICT (principal_id, card_event_id) DO NOTHING
+        RETURNING card_event_id
+        """,
+        (time.time_ns(), principal_id, transaction_id, card_event_id),
+    )
+    existing = transaction.fetchone(
+        """
+        SELECT 1 AS present FROM approval_action_tombstones
+        WHERE principal_id = ? AND card_event_id = ?
+        """,
+        (principal_id, card_event_id),
+    )
+    if remembered is None and existing is None:
+        return False
+    transaction.execute(
+        "DELETE FROM approval_cards WHERE principal_id = ? AND transaction_id = ? AND card_event_id = ?",
+        (principal_id, transaction_id, card_event_id),
+    )
+    return True
+
+
+def is_terminal_card(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    card_event_id: str,
+) -> bool:
+    """Return whether a delivered terminal approval owns this Matrix event."""
+    row = transaction.fetchone(
+        """
+        SELECT 1 AS present FROM approval_action_tombstones
+        WHERE principal_id = ? AND room_id = ? AND card_event_id = ?
+        """,
+        (principal_id, room_id, card_event_id),
+    )
+    return row is not None
 
 
 def pending_card(

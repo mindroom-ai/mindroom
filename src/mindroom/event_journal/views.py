@@ -405,6 +405,14 @@ class ApprovalView(Protocol):
         """Drop one approval card whose decision the room now shows, or that was never sent."""
         ...
 
+    async def finish_approval_card(self, *, transaction_id: str, card_event_id: str) -> bool:
+        """Retire delivered payload while preserving durable approval-only classification."""
+        ...
+
+    async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool:
+        """Return whether one delivered approval action is durably terminal."""
+        ...
+
     async def pending_approval_card(
         self,
         *,

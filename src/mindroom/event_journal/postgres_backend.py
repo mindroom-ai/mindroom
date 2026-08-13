@@ -15,7 +15,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from .offloading import ThreadOffload
-from .schema import POSTGRES_DIALECT, render, schema_statements
+from .schema import POSTGRES_DIALECT, approval_card_upgrade_statements, render, schema_statements
 
 # An arbitrary constant that only this schema setup uses, so the lock it
 # takes cannot collide with an application advisory lock.
@@ -113,6 +113,8 @@ class PostgresBackend:
             # statements are all no-ops once the schema exists.
             cursor.execute(cast("LiteralString", f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK_KEY})"))
             for statement in schema_statements(POSTGRES_DIALECT):
+                cursor.execute(cast("LiteralString", statement))
+            for statement in approval_card_upgrade_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
         self._writer.commit()
 

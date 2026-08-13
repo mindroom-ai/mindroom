@@ -23,6 +23,7 @@ from mindroom.history_recovery import (
 )
 from mindroom.logging_config import get_logger
 
+from . import approvals
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
@@ -297,9 +298,18 @@ def _advance_membership_epoch(
         "DELETE FROM approval_cards WHERE principal_id = ? AND room_id = ?",
         (principal_id, room_id),
     )
+    # Approval cards are authored by the router principal, while the paused
+    # run belongs to the responding entity principal. Preserve the router's
+    # terminal Matrix edit debt before this fence removes the continuation.
+    approvals.expire_cards_for_departed_continuations(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        reason="Requesting agent left the room.",
+    )
     # A paused run owns exactly the source rows this fence is about to settle.
     # Delete the aggregate first so no durable continuation survives with no
-    # runnable source or visible card. Its call and source rows cascade.
+    # runnable source. Its call and source rows cascade.
     transaction.execute(
         """
         DELETE FROM approval_continuations
@@ -767,6 +777,11 @@ def _pending_rows(
               AND (
                 continuations.state IN ('ready', 'failing')
                 OR (
+                  continuations.state = 'waiting'
+                  AND continuations.runtime_generation IS NOT NULL
+                  AND continuations.runtime_generation <> ?
+                )
+                OR (
                   continuations.state = 'claimed'
                   AND (
                     continuations.runtime_generation IS NULL
@@ -783,7 +798,7 @@ def _pending_rows(
             )
           )
         """
-        continuation_params = (runtime_generation,)
+        continuation_params = (runtime_generation, runtime_generation)
     return transaction.fetchall(
         f"""
         SELECT {_EVENT_JOURNAL_COLUMNS} FROM journal_events AS events

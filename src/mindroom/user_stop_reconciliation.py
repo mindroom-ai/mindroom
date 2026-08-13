@@ -70,13 +70,18 @@ class UserStopReconciler:
         stop_receipt_order: int,
         target: MessageTarget,
         on_current_stop_finalized: Callable[[], Awaitable[None]],
+        approval_settled: bool,
     ) -> bool:
         stopped = await self._record(response_event_id, stop_receipt_order)
         newer_edit_exists = (stopped.latest_edit_receipt_order or 0) > stop_receipt_order
         if not self._is_settled(stopped, stop_receipt_order):
-            if not newer_edit_exists and not await self.deps.delivery_gateway.finalize_user_stopped_response(
-                target,
-                response_event_id,
+            if (
+                not newer_edit_exists
+                and not approval_settled
+                and not await self.deps.delivery_gateway.finalize_user_stopped_response(
+                    target,
+                    response_event_id,
+                )
             ):
                 msg = f"Failed to finalize user-stopped response {response_event_id!r}"
                 raise RuntimeError(msg)
@@ -110,14 +115,16 @@ class UserStopReconciler:
         source_event_id = stopped_turn.indexed_event_ids[0]
         stopped = await self.deps.response_runner.finalize_user_stop(
             response_event_id,
+            source_event_id,
             target,
             stop_receipt_order,
             lambda: self._should_cancel(source_event_id, stop_receipt_order),
-            lambda: self._finalize_under_lock(
+            lambda approval_settled: self._finalize_under_lock(
                 response_event_id,
                 stop_receipt_order,
                 target,
                 on_current_stop_finalized,
+                approval_settled,
             ),
         )
         if not stopped:

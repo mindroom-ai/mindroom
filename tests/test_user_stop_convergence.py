@@ -52,17 +52,18 @@ class _SerializingRunner:
     async def finalize_user_stop(
         self,
         message_id: str,
+        source_event_id: str,
         target: MessageTarget,
         stop_receipt_order: int,
         should_cancel: Callable[[], bool],
-        finalize: Callable[[], Awaitable[bool]],
+        finalize: Callable[[bool], Awaitable[bool]],
     ) -> bool:
         """Cancel the live response, then finalize under the target's lock."""
-        del message_id, target, stop_receipt_order
+        del message_id, source_event_id, target, stop_receipt_order
         if should_cancel():
             self.cancel_requests += 1
         async with self.lock:
-            return await finalize()
+            return await finalize(False)
 
 
 @dataclass

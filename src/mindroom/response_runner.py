@@ -861,6 +861,9 @@ class ResponseRunner:
                             self.deps.runtime_paths,
                         ),
                     ),
+                    runtime_generation=(
+                        self.deps.approval_runtime_generation if continuation_state == "waiting" else None
+                    ),
                 ),
             )
             if continuation is None or continuation.state != continuation_state:
@@ -870,15 +873,12 @@ class ResponseRunner:
             if delivery_kind == "sent" and request.on_visible_response is not None:
                 await request.on_visible_response(response_event_id)
 
-            if continuation.state == "ready":
-                self.deps.retry_approval_sources(continuation.source_event_ids)
-            else:
-                await self._approval_responses.publish_cards(
-                    continuation,
-                    plan,
-                    target=target,
-                    failure_reason="Approval card creation failed",
-                )
+            await self._approval_responses.publish_generation(
+                continuation,
+                plan,
+                target=target,
+                failure_reason="Approval card creation failed",
+            )
             return FinalDeliveryOutcome(
                 terminal_status="suspended",
                 event_id=response_event_id,
@@ -1064,16 +1064,16 @@ class ResponseRunner:
         claimed: ApprovalContinuation,
         *,
         target: MessageTarget,
-    ) -> str:
+    ) -> str | None:
         """Recover frozen FINAL debt without invoking Agno a second time."""
         delivery = await self._approval_responses.final_delivery(claimed, recover=True)
         if delivery is None:
             reason = "Tool approval continuation was interrupted before final delivery and denied safely."
-            await self._approval_responses.settle_failure(claimed, reason)
-            return claimed.response_event_id
+            settled = await self._approval_responses.settle_failure(claimed, reason)
+            return claimed.response_event_id if settled else None
         event_id = delivery.acknowledged_event_id
         if event_id is None:
-            return claimed.response_event_id
+            return None
         payload = dict(delivery.payload)
         nested = payload.get("m.new_content")
         visible = cast("dict[str, Any]", nested) if isinstance(nested, dict) else payload
@@ -1616,10 +1616,11 @@ class ResponseRunner:
     async def finalize_user_stop(
         self,
         message_id: str,
+        source_event_id: str,
         target: MessageTarget,
         stop_receipt_order: int,
         should_cancel: Callable[[], bool],
-        finalize: Callable[[], Awaitable[bool]],
+        finalize: Callable[[bool], Awaitable[bool]],
     ) -> bool:
         """Cancel the live response, then durably finalize its turn under the same lock."""
         cancellation_requested = False
@@ -1631,11 +1632,30 @@ class ResponseRunner:
                 return
             cancellation_requested = self.deps.stop_manager.request_stop_if(message_id, should_cancel)
 
+        async def finalize_locked() -> bool:
+            continuation = await self._approval_responses.for_source_event(source_event_id)
+            approval_settled = False
+            if continuation is not None:
+                failing = await self._approval_responses.request_failure(
+                    continuation,
+                    "cancelled_by_user",
+                )
+                if failing is None:
+                    failing = await self._approval_responses.get(continuation.approval_id)
+                if failing is not None:
+                    approval_settled = await self._approval_responses.settle_failure(
+                        failing,
+                        "cancelled_by_user",
+                    )
+                    if not approval_settled:
+                        return False
+            return await finalize(approval_settled)
+
         try:
             return await self._lifecycle_coordinator.run_locked_target_operation(
                 target=target,
                 while_waiting=cancel_live_response,
-                locked_operation=finalize,
+                locked_operation=finalize_locked,
             )
         finally:
             receipt_orders = self._user_stop_receipt_orders.get(message_id)
@@ -1790,17 +1810,12 @@ class ResponseRunner:
             approval_id=owned.approval_id,
             approval_state=owned.state,
         )
-        if owned.state == "waiting":
-            return owned.response_event_id
-        if owned.state == "claimed":
-            return await self._recover_claimed_approval_lifecycle(owned, target=target)
-        if owned.state == "failing":
-            reason = owned.failure_reason or "Tool approval continuation was interrupted and denied safely."
-            await self._approval_responses.settle_failure(owned, reason)
-            return owned.response_event_id
+        recovered, event_id = await self._recover_nonready_approval(owned, target=target)
+        if recovered:
+            return event_id
         claimed = await self._approval_responses.claim(owned.approval_id)
         if claimed is None:
-            return owned.response_event_id
+            return None
         try:
             outcome = await self._run_claimed_approval_lifecycle(claimed, target=target)
         except asyncio.CancelledError:
@@ -1817,11 +1832,37 @@ class ResponseRunner:
             reason = str(error) or "Tool approval continuation failed safely."
             failing = await self._approval_responses.request_failure(claimed, reason)
             if failing is not None:
-                await self._approval_responses.settle_failure(failing, reason)
-            event_id = claimed.response_event_id
+                settled = await self._approval_responses.settle_failure(failing, reason)
+                event_id = claimed.response_event_id if settled else None
+            else:
+                event_id = None
         else:
-            event_id = outcome.event_id
+            retained = await self._approval_responses.get(claimed.approval_id)
+            event_id = outcome.event_id if outcome.terminal_status != "suspended" and retained is None else None
         return event_id
+
+    async def _recover_nonready_approval(
+        self,
+        owned: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> tuple[bool, str | None]:
+        """Recover a non-ready owner, leaving ready execution to the caller."""
+        if owned.state == "waiting":
+            if owned.runtime_generation is not None:
+                reason = "Tool approval card publication was interrupted and denied safely."
+                failing = await self._approval_responses.request_failure(owned, reason)
+                if failing is not None:
+                    settled = await self._approval_responses.settle_failure(failing, reason)
+                    return True, owned.response_event_id if settled else None
+            return True, None
+        if owned.state == "claimed":
+            return True, await self._recover_claimed_approval_lifecycle(owned, target=target)
+        if owned.state == "failing":
+            reason = owned.failure_reason or "Tool approval continuation was interrupted and denied safely."
+            settled = await self._approval_responses.settle_failure(owned, reason)
+            return True, owned.response_event_id if settled else None
+        return False, None
 
     async def _finalize_early_placeholder_cancellation(
         self,

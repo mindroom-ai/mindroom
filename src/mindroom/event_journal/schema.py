@@ -228,6 +228,15 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS approval_action_tombstones (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        card_event_id TEXT NOT NULL,
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, card_event_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS approval_continuations (
         principal_id TEXT NOT NULL,
         approval_id TEXT NOT NULL UNIQUE,
@@ -375,6 +384,12 @@ _INDEXES = (
     """,
 )
 
+_APPROVAL_CARD_CONTINUATION_COLUMNS = (
+    ("continuation_id", "TEXT"),
+    ("continuation_generation", "BIGINT"),
+    ("tool_call_id", "TEXT"),
+)
+
 
 def _expand_byte_order(sql: str, dialect: _Dialect) -> str:
     """Spell the byte-order pin for one backend."""
@@ -382,12 +397,7 @@ def _expand_byte_order(sql: str, dialect: _Dialect) -> str:
 
 
 def schema_statements(dialect: _Dialect) -> tuple[str, ...]:
-    """Return every DDL statement needed to create the schema.
-
-    Creation only. There is no upgrade path and deliberately so: this schema
-    has never shipped, so the only databases carrying an older shape are
-    prerelease ones on this branch, and those are required to be deleted rather
-    than migrated.
+    """Return every DDL statement needed to create the current schema.
 
     The byte-order marker is substituted here as well as in queries. An index
     whose trailing columns sort in the server's own collation cannot satisfy an
@@ -402,6 +412,24 @@ def schema_statements(dialect: _Dialect) -> tuple[str, ...]:
             ordered_text=dialect.ordered_text,
         )
         for statement in (*_TABLES, *_INDEXES)
+    )
+
+
+def approval_card_upgrade_statements(
+    dialect: _Dialect,
+    *,
+    existing_columns: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
+    """Add native-continuation identity to the approval-card table shipped by main."""
+    if dialect == SQLITE_DIALECT:
+        return tuple(
+            f"ALTER TABLE approval_cards ADD COLUMN {name} {column_type}"
+            for name, column_type in _APPROVAL_CARD_CONTINUATION_COLUMNS
+            if name not in existing_columns
+        )
+    return tuple(
+        f"ALTER TABLE approval_cards ADD COLUMN IF NOT EXISTS {name} {column_type}"
+        for name, column_type in _APPROVAL_CARD_CONTINUATION_COLUMNS
     )
 
 

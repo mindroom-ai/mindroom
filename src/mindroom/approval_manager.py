@@ -948,12 +948,40 @@ class _ApprovalManager:
                 await before_consume()
             return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
 
-        recovered = await self._recovered_pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
-        if recovered is None or recovered[0].approver_user_id != sender_id:
+        cards = self._cards
+        stored = (
+            None if cards is None else await cards.pending_approval_card(room_id=room_id, card_event_id=card_event_id)
+        )
+        terminal_result = (
+            None
+            if cards is None
+            else await self._consume_terminal_card_action(
+                cards,
+                room_id=room_id,
+                card_event_id=card_event_id,
+                stored=stored,
+                before_consume=before_consume,
+            )
+        )
+        if terminal_result is not None:
+            return terminal_result
+        if cards is None or stored is None:
+            return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
+        transport_sender = self._transport_sender_id()
+        pending = (
+            None
+            if transport_sender is None
+            else self._trusted_pending_from_card_event(
+                stored.card,
+                room_id=room_id,
+                transport_sender=transport_sender,
+                expected_card_event_id=card_event_id,
+            )
+        )
+        if pending is None or pending.approver_user_id != sender_id:
             return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
         if before_consume is not None:
             await before_consume()
-        pending, transaction_id, stored = recovered
         if (
             stored.continuation_id is not None
             and stored.continuation_generation is not None
@@ -966,7 +994,7 @@ class _ApprovalManager:
             )
             outcome = await self._emit_continuation_resolution(
                 pending,
-                transaction_id=transaction_id,
+                transaction_id=stored.transaction_id,
                 status=resolved_status,
                 reason=resolved_reason,
                 resolved_by=sender_id if resolved_status == status else None,
@@ -982,10 +1010,33 @@ class _ApprovalManager:
             )
         return await self._discard_matrix_only_card(
             pending=pending,
-            transaction_id=transaction_id,
+            transaction_id=stored.transaction_id,
             reason=_DETACHED_REQUEST_REASON,
             resolved_by=sender_id,
         )
+
+    async def _consume_terminal_card_action(
+        self,
+        cards: ApprovalView,
+        *,
+        room_id: str,
+        card_event_id: str,
+        stored: StoredApprovalCard | None,
+        before_consume: Callable[[], Awaitable[None]] | None,
+    ) -> ApprovalActionResult | None:
+        """Consume an already-decided action without letting it enter another bot pipeline."""
+        terminal = stored is not None and stored.resolution is not None
+        if stored is None:
+            terminal = await cards.is_terminal_approval_card(room_id=room_id, card_event_id=card_event_id)
+        if not terminal:
+            return None
+        if before_consume is not None:
+            await before_consume()
+        with self._live_lock:
+            self._resolved_card_event_ids.add(card_event_id)
+        if stored is not None:
+            self._detached_expiry_wakeup.set()
+        return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
 
     async def expire_detached_card(self, *, room_id: str, card_event_id: str) -> bool:  # noqa: PLR0911
         """Expire one continuation card, redelivering any recorded terminal decision."""
@@ -1228,12 +1279,12 @@ class _ApprovalManager:
                 exc_info=True,
             )
             return False
-        # Dropped only once the room shows the decision. An edit that never
+        # Retired only once the room shows the decision. An edit that never
         # landed leaves a card the user can still click, and the row is the
-        # only thing that brings the next startup back to it.
-        if delivered:
-            await self._forget_card(transaction_id)
-        return delivered
+        # only thing that brings the next startup back to it. The compact
+        # tombstone remains so another bot principal cannot treat a late reply
+        # or reaction as ordinary input.
+        return delivered and await self._finish_card(transaction_id, pending.card_event_id)
 
     async def _record_resolution(self, card_event_id: str, resolution: dict[str, Any]) -> bool:
         """Commit one decision, reporting whether the durable record now agrees.
@@ -1274,36 +1325,6 @@ class _ApprovalManager:
             stored_status=None if recorded.resolution is None else recorded.resolution.get("status"),
         )
         return False
-
-    async def _recovered_pending_approval_for_card(
-        self,
-        *,
-        room_id: str,
-        card_event_id: str,
-    ) -> tuple[PendingApproval, str, StoredApprovalCard] | None:
-        """Return one clicked card and the row key that will retire it.
-
-        The transaction comes back with the card because that is what the row
-        is keyed on, and the caller's next move is to drop it.
-        """
-        if self._cards is None:
-            return None
-        stored = await self._cards.pending_approval_card(room_id=room_id, card_event_id=card_event_id)
-        # A recorded decision means this card is answered; only its delivery is
-        # in doubt. Treating a click on it as a fresh resolution would overwrite
-        # a decision whose tool may already have run.
-        if stored is None or stored.resolution is not None:
-            return None
-        transport_sender = self._transport_sender_id()
-        if transport_sender is None:
-            return None
-        pending = self._trusted_pending_from_card_event(
-            stored.card,
-            room_id=room_id,
-            transport_sender=transport_sender,
-            expected_card_event_id=card_event_id,
-        )
-        return None if pending is None else (pending, stored.transaction_id, stored)
 
     def _trusted_pending_from_card_event(
         self,
@@ -1414,6 +1435,24 @@ class _ApprovalManager:
             await self._cards.forget_approval_card(transaction_id=transaction_id)
         except Exception:
             logger.warning("Failed to drop an approval card", transaction_id=transaction_id, exc_info=True)
+
+    async def _finish_card(self, transaction_id: str, card_event_id: str) -> bool:
+        """Retire delivered payload while preserving cross-bot action identity."""
+        if self._cards is None:
+            return True
+        try:
+            return await self._cards.finish_approval_card(
+                transaction_id=transaction_id,
+                card_event_id=card_event_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to finish a delivered approval card",
+                transaction_id=transaction_id,
+                card_event_id=card_event_id,
+                exc_info=True,
+            )
+            return False
 
     async def _recoverable_room_cards(
         self,
@@ -1715,6 +1754,9 @@ class _ApprovalManager:
             attempted=stored.attempted,
             sending_device_id=stored.sending_device_id,
             created_at_ns=stored.created_at_ns,
+            continuation_id=stored.continuation_id,
+            continuation_generation=stored.continuation_generation,
+            tool_call_id=stored.tool_call_id,
         )
 
     async def shutdown(self, *, reason: str) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -98,6 +99,17 @@ class ApprovalResponseCoordinator:
         """Return one principal-owned paused run."""
         return await self.store.approval_continuation(approval_id)
 
+    async def activate(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
+        """Expose one generation after every human-gated card is durable."""
+        activated = await self.store.activate_approval_continuation(
+            continuation.approval_id,
+            expected_generation=continuation.generation,
+        )
+        if activated is None:
+            msg = f"Could not activate approval continuation {continuation.approval_id!r}"
+            raise RuntimeError(msg)
+        return activated
+
     async def for_source_event(self, source_event_id: str) -> ApprovalContinuation | None:
         """Return continuation ownership for one original source."""
         return await self.store.approval_continuation_for_source(source_event_id)
@@ -158,7 +170,7 @@ class ApprovalResponseCoordinator:
             waiting_text="Waiting for approval: " + ", ".join(f"`{name}`" for _tool, _id, name, _owner in identified),
         )
 
-    async def publish_cards(
+    async def _publish_cards(
         self,
         continuation: ApprovalContinuation,
         plan: _ApprovalPausePlan,
@@ -193,6 +205,27 @@ class ApprovalResponseCoordinator:
                 raise RuntimeError(failure_reason)
         return continuation
 
+    async def publish_generation(
+        self,
+        continuation: ApprovalContinuation,
+        plan: _ApprovalPausePlan,
+        *,
+        target: MessageTarget,
+        failure_reason: str,
+    ) -> ApprovalContinuation:
+        """Publish every required card, release its lease, and wake executable work."""
+        if continuation.state == "waiting":
+            await self._publish_cards(
+                continuation,
+                plan,
+                target=target,
+                failure_reason=failure_reason,
+            )
+            continuation = await self.activate(continuation)
+        if continuation.state == "ready":
+            self.retry_sources(continuation.source_event_ids)
+        return continuation
+
     async def advance_pause(
         self,
         current: ApprovalContinuation,
@@ -215,24 +248,29 @@ class ApprovalResponseCoordinator:
         ):
             msg = "Could not publish the chained approval response"
             raise RuntimeError(msg)
-        advanced = await self.store.advance_approval_continuation(
+        publishing = await self.store.advance_approval_continuation(
             current.approval_id,
             claimant_generation=current.generation,
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
         )
-        if advanced is None:
+        if publishing is None:
             msg = "Could not persist the chained approval pause"
             raise RuntimeError(msg)
-        await self.publish_cards(
-            advanced,
-            plan,
-            target=target,
-            failure_reason="Chained approval card creation failed",
-        )
-        if advanced.state == "ready":
-            self.retry_sources(advanced.source_event_ids)
+        try:
+            advanced = await self.publish_generation(
+                publishing,
+                plan,
+                target=target,
+                failure_reason="Chained approval card creation failed",
+            )
+        except (asyncio.CancelledError, Exception):
+            await self.request_failure(
+                publishing,
+                "Chained approval card creation failed",
+            )
+            raise
         return advanced, plan.waiting_text
 
     async def request_failure(
