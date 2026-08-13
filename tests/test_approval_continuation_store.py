@@ -966,6 +966,72 @@ async def test_failure_settlement_exception_retries_claimed_continuation(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_incomplete_runner_settlement_retries_unowned_settling_continuation(tmp_path: Path) -> None:
+    """A normal runner return must not strand settlement after transient Matrix failure."""
+    transport: ApprovalMatrixTransport
+
+    async def resume(continuation: ApprovalContinuation) -> None:
+        claimed = transport._continuations.claim(continuation.approval_id, "worker")
+        assert claimed is not None
+        settling = transport._continuations.begin_failure(
+            continuation.approval_id,
+            "temporary Matrix failure",
+            claimant_id="worker",
+            settlement_id="runner-settler",
+            runtime_generation="runtime-current",
+        )
+        assert settling is not None
+        released = transport._continuations.release_failure(continuation.approval_id, "runner-settler")
+        assert released is not None
+        assert released.state == "settling"
+        assert released.settlement_id is None
+
+    async def fail(continuation: ApprovalContinuation, reason: str) -> None:
+        assert continuation.state == "settling"
+        assert reason == "temporary Matrix failure"
+        fenced = transport._continuations.begin_failure(
+            continuation.approval_id,
+            reason,
+            claimant_id=continuation.claimant_id,
+            settlement_id="retry-settler",
+            runtime_generation="runtime-current",
+        )
+        assert fenced is not None
+        assert transport._continuations.finish_failure(
+            continuation.approval_id,
+            "retry-settler",
+            reason,
+        )
+
+    bot = SimpleNamespace(
+        running=True,
+        resume_approval_continuation=AsyncMock(side_effect=resume),
+        fail_approval_continuation=AsyncMock(side_effect=fail),
+    )
+    transport = ApprovalMatrixTransport(
+        runtime_paths=RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path,
+        ),
+        bot_provider=lambda _name: cast("Any", bot),
+        cards_provider=lambda: None,
+    )
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    ready = transport._continuations.acknowledge_call("approval-1", "call-1")
+    assert ready is not None
+
+    await asyncio.wait_for(transport._dispatch_continuation("approval-1"), timeout=2)
+
+    failed = transport._continuations.get("approval-1")
+    assert failed is not None
+    assert failed.state == "failed"
+    bot.fail_approval_continuation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_removed_owner_waits_for_router_before_retiring_ready_continuation(tmp_path: Path) -> None:
     """A temporarily absent router must not lose visible terminal settlement for a removed owner."""
     runtime_paths = RuntimePaths(

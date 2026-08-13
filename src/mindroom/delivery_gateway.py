@@ -46,6 +46,7 @@ from mindroom.matrix.client_delivery import (
     send_message_outcome,
     send_message_result,
 )
+from mindroom.matrix.event_info import reply_to_event_id_from_content
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
@@ -737,6 +738,9 @@ class DeliveryGateway:
         if not response_sender:
             return None
         source_event_ids = self.deps.turn_handoff.sources_for_turn(claimed.turn_id)
+        reply_to_event_id = reply_to_event_id_from_content(claimed.payload)
+        if reply_to_event_id is not None and reply_to_event_id not in source_event_ids:
+            source_event_ids = (*source_event_ids, reply_to_event_id)
         delivered = await find_response_event_ids_via_room_messages(
             client,
             claimed.room_id,

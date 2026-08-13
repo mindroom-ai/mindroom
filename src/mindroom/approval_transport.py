@@ -357,11 +357,16 @@ class ApprovalMatrixTransport:
                     exc_info=(type(error), error, error.__traceback__),
                 )
             return False
-        if error is not None and refreshed is not None and refreshed.state == "claimed":
+        if refreshed is not None and refreshed.state in {"claimed", "settling"}:
+            reason = refreshed.failure_reason
+            if reason is None and error is not None:
+                reason = f"Tool approval continuation failed safely after it was claimed: {error}"
+            if reason is None:
+                reason = "Tool approval continuation ended without terminal settlement; it was denied safely."
             return await self._fail_continuation_until_terminal(
                 bot,
                 refreshed,
-                f"Tool approval continuation failed safely after it was claimed: {error}",
+                reason,
             )
         return True
 
