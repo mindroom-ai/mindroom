@@ -48,6 +48,7 @@ DetachedApprovalDecisionHandler = Callable[
 ]
 DetachedApprovalDecisionReadyHandler = Callable[[str, str], Awaitable[None]]
 DetachedApprovalCardReadyHandler = Callable[[str, str, str], Awaitable[bool]]
+DetachedApprovalCardMissingHandler = Callable[[str], Awaitable[bool]]
 
 _STARTUP_DISCARD_SCAN_PAGE = 256
 # How long shutdown waits on work it does not own. Every such wait is on a
@@ -372,6 +373,7 @@ class _ApprovalManager:
         detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
         detached_decision_ready: DetachedApprovalDecisionReadyHandler | None = None,
         detached_card_ready: DetachedApprovalCardReadyHandler | None = None,
+        detached_card_missing: DetachedApprovalCardMissingHandler | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
         self._send_event = sender
@@ -384,6 +386,7 @@ class _ApprovalManager:
         self._detached_decision_handler = detached_decision_handler
         self._detached_decision_ready = detached_decision_ready
         self._detached_card_ready = detached_card_ready
+        self._detached_card_missing = detached_card_missing
         self._live_lock = threading.RLock()
         self._resolving_card_event_ids: set[str] = set()
         self._resolved_card_event_ids = _BoundedCardEventIds(_MAX_REMEMBERED_TERMINAL_CARD_IDS)
@@ -1068,7 +1071,9 @@ class _ApprovalManager:
         if stored is None:
             with self._live_lock:
                 binding = any(write.card_event_id == card_event_id for write in self._detached_card_writes)
-            return not binding
+            if binding:
+                return False
+            return self._detached_card_missing is None or await self._detached_card_missing(card_event_id)
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
             return False
@@ -1137,6 +1142,7 @@ class _ApprovalManager:
         detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
         detached_decision_ready: DetachedApprovalDecisionReadyHandler | None = None,
         detached_card_ready: DetachedApprovalCardReadyHandler | None = None,
+        detached_card_missing: DetachedApprovalCardMissingHandler | None = None,
     ) -> None:
         """Update Matrix transport hooks for an existing runtime manager."""
         if sender is not None:
@@ -1157,6 +1163,7 @@ class _ApprovalManager:
             decision_handler=detached_decision_handler,
             decision_ready=detached_decision_ready,
             card_ready=detached_card_ready,
+            card_missing=detached_card_missing,
         )
 
     def _configure_detached_handlers(
@@ -1165,6 +1172,7 @@ class _ApprovalManager:
         decision_handler: DetachedApprovalDecisionHandler | None,
         decision_ready: DetachedApprovalDecisionReadyHandler | None,
         card_ready: DetachedApprovalCardReadyHandler | None,
+        card_missing: DetachedApprovalCardMissingHandler | None,
     ) -> None:
         if decision_handler is not None:
             self._detached_decision_handler = decision_handler
@@ -1172,6 +1180,8 @@ class _ApprovalManager:
             self._detached_decision_ready = decision_ready
         if card_ready is not None:
             self._detached_card_ready = card_ready
+        if card_missing is not None:
+            self._detached_card_missing = card_missing
 
     def _current_shutdown_reason(self) -> str | None:
         with self._live_lock:
@@ -2130,6 +2140,7 @@ def initialize_approval_store(
     detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
     detached_decision_ready: DetachedApprovalDecisionReadyHandler | None = None,
     detached_card_ready: DetachedApprovalCardReadyHandler | None = None,
+    detached_card_missing: DetachedApprovalCardMissingHandler | None = None,
 ) -> _ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
@@ -2146,6 +2157,7 @@ def initialize_approval_store(
             detached_decision_handler=detached_decision_handler,
             detached_decision_ready=detached_decision_ready,
             detached_card_ready=detached_card_ready,
+            detached_card_missing=detached_card_missing,
         )
         return _MANAGER
 
@@ -2165,6 +2177,7 @@ def initialize_approval_store(
         detached_decision_handler=detached_decision_handler,
         detached_decision_ready=detached_decision_ready,
         detached_card_ready=detached_card_ready,
+        detached_card_missing=detached_card_missing,
     )
     return _MANAGER
 

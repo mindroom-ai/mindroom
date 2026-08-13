@@ -191,6 +191,7 @@ class ApprovalMatrixTransport:
             detached_decision_handler=self._handle_continuation_decision,
             detached_decision_ready=self._handle_continuation_decision_ready,
             detached_card_ready=self._handle_detached_card_ready,
+            detached_card_missing=self._handle_detached_card_missing,
         )
 
     async def _handle_detached_card_ready(
@@ -281,9 +282,7 @@ class ApprovalMatrixTransport:
                 return
             bot = self.bot_provider(continuation.entity_name)
             if bot is not None and bot.running:
-                await bot.resume_approval_continuation(continuation)
-                refreshed = await asyncio.to_thread(self._continuations.get, approval_id)
-                if refreshed is None or refreshed.state != "ready":
+                if await self._resume_continuation_once(bot, continuation):
                     return
                 if not waiting_logged:
                     logger.warning(
@@ -334,6 +333,37 @@ class ApprovalMatrixTransport:
             await asyncio.sleep(retry_seconds)
             retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
 
+    async def _resume_continuation_once(
+        self,
+        bot: _ApprovalTransportBot,
+        continuation: ApprovalContinuation,
+    ) -> bool:
+        """Attempt one resume, returning whether durable state says dispatch is finished."""
+        error: Exception | None = None
+        try:
+            await bot.resume_approval_continuation(continuation)
+        except asyncio.CancelledError:
+            raise
+        except Exception as caught:
+            error = caught
+        refreshed = await asyncio.to_thread(self._continuations.get, continuation.approval_id)
+        if refreshed is not None and refreshed.state == "ready":
+            if error is not None:
+                logger.warning(
+                    "approval_continuation_resume_retry",
+                    approval_id=continuation.approval_id,
+                    entity_name=continuation.entity_name,
+                    error=str(error),
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+            return False
+        if error is not None and refreshed is not None and refreshed.state == "claimed":
+            await bot.fail_approval_continuation(
+                refreshed,
+                f"Tool approval continuation failed safely after it was claimed: {error}",
+            )
+        return True
+
     async def _recover_continuations(self) -> bool:
         complete = True
         recoverable = await asyncio.to_thread(self._continuations.recoverable)
@@ -345,20 +375,7 @@ class ApprovalMatrixTransport:
                 )
                 complete = settled and complete
             elif continuation.state == "pending":
-                recovered = await self._attach_recovered_cards(continuation)
-                if any(not call.decision_recorded and call.card_event_id is None for call in recovered.calls):
-                    settled = await self._fail_recovered_continuation(
-                        recovered,
-                        "Tool approval card was not delivered before the restart.",
-                    )
-                    complete = settled and complete
-                    continue
-                for call in recovered.calls:
-                    if call.decision is not None and not call.decision_recorded and call.card_event_id is not None:
-                        await expire_suspended_tool_approval(recovered.room_id, call.card_event_id)
-                refreshed = await asyncio.to_thread(self._continuations.get, recovered.approval_id)
-                if refreshed is None or refreshed.state != "pending":
-                    continue
+                complete = await self._recover_pending_continuation(continuation) and complete
             elif continuation.state == "ready":
                 self._schedule_continuation(continuation)
             else:
@@ -374,6 +391,24 @@ class ApprovalMatrixTransport:
                 )
                 complete = settled and complete
         return complete
+
+    async def _recover_pending_continuation(self, continuation: ApprovalContinuation) -> bool:
+        """Repair or fail closed one pending continuation discovered at startup."""
+        recovered = await self._attach_recovered_cards(continuation)
+        if any(not call.decision_recorded and call.card_event_id is None for call in recovered.calls):
+            return await self._fail_recovered_continuation(
+                recovered,
+                "Tool approval card was not delivered before the restart.",
+            )
+        if not await self._attached_cards_exist(recovered):
+            return await self._fail_recovered_continuation(
+                recovered,
+                "Tool approval card no longer exists after room membership changed; the tool was denied safely.",
+            )
+        for call in recovered.calls:
+            if call.decision is not None and not call.decision_recorded and call.card_event_id is not None:
+                await expire_suspended_tool_approval(recovered.room_id, call.card_event_id)
+        return True
 
     def _needs_startup_recovery(self, continuation: ApprovalContinuation) -> bool:
         """Return whether startup may act on this row without racing live work."""
@@ -414,6 +449,32 @@ class ApprovalMatrixTransport:
                     continuation = attached
                     missing_ids.discard(tool_call_id)
         return continuation
+
+    async def _attached_cards_exist(self, continuation: ApprovalContinuation) -> bool:
+        """Return whether every unresolved attached card still has durable Matrix ownership."""
+        cards = self.cards_provider()
+        if cards is None:
+            return True
+        for call in continuation.calls:
+            if call.decision_recorded or call.card_event_id is None:
+                continue
+            stored = await cards.pending_approval_card(
+                room_id=continuation.room_id,
+                card_event_id=call.card_event_id,
+            )
+            if stored is None:
+                return False
+        return True
+
+    async def _handle_detached_card_missing(self, card_event_id: str) -> bool:
+        """Fail closed when membership fencing removed a continuation's card row."""
+        continuation = await asyncio.to_thread(self._continuations.for_card_event, card_event_id)
+        if continuation is None:
+            return True
+        return await self._fail_recovered_continuation(
+            continuation,
+            "Tool approval card no longer exists after room membership changed; the tool was denied safely.",
+        )
 
     async def _fail_recovered_continuation(self, continuation: ApprovalContinuation, reason: str) -> bool:
         """Terminalize one continuation and edit its waiting response when possible."""

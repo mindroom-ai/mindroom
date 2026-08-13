@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from sqlalchemy import Table, select, tuple_
 
 from mindroom.agent_storage import create_state_storage
+from mindroom.history.types import HistoryScope
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -122,6 +123,8 @@ class ApprovalContinuation:
     source_kind: str = "message"
     attachment_ids: tuple[str, ...] = ()
     message_received_depth: int = 0
+    history_scope: HistoryScope | None = None
+    delivery_principal_id: str | None = None
     runtime_generation: str | None = None
     settlement_id: str | None = None
 
@@ -149,6 +152,8 @@ class ApprovalContinuation:
             "source_kind": self.source_kind,
             "attachment_ids": list(self.attachment_ids),
             "message_received_depth": self.message_received_depth,
+            "history_scope": self.history_scope.to_metadata() if self.history_scope is not None else None,
+            "delivery_principal_id": self.delivery_principal_id,
             "runtime_generation": self.runtime_generation,
             "settlement_id": self.settlement_id,
         }
@@ -183,6 +188,8 @@ class ApprovalContinuation:
             source_kind=cast("str", context.get("source_kind", "message")),
             attachment_ids=tuple(cast("list[str]", context.get("attachment_ids", []))),
             message_received_depth=cast("int", context.get("message_received_depth", 0)),
+            history_scope=HistoryScope.from_metadata(context.get("history_scope")),
+            delivery_principal_id=cast("str | None", context.get("delivery_principal_id")),
             runtime_generation=cast("str | None", context.get("runtime_generation")),
             settlement_id=cast("str | None", context.get("settlement_id")),
         )
@@ -388,6 +395,17 @@ class ApprovalContinuationStore:
                 continuation
                 for continuation in self._records(_RECOVERABLE_STATES)
                 if source_event_id in continuation.source_event_ids
+            ),
+            None,
+        )
+
+    def for_card_event(self, card_event_id: str) -> ApprovalContinuation | None:
+        """Return pending continuation ownership for one attached Matrix card."""
+        return next(
+            (
+                continuation
+                for continuation in self._records(("pending",))
+                if any(call.card_event_id == card_event_id for call in continuation.calls)
             ),
             None,
         )

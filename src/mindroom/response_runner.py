@@ -140,6 +140,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.dispatch_source import ScheduledHistoryBudget
+    from mindroom.event_journal import OutboxView
     from mindroom.history.types import HistoryScope
     from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -483,6 +484,8 @@ class ResponseRunnerDeps:
     post_response_effects: PostResponseEffectsSupport
     state_writer: ConversationStateWriter
     request_preparer: ResponsePayloadPreparer
+    journal_principal_id: str
+    outbox_for_principal: Callable[[str], OutboxView]
 
 
 @dataclass(frozen=True)
@@ -535,6 +538,8 @@ class ResponseRunner:
             delivery_gateway=self.deps.delivery_gateway,
             logger=self.deps.logger,
             runtime_generation=self._approval_runtime_generation,
+            journal_principal_id=self.deps.journal_principal_id,
+            outbox_for_principal=self.deps.outbox_for_principal,
         )
         self._approval_execution = AgentApprovalExecution(
             config=lambda: self.deps.runtime.config,
@@ -716,6 +721,7 @@ class ResponseRunner:
         progress: _DeliveryProgress,
         execution_identity: ToolExecutionIdentity,
         entity_kind: Literal["agent", "team"],
+        history_scope: HistoryScope,
         team_member_names: tuple[str, ...] = (),
         team_mode: str | None = None,
     ) -> FinalDeliveryOutcome:
@@ -777,6 +783,8 @@ class ResponseRunner:
             source_kind=request.response_envelope.source_kind,
             attachment_ids=tuple(request.attachment_ids or ()),
             message_received_depth=request.response_envelope.message_received_depth,
+            history_scope=history_scope,
+            delivery_principal_id=self.deps.journal_principal_id,
         )
         try:
             await self._approval_responses.create(publishing)
@@ -1289,7 +1297,7 @@ class ResponseRunner:
         )
         if execution_identity is None:
             return None
-        history_scope = self.deps.state_writer.history_scope()
+        history_scope = continuation.history_scope or self.deps.state_writer.history_scope()
         return self._build_persist_response_event_id_effect(
             session_id=continuation.session_id,
             session_type=self.deps.state_writer.session_type_for_scope(history_scope),
@@ -3100,6 +3108,7 @@ class ResponseRunner:
                 progress=progress,
                 execution_identity=tool_dispatch.execution_identity,
                 entity_kind="team",
+                history_scope=session_scope,
                 team_member_names=tuple(agent_names),
                 team_mode=mode.value,
             ),
@@ -3869,5 +3878,6 @@ class ResponseRunner:
                 progress=progress,
                 execution_identity=execution_identity,
                 entity_kind="agent",
+                history_scope=history_scope,
             ),
         )

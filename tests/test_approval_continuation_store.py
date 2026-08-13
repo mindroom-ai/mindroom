@@ -20,7 +20,7 @@ from mindroom.approval_continuation import (
 from mindroom.approval_manager import ApprovalStartupSweep
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.constants import RuntimePaths
-from mindroom.event_journal import StoredApprovalCard
+from mindroom.event_journal import DepartureSource, EventJournalStore, StoredApprovalCard
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -728,6 +728,110 @@ async def test_running_owner_that_cannot_claim_is_polled_with_backoff(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_transient_resume_exception_retries_ready_continuation(tmp_path: Path) -> None:
+    """A transient pre-claim failure must not retire the only READY dispatcher."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    transport: ApprovalMatrixTransport
+    attempts = 0
+
+    async def resume(continuation: ApprovalContinuation) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            msg = "temporary continuation-store failure"
+            raise RuntimeError(msg)
+        claimed = transport._continuations.claim(continuation.approval_id, "worker")
+        assert claimed is not None
+        completed = transport._continuations.complete(continuation.approval_id, "worker")
+        assert completed is not None
+
+    bot = SimpleNamespace(running=True, resume_approval_continuation=resume)
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda _name: cast("Any", bot),
+        cards_provider=lambda: None,
+    )
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    ready = transport._continuations.acknowledge_call("approval-1", "call-1")
+    assert ready is not None
+
+    await asyncio.wait_for(transport._dispatch_continuation("approval-1"), timeout=2)
+
+    completed = transport._continuations.get("approval-1")
+    assert completed is not None
+    assert completed.state == "completed"
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_resume_exception_after_claim_fails_closed(tmp_path: Path) -> None:
+    """An exception after claim must settle failure instead of retrying possible execution."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    transport: ApprovalMatrixTransport
+
+    async def resume(continuation: ApprovalContinuation) -> None:
+        claimed = transport._continuations.claim(continuation.approval_id, "worker")
+        assert claimed is not None
+        msg = "failed after claim"
+        raise RuntimeError(msg)
+
+    async def fail(continuation: ApprovalContinuation, reason: str) -> None:
+        assert continuation.state == "claimed"
+        assert "failed after claim" in reason
+        fenced = transport._continuations.begin_failure(
+            continuation.approval_id,
+            reason,
+            claimant_id=continuation.claimant_id,
+            settlement_id="test-settler",
+            runtime_generation="test-runtime",
+        )
+        assert fenced is not None
+        assert fenced.settlement_id == "test-settler"
+        assert (
+            transport._continuations.finish_failure(
+                continuation.approval_id,
+                "test-settler",
+                reason,
+            )
+            is not None
+        )
+
+    bot = SimpleNamespace(
+        running=True,
+        resume_approval_continuation=AsyncMock(side_effect=resume),
+        fail_approval_continuation=AsyncMock(side_effect=fail),
+    )
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda _name: cast("Any", bot),
+        cards_provider=lambda: None,
+    )
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    ready = transport._continuations.acknowledge_call("approval-1", "call-1")
+    assert ready is not None
+
+    await transport._dispatch_continuation("approval-1")
+
+    failed = transport._continuations.get("approval-1")
+    assert failed is not None
+    assert failed.state == "failed"
+    bot.resume_approval_continuation.assert_awaited_once()
+    bot.fail_approval_continuation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_removed_owner_waits_for_router_before_retiring_ready_continuation(tmp_path: Path) -> None:
     """A temporarily absent router must not lose visible terminal settlement for a removed owner."""
     runtime_paths = RuntimePaths(
@@ -802,6 +906,73 @@ async def test_permanently_failed_configured_owner_is_terminalized_by_router(tmp
     assert settled is not None
     assert settled.state == "failed"
     router.fail_approval_continuation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_startup_fails_closed_when_attached_card_was_membership_fenced(tmp_path: Path) -> None:
+    """A stale attached card id must not leave its continuation pending forever."""
+    journal = EventJournalStore.open_sqlite(tmp_path / "event-journal.db")
+    cards = journal.principal("router@@mindroom_router:example.org")
+    card = {
+        "event_id": "$departed-card",
+        "sender": "@mindroom_router:example.org",
+        "type": "io.mindroom.tool_approval",
+        "content": {"approval_id": "approval-1-0-0", "status": "pending"},
+    }
+    await cards.claim_approval_card(
+        room_id="!room:example.org",
+        transaction_id="approval-1-0-0",
+        card=card,
+    )
+    await cards.mark_approval_card_attempted(
+        transaction_id="approval-1-0-0",
+        sending_device_id="DEVICE",
+    )
+    await cards.acknowledge_approval_card(
+        transaction_id="approval-1-0-0",
+        card_event_id="$departed-card",
+        card=card,
+    )
+    transport: ApprovalMatrixTransport
+
+    async def fail(continuation: ApprovalContinuation, reason: str) -> None:
+        assert "no longer exists" in reason
+        _finish_test_failure(transport._continuations, continuation.approval_id, reason)
+
+    bot = SimpleNamespace(running=True, fail_approval_continuation=AsyncMock(side_effect=fail))
+    transport = ApprovalMatrixTransport(
+        runtime_paths=RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path,
+        ),
+        bot_provider=lambda _name: cast("Any", bot),
+        cards_provider=lambda: cards,
+    )
+    continuation = _continuation()
+    transport._continuations.create(
+        replace(
+            continuation,
+            calls=(replace(continuation.calls[0], card_event_id="$departed-card"), continuation.calls[1]),
+        ),
+    )
+    await cards.fence_departure("!room:example.org", source=DepartureSource.LOCAL)
+    await cards.note_membership_restarted("!room:example.org")
+    assert (
+        await cards.pending_approval_card(
+            room_id="!room:example.org",
+            card_event_id="$departed-card",
+        )
+        is None
+    )
+
+    assert await transport._recover_continuations() is True
+
+    failed = transport._continuations.get("approval-1")
+    assert failed is not None
+    assert failed.state == "failed"
+    await journal.close()
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from agno.agent import Agent as AgnoAgent
+from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.models.response import ToolExecution
 from agno.tools.function import Function
@@ -37,6 +38,7 @@ from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
@@ -818,6 +820,7 @@ async def test_suspension_owns_source_before_waiting_response_delivery(tmp_path:
                 progress=response_runner._DeliveryProgress(),
                 execution_identity=identity,
                 entity_kind="agent",
+                history_scope=runner.deps.state_writer.history_scope(),
             ),
         )
         await asyncio.wait_for(delivery_started.wait(), timeout=1.0)
@@ -879,6 +882,7 @@ async def test_cancelled_initial_ownership_commit_is_settled_before_return(tmp_p
                 progress=response_runner._DeliveryProgress(),
                 execution_identity=identity,
                 entity_kind="agent",
+                history_scope=runner.deps.state_writer.history_scope(),
             ),
         )
         assert await asyncio.to_thread(create_started.wait, 1)
@@ -941,6 +945,7 @@ async def test_cancelled_waiting_response_binding_is_settled_before_return(tmp_p
                 progress=response_runner._DeliveryProgress(),
                 execution_identity=identity,
                 entity_kind="agent",
+                history_scope=runner.deps.state_writer.history_scope(),
             ),
         )
         assert await asyncio.to_thread(bind_started.wait, 1)
@@ -1568,6 +1573,65 @@ async def test_agent_continuation_restores_original_tool_runtime_context(tmp_pat
     assert observed_context == [(("att_original",), "original-model", 3)]
 
 
+def test_ad_hoc_team_continuation_persists_response_in_original_history_scope(tmp_path: Path) -> None:
+    """A resumed ad-hoc team must link its Matrix response to the team run, not the owner agent."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    target = _target(thread_id="$thread")
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=target,
+        user_id="@user:localhost",
+        agent_name="general",
+    )
+    history_scope = HistoryScope(kind="team", scope_id="ad_hoc_general_research")
+    continuation = ApprovalContinuation(
+        approval_id="approval-ad-hoc-team-linkage",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="team",
+        entity_name="general",
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="removed-agent",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.APPROVED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity=serialize_tool_execution_identity(identity),
+        source_event_ids=("$source",),
+        history_scope=history_scope,
+    )
+    storage = MagicMock()
+
+    with (
+        patch.object(runner.deps.state_writer, "create_storage", return_value=storage) as create_storage,
+        patch.object(
+            runner.deps.state_writer,
+            "persist_response_event_id_in_session_run",
+        ) as persist,
+    ):
+        callback = runner._approval_response_event_persistence(continuation)
+        assert callback is not None
+        callback("run-1", "$final")
+
+    create_storage.assert_called_once_with(identity, scope=history_scope)
+    assert persist.call_args.kwargs["session_type"] is SessionType.TEAM
+    persist.assert_called_once_with(
+        storage=storage,
+        session_id="session-1",
+        session_type=SessionType.TEAM,
+        run_id="run-1",
+        response_event_id="$final",
+    )
+    storage.close.assert_called_once_with()
+
+
 @pytest.mark.asyncio
 async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path: Path) -> None:
     """Unchanged bots must apply reloaded approval policy and agent configuration."""
@@ -1864,6 +1928,7 @@ async def test_suspension_rejects_missing_requester_before_persistence(tmp_path:
             progress=response_runner._DeliveryProgress(),
             execution_identity=identity,
             entity_kind="agent",
+            history_scope=runner.deps.state_writer.history_scope(),
         )
 
 
@@ -2037,6 +2102,7 @@ async def test_card_publication_exception_terminalizes_partial_set(tmp_path: Pat
             progress=response_runner._DeliveryProgress(),
             execution_identity=identity,
             entity_kind="agent",
+            history_scope=runner.deps.state_writer.history_scope(),
         )
 
     failed = runner._approval_responses._store.get("approval-publication-error")
@@ -2180,6 +2246,161 @@ async def test_router_failure_uses_terminal_notice_instead_of_cross_sender_edit(
     failed = runner._approval_responses._store.get(continuation.approval_id)
     assert failed is not None
     assert failed.state == "failed"
+
+
+@pytest.mark.asyncio
+async def test_router_recovery_honors_original_principal_acknowledged_final(tmp_path: Path) -> None:
+    """An unavailable owner's acknowledged FINAL must win over a router failure notice."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-original-final",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="removed-agent",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="removed-agent",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.APPROVED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="claimed",
+        claimant_id="removed-agent:worker",
+        delivery_principal_id="removed-agent@@removed-agent:localhost",
+    )
+    runner._approval_responses._store.create(continuation)
+    original_outbox = SimpleNamespace(
+        load_delivery=AsyncMock(
+            return_value=SimpleNamespace(
+                acknowledged_event_id="$final",
+                attempted=True,
+            ),
+        ),
+    )
+    runner._approval_responses.outbox_for_principal = MagicMock(return_value=original_outbox)
+
+    with patch.object(DeliveryGateway, "send_text", new=AsyncMock()) as send:
+        await runner.fail_approval_continuation(continuation, "Agent removed")
+
+    completed = runner._approval_responses._store.get(continuation.approval_id)
+    assert completed is not None
+    assert completed.state == "completed"
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_recovery_adopts_original_principal_waiting_event(tmp_path: Path) -> None:
+    """An unavailable owner's acknowledged INITIAL anchors the router's terminal notice."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-original-initial",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="removed-agent",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id=None,
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="removed-agent",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.DENIED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="publishing",
+        delivery_principal_id="removed-agent@@removed-agent:localhost",
+    )
+    runner._approval_responses._store.create(continuation)
+    original_outbox = SimpleNamespace(
+        load_delivery=AsyncMock(
+            return_value=SimpleNamespace(
+                acknowledged_event_id="$waiting",
+                attempted=True,
+            ),
+        ),
+    )
+    runner._approval_responses.outbox_for_principal = MagicMock(return_value=original_outbox)
+
+    with patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$terminal")) as send:
+        await runner.fail_approval_continuation(continuation, "Agent removed")
+
+    failed = runner._approval_responses._store.get(continuation.approval_id)
+    assert failed is not None
+    assert failed.state == "failed"
+    assert failed.response_event_id == "$waiting"
+    request = send.await_args.args[0]
+    assert request.target.reply_to_event_id == "$waiting"
+
+
+@pytest.mark.asyncio
+async def test_router_recovery_leaves_original_principal_attempted_final_recoverable(tmp_path: Path) -> None:
+    """An unresolved original FINAL must not be overwritten by a router failure notice."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-original-final-unresolved",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="removed-agent",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="removed-agent",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.APPROVED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="claimed",
+        claimant_id="removed-agent:worker",
+        delivery_principal_id="removed-agent@@removed-agent:localhost",
+    )
+    runner._approval_responses._store.create(continuation)
+    original_outbox = SimpleNamespace(
+        load_delivery=AsyncMock(
+            return_value=SimpleNamespace(
+                acknowledged_event_id=None,
+                attempted=True,
+            ),
+        ),
+    )
+    runner._approval_responses.outbox_for_principal = MagicMock(return_value=original_outbox)
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock()) as send,
+        patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock()) as recover,
+    ):
+        await runner.fail_approval_continuation(continuation, "Agent removed")
+
+    recoverable = runner._approval_responses._store.get(continuation.approval_id)
+    assert recoverable is not None
+    assert recoverable.state == "claimed"
+    send.assert_not_awaited()
+    recover.assert_not_awaited()
 
 
 @pytest.mark.asyncio

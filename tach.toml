@@ -110,6 +110,8 @@ visibility = [
 path = "mindroom.event_journal"
 depends_on = ["mindroom.logging_config", "mindroom.matrix.sidecar_content"]
 visibility = [
+    "mindroom.approval_manager",
+    "mindroom.approval_response",
     "mindroom.bot",
     "mindroom.delivery_gateway",
     "mindroom.dispatch_replay_guard",
@@ -125,7 +127,6 @@ visibility = [
     "mindroom.reaction_dispatch",
     "mindroom.response_delivery",
     "mindroom.thread_export.projected_history",
-    "mindroom.approval_manager",
     "mindroom.turn_controller",
     "mindroom.visible_response_reconciliation",
     "mindroom.orchestrator",
@@ -569,6 +570,7 @@ visibility = ["mindroom.approval_manager"]
 path = "mindroom.approval_continuation"
 depends_on = [
     "mindroom.agent_storage",
+    "mindroom.history.types",
     "sqlalchemy",
 ]
 visibility = [
@@ -611,6 +613,7 @@ depends_on = [
     "mindroom.approval_continuation",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.event_journal",
     "mindroom.message_target",
     "mindroom.tool_approval",
 ]

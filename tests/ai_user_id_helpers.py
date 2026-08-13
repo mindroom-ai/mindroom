@@ -476,6 +476,8 @@ def _build_response_runner(
                 agent_name=bot.agent_name,
                 logger=bot.logger,
             ),
+            journal_principal_id=f"{bot.agent_name}@{bot.matrix_id.full_id}",
+            outbox_for_principal=lambda _principal_id: delivery_gateway.deps.outbox,
         ),
     )
 

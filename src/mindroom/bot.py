@@ -710,6 +710,8 @@ class AgentBot:
                 post_response_effects=self._post_response_effects_support,
                 state_writer=self._conversation_state_writer,
                 request_preparer=self._request_payload_preparer,
+                journal_principal_id=self._journal_principal_id,
+                outbox_for_principal=self._journal_store.principal,
             ),
         )
         self._edit_regenerator = EditRegenerator(

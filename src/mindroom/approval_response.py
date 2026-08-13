@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.event_journal import OutboxView
     from mindroom.response_turn import PausedAttempt
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -88,6 +89,8 @@ class ApprovalResponseCoordinator:
     delivery_gateway: DeliveryGateway
     logger: structlog.stdlib.BoundLogger
     runtime_generation: Callable[[], str]
+    journal_principal_id: str
+    outbox_for_principal: Callable[[str], OutboxView]
     _store: ApprovalContinuationStore = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -403,7 +406,7 @@ class ApprovalResponseCoordinator:
                 room_id=current.room_id,
                 source_thread_id=current.thread_id,
                 resolved_thread_id=current.thread_id,
-                reply_to_event_id=None,
+                reply_to_event_id=(current.response_event_id if self.agent_name != current.entity_name else None),
                 session_id=current.session_id,
             )
             if current.response_event_id is not None and self.agent_name == current.entity_name:
@@ -451,7 +454,7 @@ class ApprovalResponseCoordinator:
         binding_state: Literal["publishing", "settling"] = (
             "publishing" if continuation.state == "publishing" else "settling"
         )
-        delivery = await self.delivery_gateway.deps.outbox.load_delivery(
+        delivery = await self._delivery_outbox(continuation).load_delivery(
             turn_id=continuation.source_event_ids[0],
             stage=DeliveryStage.INITIAL,
         )
@@ -469,15 +472,26 @@ class ApprovalResponseCoordinator:
         if continuation.state != "claimed":
             return False
         turn_id = continuation.source_event_ids[0]
-        delivery = await self.delivery_gateway.deps.outbox.load_delivery(
+        outbox = self._delivery_outbox(continuation)
+        delivery = await outbox.load_delivery(
             turn_id=turn_id,
             stage=DeliveryStage.FINAL,
         )
         if delivery is None:
             return False
         if delivery.acknowledged_event_id is None:
+            if delivery.attempted and continuation.delivery_principal_id not in {
+                None,
+                self.journal_principal_id,
+            }:
+                self.logger.warning(
+                    "approval_continuation_original_final_unresolved",
+                    approval_id=continuation.approval_id,
+                    delivery_principal_id=continuation.delivery_principal_id,
+                )
+                return True
             await self.delivery_gateway.recover_deliveries()
-            delivery = await self.delivery_gateway.deps.outbox.load_delivery(
+            delivery = await outbox.load_delivery(
                 turn_id=turn_id,
                 stage=DeliveryStage.FINAL,
             )
@@ -486,6 +500,11 @@ class ApprovalResponseCoordinator:
         if continuation.claimant_id is not None:
             await self.complete(continuation.approval_id, continuation.claimant_id)
         return True
+
+    def _delivery_outbox(self, continuation: ApprovalContinuation) -> OutboxView:
+        """Return the principal-bound outbox that owns this continuation's delivery."""
+        principal_id = continuation.delivery_principal_id
+        return self.delivery_gateway.deps.outbox if principal_id is None else self.outbox_for_principal(principal_id)
 
     async def _edit_response(
         self,

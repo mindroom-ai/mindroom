@@ -311,6 +311,7 @@ def initialize_approval_runtime(
     detached_decision_handler: approval_manager.DetachedApprovalDecisionHandler | None = None,
     detached_decision_ready: approval_manager.DetachedApprovalDecisionReadyHandler | None = None,
     detached_card_ready: DetachedApprovalCardReadyHandler | None = None,
+    detached_card_missing: approval_manager.DetachedApprovalCardMissingHandler | None = None,
 ) -> None:
     """Initialize the approval runtime behind the public approval seam."""
     approval_manager.initialize_approval_store(
@@ -325,6 +326,7 @@ def initialize_approval_runtime(
         detached_decision_handler=detached_decision_handler,
         detached_decision_ready=detached_decision_ready,
         detached_card_ready=detached_card_ready,
+        detached_card_missing=detached_card_missing,
     )
 
 

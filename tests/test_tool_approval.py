@@ -281,6 +281,28 @@ async def test_detached_transport_refusal_forgets_the_unsent_card_row(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_missing_detached_card_notifies_continuation_owner(tmp_path: Path) -> None:
+    """A membership-fenced card must fail its continuation instead of silently ending expiry."""
+    cards = FakeApprovalCards()
+    missing = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(),
+        editor=AsyncMock(),
+        cards=cards,
+        detached_card_missing=missing,
+    )
+
+    settled = await store.expire_detached_card(
+        room_id="!room:localhost",
+        card_event_id="$departed-card",
+    )
+
+    assert settled is True
+    missing.assert_awaited_once_with("$departed-card")
+
+
+@pytest.mark.asyncio
 async def test_detached_approval_expiry_resolves_continuation_without_waiter(tmp_path: Path) -> None:
     """Expiry must wake the durable continuation even though no response coroutine is waiting."""
     cards = FakeApprovalCards()
