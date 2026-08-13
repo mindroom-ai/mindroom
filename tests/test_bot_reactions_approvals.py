@@ -30,7 +30,6 @@ from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import (
     EventClass,
     EventKind,
-    InteractiveQuestion,
     SemanticConsumer,
 )
 from mindroom.handled_turns import TurnRecord, with_user_stop
@@ -57,6 +56,7 @@ from tests.bot_helpers import (
     dispatch_reaction_durably as _dispatch_reaction,
 )
 from tests.conftest import (
+    activate_interactive_prompt,
     install_relation_lookup,
     make_matrix_client_mock,
     replace_interactive_selection_handlers,
@@ -448,18 +448,15 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
         store = bot._journal_store.principal(bot._journal_principal_id)
-        assert await store.register_interactive_question_for_epoch(
-            await store.membership_epoch(room.room_id),
-            InteractiveQuestion(
-                question_event_id="$question",
-                revision_event_id="$question",
-                room_id=room.room_id,
-                thread_id=None,
-                creator_agent=bot.agent_name,
-                question_text="Choose one",
-                options={"👍": "approve"},
-                option_labels={"👍": "Approve"},
-            ),
+        assert await activate_interactive_prompt(
+            store,
+            question_event_id="$question",
+            room_id=room.room_id,
+            sender=bot.matrix_id.full_id,
+            creator_agent=bot.agent_name,
+            question_text="Choose one",
+            options={"👍": "approve"},
+            option_labels={"👍": "Approve"},
         )
 
         execute = AsyncMock(side_effect=(OSError("pending write failed"), None))
@@ -496,18 +493,15 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
         store = bot._journal_store.principal(bot._journal_principal_id)
-        assert await store.register_interactive_question_for_epoch(
-            await store.membership_epoch(room.room_id),
-            InteractiveQuestion(
-                question_event_id="$question",
-                revision_event_id="$question",
-                room_id=room.room_id,
-                thread_id=None,
-                creator_agent=bot.agent_name,
-                question_text="Choose one",
-                options={"👍": "approve"},
-                option_labels={"👍": "Approve"},
-            ),
+        assert await activate_interactive_prompt(
+            store,
+            question_event_id="$question",
+            room_id=room.room_id,
+            sender=bot.matrix_id.full_id,
+            creator_agent=bot.agent_name,
+            question_text="Choose one",
+            options={"👍": "approve"},
+            option_labels={"👍": "Approve"},
         )
 
         with patch.object(
@@ -2574,18 +2568,16 @@ class TestAgentBot(AgentBotTestBase):
             handle=AsyncMock(side_effect=failure),
         )
         store = bot._journal_store.principal(bot._journal_principal_id)
-        assert await store.register_interactive_question_for_epoch(
-            await store.membership_epoch(room.room_id),
-            InteractiveQuestion(
-                question_event_id=selection.question_event_id,
-                revision_event_id=selection.question_event_id,
-                room_id=room.room_id,
-                thread_id=selection.thread_id,
-                creator_agent=bot.agent_name,
-                question_text=selection.question_text,
-                options={selection.selection_key: selection.selected_value},
-                option_labels={selection.selection_key: selection.selected_label},
-            ),
+        assert await activate_interactive_prompt(
+            store,
+            question_event_id=selection.question_event_id,
+            room_id=room.room_id,
+            sender=bot.matrix_id.full_id,
+            creator_agent=bot.agent_name,
+            thread_id=selection.thread_id,
+            question_text=selection.question_text,
+            options={selection.selection_key: selection.selected_value},
+            option_labels={selection.selection_key: selection.selected_label},
         )
 
         await bot._journal_dispatcher.admit_out_of_band(

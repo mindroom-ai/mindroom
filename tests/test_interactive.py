@@ -21,38 +21,6 @@ def mock_client() -> AsyncMock:
 class TestInteractiveFunctions:
     """Test pure interactive formatting and Matrix button delivery."""
 
-    def test_should_create_interactive_question(self) -> None:
-        """Test detection of interactive code blocks."""
-        # Should detect - standard format
-        assert interactive.should_create_interactive_question("Here's a question:\n```interactive\n{}\n```")
-
-        assert interactive.should_create_interactive_question(
-            'Text before\n```interactive\n{"question": "test"}\n```\nText after',
-        )
-
-        # Should detect - newline format (agent mistake)
-        assert interactive.should_create_interactive_question("Here's a question:\n```\ninteractive\n{}\n```")
-
-        # Should detect - common LLM variations
-        assert interactive.should_create_interactive_question("Here's a question:\n``` interactive\n{}\n```")
-        assert interactive.should_create_interactive_question("Here's a question:\n```Interactive\n{}\n```")
-        assert interactive.should_create_interactive_question("Here's a question:\n    ```interactive\n{}\n    ```")
-        assert interactive.should_create_interactive_question("Here's a question:\n```interactive json\n{}\n```")
-        assert interactive.should_create_interactive_question(
-            'Please choose: ```interactive\n{"question": "test"}\n```',
-        )
-
-        # Should detect - without checkmark
-        assert interactive.should_create_interactive_question("Here's a question:\n```interactive\n{}\n```")
-
-        # Should not detect
-        assert not interactive.should_create_interactive_question("Regular message without code block")
-
-        assert not interactive.should_create_interactive_question("```python\nprint('hello')\n```")
-        assert not interactive.should_create_interactive_question('```\n{"question": "test"}\n```')
-        assert not interactive.should_create_interactive_question("```interactive.py\nprint('hello')\n```")
-        assert not interactive.should_create_interactive_question("```\ninteractive = True\nprint('hello')\n```")
-
     @pytest.mark.parametrize(
         "response_text",
         [

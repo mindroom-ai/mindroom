@@ -187,6 +187,28 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert list(outbox.rows) == [("$cause", "final")]
         assert outbox.rows["$cause", "final"].acknowledged_event_id == "$sent"
 
+    async def test_interactive_prompt_is_frozen_in_the_terminal_matrix_payload(self, tmp_path: Path) -> None:
+        """Projection ownership requires prompt metadata to cross Matrix with the answer."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "Choose"})
+        response = """```interactive
+{"question":"Pick","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
+```"""
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
+            outcome = await gateway.deliver_final(self._final_request(response))
+
+        assert outcome.event_id == "$sent"
+        assert outbox.rows["$cause", "final"].payload["io.mindroom.interactive"] == {
+            "creator_agent": "agent",
+            "option_labels": {"1": "Yes", "✅": "Yes"},
+            "options": {"1": "yes", "✅": "yes"},
+            "question_text": "Pick",
+            "source_event_id": "$cause",
+        }
+
     async def test_the_same_turn_resends_under_the_same_transaction_id(
         self,
         tmp_path: Path,

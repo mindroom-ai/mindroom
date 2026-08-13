@@ -31,7 +31,7 @@ from mindroom.delivery_gateway import FinalizeStreamedResponseRequest, ResponseI
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.event_journal import EventClass, EventKind, InteractiveQuestion
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.handled_turns import TurnRecord
 from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -66,6 +66,7 @@ from tests.conftest import (
     install_shutdown_drain_mocks,
     make_matrix_client_mock,
     make_pending_event,
+    membership_epoch_is_active,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -85,20 +86,8 @@ if TYPE_CHECKING:
 
 
 async def _membership_accepts_question(store: PrincipalStore, room_id: str, epoch: int) -> bool:
-    """Probe active membership through guarded question registration."""
-    return await store.register_interactive_question_for_epoch(
-        epoch,
-        InteractiveQuestion(
-            question_event_id="$membership-probe",
-            revision_event_id="$membership-probe",
-            room_id=room_id,
-            thread_id=None,
-            creator_agent="agent",
-            question_text="Probe",
-            options={"1": "one"},
-            option_labels={"1": "One"},
-        ),
-    )
+    """Probe the same active-membership predicate used by prompt admission."""
+    return await membership_epoch_is_active(store, room_id, epoch)
 
 
 _STORE_GENERATION = "test-store-generation"

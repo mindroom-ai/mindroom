@@ -40,6 +40,8 @@ from .projection import ProjectedEvent, project
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from .backend import Row, Transaction
     from .models import InboundEvent
 
@@ -774,7 +776,7 @@ def admit(
     principal_id: str,
     event: InboundEvent,
     projected: ProjectedEvent | None,
-) -> AdmissionResult:
+) -> tuple[AdmissionResult, Mapping[str, object] | None]:
     """Insert, deduplicate, and project one event in a single transaction.
 
     A context-only event is projected here and never replayed, so it keeps no
@@ -812,16 +814,17 @@ def admit(
         ),
     )
     if row is None:
-        return AdmissionResult.DUPLICATE
+        return AdmissionResult.DUPLICATE, None
+    installed_content = None
     if projected is not None:
-        project(
+        installed_content = project(
             transaction,
             principal_id,
             projected,
             receipt_order=int(row["receipt_order"]),
             membership_epoch=epoch,
         )
-    return AdmissionResult.ADMITTED
+    return AdmissionResult.ADMITTED, installed_content
 
 
 def admitted_thread_id(

@@ -170,8 +170,8 @@ def project(
     *,
     receipt_order: int,
     membership_epoch: int,
-) -> None:
-    """Fold one admitted event into the visible-message projection."""
+) -> Mapping[str, object] | None:
+    """Fold one event and return the content installed as its visible revision."""
     if event.redacts_event_id is not None:
         _project_redaction(
             transaction,
@@ -179,20 +179,19 @@ def project(
             event,
             receipt_order=receipt_order,
         )
-        return
+        return None
     if _is_tombstoned(transaction, principal_id, event.room_id, event.event_id):
-        return
+        return None
     replaces = replacement_target(event.content)
     if replaces is None:
-        _project_original(
+        return _project_original(
             transaction,
             principal_id,
             event,
             receipt_order=receipt_order,
             membership_epoch=membership_epoch,
         )
-        return
-    _project_edit(
+    return _project_edit(
         transaction,
         principal_id,
         event,
@@ -208,7 +207,7 @@ def _project_original(
     *,
     receipt_order: int,
     membership_epoch: int,
-) -> None:
+) -> Mapping[str, object] | None:
     """Install a new logical message and apply an edit that beat it here.
 
     Every event reaching here came from sync, so a repeat is the same event
@@ -239,7 +238,17 @@ def _project_original(
             membership_epoch,
         ),
     )
-    _apply_unresolved_edit(transaction, principal_id, event, receipt_order=receipt_order)
+    installed_edit = _apply_unresolved_edit(transaction, principal_id, event, receipt_order=receipt_order)
+    if installed_edit is not None:
+        return installed_edit
+    current = transaction.fetchone(
+        """
+        SELECT revision_event_id FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
+        """,
+        (principal_id, event.room_id, event.event_id),
+    )
+    return event.content if current is not None and current["revision_event_id"] == event.event_id else None
 
 
 def _apply_unresolved_edit(
@@ -248,7 +257,7 @@ def _apply_unresolved_edit(
     event: ProjectedEvent,
     *,
     receipt_order: int,
-) -> None:
+) -> Mapping[str, object] | None:
     """Apply the original sender's held edit, then drop every held edit.
 
     Unresolved edits are keyed by sender as well as target. Without the sender
@@ -270,9 +279,10 @@ def _apply_unresolved_edit(
         (principal_id, event.room_id, event.event_id),
     )
     if held is None:
-        return
+        return None
     if _is_tombstoned(transaction, principal_id, event.room_id, held["edit_event_id"]):
-        return
+        return None
+    content = visible_content(_loads(held["content_json"]))
     _install_revision(
         transaction,
         principal_id,
@@ -280,9 +290,10 @@ def _apply_unresolved_edit(
         logical_event_id=event.event_id,
         revision_event_id=held["edit_event_id"],
         revision_ts=int(held["edit_ts"]),
-        content=visible_content(_loads(held["content_json"])),
+        content=content,
         receipt_order=receipt_order,
     )
+    return content
 
 
 def _project_edit(
@@ -292,7 +303,7 @@ def _project_edit(
     *,
     target_event_id: str,
     receipt_order: int,
-) -> None:
+) -> Mapping[str, object] | None:
     """Replace the target's visible body, or hold the edit until it arrives."""
     current = transaction.fetchone(
         """
@@ -303,16 +314,17 @@ def _project_edit(
     )
     if current is None:
         if _is_tombstoned(transaction, principal_id, event.room_id, target_event_id):
-            return
+            return None
         _hold_unresolved_edit(transaction, principal_id, event, target_event_id=target_event_id)
-        return
+        return None
     if current["sender"] != event.sender:
-        return
+        return None
     if not _is_newer(
         (event.origin_server_ts, event.event_id),
         (int(current["revision_ts"]), current["revision_event_id"]),
     ):
-        return
+        return None
+    content = visible_content(event.content)
     _install_revision(
         transaction,
         principal_id,
@@ -320,9 +332,10 @@ def _project_edit(
         logical_event_id=target_event_id,
         revision_event_id=event.event_id,
         revision_ts=event.origin_server_ts,
-        content=visible_content(event.content),
+        content=content,
         receipt_order=receipt_order,
     )
+    return content
 
 
 def _held_edit_yields_to(held: Row, event: ProjectedEvent) -> bool:

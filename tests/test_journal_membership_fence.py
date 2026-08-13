@@ -19,11 +19,11 @@ from mindroom.event_journal import (
     EventClass,
     EventKind,
     InboundEvent,
-    InteractiveQuestion,
     MembershipFence,
     ProjectedEvent,
 )
 from mindroom.membership_models import ReportedDeparture
+from tests.conftest import membership_epoch_is_active
 
 if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore, PrincipalStore
@@ -164,20 +164,8 @@ async def sync_response_without_departures(membership: MembershipFence) -> None:
 
 
 async def membership_accepts_question(principal: PrincipalStore, epoch: int) -> bool:
-    """Probe active membership through guarded question registration."""
-    return await principal.register_interactive_question_for_epoch(
-        epoch,
-        InteractiveQuestion(
-            question_event_id="$membership-probe",
-            revision_event_id="$membership-probe",
-            room_id=ROOM,
-            thread_id=None,
-            creator_agent="agent",
-            question_text="Probe",
-            options={"1": "one"},
-            option_labels={"1": "One"},
-        ),
-    )
+    """Probe the same active-membership predicate used by prompt admission."""
+    return await membership_epoch_is_active(principal, ROOM, epoch)
 
 
 async def test_a_local_departure_fences_immediately(

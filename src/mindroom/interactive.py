@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING, cast
 
 import nio
 
-from mindroom.interactive_models import InteractiveSelection  # noqa: TC001 - public interactive API
+from mindroom.interactive_models import (
+    InteractivePrompt,
+    InteractiveSelection,
+    interactive_prompt_content,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import send_room_event_result
 from mindroom.matrix.message_builder import build_reaction_content
@@ -51,6 +55,26 @@ class InteractiveMetadata:
     def options_as_list(self) -> list[dict[str, str]]:
         """Return a mutable copy for Matrix reaction-button registration."""
         return [dict(item) for item in self.options_list]
+
+
+def build_prompt_content(
+    metadata: InteractiveMetadata,
+    *,
+    creator_agent: str,
+    source_event_id: str | None = None,
+    membership_epoch: int | None = None,
+) -> dict[str, object]:
+    """Encode parsed interactive metadata into one Matrix prompt revision."""
+    return interactive_prompt_content(
+        InteractivePrompt(
+            creator_agent=creator_agent,
+            question_text=metadata.question_text,
+            options=metadata.option_map,
+            option_labels=metadata.option_labels,
+            source_event_id=source_event_id,
+            membership_epoch=membership_epoch,
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,11 +122,6 @@ def _preview_text(text: str, max_length: int = 160) -> str:
     if len(compact) <= max_length:
         return compact
     return f"{compact[: max_length - 3].rstrip()}..."
-
-
-def _find_interactive_match(response_text: str) -> re.Match[str] | None:
-    """Return the first interactive block match if present."""
-    return re.search(_INTERACTIVE_PATTERN, response_text, _INTERACTIVE_PATTERN_FLAGS)
 
 
 def _normalize_interactive_marker(text: str) -> str:
@@ -155,19 +174,6 @@ def _should_warn_unparsed_interactive(response_text: str) -> bool:
         if payload_line.startswith(("{", "[")):
             return True
     return False
-
-
-def should_create_interactive_question(response_text: str) -> bool:
-    """Check if the response contains an interactive question in JSON format.
-
-    Args:
-        response_text: The AI's response text
-
-    Returns:
-        True if an interactive code block is found
-
-    """
-    return bool(_find_interactive_match(response_text))
 
 
 def build_selection_prompt(selection: InteractiveSelection) -> str:

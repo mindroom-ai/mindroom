@@ -6,7 +6,7 @@
 **Goal:** Make the admitted Matrix-visible revision the sole authority for active interactive prompts while retaining durable source-owned selections.
 
 **Architecture:** Outbound terminal messages and edits carry typed `io.mindroom.interactive` metadata before transport.
-The existing projection orders revisions, and the same admission transaction reconciles the active prompt from the resulting visible row before any later reaction can be admitted.
+The existing projection orders revisions and returns the content it installed so the same admission transaction can reconcile the active prompt before any later answer is admitted.
 Runtime code renders buttons but no longer registers, replaces, or forgets durable questions.
 
 **Tech Stack:** Python 3.13, asyncio, dataclasses, Matrix message content, SQLite, PostgreSQL, pytest, Ruff, ty, Tach.
@@ -52,7 +52,7 @@ Runtime code renders buttons but no longer registers, replaces, or forgets durab
 - Produce: `InteractivePrompt(creator_agent, question_text, options, option_labels, source_event_id, membership_epoch)`.
 - Produce: `interactive_prompt_content(prompt: InteractivePrompt) -> dict[str, object]`.
 - Produce: `interactive_prompt_from_content(content: Mapping[str, object]) -> InteractivePrompt | None`.
-- Produce: `reconcile_projected_prompt(transaction, principal_id, projected) -> None`.
+- Produce: `reconcile_projected_prompt(transaction, principal_id, projected, installed_content) -> None`.
 - Remove: `register_if_current`, `replace_if_current`, and `forget` from durable runtime use.
 
 - [ ] **Step 1: Write failing projection-order tests**
@@ -72,7 +72,6 @@ selection = await alice.claim_interactive_reaction(
     source_event_id="$reaction",
     question_event_id="$target",
     selection_key="1",
-    creator_agent="agent",
 )
 assert selection is not None
 assert (selection.question_text, selection.selected_value) == ("New?", "new")
@@ -91,15 +90,16 @@ When both proof forms are present, use the admitted source event if it exists an
 
 - [ ] **Step 4: Reconcile from the visible projection**
 
-After `journal.admit` projects a newly admitted actionable message or edit, read the target's current `visible_messages` row.
+After `journal.admit` projects a newly admitted message or edit, carry the content that projection actually installed into prompt reconciliation.
 Accept self authorship only when `principal_id == f"{prompt.creator_agent}@{visible_sender}"` for interactive content or when the principal suffix matches the visible sender for a clearing edit.
 Validate the source or epoch through `reads.claim_membership_epoch` and then replace or delete the active row in the same backend transaction.
-Always reconcile from the currently visible row rather than the incoming edit so a losing older revision cannot reactivate itself.
+Return no installed content for a losing older revision so it cannot reactivate itself.
+Carry the installed content directly so unresolved sidecar previews do not hide prompt metadata from reconciliation.
 Delete any active row whose current self-authored visible revision has no valid prompt metadata.
 
 - [ ] **Step 5: Remove the claim-time active-row fallback**
 
-Require reaction admission to have created its immutable source-bound selection snapshot.
+Require reaction and numeric-text admission to have created their immutable source-bound selection snapshots.
 Do not reinterpret a source through a prompt revision that appeared after admission.
 
 - [ ] **Step 6: Run the store tests and verify GREEN**

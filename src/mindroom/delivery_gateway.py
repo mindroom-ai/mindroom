@@ -1156,6 +1156,15 @@ class DeliveryGateway:
 
         interactive_response = interactive.parse_and_format_interactive(draft.response_text, extract_mapping=True)
         display_text = interactive_response.formatted_text
+        delivery_extra_content = dict(draft.extra_content or {})
+        if interactive_response.interactive_metadata is not None:
+            delivery_extra_content.update(
+                interactive.build_prompt_content(
+                    interactive_response.interactive_metadata,
+                    creator_agent=self.deps.agent_name,
+                    source_event_id=request.identity.response_envelope.source_event_id,
+                ),
+            )
 
         if request.existing_event_id is not None:
             edited = await self.edit_text(
@@ -1164,7 +1173,7 @@ class DeliveryGateway:
                     event_id=request.existing_event_id,
                     new_text=display_text,
                     tool_trace=draft.tool_trace,
-                    extra_content=draft.extra_content,
+                    extra_content=delivery_extra_content,
                     delivery_turn_id=request.identity.response_envelope.source_event_id,
                     retry_sync_recovery=True,
                 ),
@@ -1206,7 +1215,7 @@ class DeliveryGateway:
                 response_text=display_text,
                 skip_mentions=request.skip_mentions,
                 tool_trace=draft.tool_trace,
-                extra_content=draft.extra_content,
+                extra_content=delivery_extra_content,
                 retry_sync_recovery=True,
                 # The Matrix event that caused this turn. The handled-turn
                 # ledger already keys on it, and it re-derives to the same
@@ -1488,6 +1497,8 @@ class DeliveryGateway:
             terminal_send=self._durable_terminal_send(delivery_turn_id, request.target),
             final_text_transform=self._final_text_transform(request.identity),
             transport_is_current=self._stream_transport_gate(delivery_turn_id, request.target.room_id),
+            interactive_creator_agent=self.deps.agent_name,
+            interactive_source_event_id=delivery_turn_id,
         )
 
     def _stream_transport_gate(

@@ -741,7 +741,6 @@ class TurnController:
             selection = await self.deps.interactive_questions.claim_interactive_text(
                 source_event_id=prepared_event.event_id,
                 selection_key=message_text,
-                creator_agent=self.deps.agent_name,
             )
             if selection is not None:
                 # A consumed interactive answer never enters the gate, and its

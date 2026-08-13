@@ -38,7 +38,7 @@ The resulting implementation is heavily tested but has the wrong atomic boundary
 ## Ownership Boundary
 
 The event journal owns every durable fact about an interactive question.
-`interactive.py` owns only pure response parsing, prompt construction, sender validation helpers, and Matrix reaction-button I/O.
+`interactive.py` owns only pure response parsing, prompt construction, and Matrix reaction-button I/O.
 `ReactionDispatcher` owns routing an admitted reaction to the appropriate semantic consumer.
 `TurnController` owns executing the selected source turn, but not restoring or consuming its durable selection.
 `ResponseRunner` owns the lifetime of the detached asyncio task, but not the durable selection.
@@ -57,7 +57,6 @@ CREATE TABLE IF NOT EXISTS interactive_questions (
     revision_event_id TEXT NOT NULL,
     room_id TEXT NOT NULL,
     thread_id TEXT NOT NULL,
-    creator_agent TEXT NOT NULL,
     question_json TEXT NOT NULL,
     membership_epoch BIGINT NOT NULL,
     created_at_ns BIGINT NOT NULL,
@@ -69,7 +68,6 @@ CREATE TABLE IF NOT EXISTS interactive_selections (
     source_event_id TEXT NOT NULL,
     question_event_id TEXT NOT NULL,
     revision_event_id TEXT NOT NULL,
-    creator_agent TEXT NOT NULL,
     selection_json TEXT NOT NULL,
     PRIMARY KEY (principal_id, source_event_id),
     FOREIGN KEY (principal_id, source_event_id)
@@ -80,8 +78,9 @@ CREATE TABLE IF NOT EXISTS interactive_selections (
 `question_event_id` is the stable Matrix target, while `revision_event_id` identifies the exact send or edit whose prompt the user saw.
 `question_json` stores the question text, option values, and option labels as one immutable payload.
 Every `interactive_questions` row is the currently active revision of one Matrix target.
-Reaction admission snapshots that revision and selected option into `interactive_selections` before a later edit can replace the active row.
-Claiming assigns the source's semantic consumer, consumes only the matching active revision, and discards competing candidate snapshots for that revision in one transaction.
+Reaction and numeric-text admission snapshot that revision and selected option into `interactive_selections` before a later edit can replace the active row.
+Claiming consumes only the matching active revision and discards competing candidate snapshots for that revision in one transaction.
+Reaction claim additionally assigns the source's semantic consumer in that transaction.
 The source primary key makes one source unable to select multiple prompt revisions.
 An edited Matrix target can therefore activate a replacement question without overwriting a pending source's earlier prompt snapshot.
 Numeric text selection orders eligible questions by `created_at_ns` and then `question_event_id` so selection remains deterministic across processes.
@@ -100,7 +99,8 @@ Reaction buttons remain a transport-side convenience and never establish durable
 ## Projection-Owned Activation
 
 `PrincipalStore` exposes no question registration, replacement, or forget API.
-After admitting and projecting an actionable self-authored message or edit, the journal reads the projection's currently visible revision for that logical target.
+After admitting and projecting a self-authored message or edit, projection returns the content it actually installed as the visible revision.
+That return also carries prompt metadata for unresolved large-message sidecars whose visible body is deliberately withheld until refresh.
 The journal accepts prompt metadata only when its creator and Matrix sender identify the current journal principal.
 The journal validates the embedded source event or captured epoch against the room's active unfenced membership.
 It then inserts, replaces, or deletes the active question in the same transaction that admitted the Matrix revision.
@@ -110,16 +110,16 @@ An admission that applies a previously held out-of-order edit reconciles from th
 
 ## Selection Claim
 
-Admitting an actionable reaction and snapshotting the active prompt revision it references is one store transaction.
+Admitting an actionable reaction or numeric text answer and snapshotting its active prompt revision is one store transaction.
 The later claim validates that source-bound snapshot, records `INTERACTIVE_REACTION`, consumes only that active revision, and discards competing snapshots for the same revision.
 If the reaction already owns a stored selection, replay returns the same selection.
-If admission found no active projected prompt revision, claim does not reinterpret the reaction through a prompt that appeared later.
+If admission found no active projected prompt revision, claim does not reinterpret the source through a prompt that appeared later.
 If another source consumed the prompt revision first, the transaction returns no selection.
 If the source is terminal, stale, from another room, or from an old membership, the transaction returns no selection.
 Authorization and managed-agent sender checks remain outside the store because they are runtime policy rather than durable state.
 
 Numeric text selection uses the admitted message event ID as the durable source owner.
-The store selects the oldest eligible active question in the same room, thread, agent, and current membership.
+The store selects the oldest eligible active question in the same principal, room, thread, and current membership.
 A replay of the same message returns its stored source-owned selection.
 
 ## Failure and Replay
@@ -136,8 +136,8 @@ The process may die at any point without leaving a process-local claim that hide
 `journal.settle_many` deletes every stored selection whose source is being settled.
 FINAL outbox enqueue already calls source settlement in the same writer transaction, so the answer handoff and selection consumption become one commit.
 Explicit intentionally-ignored settlement uses the same primitive and therefore converges on the same state.
-A replay cannot observe a terminal reaction alongside its stored selection because both state changes share the transaction.
-`TurnController` no longer probes terminal source state to choose between commit and restore.
+A replay cannot observe a terminal source alongside its stored selection because both state changes share the transaction.
+`TurnController` no longer uses terminal source state to choose between commit and restore; it only requires durable terminal truth before reporting success.
 
 ## Membership Invalidation
 
@@ -205,8 +205,8 @@ Tests that exist only to exercise JSON corruption, advisory locks, dirty overlay
 - Outbound interactive messages and terminal edits carry their prompt and membership proof in Matrix content before transport.
 - Admitting a self-authored visible revision and activating or clearing its prompt is one transaction.
 - Active prompt ordering is exactly visible-projection ordering, not HTTP completion ordering.
-- Reaction admission snapshots the prompt revision and selected option in the same transaction as the source event.
-- Claiming assigns the semantic consumer and consumes the matching active revision in one transaction.
+- Interactive-answer admission snapshots the prompt revision and selected option in the same transaction as the source event.
+- Claiming consumes the matching active revision in one transaction, and a reaction claim assigns its semantic consumer there too.
 - A later admitted edit can replace the active revision without rewriting any earlier source snapshot.
 - A stale or losing edit cannot reactivate an older prompt revision.
 - Settling a selected source and consuming its stored selection is one transaction.

@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from .backend import Backend, Transaction
-    from .interactive_questions import InteractiveQuestion, InteractiveSelection
+    from .interactive_questions import InteractiveSelection
     from .models import (
         ConversationCursor,
         ConversationPage,
@@ -214,61 +214,12 @@ class PrincipalStore:
             ),
         )
 
-    async def register_interactive_question_for_turn(
-        self,
-        turn_id: str,
-        question: InteractiveQuestion,
-        *,
-        fallback_membership_epoch: int | None = None,
-        replace_existing: bool = False,
-    ) -> bool:
-        """Store a question under the membership that admitted its turn."""
-        return await self._backend.write(
-            lambda transaction: _register_interactive_question_for_turn(
-                transaction,
-                self._principal_id,
-                turn_id=turn_id,
-                question=question,
-                fallback_membership_epoch=fallback_membership_epoch,
-                replace_existing=replace_existing,
-            ),
-        )
-
-    async def register_interactive_question_for_epoch(
-        self,
-        expected_membership_epoch: int,
-        question: InteractiveQuestion,
-        *,
-        replace_existing: bool = False,
-    ) -> bool:
-        """Store a direct Matrix question under one captured membership."""
-        return await self._backend.write(
-            lambda transaction: _store_interactive_question(
-                transaction,
-                self._principal_id,
-                expected_membership_epoch=expected_membership_epoch,
-                question=question,
-                replace_existing=replace_existing,
-            ),
-        )
-
-    async def forget_interactive_question(self, question_event_id: str) -> None:
-        """Forget one delivered question that no longer offers its options."""
-        await self._backend.write(
-            lambda transaction: interactive_questions.forget(
-                transaction,
-                self._principal_id,
-                question_event_id,
-            ),
-        )
-
     async def claim_interactive_reaction(
         self,
         *,
         source_event_id: str,
         question_event_id: str,
         selection_key: str,
-        creator_agent: str,
     ) -> InteractiveSelection | None:
         """Atomically transfer one question selection to its reaction source."""
         return await self._backend.write(
@@ -278,7 +229,6 @@ class PrincipalStore:
                 source_event_id=source_event_id,
                 question_event_id=question_event_id,
                 selection_key=selection_key,
-                creator_agent=creator_agent,
             ),
         )
 
@@ -287,7 +237,6 @@ class PrincipalStore:
         *,
         source_event_id: str,
         selection_key: str,
-        creator_agent: str,
     ) -> InteractiveSelection | None:
         """Atomically transfer the oldest eligible selection to one text source."""
         return await self._backend.write(
@@ -296,7 +245,6 @@ class PrincipalStore:
                 self._principal_id,
                 source_event_id=source_event_id,
                 selection_key=selection_key,
-                creator_agent=creator_agent,
             ),
         )
 
@@ -896,67 +844,6 @@ def _turn_membership_is_current(
     return admitted == journal.current_membership_epoch(transaction, principal_id, room_id)
 
 
-def _register_interactive_question_for_turn(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    turn_id: str,
-    question: InteractiveQuestion,
-    fallback_membership_epoch: int | None,
-    replace_existing: bool = False,
-) -> bool:
-    """Register one question under the exact room membership that admitted its turn."""
-    admitted = transaction.fetchone(
-        """
-        SELECT room_id, membership_epoch
-        FROM journal_events
-        WHERE principal_id = ? AND event_id = ?
-        """,
-        (principal_id, turn_id),
-    )
-    if admitted is None:
-        return (
-            False
-            if fallback_membership_epoch is None
-            else _store_interactive_question(
-                transaction,
-                principal_id,
-                expected_membership_epoch=fallback_membership_epoch,
-                question=question,
-                replace_existing=replace_existing,
-            )
-        )
-    if admitted["room_id"] != question.room_id:
-        return False
-    return _store_interactive_question(
-        transaction,
-        principal_id,
-        expected_membership_epoch=int(admitted["membership_epoch"]),
-        question=question,
-        replace_existing=replace_existing,
-    )
-
-
-def _store_interactive_question(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    expected_membership_epoch: int,
-    question: InteractiveQuestion,
-    replace_existing: bool,
-) -> bool:
-    """Apply one of the two explicit registration policies."""
-    operation = (
-        interactive_questions.replace_if_current if replace_existing else interactive_questions.register_if_current
-    )
-    return operation(
-        transaction,
-        principal_id,
-        expected_membership_epoch=expected_membership_epoch,
-        question=question,
-    )
-
-
 def _admit(
     transaction: Transaction,
     principal_id: str,
@@ -964,9 +851,16 @@ def _admit(
     projected: ProjectedEvent | None,
 ) -> AdmissionResult:
     """Admit one event and snapshot any interactive prompt its reaction saw."""
-    result = journal.admit(transaction, principal_id, event, projected)
+    result, installed_content = journal.admit(transaction, principal_id, event, projected)
     if result is AdmissionResult.ADMITTED:
-        interactive_questions.snapshot_reaction_candidate(transaction, principal_id, event)
+        if projected is not None:
+            interactive_questions.reconcile_projected_prompt(
+                transaction,
+                principal_id,
+                projected,
+                installed_content,
+            )
+        interactive_questions.snapshot_source_candidate(transaction, principal_id, event)
     return result
 
 

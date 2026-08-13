@@ -673,7 +673,7 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
             suppressed=True,
         ),
         ResponseOutcome(
-            interactive_target=MessageTarget.resolve(
+            response_target=MessageTarget.resolve(
                 room_id="!room:localhost",
                 thread_id="$thread",
                 reply_to_event_id="$event",
@@ -755,9 +755,9 @@ async def test_post_response_effects_skip_memory_persistence_for_failed_run() ->
 
 
 @pytest.mark.asyncio
-async def test_post_response_effects_register_interactive_follow_up_for_preserved_stream_failure() -> None:
-    """Preserved visible streamed replies should still register interactive follow-up."""
-    register_interactive = AsyncMock()
+async def test_post_response_effects_add_buttons_for_preserved_stream_success() -> None:
+    """Preserved visible streamed replies should still receive reaction buttons."""
+    add_interactive_buttons = AsyncMock()
     target = MessageTarget.resolve(
         room_id="!room:localhost",
         thread_id="$thread",
@@ -779,25 +779,24 @@ async def test_post_response_effects_register_interactive_follow_up_for_preserve
             interactive_metadata=interactive_metadata,
         ),
         ResponseOutcome(
-            interactive_target=target,
+            response_target=target,
         ),
         PostResponseEffectsDeps(
             logger=MagicMock(),
-            register_interactive=register_interactive,
+            add_interactive_buttons=add_interactive_buttons,
         ),
     )
 
-    register_interactive.assert_awaited_once_with(
+    add_interactive_buttons.assert_awaited_once_with(
         "$stream",
-        target,
         interactive_metadata,
     )
 
 
 @pytest.mark.asyncio
-async def test_post_response_effects_skip_interactive_follow_up_for_preserved_stream_error() -> None:
-    """Failed preserved stream outcomes must not register interactive follow-up on a failed reply."""
-    register_interactive = AsyncMock()
+async def test_post_response_effects_skip_buttons_for_preserved_stream_error() -> None:
+    """Failed preserved stream outcomes must not add buttons to a failed reply."""
+    add_interactive_buttons = AsyncMock()
     target = MessageTarget.resolve(
         room_id="!room:localhost",
         thread_id="$thread",
@@ -818,15 +817,15 @@ async def test_post_response_effects_skip_interactive_follow_up_for_preserved_st
             interactive_metadata=interactive_metadata,
         ),
         ResponseOutcome(
-            interactive_target=target,
+            response_target=target,
         ),
         PostResponseEffectsDeps(
             logger=MagicMock(),
-            register_interactive=register_interactive,
+            add_interactive_buttons=add_interactive_buttons,
         ),
     )
 
-    register_interactive.assert_not_awaited()
+    add_interactive_buttons.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -847,14 +846,10 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
-        delivery_gateway=MagicMock(),
         conversation_reader=conversation_reader,
-        membership=MagicMock(),
     )
     deps = support.build_deps(
         room_id="!room:localhost",
-        interactive_agent_name="general",
-        membership_turn_id="$source",
     )
     thread_history = [
         ResolvedVisibleMessage.synthetic(
@@ -953,14 +948,10 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
-        delivery_gateway=MagicMock(),
         conversation_reader=conversation_reader,
-        membership=MagicMock(),
     )
     deps = support.build_deps(
         room_id="!adhoc:localhost",
-        interactive_agent_name="general",
-        membership_turn_id="$source",
     )
     thread_history = [
         ResolvedVisibleMessage.synthetic(

@@ -63,18 +63,24 @@ from mindroom.dispatch_handoff import (
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.event_journal import (
+    AdmissionResult,
     ConversationPage,
     DeliveryAcknowledgement,
     DeliveryStage,
+    EventClass,
+    EventKind,
+    InboundEvent,
     JournalEvent,
     OutboxDelivery,
     OutboxView,
     PendingTurnView,
     PrincipalStore,
+    ProjectedEvent,
     RelationView,
     TerminalTurnWrite,
     VisibleMessage,
 )
+from mindroom.event_journal import reads as journal_reads
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.history.runtime import (
@@ -95,6 +101,7 @@ from mindroom.history.types import (
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
+from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_reads import ConversationReader
@@ -299,6 +306,83 @@ def _configure_uncached_structlog(
     )
 
 
+async def activate_interactive_prompt(
+    store: PrincipalStore,
+    *,
+    question_event_id: str,
+    room_id: str,
+    sender: str,
+    creator_agent: str,
+    thread_id: str | None = None,
+    revision_event_id: str | None = None,
+    question_text: str = "Choose",
+    options: Mapping[str, str] | None = None,
+    option_labels: Mapping[str, str] | None = None,
+    source_event_id: str | None = None,
+) -> AdmissionResult:
+    """Admit and settle one self-authored Matrix revision carrying a prompt."""
+    prompt = InteractivePrompt(
+        creator_agent=creator_agent,
+        question_text=question_text,
+        options=dict(options or {"1": "one"}),
+        option_labels=dict(option_labels or {"1": "One"}),
+        source_event_id=source_event_id,
+        membership_epoch=await store.membership_epoch(room_id),
+    )
+    installed_content: dict[str, object] = {
+        "msgtype": "m.text",
+        "body": question_text,
+        **interactive_prompt_content(prompt),
+    }
+    event_id = revision_event_id or question_event_id
+    content = installed_content
+    if revision_event_id is not None:
+        content = {
+            "msgtype": "m.text",
+            "body": f"* {question_text}",
+            "m.new_content": installed_content,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": question_event_id},
+            **interactive_prompt_content(prompt),
+        }
+    inbound = InboundEvent(
+        event_id=event_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        kind=EventKind.MESSAGE,
+        event_class=EventClass.ACTIONABLE,
+        sender=sender,
+        origin_server_ts=1_000,
+        source={"event_id": event_id, "content": content},
+    )
+    result = await store.admit(
+        inbound,
+        ProjectedEvent(
+            event_id=event_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            sender=sender,
+            origin_server_ts=1_000,
+            content=content,
+            replaces_event_id=question_event_id if revision_event_id is not None else None,
+            redacts_event_id=None,
+        ),
+    )
+    await store.settle(event_id)
+    return result
+
+
+async def membership_epoch_is_active(store: PrincipalStore, room_id: str, epoch: int) -> bool:
+    """Probe the journal's row-locked active-membership predicate."""
+    return await store._backend.write(
+        lambda transaction: journal_reads.claim_membership_epoch(
+            transaction,
+            store._principal_id,
+            room_id=room_id,
+            expected_membership_epoch=epoch,
+        ),
+    )
+
+
 _configure_quiet_structlog()
 
 
@@ -306,6 +390,7 @@ __all__ = [
     "TEST_ACCESS_TOKEN",
     "TEST_PASSWORD",
     "FakeCredentialsManager",
+    "activate_interactive_prompt",
     "agent_response_should_respond",
     "aioresponse",
     "bind_mock_config_event_journal",
@@ -326,6 +411,7 @@ __all__ = [
     "load_config_yaml",
     "make_matrix_client_mock",
     "make_visible_message",
+    "membership_epoch_is_active",
     "message_origin",
     "normalize_console_output",
     "orchestrator_runtime_paths",
@@ -1608,14 +1694,11 @@ def make_conversation_reader_mock() -> ConversationReader:
 
 
 def make_membership_stub() -> PrincipalStore:
-    """Return a membership view that accepts interactive question updates."""
+    """Return the narrow membership view used by runtime test collaborators."""
     return cast(
         "PrincipalStore",
         SimpleNamespace(
             membership_epoch=AsyncMock(return_value=0),
-            register_interactive_question_for_turn=AsyncMock(return_value=True),
-            register_interactive_question_for_epoch=AsyncMock(return_value=True),
-            forget_interactive_question=AsyncMock(),
         ),
     )
 

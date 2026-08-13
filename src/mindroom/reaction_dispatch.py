@@ -161,7 +161,6 @@ class ReactionDispatcher:
         selection = await self.deps.journal_dispatcher.claim_interactive_reaction(
             question_event_id=event.reacts_to,
             selection_key=event.key,
-            creator_agent=self.deps.agent_name,
         )
         if selection is None:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED if interactive_claimed else None

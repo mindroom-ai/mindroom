@@ -154,7 +154,6 @@ _TABLES = (
         revision_event_id {ordered_text} NOT NULL,
         room_id TEXT NOT NULL,
         thread_id TEXT NOT NULL,
-        creator_agent TEXT NOT NULL,
         question_json TEXT NOT NULL,
         membership_epoch BIGINT NOT NULL,
         created_at_ns BIGINT NOT NULL,
@@ -167,7 +166,6 @@ _TABLES = (
         source_event_id {ordered_text} NOT NULL,
         question_event_id {ordered_text} NOT NULL,
         revision_event_id {ordered_text} NOT NULL,
-        creator_agent TEXT NOT NULL,
         selection_json TEXT NOT NULL,
         PRIMARY KEY (principal_id, source_event_id),
         FOREIGN KEY (principal_id, source_event_id)
@@ -315,7 +313,7 @@ _INDEXES = (
     """
     CREATE INDEX IF NOT EXISTS interactive_questions_active
     ON interactive_questions (
-        principal_id, room_id, thread_id, creator_agent, created_at_ns, question_event_id/*bytes*/
+        principal_id, room_id, thread_id, created_at_ns, question_event_id/*bytes*/
     )
     """,
     """
