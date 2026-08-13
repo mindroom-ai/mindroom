@@ -4938,6 +4938,36 @@ def test_published_state_fingerprint_includes_failure_counter(tmp_path: Path) ->
     )
 
 
+def test_failed_subprocess_does_not_claim_pending_state_for_newer_publication(tmp_path: Path) -> None:
+    """A child failure cannot overwrite a stale marker attached to a newer publish."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    initial_state = PublishedIndexState(
+        settings=key.indexing_settings,
+        status="complete",
+        collection="old",
+        indexed_count=1,
+        source_signature="old-source",
+        refresh_job="pending",
+        reason="test_stale",
+    )
+    newer_state = replace(
+        initial_state,
+        collection="new",
+        source_signature="new-source",
+        reason="source_changed",
+    )
+
+    assert not knowledge_refresh_runner._failed_subprocess_state_can_be_reconciled(
+        key,
+        newer_state,
+        initial_state,
+    )
+
+
 @pytest.mark.asyncio
 async def test_cold_refresh_publishes_when_empty_file_produces_no_vectors(
     tmp_path: Path,
@@ -5875,11 +5905,13 @@ async def test_cancelled_subprocess_refresh_reconciles_running_state(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pending_reason", [None, "source_changed", "git_source_updated", "manual_reindex"])
 async def test_wedged_subprocess_refresh_is_terminated_after_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    pending_reason: str | None,
 ) -> None:
-    """A child that never exits is killed and reported, instead of being awaited forever."""
+    """A wedged child is killed and its running or intermediate state is failed."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
@@ -5909,6 +5941,8 @@ async def test_wedged_subprocess_refresh_is_terminated_after_timeout(
 
         async def wait(self) -> int:
             knowledge_registry.mark_published_index_refresh_running(key)
+            if pending_reason is not None:
+                knowledge_registry.mark_published_index_stale(key, reason=pending_reason)
             await asyncio.Event().wait()
             raise AssertionError
 

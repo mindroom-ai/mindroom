@@ -121,6 +121,13 @@ _REFRESH_SUBPROCESS_THREAD_ENV = {
     "VECLIB_MAXIMUM_THREADS": "1",
     "TOKENIZERS_PARALLELISM": "false",
 }
+_REFRESH_SUBPROCESS_INTERMEDIATE_PENDING_REASONS = frozenset(
+    {
+        "git_source_updated",
+        "manual_reindex",
+        "source_changed",
+    },
+)
 
 
 async def refresh_knowledge_binding_in_subprocess(
@@ -905,6 +912,32 @@ def _refresh_running_fingerprint(
     )
 
 
+def _published_state_publication_fingerprint(state: PublishedIndexState) -> tuple[object, ...]:
+    return (
+        state.settings,
+        state.status,
+        state.collection,
+        state.last_published_at,
+        state.published_revision,
+        state.indexed_count,
+        state.source_signature,
+    )
+
+
+def _refresh_start_publication_fingerprint(
+    key: PublishedIndexKey,
+    initial_state: PublishedIndexState | None,
+) -> tuple[object, ...]:
+    if initial_state is not None:
+        return _published_state_publication_fingerprint(initial_state)
+    return _published_state_publication_fingerprint(
+        PublishedIndexState(
+            settings=key.indexing_settings,
+            status="indexing",
+        ),
+    )
+
+
 def _failed_subprocess_state_can_be_reconciled(
     key: PublishedIndexKey,
     state: PublishedIndexState | None,
@@ -915,7 +948,16 @@ def _failed_subprocess_state_can_be_reconciled(
         _refresh_running_fingerprint(key, initial_state),
     }:
         return True
-    return state is not None and state.refresh_job == "running" and state.reason == "refreshing"
+    if state is None:
+        return False
+    if state.refresh_job == "running" and state.reason == "refreshing":
+        return True
+    return (
+        state.refresh_job == "pending"
+        and state.reason in _REFRESH_SUBPROCESS_INTERMEDIATE_PENDING_REASONS
+        and _published_state_publication_fingerprint(state)
+        == _refresh_start_publication_fingerprint(key, initial_state)
+    )
 
 
 async def _reconcile_cancelled_refresh(
