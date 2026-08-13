@@ -138,6 +138,7 @@ class MatrixMessageOperations:
         context: ToolRuntimeContext,
         *,
         event_id: str,
+        revision_event_id: str | None = None,
         room_id: str,
         thread_id: str | None,
         metadata: InteractiveMetadata,
@@ -149,6 +150,7 @@ class MatrixMessageOperations:
             return
         question = InteractiveQuestion(
             question_event_id=event_id,
+            revision_event_id=event_id if revision_event_id is None else revision_event_id,
             room_id=room_id,
             thread_id=thread_id,
             creator_agent=context.agent_name,
@@ -161,6 +163,7 @@ class MatrixMessageOperations:
                 context.membership_turn_id,
                 question,
                 fallback_membership_epoch=expected_membership_epoch,
+                replace_existing=revision_event_id is not None,
             )
         elif expected_membership_epoch is None:
             return
@@ -168,6 +171,7 @@ class MatrixMessageOperations:
             registered = await membership.register_interactive_question_for_epoch(
                 expected_membership_epoch,
                 question,
+                replace_existing=revision_event_id is not None,
             )
         if not registered:
             return
@@ -709,17 +713,18 @@ class MatrixMessageOperations:
                 target=target,
                 message="Failed to edit message in Matrix.",
             )
-        if context.membership is not None:
-            await context.membership.forget_interactive_question(target)
         if interactive_response.interactive_metadata is not None:
             await self._register_interactive(
                 context,
                 event_id=target,
+                revision_event_id=delivered.event_id,
                 room_id=room_id,
                 thread_id=thread_id,
                 metadata=interactive_response.interactive_metadata,
                 expected_membership_epoch=expected_membership_epoch,
             )
+        elif context.membership is not None:
+            await context.membership.forget_interactive_question(target)
 
         return self._result(
             "ok",

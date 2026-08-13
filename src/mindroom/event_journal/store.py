@@ -22,7 +22,7 @@ from .approvals import (  # noqa: TC001 - part of this module's runtime return t
     RecordedApprovalDecision,
     StoredApprovalCard,
 )
-from .models import DeliveryAcknowledgement
+from .models import AdmissionResult, DeliveryAcknowledgement
 from .projection import drop_refetched_message, install_refetched_revision, project
 
 if TYPE_CHECKING:
@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from .backend import Backend, Transaction
     from .interactive_questions import InteractiveQuestion, InteractiveSelection
     from .models import (
-        AdmissionResult,
         ConversationCursor,
         ConversationPage,
         DeliveryStage,
@@ -74,7 +73,7 @@ class PrincipalStore:
     ) -> AdmissionResult:
         """Admit one event and update the projection in a single transaction."""
         return await self._backend.write(
-            lambda transaction: journal.admit(transaction, self._principal_id, event, projected),
+            lambda transaction: _admit(transaction, self._principal_id, event, projected),
         )
 
     async def pending(
@@ -221,8 +220,9 @@ class PrincipalStore:
         question: InteractiveQuestion,
         *,
         fallback_membership_epoch: int | None = None,
+        replace_existing: bool = False,
     ) -> bool:
-        """Register a question only under the membership that admitted its turn."""
+        """Store a question under the membership that admitted its turn."""
         return await self._backend.write(
             lambda transaction: _register_interactive_question_for_turn(
                 transaction,
@@ -230,6 +230,7 @@ class PrincipalStore:
                 turn_id=turn_id,
                 question=question,
                 fallback_membership_epoch=fallback_membership_epoch,
+                replace_existing=replace_existing,
             ),
         )
 
@@ -237,14 +238,17 @@ class PrincipalStore:
         self,
         expected_membership_epoch: int,
         question: InteractiveQuestion,
+        *,
+        replace_existing: bool = False,
     ) -> bool:
-        """Register a direct Matrix question under one captured membership."""
+        """Store a direct Matrix question under one captured membership."""
         return await self._backend.write(
-            lambda transaction: interactive_questions.register_if_current(
+            lambda transaction: _store_interactive_question(
                 transaction,
                 self._principal_id,
                 expected_membership_epoch=expected_membership_epoch,
                 question=question,
+                replace_existing=replace_existing,
             ),
         )
 
@@ -899,6 +903,7 @@ def _register_interactive_question_for_turn(
     turn_id: str,
     question: InteractiveQuestion,
     fallback_membership_epoch: int | None,
+    replace_existing: bool = False,
 ) -> bool:
     """Register one question under the exact room membership that admitted its turn."""
     admitted = transaction.fetchone(
@@ -913,21 +918,56 @@ def _register_interactive_question_for_turn(
         return (
             False
             if fallback_membership_epoch is None
-            else interactive_questions.register_if_current(
+            else _store_interactive_question(
                 transaction,
                 principal_id,
                 expected_membership_epoch=fallback_membership_epoch,
                 question=question,
+                replace_existing=replace_existing,
             )
         )
     if admitted["room_id"] != question.room_id:
         return False
-    return interactive_questions.register_if_current(
+    return _store_interactive_question(
         transaction,
         principal_id,
         expected_membership_epoch=int(admitted["membership_epoch"]),
         question=question,
+        replace_existing=replace_existing,
     )
+
+
+def _store_interactive_question(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    expected_membership_epoch: int,
+    question: InteractiveQuestion,
+    replace_existing: bool,
+) -> bool:
+    """Apply one of the two explicit registration policies."""
+    operation = (
+        interactive_questions.replace_if_current if replace_existing else interactive_questions.register_if_current
+    )
+    return operation(
+        transaction,
+        principal_id,
+        expected_membership_epoch=expected_membership_epoch,
+        question=question,
+    )
+
+
+def _admit(
+    transaction: Transaction,
+    principal_id: str,
+    event: InboundEvent,
+    projected: ProjectedEvent | None,
+) -> AdmissionResult:
+    """Admit one event and snapshot any interactive prompt its reaction saw."""
+    result = journal.admit(transaction, principal_id, event, projected)
+    if result is AdmissionResult.ADMITTED:
+        interactive_questions.snapshot_reaction_candidate(transaction, principal_id, event)
+    return result
 
 
 def _enqueue_delivery(

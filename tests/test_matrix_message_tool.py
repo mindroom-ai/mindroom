@@ -607,6 +607,7 @@ async def test_matrix_message_send_interactive_block_registers_question_and_adds
         0,
         InteractiveQuestion(
             question_event_id="$evt",
+            revision_event_id="$evt",
             room_id=ctx.room_id,
             thread_id=None,
             creator_agent=ctx.agent_name,
@@ -624,6 +625,7 @@ async def test_matrix_message_send_interactive_block_registers_question_and_adds
                 "2": "Reject",
             },
         ),
+        replace_existing=False,
     )
     mock_add_reactions.assert_awaited_once_with(
         ctx.client,
@@ -716,13 +718,18 @@ async def test_matrix_message_does_not_register_interactive_state_after_membersh
             "$source",
             ANY,
             fallback_membership_epoch=7,
+            replace_existing=action == "edit",
         )
         membership.register_interactive_question_for_epoch.assert_not_awaited()
         assert operation_order == ["epoch", "transport", "turn guard"]
     else:
         membership.membership_epoch.assert_awaited_once_with(ctx.room_id)
         membership.register_interactive_question_for_turn.assert_not_awaited()
-        membership.register_interactive_question_for_epoch.assert_awaited_once_with(7, ANY)
+        membership.register_interactive_question_for_epoch.assert_awaited_once_with(
+            7,
+            ANY,
+            replace_existing=action == "edit",
+        )
         assert operation_order == ["epoch", "transport", "epoch guard"]
 
 
@@ -1527,11 +1534,12 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
     assert payload["event_id"] == "$edit_evt"
     assert mock_edit.await_args.args[4] == formatted_text
     assert mock_edit.await_args.args[3]["body"] == formatted_text
-    ctx.membership.forget_interactive_question.assert_awaited_once_with("$target")
+    ctx.membership.forget_interactive_question.assert_not_awaited()
     ctx.membership.register_interactive_question_for_epoch.assert_awaited_once_with(
         0,
         InteractiveQuestion(
             question_event_id="$target",
+            revision_event_id="$edit_evt",
             room_id=ctx.room_id,
             thread_id=ctx.thread_id,
             creator_agent=ctx.agent_name,
@@ -1549,6 +1557,7 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
                 "2": "Reject",
             },
         ),
+        replace_existing=True,
     )
     mock_add_reactions.assert_awaited_once_with(
         ctx.client,
@@ -1569,7 +1578,7 @@ async def test_matrix_message_edit_replaces_a_question_without_losing_its_source
     principal = journal_store.principal("general@mindroom")
     ctx = _make_context(membership=principal)
 
-    async def admit(event_id: str, kind: EventKind) -> None:
+    async def admit(event_id: str, kind: EventKind, *, content: dict[str, object] | None = None) -> None:
         await principal.admit(
             InboundEvent(
                 event_id=event_id,
@@ -1579,13 +1588,14 @@ async def test_matrix_message_edit_replaces_a_question_without_losing_its_source
                 event_class=EventClass.ACTIONABLE,
                 sender=ctx.requester_id,
                 origin_server_ts=1_000,
-                source={"event_id": event_id, "content": {"body": event_id}},
+                source={"event_id": event_id, "content": content or {"body": event_id}},
             ),
         )
 
     await admit("$turn", EventKind.MESSAGE)
     original_question = InteractiveQuestion(
         question_event_id="$target",
+        revision_event_id="$target",
         room_id=ctx.room_id,
         thread_id=ctx.thread_id,
         creator_agent=ctx.agent_name,
@@ -1594,7 +1604,14 @@ async def test_matrix_message_edit_replaces_a_question_without_losing_its_source
         option_labels={"1": "Original"},
     )
     assert await principal.register_interactive_question_for_turn("$turn", original_question)
-    await admit("$reaction", EventKind.REACTION)
+    reaction_content = {
+        "m.relates_to": {
+            "rel_type": "m.annotation",
+            "event_id": "$target",
+            "key": "1",
+        },
+    }
+    await admit("$reaction", EventKind.REACTION, content=reaction_content)
     original = InteractiveSelection(
         question_event_id="$target",
         question_text="Original question?",
@@ -1603,16 +1620,6 @@ async def test_matrix_message_edit_replaces_a_question_without_losing_its_source
         selected_value="original",
         thread_id=ctx.thread_id,
     )
-    assert (
-        await principal.claim_interactive_reaction(
-            source_event_id="$reaction",
-            question_event_id="$target",
-            selection_key="1",
-            creator_agent=ctx.agent_name,
-        )
-        == original
-    )
-
     replacement = """```interactive json
 {"question": "Replacement?", "options": [{"label": "New", "value": "new"}]}
 ```"""
@@ -1637,7 +1644,7 @@ async def test_matrix_message_edit_replaces_a_question_without_losing_its_source
         == original
     )
     await principal.settle("$reaction")
-    await admit("$replacement-reaction", EventKind.REACTION)
+    await admit("$replacement-reaction", EventKind.REACTION, content=reaction_content)
     selected_replacement = await principal.claim_interactive_reaction(
         source_event_id="$replacement-reaction",
         question_event_id="$target",

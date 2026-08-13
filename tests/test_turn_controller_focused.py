@@ -2731,11 +2731,53 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
     assert request.response_envelope.target.resolved_thread_id == selection.thread_id
     metadata = request.matrix_run_metadata
     assert metadata is not None
-    assert metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == [selection.question_event_id]
-    assert metadata[constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] == ["$selection:localhost"]
+    assert metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == ["$selection:localhost"]
+    assert metadata[constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] == [selection.question_event_id]
 
     assert harness.turn_store.is_handled(selection.question_event_id) is True
     assert harness.turn_store.is_handled("$selection:localhost") is True
+
+
+@pytest.mark.asyncio
+async def test_edited_question_selection_uses_its_exact_source_as_turn_identity(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """Two prompt revisions at one Matrix target each receive their selected response."""
+    harness = _build_harness(config, tmp_path)
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    original = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Original?",
+        selection_key="1",
+        selected_label="Original",
+        selected_value="original",
+        thread_id="$thread-root:localhost",
+    )
+    replacement = replace(
+        original,
+        question_text="Replacement?",
+        selected_label="Replacement",
+        selected_value="replacement",
+    )
+
+    await harness.controller._handle_interactive_selection(
+        room,
+        selection=original,
+        user_id=_SENDER,
+        source_event_id="$original-selection:localhost",
+    )
+    await harness.controller._handle_interactive_selection(
+        room,
+        selection=replacement,
+        user_id=_SENDER,
+        source_event_id="$replacement-selection:localhost",
+    )
+
+    assert len(harness.runner.requests) == 2
+    assert len(harness.gateway.sent) == 2
+    assert harness.turn_store.is_handled("$original-selection:localhost") is True
+    assert harness.turn_store.is_handled("$replacement-selection:localhost") is True
 
 
 @pytest.mark.asyncio
@@ -2843,7 +2885,7 @@ async def test_interactive_selection_claim_conflict_accepts_racing_terminal_turn
         monkeypatch.setattr(harness.turn_store, "record_pending_turn", real_record_pending)
         await harness.turn_store.record_turn(
             TurnRecord.create(
-                [selection.question_event_id],
+                ["$selection:localhost"],
                 response_event_id="$racing-response:localhost",
             ),
         )

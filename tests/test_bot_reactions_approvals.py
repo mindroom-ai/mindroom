@@ -452,6 +452,7 @@ class TestAgentBot(AgentBotTestBase):
             await store.membership_epoch(room.room_id),
             InteractiveQuestion(
                 question_event_id="$question",
+                revision_event_id="$question",
                 room_id=room.room_id,
                 thread_id=None,
                 creator_agent=bot.agent_name,
@@ -499,6 +500,7 @@ class TestAgentBot(AgentBotTestBase):
             await store.membership_epoch(room.room_id),
             InteractiveQuestion(
                 question_event_id="$question",
+                revision_event_id="$question",
                 room_id=room.room_id,
                 thread_id=None,
                 creator_agent=bot.agent_name,
@@ -2576,6 +2578,7 @@ class TestAgentBot(AgentBotTestBase):
             await store.membership_epoch(room.room_id),
             InteractiveQuestion(
                 question_event_id=selection.question_event_id,
+                revision_event_id=selection.question_event_id,
                 room_id=room.room_id,
                 thread_id=selection.thread_id,
                 creator_agent=bot.agent_name,

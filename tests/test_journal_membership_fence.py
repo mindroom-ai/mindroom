@@ -169,6 +169,7 @@ async def membership_accepts_question(principal: PrincipalStore, epoch: int) -> 
         epoch,
         InteractiveQuestion(
             question_event_id="$membership-probe",
+            revision_event_id="$membership-probe",
             room_id=ROOM,
             thread_id=None,
             creator_agent="agent",

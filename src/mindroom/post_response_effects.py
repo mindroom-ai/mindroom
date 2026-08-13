@@ -125,6 +125,7 @@ class PostResponseEffectsSupport:
             membership_turn_id,
             InteractiveQuestion(
                 question_event_id=event_id,
+                revision_event_id=event_id,
                 room_id=room_id,
                 thread_id=target.resolved_thread_id,
                 creator_agent=agent_name,

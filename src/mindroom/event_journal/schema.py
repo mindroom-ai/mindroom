@@ -151,6 +151,7 @@ _TABLES = (
     CREATE TABLE IF NOT EXISTS interactive_questions (
         principal_id TEXT NOT NULL,
         question_event_id {ordered_text} NOT NULL,
+        revision_event_id {ordered_text} NOT NULL,
         room_id TEXT NOT NULL,
         thread_id TEXT NOT NULL,
         creator_agent TEXT NOT NULL,
@@ -164,6 +165,9 @@ _TABLES = (
     CREATE TABLE IF NOT EXISTS interactive_selections (
         principal_id TEXT NOT NULL,
         source_event_id {ordered_text} NOT NULL,
+        question_event_id {ordered_text} NOT NULL,
+        revision_event_id {ordered_text} NOT NULL,
+        creator_agent TEXT NOT NULL,
         selection_json TEXT NOT NULL,
         PRIMARY KEY (principal_id, source_event_id),
         FOREIGN KEY (principal_id, source_event_id)
@@ -315,6 +319,10 @@ _INDEXES = (
     )
     """,
     """
+    CREATE INDEX IF NOT EXISTS interactive_selections_revision
+    ON interactive_selections (principal_id, question_event_id, revision_event_id)
+    """,
+    """
     CREATE INDEX IF NOT EXISTS journal_events_pending
     ON journal_events (principal_id, receipt_order)
     WHERE state = 'pending'
@@ -377,10 +385,9 @@ def _expand_byte_order(sql: str, dialect: _Dialect) -> str:
 def schema_statements(dialect: _Dialect) -> tuple[str, ...]:
     """Return every DDL statement needed to create the schema.
 
-    Creation only. There is no upgrade path and deliberately so: this schema
-    has never shipped, so the only databases carrying an older shape are
-    prerelease ones on this branch, and those are required to be deleted rather
-    than migrated.
+    Creation only. There is no upgrade path and deliberately so: incompatible
+    shapes are rejected by the backends with an instruction to recreate the
+    journal rather than being opened under semantics their rows cannot satisfy.
 
     The byte-order marker is substituted here as well as in queries. An index
     whose trailing columns sort in the server's own collation cannot satisfy an

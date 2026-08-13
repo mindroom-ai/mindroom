@@ -201,6 +201,14 @@ class SqliteBackend:
         # gap the certifier can see. Readers commit nothing, so this is the
         # writer's cost alone.
         _configure(connection, synchronous="FULL")
+        legacy_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(interactive_questions)")}
+        if "claimed_source_event_id" in legacy_columns:
+            connection.close()
+            msg = (
+                "This event journal uses the incompatible pre-selection schema; "
+                "recreate the event journal database before starting MindRoom"
+            )
+            raise RuntimeError(msg)
         connection.execute("BEGIN IMMEDIATE")
         for statement in schema_statements(SQLITE_DIALECT):
             connection.execute(statement)

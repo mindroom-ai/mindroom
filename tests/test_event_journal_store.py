@@ -476,6 +476,7 @@ def _interactive_question(
     """Return one literal journal-owned question fixture."""
     return InteractiveQuestion(
         question_event_id=question_event_id,
+        revision_event_id=question_event_id,
         room_id=room_id,
         thread_id=thread_id,
         creator_agent="agent",
@@ -491,7 +492,7 @@ async def _interactive_question_rows(store: EventJournalStore) -> list[dict[str,
         lambda transaction: transaction.fetchall(
             """
             SELECT principal_id, question_event_id, room_id, thread_id, creator_agent,
-                   question_json, membership_epoch
+                   revision_event_id, question_json, membership_epoch
             FROM interactive_questions
             ORDER BY question_event_id
             """,
@@ -501,11 +502,12 @@ async def _interactive_question_rows(store: EventJournalStore) -> list[dict[str,
 
 
 async def _interactive_selection_rows(store: EventJournalStore) -> list[dict[str, object]]:
-    """Return source-owned selections as plain test evidence."""
+    """Return source-bound selection snapshots as plain test evidence."""
     rows = await store.backend.read(
         lambda transaction: transaction.fetchall(
             """
-            SELECT principal_id, source_event_id, selection_json
+            SELECT principal_id, source_event_id, question_event_id,
+                   revision_event_id, creator_agent, selection_json
             FROM interactive_selections
             ORDER BY source_event_id
             """,
@@ -1497,6 +1499,7 @@ class TestInteractiveQuestionRegistration:
             {
                 "principal_id": "agent@alice",
                 "question_event_id": "$question",
+                "revision_event_id": "$question",
                 "room_id": ROOM,
                 "thread_id": "$thread",
                 "creator_agent": "agent",
@@ -1596,6 +1599,7 @@ class TestInteractiveQuestionClaims:
         await alice.forget_interactive_question("$question")
         replacement = InteractiveQuestion(
             question_event_id="$question",
+            revision_event_id="$question-edit",
             room_id=ROOM,
             thread_id="$thread",
             creator_agent="agent",
@@ -1630,6 +1634,72 @@ class TestInteractiveQuestionClaims:
             selected_label="Two",
             selected_value="two",
             thread_id="$thread",
+        )
+
+    async def test_reaction_admission_preserves_the_prompt_seen_before_an_edit(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A queued reaction cannot be reinterpreted through a later prompt revision."""
+        await admit(alice, "$turn")
+        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$question"))
+        reaction, _ = message(
+            "$reaction",
+            kind=EventKind.REACTION,
+            content={
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$question",
+                    "key": "1",
+                },
+            },
+        )
+        await alice.admit(reaction)
+
+        await alice.forget_interactive_question("$question")
+        replacement = replace(
+            _interactive_question("$question"),
+            revision_event_id="$question-edit",
+            question_text="Choose again",
+            options={"1": "new"},
+            option_labels={"1": "New"},
+        )
+        assert await alice.register_interactive_question_for_turn("$turn", replacement)
+
+        selected = await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+            question_event_id="$question",
+            selection_key="1",
+            creator_agent="agent",
+        )
+
+        assert selected is not None
+        assert (selected.question_text, selected.selected_value) == ("Choose", "one")
+
+        await alice.settle("$reaction")
+        replacement_reaction, _ = message(
+            "$replacement-reaction",
+            kind=EventKind.REACTION,
+            content={
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$question",
+                    "key": "1",
+                },
+            },
+        )
+        await alice.admit(replacement_reaction)
+        replacement_selection = await alice.claim_interactive_reaction(
+            source_event_id="$replacement-reaction",
+            question_event_id="$question",
+            selection_key="1",
+            creator_agent="agent",
+        )
+
+        assert replacement_selection is not None
+        assert (replacement_selection.question_text, replacement_selection.selected_value) == (
+            "Choose again",
+            "new",
         )
 
     async def test_interactive_reaction_claim_is_atomic_and_replayable(
@@ -1684,8 +1754,19 @@ class TestInteractiveQuestionClaims:
         """A losing reaction keeps no semantic claim that would hide other routing."""
         await admit(alice, "$turn")
         assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$question"))
-        await admit(alice, "$winner", kind=EventKind.REACTION)
-        await admit(alice, "$loser", kind=EventKind.REACTION)
+        for event_id in ("$winner", "$loser"):
+            reaction, _ = message(
+                event_id,
+                kind=EventKind.REACTION,
+                content={
+                    "m.relates_to": {
+                        "rel_type": "m.annotation",
+                        "event_id": "$question",
+                        "key": "1",
+                    },
+                },
+            )
+            await alice.admit(reaction)
         assert await alice.claim_interactive_reaction(
             source_event_id="$winner",
             question_event_id="$question",
@@ -1772,6 +1853,14 @@ class TestInteractiveQuestionClaims:
                 creator_agent="agent",
             )
             == expected
+        )
+        assert (
+            await alice.claim_interactive_text(
+                source_event_id="$answer",
+                selection_key="1",
+                creator_agent="other-agent",
+            )
+            is None
         )
         assert (
             await alice.claim_interactive_text(
@@ -1884,7 +1973,7 @@ class TestInteractiveQuestionConsumption:
         alice: PrincipalStore,
         journal_store: EventJournalStore,
     ) -> None:
-        """The membership fence and its derived-question deletion are one transaction."""
+        """The membership fence and its interactive-state deletion are one transaction."""
         await admit(alice, "$turn")
         assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$active"))
         assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$claimed"))
@@ -4381,6 +4470,46 @@ class TestConnectionSecretsStayOutOfLogs:
         assert "hunter2" not in rendered
         assert "someone" not in rendered
         assert "db.example" not in rendered
+
+
+class TestIncompatibleSchemaRefusal:
+    """A shipped question-claim shape must not be read under new ownership semantics."""
+
+    async def test_sqlite_refuses_the_legacy_claim_column(self, tmp_path: Path) -> None:
+        """SQLite fails loudly instead of treating an owned question as active."""
+        database_path = tmp_path / "legacy.db"
+        with sqlite3.connect(database_path) as database:
+            database.execute(
+                """
+                CREATE TABLE interactive_questions (
+                    principal_id TEXT NOT NULL,
+                    question_event_id TEXT NOT NULL,
+                    claimed_source_event_id TEXT
+                )
+                """,
+            )
+
+        with pytest.raises(RuntimeError, match="incompatible pre-selection schema"):
+            EventJournalStore.open_sqlite(database_path)
+
+    async def test_postgres_refuses_the_legacy_claim_column(self, postgres_journal_url: str) -> None:
+        """PostgreSQL applies the same explicit schema boundary as SQLite."""
+        import psycopg  # noqa: PLC0415
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        with psycopg.connect(database_url, autocommit=True) as database:
+            database.execute(
+                """
+                CREATE TABLE interactive_questions (
+                    principal_id TEXT NOT NULL,
+                    question_event_id TEXT NOT NULL,
+                    claimed_source_event_id TEXT
+                )
+                """,
+            )
+
+        with pytest.raises(RuntimeError, match="incompatible pre-selection schema"):
+            EventJournalStore.open_postgres(database_url)
 
 
 class TestHotQueriesAreIndexCovered:

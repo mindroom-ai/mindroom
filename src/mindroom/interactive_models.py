@@ -10,6 +10,7 @@ class InteractiveQuestion:
     """One delivered question that can still accept a selection."""
 
     question_event_id: str
+    revision_event_id: str
     room_id: str
     thread_id: str | None
     creator_agent: str

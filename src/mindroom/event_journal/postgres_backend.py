@@ -85,7 +85,11 @@ class PostgresBackend:
         """
         backend = cls(database_url=database_url)
         backend._writer = backend._connect()
-        backend._create_schema()
+        try:
+            backend._create_schema()
+        except BaseException:
+            backend._writer.close()
+            raise
         backend._pool = [backend._connect() for _ in range(_POOL_SIZE)]
         return backend
 
@@ -112,6 +116,21 @@ class PostgresBackend:
             # advisory lock costs nothing at steady state, because the
             # statements are all no-ops once the schema exists.
             cursor.execute(cast("LiteralString", f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK_KEY})"))
+            cursor.execute(
+                """
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'interactive_questions'
+                  AND column_name = 'claimed_source_event_id'
+                """,
+            )
+            if cursor.fetchone() is not None:
+                msg = (
+                    "This event journal uses the incompatible pre-selection schema; "
+                    "recreate the event journal database before starting MindRoom"
+                )
+                raise RuntimeError(msg)
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
         self._writer.commit()

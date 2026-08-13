@@ -219,7 +219,8 @@ journal event pending
 For those callback families only, `SemanticConsumer` is the durable authority that prevents a second consumer from claiming the same callback.
 Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
 An interactive reaction remains pending while its detached response owns the selection, so a restart can replay it until response delivery becomes durable.
-The active Matrix question and the pending source's immutable selection use separate journal rows, so editing an event can activate its replacement question without rewriting or deleting the older source's replay state.
+Reaction admission snapshots the exact active prompt revision before a later Matrix edit can replace it, and the later semantic claim consumes only that revision.
+The active Matrix target and the pending source's immutable selection use separate journal rows, while the exact selecting source—not the reusable target event ID—is the response turn's execution and deduplication identity.
 
 ### Deferred callback outcome
 

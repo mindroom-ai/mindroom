@@ -90,6 +90,7 @@ async def _membership_accepts_question(store: PrincipalStore, room_id: str, epoc
         epoch,
         InteractiveQuestion(
             question_event_id="$membership-probe",
+            revision_event_id="$membership-probe",
             room_id=room_id,
             thread_id=None,
             creator_agent="agent",

@@ -4,17 +4,52 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from mindroom.interactive_models import InteractiveQuestion, InteractiveSelection
 
 from . import reads
 from .identity import decode_thread_id, encode_thread_id
-from .models import EventKind, SemanticConsumer
+from .models import EventClass, EventKind, SemanticConsumer
 from .schema import PENDING_STATE
 
 if TYPE_CHECKING:
     from .backend import Row, Transaction
+    from .models import InboundEvent
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredSelection:
+    """One source's prompt snapshot plus the policy identity that created it."""
+
+    selection: InteractiveSelection
+    revision_event_id: str
+    creator_agent: str
+
+
+def _consume_selection_revision(
+    transaction: Transaction,
+    principal_id: str,
+    source_event_id: str,
+    stored: _StoredSelection,
+) -> None:
+    """Consume one active revision and discard competing snapshots of it."""
+    transaction.execute(
+        """
+        DELETE FROM interactive_questions
+        WHERE principal_id = ? AND question_event_id = ? AND revision_event_id = ?
+        """,
+        (principal_id, stored.selection.question_event_id, stored.revision_event_id),
+    )
+    transaction.execute(
+        """
+        DELETE FROM interactive_selections
+        WHERE principal_id = ? AND question_event_id = ? AND revision_event_id = ?
+          AND source_event_id != ?
+        """,
+        (principal_id, stored.selection.question_event_id, stored.revision_event_id, source_event_id),
+    )
 
 
 def _question_json(question: InteractiveQuestion) -> str:
@@ -50,10 +85,9 @@ def _selection_from_row(row: Row, selection_key: str) -> InteractiveSelection | 
 
 
 def _selection_json(selection: InteractiveSelection) -> str:
-    """Serialize the immutable selection owned by one pending source."""
+    """Serialize the immutable selection bound to one pending source."""
     return json.dumps(
         {
-            "question_event_id": selection.question_event_id,
             "question_text": selection.question_text,
             "selected_label": selection.selected_label,
             "selected_value": selection.selected_value,
@@ -70,11 +104,11 @@ def _stored_selection(
     transaction: Transaction,
     principal_id: str,
     source_event_id: str,
-) -> InteractiveSelection | None:
-    """Return the immutable selection already owned by one source."""
+) -> _StoredSelection | None:
+    """Return the immutable prompt snapshot stored for one source."""
     row = transaction.fetchone(
         """
-        SELECT selection_json
+        SELECT question_event_id, revision_event_id, creator_agent, selection_json
         FROM interactive_selections
         WHERE principal_id = ? AND source_event_id = ?
         """,
@@ -83,36 +117,103 @@ def _stored_selection(
     if row is None:
         return None
     payload = cast("dict[str, object]", json.loads(str(row["selection_json"])))
-    return InteractiveSelection(
-        question_event_id=str(payload["question_event_id"]),
-        question_text=str(payload["question_text"]),
-        selection_key=str(payload["selection_key"]),
-        selected_label=str(payload["selected_label"]),
-        selected_value=str(payload["selected_value"]),
-        thread_id=cast("str | None", payload["thread_id"]),
+    return _StoredSelection(
+        selection=InteractiveSelection(
+            question_event_id=str(row["question_event_id"]),
+            question_text=str(payload["question_text"]),
+            selection_key=str(payload["selection_key"]),
+            selected_label=str(payload["selected_label"]),
+            selected_value=str(payload["selected_value"]),
+            thread_id=cast("str | None", payload["thread_id"]),
+        ),
+        revision_event_id=str(row["revision_event_id"]),
+        creator_agent=str(row["creator_agent"]),
     )
 
 
-def _store_selection(
+def _snapshot_selection(
     transaction: Transaction,
     principal_id: str,
     source_event_id: str,
+    revision_event_id: str,
+    creator_agent: str,
     selection: InteractiveSelection,
-) -> None:
-    """Transfer one active question into its source-owned selection."""
+) -> _StoredSelection:
+    """Store and return one source-bound prompt revision snapshot."""
     transaction.execute(
         """
-        INSERT INTO interactive_selections (principal_id, source_event_id, selection_json)
-        VALUES (?, ?, ?)
+        INSERT INTO interactive_selections (
+            principal_id, source_event_id, question_event_id,
+            revision_event_id, creator_agent, selection_json
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (principal_id, source_event_id) DO NOTHING
         """,
-        (principal_id, source_event_id, _selection_json(selection)),
+        (
+            principal_id,
+            source_event_id,
+            selection.question_event_id,
+            revision_event_id,
+            creator_agent,
+            _selection_json(selection),
+        ),
     )
-    transaction.execute(
+    return _StoredSelection(
+        selection=selection,
+        revision_event_id=revision_event_id,
+        creator_agent=creator_agent,
+    )
+
+
+def snapshot_reaction_candidate(  # noqa: PLR0911 - malformed or unrelated reactions have no candidate
+    transaction: Transaction,
+    principal_id: str,
+    event: InboundEvent,
+) -> None:
+    """Snapshot the prompt revision visible when one reaction is admitted."""
+    if event.kind is not EventKind.REACTION or event.event_class is not EventClass.ACTIONABLE:
+        return
+    content = event.source.get("content")
+    if not isinstance(content, dict):
+        return
+    content = cast("dict[str, object]", content)
+    relation = content.get("m.relates_to")
+    if not isinstance(relation, dict):
+        return
+    relation = cast("dict[str, object]", relation)
+    if relation.get("rel_type") != "m.annotation":
+        return
+    question_event_id = relation.get("event_id")
+    selection_key = relation.get("key")
+    if not isinstance(question_event_id, str) or not isinstance(selection_key, str):
+        return
+    source = transaction.fetchone(
         """
-        DELETE FROM interactive_questions
-        WHERE principal_id = ? AND question_event_id = ?
+        SELECT membership_epoch
+        FROM journal_events
+        WHERE principal_id = ? AND event_id = ? AND state = ?
         """,
-        (principal_id, selection.question_event_id),
+        (principal_id, event.event_id, PENDING_STATE),
+    )
+    if source is None:
+        return
+    membership_epoch = int(source["membership_epoch"])
+    question_row = _question_row(transaction, principal_id, question_event_id)
+    if (
+        question_row is None
+        or question_row["room_id"] != event.room_id
+        or int(question_row["membership_epoch"]) != membership_epoch
+    ):
+        return
+    selection = _selection_from_row(question_row, selection_key)
+    if selection is None:
+        return
+    _snapshot_selection(
+        transaction,
+        principal_id,
+        event.event_id,
+        str(question_row["revision_event_id"]),
+        str(question_row["creator_agent"]),
+        selection,
     )
 
 
@@ -137,7 +238,7 @@ def _question_row(transaction: Transaction, principal_id: str, question_event_id
         SET question_json = question_json
         WHERE principal_id = ? AND question_event_id = ?
         RETURNING question_event_id, room_id, thread_id, creator_agent,
-                  question_json, membership_epoch
+                  revision_event_id, question_json, membership_epoch
         """,
         (principal_id, question_event_id),
     )
@@ -188,12 +289,24 @@ def claim_reaction(  # noqa: PLR0911 - each failed ownership predicate is termin
         return None
     stored_selection = _stored_selection(transaction, principal_id, source_event_id)
     if stored_selection is not None:
-        return (
-            stored_selection
-            if stored_selection.question_event_id == question_event_id
-            and stored_selection.selection_key == selection_key
-            else None
-        )
+        selection = stored_selection.selection
+        if (
+            selection.question_event_id != question_event_id
+            or selection.selection_key != selection_key
+            or stored_selection.creator_agent != creator_agent
+        ):
+            return None
+        if source["semantic_consumer"] is None:
+            transaction.execute(
+                """
+                UPDATE journal_events
+                SET semantic_consumer = ?
+                WHERE principal_id = ? AND event_id = ?
+                """,
+                (SemanticConsumer.INTERACTIVE_REACTION.value, principal_id, source_event_id),
+            )
+            _consume_selection_revision(transaction, principal_id, source_event_id, stored_selection)
+        return selection
     if source["semantic_consumer"] is not None:
         return None
     question_row = _question_row(transaction, principal_id, question_event_id)
@@ -216,7 +329,15 @@ def claim_reaction(  # noqa: PLR0911 - each failed ownership predicate is termin
         """,
         (SemanticConsumer.INTERACTIVE_REACTION.value, principal_id, source_event_id),
     )
-    _store_selection(transaction, principal_id, source_event_id, selection)
+    stored_selection = _snapshot_selection(
+        transaction,
+        principal_id,
+        source_event_id,
+        str(question_row["revision_event_id"]),
+        creator_agent,
+        selection,
+    )
+    _consume_selection_revision(transaction, principal_id, source_event_id, stored_selection)
     return selection
 
 
@@ -266,7 +387,12 @@ def claim_text(  # noqa: PLR0911 - each failed ownership predicate is terminal
         return None
     stored_selection = _stored_selection(transaction, principal_id, source_event_id)
     if stored_selection is not None:
-        return stored_selection if stored_selection.selection_key == selection_key else None
+        return (
+            stored_selection.selection
+            if stored_selection.selection.selection_key == selection_key
+            and stored_selection.creator_agent == creator_agent
+            else None
+        )
 
     candidate_question = transaction.fetchone(
         """
@@ -293,7 +419,15 @@ def claim_text(  # noqa: PLR0911 - each failed ownership predicate is terminal
     selection = _selection_from_row(question_row, selection_key)
     if selection is None:
         return None
-    _store_selection(transaction, principal_id, source_event_id, selection)
+    stored_selection = _snapshot_selection(
+        transaction,
+        principal_id,
+        source_event_id,
+        str(question_row["revision_event_id"]),
+        creator_agent,
+        selection,
+    )
+    _consume_selection_revision(transaction, principal_id, source_event_id, stored_selection)
     return selection
 
 
@@ -312,18 +446,29 @@ def register_if_current(
         expected_membership_epoch=expected_membership_epoch,
     ):
         return False
+    return _register(transaction, principal_id, expected_membership_epoch, question)
+
+
+def _register(
+    transaction: Transaction,
+    principal_id: str,
+    expected_membership_epoch: int,
+    question: InteractiveQuestion,
+) -> bool:
+    """Store one question after its membership row has been claimed."""
     question_json = _question_json(question)
     transaction.execute(
         """
         INSERT INTO interactive_questions (
-            principal_id, question_event_id, room_id, thread_id, creator_agent,
+            principal_id, question_event_id, revision_event_id, room_id, thread_id, creator_agent,
             question_json, membership_epoch, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, question_event_id) DO NOTHING
         """,
         (
             principal_id,
             question.question_event_id,
+            question.revision_event_id,
             question.room_id,
             encode_thread_id(question.thread_id),
             question.creator_agent,
@@ -334,7 +479,8 @@ def register_if_current(
     )
     stored = transaction.fetchone(
         """
-        SELECT question_event_id, room_id, thread_id, creator_agent, question_json, membership_epoch
+        SELECT question_event_id, revision_event_id, room_id, thread_id,
+               creator_agent, question_json, membership_epoch
         FROM interactive_questions
         WHERE principal_id = ? AND question_event_id = ?
         """,
@@ -344,7 +490,8 @@ def register_if_current(
         msg = f"Interactive question {question.question_event_id!r} disappeared during registration"
         raise RuntimeError(msg)
     if (
-        stored["room_id"] != question.room_id
+        stored["revision_event_id"] != question.revision_event_id
+        or stored["room_id"] != question.room_id
         or decode_thread_id(str(stored["thread_id"])) != question.thread_id
         or stored["creator_agent"] != question.creator_agent
         or stored["question_json"] != question_json
@@ -353,6 +500,25 @@ def register_if_current(
         msg = f"Interactive question {question.question_event_id!r} changed across registration replay"
         raise ValueError(msg)
     return True
+
+
+def replace_if_current(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    expected_membership_epoch: int,
+    question: InteractiveQuestion,
+) -> bool:
+    """Atomically replace one active Matrix target with its delivered revision."""
+    if not reads.claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=question.room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    ):
+        return False
+    forget(transaction, principal_id, question.question_event_id)
+    return _register(transaction, principal_id, expected_membership_epoch, question)
 
 
 def forget(transaction: Transaction, principal_id: str, question_event_id: str) -> None:

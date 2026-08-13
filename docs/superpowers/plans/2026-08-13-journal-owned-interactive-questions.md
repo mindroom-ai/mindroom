@@ -5,8 +5,8 @@
 
 **Goal:** Replace JSON and process-global interactive-question ownership with one event-journal transaction boundary for registration, selection, settlement, and membership invalidation.
 
-**Architecture:** A focused `event_journal.interactive_questions` module owns active-question rows and immutable source-selection rows.
-The event journal transfers a validated selection from the active question to its admitted source, consumes that selection during source settlement, and deletes membership-scoped interactive state during fencing, while runtime code only executes the durable selection.
+**Architecture:** A focused `event_journal.interactive_questions` module owns active-question revisions and source-bound selection snapshots.
+The event journal snapshots the prompt revision at reaction admission, assigns exclusive ownership at claim, consumes the selection during source settlement, and deletes membership-scoped interactive state during fencing, while runtime code executes the exact selecting source.
 
 **Tech Stack:** Python 3.13, asyncio, dataclasses, SQLite, PostgreSQL, pytest, Ruff, ty, Tach.
 
@@ -25,8 +25,8 @@ The event journal transfers a validated selection from the active question to it
 
 ## File Structure
 
-- `src/mindroom/event_journal/interactive_questions.py` owns question serialization and transactional registration and claim operations.
-- `src/mindroom/event_journal/schema.py` owns the `interactive_questions` and `interactive_selections` tables plus the active-question lookup index.
+- `src/mindroom/event_journal/interactive_questions.py` owns question and selection serialization plus transactional registration, admission snapshots, and claim operations.
+- `src/mindroom/event_journal/schema.py` owns the `interactive_questions` and `interactive_selections` tables plus their lookup indexes.
 - `src/mindroom/event_journal/store.py` exposes typed async `PrincipalStore` methods and composes turn membership proof with registration.
 - `src/mindroom/event_journal/views.py` exposes only the methods required by typed runtime collaborators.
 - `src/mindroom/event_journal/journal.py` composes selection consumption with source settlement and active-question deletion with membership invalidation.
@@ -56,10 +56,10 @@ The event journal transfers a validated selection from the active question to it
 
 **Interfaces:**
 
-- Produce: `InteractiveQuestion(question_event_id, room_id, thread_id, creator_agent, question_text, options, option_labels)`.
+- Produce: `InteractiveQuestion(question_event_id, revision_event_id, room_id, thread_id, creator_agent, question_text, options, option_labels)`.
 - Produce: `InteractiveSelection(question_event_id, question_text, selection_key, selected_label, selected_value, thread_id)`.
-- Produce: `PrincipalStore.register_interactive_question_for_turn(turn_id: str, question: InteractiveQuestion) -> bool`.
-- Produce: `PrincipalStore.register_interactive_question_for_epoch(expected_membership_epoch: int, question: InteractiveQuestion) -> bool`.
+- Produce: `PrincipalStore.register_interactive_question_for_turn(turn_id: str, question: InteractiveQuestion, *, replace_existing: bool = False) -> bool`.
+- Produce: `PrincipalStore.register_interactive_question_for_epoch(expected_membership_epoch: int, question: InteractiveQuestion, *, replace_existing: bool = False) -> bool`.
 - Produce: `PrincipalStore.forget_interactive_question(question_event_id: str) -> None`.
 
 - [ ] **Step 1: Write failing registration tests**
@@ -71,6 +71,7 @@ Add a test that `forget_interactive_question` removes only the addressed questio
 ```python
 question = InteractiveQuestion(
     question_event_id="$question",
+    revision_event_id="$question",
     room_id="!room:test",
     thread_id="$thread",
     creator_agent="agent",
@@ -121,9 +122,10 @@ Run: `git add src/mindroom/event_journal tests/test_event_journal_store.py && gi
 
 - [ ] **Step 1: Write failing atomic-claim tests**
 
-Add tests proving a pending reaction and active question become `INTERACTIVE_REACTION` plus one immutable source-owned selection in one call.
+Add tests proving reaction admission snapshots the visible prompt revision and claim assigns `INTERACTIVE_REACTION` plus one immutable source-owned selection.
 Assert replay by the same reaction returns the same literal selection.
 Assert a second reaction cannot steal the question and does not gain the interactive semantic consumer.
+Assert an edit between reaction admission and claim cannot reinterpret the already-selected option through the replacement prompt.
 Assert a reaction in another room, a terminal reaction, an old-membership reaction, an invalid option, and another agent all return `None` without mutation.
 Add text tests proving the oldest eligible question is selected deterministically and same-message replay returns it.
 
@@ -152,9 +154,11 @@ Expected: FAIL because claim methods do not exist.
 
 - [ ] **Step 3: Implement row-locked claim transitions**
 
-Lock the source and question rows with portable no-op `UPDATE ... RETURNING` statements before validating them.
+Snapshot a reaction's active prompt revision in the same transaction that admits its source.
+Lock the source, membership, and relevant question rows with portable no-op `UPDATE ... RETURNING` statements before validating a claim.
 Require a pending source, current unfenced membership, matching room and membership epoch, matching creator agent, and an available option.
-Set `semantic_consumer`, insert the immutable source-owned selection, and delete the active question only after all facts are locked and validated.
+Set `semantic_consumer`, retain the immutable source-owned selection, and delete only its matching active revision after all facts are locked and validated.
+Delete competing unclaimed snapshots for that prompt revision so only one source can answer it.
 For text selection, first return a selection already owned by the same source, otherwise claim the oldest matching active row by `created_at_ns` and byte-ordered event ID.
 
 - [ ] **Step 4: Run the claim tests and verify GREEN**
@@ -205,7 +209,7 @@ Expected: PASS on SQLite and PostgreSQL.
 
 - [ ] **Step 5: Commit the transactional boundary slice**
 
-Run: `git add src/mindroom/event_journal tests/test_event_journal_store.py tests/test_journal_membership_fence.py && git commit -m "Consume interactive questions with journal truth"`
+Run: `git add src/mindroom/event_journal tests/test_event_journal_store.py tests/test_journal_membership_fence.py && git commit -m "Consume interactive selections with journal truth"`
 
 ### Task 4: Route Registration and Selection Through the Journal
 
@@ -231,6 +235,7 @@ Run: `git add src/mindroom/event_journal tests/test_event_journal_store.py tests
 
 Add a real-store reaction test that registers a question, dispatches a reaction, and observes a deferred selection without touching interactive module globals.
 Add a replay test that recreates the bot-facing collaborators over the same database and receives the same stored selection.
+Add an edit test that preserves the pre-edit snapshot while atomically registering the delivered edit as a new revision at the same Matrix target.
 Add post-response and direct-tool tests that verify buttons are added only after the journal registration succeeds.
 Add a text-response test that claims through the admitted message source and returns the literal oldest selection.
 
@@ -278,7 +283,7 @@ Run: `git add src/mindroom tests/test_bot_reactions_approvals.py tests/test_matr
 
 Cause selection execution to fail before FINAL enqueue and assert the source remains pending and replay returns the same selection without any restore callback.
 Cancel before task start and after lifecycle acquisition and assert normal source retry preserves the durable claim.
-Reach FINAL handoff, then raise, and assert the source is terminal and the question is already absent without a terminal probe.
+Reach FINAL handoff, then raise, and assert the source is terminal and its stored selection is already absent without a terminal probe.
 
 - [ ] **Step 2: Run the lifecycle tests and verify RED**
 
@@ -362,7 +367,7 @@ Run: `git add src/mindroom tests && git commit -m "Remove split interactive pers
 
 - [ ] **Step 1: Update architecture documentation**
 
-Document that interactive questions and their selecting source share the journal transaction boundary.
+Document that reaction admission snapshots the active prompt revision, claim establishes exclusive source ownership, and source settlement consumes the selection inside journal transactions.
 Document that detached execution remains runtime-owned and that restart quiescence prevents overlapping execution.
 Remove descriptions of JSON question recovery or external departure cleanup.
 

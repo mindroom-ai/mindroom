@@ -38,7 +38,7 @@ The resulting implementation is heavily tested but has the wrong atomic boundary
 The event journal owns every durable fact about an interactive question.
 `interactive.py` owns only pure response parsing, prompt construction, sender validation helpers, and Matrix reaction-button I/O.
 `ReactionDispatcher` owns routing an admitted reaction to the appropriate semantic consumer.
-`TurnController` owns executing the selected turn, but not restoring or consuming the question.
+`TurnController` owns executing the selected source turn, but not restoring or consuming its durable selection.
 `ResponseRunner` owns the lifetime of the detached asyncio task, but not the durable selection.
 `MembershipFence` translates Matrix membership observations into journal transitions, but does not invoke external cleanup callbacks.
 
@@ -50,6 +50,7 @@ Add separate active-question and source-selection tables to the event-journal sc
 CREATE TABLE IF NOT EXISTS interactive_questions (
     principal_id TEXT NOT NULL,
     question_event_id TEXT NOT NULL,
+    revision_event_id TEXT NOT NULL,
     room_id TEXT NOT NULL,
     thread_id TEXT NOT NULL,
     creator_agent TEXT NOT NULL,
@@ -62,6 +63,9 @@ CREATE TABLE IF NOT EXISTS interactive_questions (
 CREATE TABLE IF NOT EXISTS interactive_selections (
     principal_id TEXT NOT NULL,
     source_event_id TEXT NOT NULL,
+    question_event_id TEXT NOT NULL,
+    revision_event_id TEXT NOT NULL,
+    creator_agent TEXT NOT NULL,
     selection_json TEXT NOT NULL,
     PRIMARY KEY (principal_id, source_event_id),
     FOREIGN KEY (principal_id, source_event_id)
@@ -69,11 +73,13 @@ CREATE TABLE IF NOT EXISTS interactive_selections (
 )
 ```
 
+`question_event_id` is the stable Matrix target, while `revision_event_id` identifies the exact send or edit whose prompt the user saw.
 `question_json` stores the question text, option values, and option labels as one immutable payload.
-Every `interactive_questions` row is active and available to a new selection.
-Claiming transfers an immutable selection snapshot into `interactive_selections` and deletes the active row in the same transaction.
-The source primary key makes one source unable to own multiple selections.
-An edited Matrix event may then register a replacement active question at the same event ID without overwriting the pending source's selection.
+Every `interactive_questions` row is the currently active revision of one Matrix target.
+Reaction admission snapshots that revision and selected option into `interactive_selections` before a later edit can replace the active row.
+Claiming assigns the source's semantic consumer, consumes only the matching active revision, and discards competing candidate snapshots for that revision in one transaction.
+The source primary key makes one source unable to select multiple prompt revisions.
+An edited Matrix target can therefore activate a replacement question without overwriting a pending source's earlier prompt snapshot.
 Numeric text selection orders eligible questions by `created_at_ns` and then `question_event_id` so selection remains deterministic across processes.
 
 ## Registration
@@ -81,16 +87,18 @@ Numeric text selection orders eligible questions by `created_at_ns` and then `qu
 `PrincipalStore` exposes explicit registration methods for the two real proof forms.
 A turn-backed registration verifies the membership epoch recorded on the admitted source turn.
 A direct Matrix operation registration verifies the membership epoch captured before network I/O.
-Both methods insert the question only when the room remains unfenced at the expected epoch.
-The epoch check and insert happen in one writer transaction.
+Both methods insert or atomically replace the active revision only when the room remains unfenced at the expected epoch.
+The epoch check and registration happen in one writer transaction.
 Callers add Matrix reaction buttons only after the insert succeeds.
 Production code no longer accepts a synchronous callback that writes a different persistence system while the membership row is locked.
 
 ## Selection Claim
 
-Reaction selection uses one store transaction that reads the pending reaction source, reads the target active question, validates the option, records `INTERACTIVE_REACTION`, stores the source-owned selection, and deletes the active question.
-If the reaction already owns a stored selection, the transaction returns the same selection for replay.
-If another source consumed the active question first, the transaction returns no selection.
+Admitting an actionable reaction and snapshotting the active prompt revision it references is one store transaction.
+The later claim validates that source-bound snapshot, records `INTERACTIVE_REACTION`, consumes only that active revision, and discards competing snapshots for the same revision.
+If admission happened before the outgoing question registration completed, claim falls back to the then-active revision to preserve the existing post-send behavior.
+If the reaction already owns a stored selection, replay returns the same selection.
+If another source consumed the prompt revision first, the transaction returns no selection.
 If the source is terminal, stale, from another room, or from an old membership, the transaction returns no selection.
 Authorization and managed-agent sender checks remain outside the store because they are runtime policy rather than durable state.
 
@@ -105,6 +113,7 @@ Before terminal truth, the immutable selection remains durably bound to a pendin
 When execution fails or is cancelled, normal journal retry releases the deferred source and replay retrieves the same selection.
 An enqueue or task-start failure therefore requires no question mutation.
 The process may die at any point without leaving a process-local claim that hides durable work.
+`TurnController` uses the exact selecting source as the execution, correlation, and terminal-dedup identity, while the reusable question event ID remains only the Matrix reply target and turn-discovery alias.
 
 ## Terminal Consumption
 
@@ -127,7 +136,7 @@ That record keeps room, observation identity, and same-response rejoin evidence 
 ## Runtime Shutdown
 
 The current restart-only wait for source-owned detached tasks remains initially.
-Durable question ownership prevents state loss, but it does not make concurrent model or tool execution safe.
+Durable source-selection ownership prevents state loss, but it does not make concurrent model or tool execution safe.
 The dispatcher must still quiesce before the restart barrier snapshots source-owned tasks.
 The `PendingEventWorker` stopped flag and stop generation remain because they prevent external recovery drains from creating new lanes after shutdown or across stop-start ABA.
 Durable runtime leases are rejected because they would require generation checks on every downstream side effect and would increase the scope of this PR.
@@ -144,7 +153,7 @@ After implementation, a merge-tree and focused combined test run against PR #180
 ## File Structure
 
 - Create `src/mindroom/interactive_models.py` for the leaf question and selection dataclasses.
-- Create `src/mindroom/event_journal/interactive_questions.py` for question SQL and transactional operations.
+- Create `src/mindroom/event_journal/interactive_questions.py` for question and selection serialization, SQL, and transactional operations.
 - Create `src/mindroom/membership_models.py` for the leaf reported-departure record shared by sync parsing and journal fencing.
 - Modify `src/mindroom/event_journal/schema.py` for the table and lookup indexes.
 - Modify `src/mindroom/event_journal/store.py` and `views.py` for typed async APIs.
@@ -158,7 +167,7 @@ After implementation, a merge-tree and focused combined test run against PR #180
 
 ## Testing Strategy
 
-Journal-store tests cover registration guards, exclusive claims, same-source replay, deterministic text selection, settlement consumption, and membership deletion on SQLite and PostgreSQL.
+Journal-store tests cover registration guards, admission-time revision snapshots, exclusive claims, same-source replay, deterministic text selection, settlement consumption, and membership deletion on SQLite and PostgreSQL.
 Reaction-dispatch tests use the real store boundary and prove that semantic-consumer claim and selection transfer cannot split.
 Turn-controller tests prove that failures leave the durable selection replayable without a restore callback.
 Restart tests prove that a replacement process can reload and replay a stored selection without process-global state.
@@ -173,11 +182,14 @@ Tests that exist only to exercise JSON corruption, advisory locks, dirty overlay
 - No production `commit_selection` or `restore_selection` function remains.
 - No membership transaction invokes an external question-cleanup callback.
 - No public membership boundary represents one reported departure with parallel tuples.
-- Claiming a reaction and its question is one transaction.
-- Claiming transfers the selected payload away from the active question row so a later edit can register a replacement independently.
+- Reaction admission snapshots the prompt revision and selected option in the same transaction as the source event.
+- Claiming assigns the semantic consumer and consumes the matching active revision in one transaction.
+- A later edit can atomically replace the active revision without rewriting any earlier source snapshot.
 - Settling a selected source and consuming its stored selection is one transaction.
 - Fencing a departure and removing its active questions and stale selections is one transaction.
 - Same-source replay returns the same selection before terminal settlement.
+- Two edited prompt revisions at one Matrix target use distinct selecting sources as their turn identities.
+- Backends reject the incompatible legacy `claimed_source_event_id` schema instead of silently interpreting it under the new model.
 - The focused SQLite and PostgreSQL suites pass.
 - The complete non-Matrix test suite, static checks, dependency checks, and formatting checks pass before push.
 - The final production diff is materially smaller and has fewer cross-module state transitions than the current PR head.

@@ -1368,13 +1368,10 @@ class TurnController:
         response_target: MessageTarget,
     ) -> None:
         """Execute one selection after its caller transfers claim ownership."""
-        if await self._interactive_selection_is_durably_terminal(
-            selection.question_event_id,
-            source_event_id,
-        ):
+        if await self._interactive_selection_is_durably_terminal(source_event_id):
             return
         reconcile_visible_response = self.deps.turn_store.has_pending_response_intent(
-            (selection.question_event_id,),
+            (source_event_id,),
         )
         thread_history = (
             await self.deps.resolver.fetch_thread_history(
@@ -1386,26 +1383,22 @@ class TurnController:
         )
         selection_handled_turn = self.deps.turn_store.attach_response_context(
             TurnRecord.create(
-                [selection.question_event_id],
-                discovery_event_ids=((source_event_id,) if source_event_id != selection.question_event_id else ()),
+                [source_event_id],
+                discovery_event_ids=(
+                    (selection.question_event_id,) if source_event_id != selection.question_event_id else ()
+                ),
                 requester_id=user_id,
-                correlation_id=selection.question_event_id,
+                correlation_id=source_event_id,
             ),
             history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
             conversation_target=response_target,
         )
         pending_turn = await self.deps.turn_store.record_pending_turn(selection_handled_turn)
         if pending_turn is None:
-            await self._require_durable_interactive_selection(
-                selection.question_event_id,
-                source_event_id,
-            )
+            await self._require_durable_interactive_selection(source_event_id)
             return
         if pending_turn.completed or pending_turn.redacted_source_event_ids:
-            await self._require_durable_interactive_selection(
-                selection.question_event_id,
-                source_event_id,
-            )
+            await self._require_durable_interactive_selection(source_event_id)
             return
         selection_handled_turn = pending_turn
         ack_event_id = (
@@ -1436,13 +1429,13 @@ class TurnController:
         if not ack_event_id:
             self.deps.logger.error(
                 "Failed to send acknowledgment for interactive selection",
-                source_event_id=selection.question_event_id,
+                source_event_id=source_event_id,
             )
             raise self._interactive_selection_retry_error(source_event_id)
         selection_handled_turn = canonicalize_turn_record(selection_handled_turn, response_event_id=ack_event_id)
-        # The selection is a synthetic turn with no Matrix message of its own, so
-        # the attachment context that ingress normally resolves per message must
-        # be rebuilt here from the conversation that asked the question.
+        # A reaction or numeric answer identifies the selection but does not
+        # carry the question's attachment context, so rebuild it from the
+        # conversation that asked the question.
         try:
             selection_payload = await self.deps.normalizer.build_dispatch_payload_with_attachments(
                 DispatchPayloadWithAttachmentsRequest(
@@ -1469,7 +1462,7 @@ class TurnController:
                 await self.deps.turn_store.record_responded_turn(
                     canonicalize_turn_record(selection_handled_turn, response_event_id=response_event_id),
                 )
-                await self._require_durable_interactive_selection(selection.question_event_id, source_event_id)
+                await self._require_durable_interactive_selection(source_event_id)
                 return
             raise self._interactive_selection_retry_error(source_event_id) from error
         selection_attachment_ids = tuple(selection_payload.attachment_ids or ())
@@ -1513,30 +1506,25 @@ class TurnController:
             await self.deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(selection_handled_turn, response_event_id=response_event_id),
             )
-            await self._require_durable_interactive_selection(selection.question_event_id, source_event_id)
+            await self._require_durable_interactive_selection(source_event_id)
             return
-        await self._require_durable_interactive_selection(
-            selection.question_event_id,
-            source_event_id,
-        )
+        await self._require_durable_interactive_selection(source_event_id)
 
     async def _interactive_selection_is_durably_terminal(
         self,
-        question_event_id: str,
         source_event_id: str,
     ) -> bool:
-        """Return whether the question or exact selection source is durably terminal."""
-        return any(
-            self.deps.turn_store.is_handled(event_id) for event_id in {question_event_id, source_event_id}
+        """Return whether the exact selection source is durably terminal."""
+        return self.deps.turn_store.is_handled(
+            source_event_id,
         ) or await self.deps.dispatch_source_is_terminal(source_event_id)
 
     async def _require_durable_interactive_selection(
         self,
-        question_event_id: str,
         source_event_id: str,
     ) -> None:
-        """Fail retryably until one selected question reaches durable terminal truth."""
-        if await self._interactive_selection_is_durably_terminal(question_event_id, source_event_id):
+        """Fail retryably until one selection source reaches durable terminal truth."""
+        if await self._interactive_selection_is_durably_terminal(source_event_id):
             return
         raise self._interactive_selection_retry_error(source_event_id)
 

@@ -676,6 +676,7 @@ async def test_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(
         1,
         InteractiveQuestion(
             question_event_id="$membership-probe",
+            revision_event_id="$membership-probe",
             room_id=room_id,
             thread_id=None,
             creator_agent=bot.agent_name,
