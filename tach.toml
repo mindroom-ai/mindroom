@@ -325,6 +325,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.ai",
+    "mindroom.approval_execution",
     "mindroom.response_runner",
     "mindroom.teams",
 ]
@@ -571,6 +572,7 @@ depends_on = [
     "sqlalchemy",
 ]
 visibility = [
+    "mindroom.approval_response",
     "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.response_runner",
@@ -589,6 +591,30 @@ depends_on = [
     "mindroom.tool_approval",
 ]
 visibility = ["mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.approval_execution"
+depends_on = [
+    "mindroom.agents",
+    "mindroom.history.runtime",
+    "mindroom.matrix.typing",
+    "mindroom.response_turn",
+    "mindroom.tool_system.events",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.response_runner"]
+
+[[modules]]
+path = "mindroom.approval_response"
+depends_on = [
+    "mindroom.approval_continuation",
+    "mindroom.constants",
+    "mindroom.delivery_gateway",
+    "mindroom.message_target",
+    "mindroom.tool_approval",
+]
+visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.approval_inbound"
@@ -616,11 +642,11 @@ depends_on = [
 visibility = [
     "mindroom.agents",
     "mindroom.approval_inbound",
+    "mindroom.approval_response",
     "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.orchestrator",
-    "mindroom.response_runner",
     "mindroom.tool_system.tool_hooks",
 ]
 
@@ -1546,10 +1572,13 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.approval_continuation",
+    "mindroom.approval_execution",
+    "mindroom.approval_response",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.entity_resolution",
     "mindroom.history.interrupted_replay",
+    "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.turn_recorder",
     "mindroom.history.types",
@@ -1571,8 +1600,6 @@ depends_on = [
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
-    "mindroom.tool_approval",
-    "mindroom.history.runtime",
     "mindroom.user_turn_time",
 ]
 

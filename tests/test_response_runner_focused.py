@@ -753,7 +753,7 @@ async def test_replayed_source_adopts_durable_approval_continuation(tmp_path: Pa
         },
         source_event_ids=(request.response_envelope.source_event_id,),
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
     locked_operation = AsyncMock(return_value="$duplicate")
 
     event_id = await runner._run_locked_response_lifecycle(
@@ -805,8 +805,8 @@ async def test_suspension_owns_source_before_waiting_response_delivery(tmp_path:
             new=AsyncMock(side_effect=deliver_waiting_response),
         ) as send_text,
         patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-cancel")),
-        patch("mindroom.response_runner.resolve_tool_approval_approver", return_value="@user:localhost"),
-        patch("mindroom.response_runner.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
         suspension = asyncio.create_task(
             runner._suspend_for_approval(
@@ -823,7 +823,7 @@ async def test_suspension_owns_source_before_waiting_response_delivery(tmp_path:
         with pytest.raises(asyncio.CancelledError):
             await suspension
 
-    owned = runner._approval_continuations.get("approval-cancel")
+    owned = runner._approval_responses._store.get("approval-cancel")
     assert owned is not None
     assert owned.state == "failed"
     assert owned.response_event_id == "$terminal"
@@ -859,8 +859,8 @@ async def test_approval_chain_keeps_second_pause_in_same_guarded_continuation(tm
         source_event_ids=("$source",),
         state="ready",
     )
-    runner._approval_continuations.create(continuation)
-    claimed = runner._approval_continuations.claim(continuation.approval_id, "worker")
+    runner._approval_responses._store.create(continuation)
+    claimed = runner._approval_responses._store.claim(continuation.approval_id, "worker")
     assert claimed is not None
     next_tool = ToolExecution(
         tool_call_id="call-2",
@@ -879,7 +879,7 @@ async def test_approval_chain_keeps_second_pause_in_same_guarded_continuation(tm
         tool_trace: list[object],
     ) -> tuple[ApprovalContinuation, str]:
         del target, tool_trace
-        advanced = runner._approval_continuations.advance_pause(
+        advanced = runner._approval_responses._store.advance_pause(
             current.approval_id,
             claimant_id,
             run_id=next_pause.run_id,
@@ -900,8 +900,8 @@ async def test_approval_chain_keeps_second_pause_in_same_guarded_continuation(tm
 
     with (
         patch.object(runner, "_continue_entity_call", new=AsyncMock(side_effect=[paused, "done"])),
-        patch.object(runner, "_advance_approval_pause", new=AsyncMock(side_effect=advance)),
-        patch.object(runner, "_edit_continuation_response", new=AsyncMock(return_value=True)),
+        patch.object(runner._approval_responses, "advance_pause", new=AsyncMock(side_effect=advance)),
+        patch.object(runner._approval_responses, "_edit_response", new=AsyncMock(return_value=True)),
     ):
         text, terminal, tool_trace = await runner._run_approval_chain(
             claimed,
@@ -909,7 +909,7 @@ async def test_approval_chain_keeps_second_pause_in_same_guarded_continuation(tm
             claimant_id="worker",
         )
 
-    settled = runner._approval_continuations.get(continuation.approval_id)
+    settled = runner._approval_responses._store.get(continuation.approval_id)
     assert text == "done"
     assert terminal is True
     assert tool_trace == []
@@ -946,13 +946,13 @@ async def test_approval_chain_does_not_complete_before_normal_final_delivery(tmp
         source_event_ids=("$source",),
         state="ready",
     )
-    runner._approval_continuations.create(continuation)
-    claimed = runner._approval_continuations.claim(continuation.approval_id, "worker")
+    runner._approval_responses._store.create(continuation)
+    claimed = runner._approval_responses._store.claim(continuation.approval_id, "worker")
     assert claimed is not None
 
     with (
         patch.object(runner, "_continue_entity_call", new=AsyncMock(return_value="done")),
-        patch.object(runner, "_edit_continuation_response", new=AsyncMock()) as edit,
+        patch.object(runner._approval_responses, "_edit_response", new=AsyncMock()) as edit,
     ):
         text, terminal, _tool_trace = await runner._run_approval_chain(
             claimed,
@@ -960,7 +960,7 @@ async def test_approval_chain_does_not_complete_before_normal_final_delivery(tmp
             claimant_id="worker",
         )
 
-    unsettled = runner._approval_continuations.get(continuation.approval_id)
+    unsettled = runner._approval_responses._store.get(continuation.approval_id)
     assert text == "done"
     assert terminal is True
     assert unsettled is not None
@@ -996,8 +996,8 @@ async def test_approval_chain_requires_durable_completion_transition(tmp_path: P
         source_event_ids=("$source",),
         state="ready",
     )
-    runner._approval_continuations.create(continuation)
-    claimed = runner._approval_continuations.claim(continuation.approval_id, "worker")
+    runner._approval_responses._store.create(continuation)
+    claimed = runner._approval_responses._store.claim(continuation.approval_id, "worker")
     assert claimed is not None
 
     with (
@@ -1014,7 +1014,7 @@ async def test_approval_chain_requires_durable_completion_transition(tmp_path: P
                 ),
             ),
         ),
-        patch.object(runner._approval_continuations, "complete", return_value=None),
+        patch.object(runner._approval_responses._store, "complete", return_value=None),
         pytest.raises(RuntimeError, match="completion claim"),
     ):
         await runner._deliver_completed_approval_chain(
@@ -1055,10 +1055,10 @@ async def test_resume_failure_remains_recoverable_until_visible_failure_edit(tmp
         source_event_ids=("$source",),
         state="ready",
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
 
     async def assert_claimed_before_edit(*_args: object, **_kwargs: object) -> bool:
-        persisted = runner._approval_continuations.get(continuation.approval_id)
+        persisted = runner._approval_responses._store.get(continuation.approval_id)
         assert persisted is not None
         assert persisted.state == "claimed"
         msg = "edit failed"
@@ -1066,12 +1066,12 @@ async def test_resume_failure_remains_recoverable_until_visible_failure_edit(tmp
 
     with (
         patch.object(runner, "_continue_entity_call", new=AsyncMock(side_effect=RuntimeError("resume failed"))),
-        patch.object(runner, "_edit_continuation_response", side_effect=assert_claimed_before_edit),
+        patch.object(runner._approval_responses, "_edit_response", side_effect=assert_claimed_before_edit),
         pytest.raises(RuntimeError, match="edit failed"),
     ):
         await runner.resume_approval_continuation(continuation)
 
-    persisted = runner._approval_continuations.get(continuation.approval_id)
+    persisted = runner._approval_responses._store.get(continuation.approval_id)
     assert persisted is not None
     assert persisted.state == "claimed"
 
@@ -1104,7 +1104,7 @@ async def test_shutdown_drain_owns_transport_started_approval_resume(tmp_path: P
         source_event_ids=("$source",),
         state="ready",
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
     started = asyncio.Event()
 
     async def wait_for_shutdown(_self: object, **_kwargs: object) -> None:
@@ -1155,11 +1155,11 @@ async def test_resume_failure_logs_when_visible_terminal_edit_is_not_delivered(t
         source_event_ids=("$source",),
         state="ready",
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
 
     with (
         patch.object(runner, "_continue_entity_call", new=AsyncMock(side_effect=RuntimeError("resume failed"))),
-        patch.object(runner, "_edit_continuation_response", new=AsyncMock(return_value=False)),
+        patch.object(runner._approval_responses, "_edit_response", new=AsyncMock(return_value=False)),
     ):
         await runner.resume_approval_continuation(continuation)
 
@@ -1168,7 +1168,7 @@ async def test_resume_failure_logs_when_visible_terminal_edit_is_not_delivered(t
         approval_id=continuation.approval_id,
         response_event_id=continuation.response_event_id,
     )
-    persisted = runner._approval_continuations.get(continuation.approval_id)
+    persisted = runner._approval_responses._store.get(continuation.approval_id)
     assert persisted is not None
     assert persisted.state == "claimed"
 
@@ -1209,7 +1209,7 @@ async def test_resume_uses_stop_aware_attempt_and_normal_final_effects(tmp_path:
         source_event_ids=("$source",),
         state="ready",
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
     attempt_seen = False
 
     async def run_attempt(**kwargs: object) -> None:
@@ -1239,7 +1239,7 @@ async def test_resume_uses_stop_aware_attempt_and_normal_final_effects(tmp_path:
         await runner.resume_approval_continuation(continuation)
 
     assert attempt_seen is True
-    settled = runner._approval_continuations.get(continuation.approval_id)
+    settled = runner._approval_responses._store.get(continuation.approval_id)
     assert settled is not None
     assert settled.state == "completed"
     after_response.assert_awaited_once()
@@ -1312,12 +1312,12 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     continue_run = MagicMock(wraps=agent.acontinue_run)
 
     with (
-        patch("mindroom.response_runner.create_agent", return_value=agent),
+        patch("mindroom.approval_execution.create_agent", return_value=agent),
         patch.object(agent, "acontinue_run", new=continue_run),
-        patch("mindroom.response_runner.typing_indicator", _noop_typing),
-        patch("mindroom.response_runner.close_agent_runtime_state_dbs"),
+        patch("mindroom.approval_execution.typing_indicator", _noop_typing),
+        patch("mindroom.approval_execution.close_agent_runtime_state_dbs"),
     ):
-        result = await runner._continue_paused_agent_run(
+        result = await runner._approval_execution.continue_run(
             continuation,
             execution_identity=identity,
             tool_dispatch=ToolDispatchContext(execution_identity=identity),
@@ -1361,7 +1361,7 @@ async def test_user_stop_terminalizes_claimed_approval_continuation(tmp_path: Pa
         source_event_ids=("$source",),
         state="ready",
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
 
     async def stopped_lifecycle(*_args: object, **kwargs: object) -> None:
         progress = cast("response_runner._DeliveryProgress", kwargs["progress"])
@@ -1377,7 +1377,7 @@ async def test_user_stop_terminalizes_claimed_approval_continuation(tmp_path: Pa
     with patch.object(runner, "_run_and_settle_locked_response", new=stopped_lifecycle):
         await runner.resume_approval_continuation(continuation)
 
-    settled = runner._approval_continuations.get(continuation.approval_id)
+    settled = runner._approval_responses._store.get(continuation.approval_id)
     assert settled is not None
     assert settled.state == "failed"
     assert settled.failure_reason == "cancelled_by_user"
@@ -1411,8 +1411,8 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
         source_event_ids=("$source",),
         state="ready",
     )
-    runner._approval_continuations.create(continuation)
-    claimed = runner._approval_continuations.claim(continuation.approval_id, "worker")
+    runner._approval_responses._store.create(continuation)
+    claimed = runner._approval_responses._store.claim(continuation.approval_id, "worker")
     assert claimed is not None
     outbox = runner.deps.delivery_gateway.deps.outbox
 
@@ -1422,11 +1422,11 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
             "load_delivery",
             new=AsyncMock(return_value=MagicMock(acknowledged_event_id="$final")),
         ),
-        patch.object(runner, "_edit_continuation_response", new=AsyncMock()) as edit,
+        patch.object(runner._approval_responses, "_edit_response", new=AsyncMock()) as edit,
     ):
         await runner.fail_approval_continuation(claimed, "recovered claim failed")
 
-    settled = runner._approval_continuations.get(continuation.approval_id)
+    settled = runner._approval_responses._store.get(continuation.approval_id)
     assert settled is not None
     assert settled.state == "completed"
     edit.assert_not_awaited()
@@ -1458,7 +1458,7 @@ async def test_recovered_publication_adopts_acknowledged_waiting_event_before_fa
         source_event_ids=("$source",),
         state="publishing",
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
     outbox = runner.deps.delivery_gateway.deps.outbox
 
     async def assert_bound(current: ApprovalContinuation, **_kwargs: object) -> bool:
@@ -1471,11 +1471,11 @@ async def test_recovered_publication_adopts_acknowledged_waiting_event_before_fa
             "load_delivery",
             new=AsyncMock(return_value=MagicMock(acknowledged_event_id="$waiting")),
         ),
-        patch.object(runner, "_edit_continuation_response", side_effect=assert_bound) as edit,
+        patch.object(runner._approval_responses, "_edit_response", side_effect=assert_bound) as edit,
     ):
         await runner.fail_approval_continuation(continuation, "publication interrupted")
 
-    settled = runner._approval_continuations.get(continuation.approval_id)
+    settled = runner._approval_responses._store.get(continuation.approval_id)
     assert settled is not None
     assert settled.state == "failed"
     edit.assert_awaited_once()
@@ -1544,7 +1544,7 @@ async def test_response_runner_closes_approval_store_handle(tmp_path: Path) -> N
     """Config replacement must release every runner-owned SQLite handle."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     close = MagicMock()
-    runner._approval_continuations.close = close
+    runner._approval_responses._store.close = close
 
     await runner.close()
 
@@ -1577,25 +1577,25 @@ async def test_terminal_failure_expires_outstanding_cards_before_retiring_contin
         execution_identity={},
         source_event_ids=("$source",),
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
 
     async def expire_while_recoverable(_room_id: str, _card_event_id: str) -> bool:
-        persisted = runner._approval_continuations.get(continuation.approval_id)
+        persisted = runner._approval_responses._store.get(continuation.approval_id)
         assert persisted is not None
         assert persisted.state == "pending"
         return True
 
     with (
         patch(
-            "mindroom.response_runner.expire_suspended_tool_approval",
+            "mindroom.approval_response.expire_suspended_tool_approval",
             new=AsyncMock(side_effect=expire_while_recoverable),
         ) as expire,
-        patch.object(runner, "_edit_continuation_response", new=AsyncMock(return_value=True)),
+        patch.object(runner._approval_responses, "_edit_response", new=AsyncMock(return_value=True)),
     ):
         await runner.fail_approval_continuation(continuation, "Continuation failed")
 
     expire.assert_awaited_once_with(continuation.room_id, "$card-1")
-    failed = runner._approval_continuations.get(continuation.approval_id)
+    failed = runner._approval_responses._store.get(continuation.approval_id)
     assert failed is not None
     assert failed.state == "failed"
 
@@ -1632,19 +1632,18 @@ async def test_partial_approval_card_failure_terminalizes_delivered_cards(tmp_pa
         execution_identity={},
         source_event_ids=("$source",),
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
 
     with (
-        patch("mindroom.response_runner.expire_suspended_tool_approval", new=AsyncMock(return_value=True)) as expire,
-        patch.object(runner, "_edit_continuation_response", new=AsyncMock(return_value=True)),
+        patch("mindroom.approval_response.expire_suspended_tool_approval", new=AsyncMock(return_value=True)) as expire,
+        patch.object(runner._approval_responses, "_edit_response", new=AsyncMock(return_value=True)),
     ):
-        await runner._fail_approval_card_creation(
+        await runner._approval_responses.fail_publication(
             continuation.approval_id,
-            room_id=continuation.room_id,
             reason="second card failed",
         )
 
-    failed = runner._approval_continuations.get(continuation.approval_id)
+    failed = runner._approval_responses._store.get(continuation.approval_id)
     assert failed is not None
     assert failed.state == "failed"
     expire.assert_awaited_once_with(continuation.room_id, "$card-1")
@@ -1678,7 +1677,7 @@ async def test_card_publication_exception_terminalizes_partial_set(tmp_path: Pat
         nonlocal send_attempt
         send_attempt += 1
         if send_attempt == 1:
-            attached = runner._approval_continuations.attach_card(
+            attached = runner._approval_responses._store.attach_card(
                 "approval-publication-error",
                 "call-1",
                 "$card-1",
@@ -1691,11 +1690,11 @@ async def test_card_publication_exception_terminalizes_partial_set(tmp_path: Pat
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$waiting")),
         patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-publication-error")),
-        patch("mindroom.response_runner.resolve_tool_approval_approver", return_value="@user:localhost"),
-        patch("mindroom.response_runner.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
-        patch("mindroom.response_runner.send_suspended_tool_approval", new=AsyncMock(side_effect=publish_card)),
-        patch("mindroom.response_runner.expire_suspended_tool_approval", new=AsyncMock(return_value=True)) as expire,
-        patch.object(runner, "_edit_continuation_response", new=AsyncMock(return_value=True)),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch("mindroom.approval_response.send_suspended_tool_approval", new=AsyncMock(side_effect=publish_card)),
+        patch("mindroom.approval_response.expire_suspended_tool_approval", new=AsyncMock(return_value=True)) as expire,
+        patch.object(runner._approval_responses, "_edit_response", new=AsyncMock(return_value=True)),
         pytest.raises(RuntimeError, match="card journal unavailable"),
     ):
         await runner._suspend_for_approval(
@@ -1707,7 +1706,7 @@ async def test_card_publication_exception_terminalizes_partial_set(tmp_path: Pat
             entity_kind="agent",
         )
 
-    failed = runner._approval_continuations.get("approval-publication-error")
+    failed = runner._approval_responses._store.get("approval-publication-error")
     assert failed is not None
     assert failed.state == "failed"
     expire.assert_awaited_once_with(request.room_id, "$card-1")
@@ -1745,23 +1744,22 @@ async def test_partial_approval_card_failure_remains_recoverable_until_card_clea
         execution_identity={},
         source_event_ids=("$source",),
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
 
     async def failed_expiry(_room_id: str, _card_event_id: str) -> bool:
-        persisted = runner._approval_continuations.get(continuation.approval_id)
+        persisted = runner._approval_responses._store.get(continuation.approval_id)
         assert persisted is not None
         assert persisted.state == "pending"
         msg = "crash before terminal edit"
         raise RuntimeError(msg)
 
-    with patch("mindroom.response_runner.expire_suspended_tool_approval", new=AsyncMock(side_effect=failed_expiry)):
-        await runner._fail_approval_card_creation(
+    with patch("mindroom.approval_response.expire_suspended_tool_approval", new=AsyncMock(side_effect=failed_expiry)):
+        await runner._approval_responses.fail_publication(
             continuation.approval_id,
-            room_id=continuation.room_id,
             reason="second card failed",
         )
 
-    recoverable = runner._approval_continuations.get(continuation.approval_id)
+    recoverable = runner._approval_responses._store.get(continuation.approval_id)
     assert recoverable is not None
     assert recoverable.state == "pending"
 
@@ -1793,18 +1791,17 @@ async def test_partial_card_failure_still_terminalizes_later_delivered_cards(tmp
         execution_identity={},
         source_event_ids=("$source",),
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
     expire = AsyncMock(side_effect=[False, True])
 
-    with patch("mindroom.response_runner.expire_suspended_tool_approval", new=expire):
-        await runner._fail_approval_card_creation(
+    with patch("mindroom.approval_response.expire_suspended_tool_approval", new=expire):
+        await runner._approval_responses.fail_publication(
             continuation.approval_id,
-            room_id=continuation.room_id,
             reason="send failed",
         )
 
     assert expire.await_count == 2
-    persisted = runner._approval_continuations.get(continuation.approval_id)
+    persisted = runner._approval_responses._store.get(continuation.approval_id)
     assert persisted is not None
     assert persisted.state == "pending"
 
@@ -1834,11 +1831,11 @@ async def test_router_failure_uses_terminal_notice_instead_of_cross_sender_edit(
         execution_identity={},
         source_event_ids=("$source",),
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
 
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$terminal")) as send,
-        patch.object(runner, "_edit_continuation_response", new=AsyncMock()) as edit,
+        patch.object(runner._approval_responses, "_edit_response", new=AsyncMock()) as edit,
     ):
         await runner.fail_approval_continuation(continuation, "Agent removed")
 
@@ -1847,7 +1844,7 @@ async def test_router_failure_uses_terminal_notice_instead_of_cross_sender_edit(
     assert request.response_text == "Agent removed"
     assert request.delivery_turn_id == "$source"
     assert request.delivery_stage is response_runner.DeliveryStage.FINAL
-    failed = runner._approval_continuations.get(continuation.approval_id)
+    failed = runner._approval_responses._store.get(continuation.approval_id)
     assert failed is not None
     assert failed.state == "failed"
 
@@ -1878,12 +1875,12 @@ async def test_interrupted_publication_stays_owned_until_terminal_notice_is_sent
         source_event_ids=("$source",),
         state="publishing",
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
 
     with patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$terminal")):
         await runner.fail_approval_continuation(continuation, "Publication interrupted")
 
-    failed = runner._approval_continuations.get(continuation.approval_id)
+    failed = runner._approval_responses._store.get(continuation.approval_id)
     assert failed is not None
     assert failed.state == "failed"
     assert failed.response_event_id == "$terminal"
@@ -1915,12 +1912,12 @@ async def test_interrupted_publication_keeps_source_when_terminal_notice_fails(t
         source_event_ids=("$source",),
         state="publishing",
     )
-    runner._approval_continuations.create(continuation)
+    runner._approval_responses._store.create(continuation)
 
     with patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value=None)):
         await runner.fail_approval_continuation(continuation, "Publication interrupted")
 
-    owned = runner._approval_continuations.for_source_event("$source")
+    owned = runner._approval_responses._store.for_source_event("$source")
     assert owned is not None
     assert owned.state == "publishing"
     assert owned.response_event_id is None
