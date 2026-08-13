@@ -335,7 +335,8 @@ git commit -m "refactor: simplify durable approval suspension handoff"
 - Modify: `src/mindroom/response_runner.py`
 - Modify: `src/mindroom/approval_transport.py`
 - Modify: `src/mindroom/orchestrator.py`
-- Modify: `tests/test_response_delivery.py`
+- Modify: `tests/test_turn_delivery_handoff.py`
+- Modify: `tests/test_response_delivery_gateway.py`
 - Modify: `tests/test_response_runner_focused.py`
 - Modify: `tests/test_approval_continuation_store.py`
 - Modify: `tests/test_orchestrator_runtime.py`
@@ -351,7 +352,7 @@ Cover FINAL enqueue followed by send failure, restart recovery sending the froze
 
 - [ ] **Step 2: Run the tests and witness current reconciliation requirements**
 
-Run: `uv run pytest tests/test_response_delivery.py tests/test_response_runner_focused.py tests/test_approval_continuation_store.py tests/test_orchestrator_runtime.py -q -n auto --no-cov -k 'approval and (final or unavailable or removed or frozen)'`
+Run: `uv run pytest tests/test_turn_delivery_handoff.py tests/test_response_delivery_gateway.py tests/test_response_runner_focused.py tests/test_approval_continuation_store.py tests/test_orchestrator_runtime.py -q -n auto --no-cov -k 'approval and (final or unavailable or removed or frozen)'`
 
 Expected: FAIL until source handoff is deferred and journal-owned recovery is wired.
 
@@ -375,7 +376,7 @@ Do not keep per-approval execution dispatcher tasks, claim retry loops, generati
 
 - [ ] **Step 5: Run lifecycle, outbox, reload, and real Agno tests**
 
-Run: `uv run pytest tests/test_response_delivery.py tests/test_response_runner_focused.py tests/test_approval_continuation_store.py tests/test_orchestrator_runtime.py tests/test_dynamic_tool_continuation_delivery.py -q -n auto --no-cov`
+Run: `uv run pytest tests/test_turn_delivery_handoff.py tests/test_response_delivery_gateway.py tests/test_response_runner_focused.py tests/test_approval_continuation_store.py tests/test_orchestrator_runtime.py tests/test_dynamic_tool_continuation_delivery.py -q -n auto --no-cov`
 
 Expected: PASS.
 
