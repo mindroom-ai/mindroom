@@ -2221,6 +2221,7 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         ingress=rebuilt.deps.ingress,
         stop_manager=bot.stop_manager,
         reserve_prompt_ingress_order=rebuilt.reserve_prompt_ingress_order,
+        build_message_target=rebuilt.deps.resolver.build_message_target,
         handle_interactive_selection=rebuilt.handle_interactive_selection,
         config_confirmation=replace(
             reaction_dispatcher.deps.config_confirmation,

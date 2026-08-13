@@ -87,7 +87,6 @@ from mindroom.matrix.media import (
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
-from mindroom.message_target import MessageTarget
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
 from mindroom.response_lifecycle import response_lifecycle_reservation_context
 from mindroom.response_payload_preparation import (
@@ -136,7 +135,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.relation_lookup import RelationLookup
-    from mindroom.message_target import ResponseLifecycleKey
+    from mindroom.message_target import MessageTarget, ResponseLifecycleKey
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.sync_restart_retry import InterruptedTurnRooms
@@ -1166,19 +1165,12 @@ class TurnController:
         self,
         response: Coroutine[Any, Any, None],
         *,
-        room_id: str,
-        question_event_id: str,
+        response_target: MessageTarget,
         source_event_id: str,
-        thread_id: str | None,
         user_id: str,
         selected_value: str,
     ) -> None:
         """Transfer one selection response from journal dispatch to runner ownership."""
-        response_target = MessageTarget.resolve(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=question_event_id,
-        )
         response_envelope = self._interactive_selection_response_envelope(
             target=response_target,
             user_id=user_id,
@@ -1209,7 +1201,8 @@ class TurnController:
                 owned_response,
                 name=f"interactive_selection_response:{source_event_id}",
                 recovery_proof_ready=lambda: (
-                    thread_id is not None and self.deps.interrupted_turn_rooms.contains(source_event_id)
+                    response_target.source_thread_id is not None
+                    and self.deps.interrupted_turn_rooms.contains(source_event_id)
                 ),
                 on_failure=lambda: self.deps.retry_dispatch_sources((source_event_id,)),
                 source_event_ids=(source_event_id,),
@@ -1229,14 +1222,21 @@ class TurnController:
         selection: interactive.InteractiveSelection,
         user_id: str,
         source_event_id: str,
+        response_target: MessageTarget | None = None,
     ) -> None:
         """Own claim settlement around one validated interactive selection."""
+        target = response_target or self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=selection.thread_id,
+            reply_to_event_id=selection.question_event_id,
+        )
         try:
             await self._execute_interactive_selection(
                 room,
                 selection=selection,
                 user_id=user_id,
                 source_event_id=source_event_id,
+                response_target=target,
             )
             interactive.commit_selection(selection)
         except BaseException:
@@ -1250,6 +1250,7 @@ class TurnController:
         selection: interactive.InteractiveSelection,
         user_id: str,
         source_event_id: str,
+        response_target: MessageTarget,
     ) -> None:
         """Execute one selection after its caller transfers claim ownership."""
         if await self._interactive_selection_is_durably_terminal(
@@ -1267,11 +1268,6 @@ class TurnController:
             )
             if selection.thread_id
             else []
-        )
-        response_target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=selection.thread_id,
-            reply_to_event_id=selection.question_event_id,
         )
         selection_handled_turn = self.deps.turn_store.attach_response_context(
             TurnRecord.create(

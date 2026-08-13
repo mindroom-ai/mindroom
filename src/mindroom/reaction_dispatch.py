@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.ingress_validation import IngressValidator
     from mindroom.journal_dispatch import JournalDispatcher
+    from mindroom.message_target import MessageTarget
     from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
     from mindroom.stop import StopManager
@@ -48,6 +49,7 @@ class ReactionDispatcherDeps:
     user_stop_reconciler: UserStopReconciler
     ingress: IngressValidator
     reserve_prompt_ingress_order: Callable[..., PromptIngressReservationOwner]
+    build_message_target: Callable[..., MessageTarget]
     handle_interactive_selection: Callable[..., Awaitable[None]]
     start_interactive_selection: Callable[..., Awaitable[None]]
     emit_reaction_received_hooks: Callable[..., Awaitable[None]]
@@ -172,17 +174,21 @@ class ReactionDispatcher:
                 raise
 
         try:
+            response_target = self.deps.build_message_target(
+                room_id=room.room_id,
+                thread_id=selection.thread_id,
+                reply_to_event_id=selection.question_event_id,
+            )
             await self.deps.start_interactive_selection(
                 self.deps.handle_interactive_selection(
                     room,
                     selection=selection,
                     user_id=event.sender,
                     source_event_id=event.event_id,
+                    response_target=response_target,
                 ),
-                room_id=room.room_id,
-                question_event_id=selection.question_event_id,
+                response_target=response_target,
                 source_event_id=event.event_id,
-                thread_id=selection.thread_id,
                 user_id=event.sender,
                 selected_value=selection.selected_value,
             )

@@ -31,8 +31,10 @@ from mindroom.hooks import (
     ReactionReceivedContext,
     hook,
 )
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, _shutdown_approval_store
 from tests.approval_test_support import FakeApprovalCards
 from tests.bot_helpers import (
@@ -720,17 +722,19 @@ class TestAgentBot(AgentBotTestBase):
             preparation_started.set()
             await asyncio.Event().wait()
 
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!test:localhost",
+            thread_id="$thread-a",
+            reply_to_event_id="$question",
+        )
         await bot._turn_controller.start_interactive_selection(
             prepare_forever(),
-            room_id="!test:localhost",
-            question_event_id="$question",
+            response_target=target,
             source_event_id="$reaction",
-            thread_id="$thread-a",
             user_id="@user:localhost",
             selected_value="Selected",
         )
         await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
-        target = MessageTarget.resolve("!test:localhost", "$thread-a", "$question")
         assert bot._response_runner.has_active_response_for_target(target)
 
         assert await bot._response_runner.drain_inbox_responses(cancel_after_seconds=0.01) is False
@@ -833,6 +837,64 @@ class TestAgentBot(AgentBotTestBase):
             release_interactive.set()
             if newer_task is not None:
                 await asyncio.gather(newer_task, return_exceptions=True)
+            await bot._response_runner.drain_inbox_responses()
+
+    @pytest.mark.asyncio
+    async def test_interactive_reaction_keeps_room_mode_target_across_handoff(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Reaction reservation and execution must share one configured target."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        room = nio.MatrixRoom("!test:localhost", mock_agent_user.user_id)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        reaction = _reaction_event("👍", "$interactive-reaction")
+        selection = interactive.InteractiveSelection(
+            question_event_id="$question",
+            question_text="Choose one",
+            selection_key="👍",
+            selected_label="Selected",
+            selected_value="Selected",
+            thread_id="$original-thread",
+        )
+        set_room_thread_mode_override(
+            runtime_paths,
+            room_id=room.room_id,
+            mode="room",
+            set_by="@admin:localhost",
+        )
+        resolved_targets: list[MessageTarget] = []
+
+        async def generate_locked(
+            _self: ResponseRunner,
+            _request: ResponseRequest,
+            *,
+            resolved_target: MessageTarget,
+            early_placeholder_state: object,
+        ) -> str:
+            del early_placeholder_state
+            resolved_targets.append(resolved_target)
+            return "$response"
+
+        bot._conversation_resolver.fetch_thread_history = AsyncMock(
+            return_value=thread_history_result([], is_full_history=True),
+        )
+        bot._visible_responses.recovered_response_event_id = AsyncMock(return_value=None)
+        bot._visible_responses.deliver_recoverable_text = AsyncMock(return_value="$ack")
+        try:
+            with (
+                patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
+                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+            ):
+                await _dispatch_reaction(bot, room, reaction)
+                await bot._response_runner.drain_inbox_responses()
+
+            assert [target.resolved_thread_id for target in resolved_targets] == [None]
+            assert reaction.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
+        finally:
             await bot._response_runner.drain_inbox_responses()
 
     @pytest.mark.asyncio

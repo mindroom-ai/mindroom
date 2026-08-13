@@ -266,6 +266,7 @@ depends_on = [
     "mindroom.dispatch_callback_outcome",
     "mindroom.entity_resolution",
     "mindroom.event_journal",
+    "mindroom.message_target",
     "mindroom.user_stop_reconciliation",
 ]
 visibility = ["mindroom.bot"]

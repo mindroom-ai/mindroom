@@ -832,6 +832,7 @@ class AgentBot:
                 user_stop_reconciler=self._user_stop_reconciler,
                 ingress=self._ingress_validator,
                 reserve_prompt_ingress_order=self._turn_controller.reserve_prompt_ingress_order,
+                build_message_target=self._conversation_resolver.build_message_target,
                 handle_interactive_selection=self._turn_controller.handle_interactive_selection,
                 start_interactive_selection=self._turn_controller.start_interactive_selection,
                 emit_reaction_received_hooks=self._emit_reaction_received_hooks,

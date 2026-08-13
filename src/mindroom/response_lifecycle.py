@@ -302,7 +302,6 @@ class ResponseLifecycleCoordinator:
                 queued_signal=queued_signal,
                 response_envelope=response_envelope,
                 signal_queued_message=True,
-                lifecycle_lock_owned_by_response=False,
             ),
         )
         try:
@@ -360,12 +359,11 @@ class ResponseLifecycleCoordinator:
         queued_signal: _QueuedMessageState,
         response_envelope: MessageEnvelope,
         signal_queued_message: bool,
-        lifecycle_lock_owned_by_response: bool,
     ) -> str | None:
         existing_turn = queued_signal.begin_response_turn()
         if not signal_queued_message:
             return None
-        if not (existing_turn or (lifecycle_lock.locked() and not lifecycle_lock_owned_by_response)):
+        if not (existing_turn or lifecycle_lock.locked()):
             return None
         if not self._should_signal_queued_message(response_envelope):
             return None
@@ -400,7 +398,6 @@ class ResponseLifecycleCoordinator:
             queued_signal=queued_signal,
             response_envelope=response_envelope,
             signal_queued_message=signal_queued_message,
-            lifecycle_lock_owned_by_response=False,
         )
         return lifecycle_lock, queued_signal, notice
 
