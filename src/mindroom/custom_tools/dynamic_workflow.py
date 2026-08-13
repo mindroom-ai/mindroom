@@ -28,7 +28,6 @@ from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError, collect_workflow_spec_errors
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.tool_approval import ToolCallWorkflowOrigin
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -485,7 +484,7 @@ def _participant_executor(context: ToolRuntimeContext, workflow_id: str) -> Part
         step_outputs: dict[str, object],
     ) -> object:
         del input_data, step_outputs
-        return _execute_participant(context, participant, prompt, run_scope=run_scope, workflow_id=workflow_id)
+        return _execute_participant(context, participant, prompt, run_scope=run_scope)
 
     return execute
 
@@ -501,7 +500,7 @@ def _aparticipant_executor(context: ToolRuntimeContext, workflow_id: str) -> Asy
         step_outputs: dict[str, object],
     ) -> object:
         del input_data, step_outputs
-        return await _aexecute_participant(context, participant, prompt, run_scope=run_scope, workflow_id=workflow_id)
+        return await _aexecute_participant(context, participant, prompt, run_scope=run_scope)
 
     return execute
 
@@ -512,7 +511,6 @@ def _execute_participant(
     prompt: str,
     *,
     run_scope: str,
-    workflow_id: str,
 ) -> object:
     participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
     if participant_kind == "room_agent":
@@ -523,7 +521,6 @@ def _execute_participant(
             participant,
             prompt,
             run_scope=run_scope,
-            workflow_id=workflow_id,
         )
     msg = f"Unsupported Dynamic Workflow participant kind '{participant_kind}'."
     raise DynamicWorkflowError(msg)
@@ -535,7 +532,6 @@ async def _aexecute_participant(
     prompt: str,
     *,
     run_scope: str,
-    workflow_id: str,
 ) -> object:
     participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
     if participant_kind == "room_agent":
@@ -546,7 +542,6 @@ async def _aexecute_participant(
             participant,
             prompt,
             run_scope=run_scope,
-            workflow_id=workflow_id,
         )
     msg = f"Unsupported Dynamic Workflow participant kind '{participant_kind}'."
     raise DynamicWorkflowError(msg)
@@ -660,7 +655,6 @@ def _execute_ephemeral_agent_participant(
     prompt: str,
     *,
     run_scope: str,
-    workflow_id: str,
 ) -> object:
     return asyncio.run(
         _aexecute_ephemeral_agent_participant(
@@ -668,7 +662,6 @@ def _execute_ephemeral_agent_participant(
             participant,
             prompt,
             run_scope=run_scope,
-            workflow_id=workflow_id,
         ),
     )
 
@@ -679,7 +672,6 @@ async def _aexecute_ephemeral_agent_participant(
     prompt: str,
     *,
     run_scope: str,
-    workflow_id: str,
 ) -> object:
     toolkits_by_name = _resolve_participant_toolkits(context, participant)
     participant_id = _required_participant_text(participant, "id")
@@ -691,12 +683,12 @@ async def _aexecute_ephemeral_agent_participant(
     execution_identity = build_execution_identity_from_runtime_context(context)
     model = model_loading.get_model_instance(context.config, context.runtime_paths, model_name, execution_identity)
     run_config = _participant_run_config(context, toolkits_by_name)
+    toolkits_by_name = _filter_nonresumable_toolkits(toolkits_by_name, run_config)
     bridge = build_tool_hook_bridge(
         context.hook_registry,
         agent_name=context.agent_name,
         config=run_config,
         runtime_paths=context.runtime_paths,
-        workflow_origin=ToolCallWorkflowOrigin(workflow_id=workflow_id, participant_id=participant_id),
     )
     agent = Agent(
         id=f"dynamic_workflow_{participant_id}",
@@ -718,6 +710,24 @@ async def _aexecute_ephemeral_agent_participant(
         ),
     )
     return await _arun_agent(participant_context, agent, prompt)
+
+
+def _filter_nonresumable_toolkits(toolkits: dict[str, Toolkit], config: Config) -> dict[str, Toolkit]:
+    """Hide gated functions from embedded agents that cannot resume paused runs."""
+    from mindroom.agents import _apply_tool_approval_capability  # noqa: PLC0415
+
+    return {
+        name: filtered
+        for name, toolkit in toolkits.items()
+        if (
+            filtered := _apply_tool_approval_capability(
+                toolkit,
+                config,
+                supports_native_tool_approval=False,
+            )
+        )
+        is not None
+    }
 
 
 def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict[str, object]) -> dict[str, Toolkit]:

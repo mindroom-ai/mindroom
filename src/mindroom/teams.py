@@ -1541,6 +1541,7 @@ def materialize_exact_team_members(
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     reason_prefix: str = "Team request",
     dynamic_tool_continuation: bool = False,
+    supports_native_tool_approval: bool = False,
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact team-member set without silent fallback.
 
@@ -1577,6 +1578,7 @@ def materialize_exact_team_members(
             include_openai_compat_guidance=include_openai_compat_guidance,
             refresh_scheduler=refresh_scheduler,
             dynamic_tool_continuation=dynamic_tool_continuation,
+            supports_native_tool_approval=supports_native_tool_approval,
         )
 
     team_members = materialize_exact_requested_team_members(
@@ -1633,6 +1635,7 @@ def _materialize_team_members(
         unavailable_bases=unavailable_bases,
         refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
         dynamic_tool_continuation=True,
+        supports_native_tool_approval=True,
         reason_prefix=reason_prefix,
     )
 

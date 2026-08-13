@@ -322,6 +322,7 @@ def test_materialize_exact_team_members_defaults_to_no_continuation() -> None:
         )
 
     assert mock_create.call_args.kwargs["dynamic_tool_continuation"] is False
+    assert mock_create.call_args.kwargs["supports_native_tool_approval"] is False
 
 
 def test_team_members_are_built_with_dynamic_tool_continuation() -> None:
@@ -343,6 +344,7 @@ def test_team_members_are_built_with_dynamic_tool_continuation() -> None:
         )
 
     assert mock_create.call_args.kwargs["dynamic_tool_continuation"] is True
+    assert mock_create.call_args.kwargs["supports_native_tool_approval"] is True
 
 
 @pytest.mark.asyncio

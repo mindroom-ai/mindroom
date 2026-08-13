@@ -1107,6 +1107,7 @@ async def _prepare_agent_and_prompt(
     current_prompt_is_structured: bool = False,
     pipeline_timing: DispatchPipelineTiming | None = None,
     eager_deferred_tools: bool = False,
+    supports_native_tool_approval: bool = False,
     reusable_agent: Agent | None = None,
 ) -> _PreparedAgentRun:
     """Prepare agent and full prompt for AI processing.
@@ -1147,6 +1148,7 @@ async def _prepare_agent_and_prompt(
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
                 dynamic_tool_continuation=True,
+                supports_native_tool_approval=supports_native_tool_approval,
                 eager_deferred_tools=eager_deferred_tools,
             )
         return runtime_model, agent
@@ -1302,6 +1304,7 @@ async def _prepare_agent_run_context(
     turn_recorder: TurnRecorder | None,
     pipeline_timing: DispatchPipelineTiming | None,
     eager_deferred_tools: bool = False,
+    supports_native_tool_approval: bool = False,
     reusable_agent: Agent | None = None,
 ) -> _AgentRunContext:
     """Prepare one agent response lifecycle through metadata assembly."""
@@ -1328,6 +1331,7 @@ async def _prepare_agent_run_context(
         current_prompt_is_structured=current_prompt_is_structured,
         pipeline_timing=pipeline_timing,
         eager_deferred_tools=eager_deferred_tools,
+        supports_native_tool_approval=supports_native_tool_approval,
         reusable_agent=reusable_agent,
     )
     if pipeline_timing is not None:
@@ -1394,6 +1398,7 @@ async def ai_response(  # noqa: C901
     turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     eager_deferred_tools: bool = False,
+    supports_native_tool_approval: bool = False,
     reusable_agent: Agent | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
@@ -1436,6 +1441,7 @@ async def ai_response(  # noqa: C901
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
         eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
+        supports_native_tool_approval: Whether this caller can resume Agno confirmation pauses.
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
             The caller must serialize uses and close its runtime database handles.
 
@@ -1471,6 +1477,7 @@ async def ai_response(  # noqa: C901
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
                 eager_deferred_tools=eager_deferred_tools,
+                supports_native_tool_approval=supports_native_tool_approval,
                 reusable_agent=reusable_agent,
             ),
             show_tool_calls=show_tool_calls,
@@ -1537,6 +1544,7 @@ async def ai_response(  # noqa: C901
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
                 eager_deferred_tools=eager_deferred_tools,
+                supports_native_tool_approval=supports_native_tool_approval,
                 reusable_agent=_reset_reusable_agent_context(reusable_agent, reusable_agent_base_context),
             )
         except Exception as e:
@@ -1890,6 +1898,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     eager_deferred_tools: bool = False,
+    supports_native_tool_approval: bool = False,
     reusable_agent: Agent | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
@@ -1928,6 +1937,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
         eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
+        supports_native_tool_approval: Whether this caller can resume Agno confirmation pauses.
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
             The caller must serialize uses and close its runtime database handles.
 
@@ -2009,6 +2019,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
                 eager_deferred_tools=eager_deferred_tools,
+                supports_native_tool_approval=supports_native_tool_approval,
                 reusable_agent=_reset_reusable_agent_context(reusable_agent, reusable_agent_base_context),
             )
         except Exception as e:

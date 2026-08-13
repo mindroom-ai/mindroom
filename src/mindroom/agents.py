@@ -1300,11 +1300,31 @@ def _prune_toolkit_functions(
     return toolkit if toolkit.functions or toolkit.async_functions else None
 
 
-def _mark_toolkit_approval_requirements(toolkit: Toolkit, config: Config) -> None:
-    """Move potentially gated calls onto Agno's persisted confirmation boundary."""
-    for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
-        if tool_may_require_approval(config, function.name):
-            function.requires_confirmation = True
+def _apply_tool_approval_capability(
+    toolkit: Toolkit | None,
+    config: Config,
+    *,
+    supports_native_tool_approval: bool,
+) -> Toolkit | None:
+    """Expose gated functions only where an Agno paused run can be resumed."""
+    if toolkit is None:
+        return None
+    if supports_native_tool_approval:
+        for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
+            if tool_may_require_approval(config, function.name):
+                function.requires_confirmation = True
+        return toolkit
+    toolkit.functions = {
+        name: function
+        for name, function in toolkit.functions.items()
+        if not tool_may_require_approval(config, function.name)
+    }
+    toolkit.async_functions = {
+        name: function
+        for name, function in toolkit.async_functions.items()
+        if not tool_may_require_approval(config, function.name)
+    }
+    return toolkit
 
 
 @timed("system_prompt_assembly.agent_create.dynamic_tool_selection")
@@ -1434,6 +1454,7 @@ def _assemble_agent_toolkits(
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     dynamic_tool_continuation: bool,
+    supports_native_tool_approval: bool,
     native_deferred_tools: bool,
     eager_deferred_tools: bool,
 ) -> _AgentToolAssembly:
@@ -1524,8 +1545,12 @@ def _assemble_agent_toolkits(
                 )
             if toolkit:
                 toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
+            toolkit = _apply_tool_approval_capability(
+                toolkit,
+                config,
+                supports_native_tool_approval=supports_native_tool_approval,
+            )
             if toolkit:
-                _mark_toolkit_approval_requirements(toolkit, config)
                 toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
                 tools.append(toolkit)
                 target_names = (
@@ -1810,6 +1835,7 @@ def create_agent(
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     dynamic_tool_continuation: bool = False,
+    supports_native_tool_approval: bool = False,
     eager_deferred_tools: bool = False,
 ) -> Agent:
     """Create an agent instance from configuration.
@@ -1848,6 +1874,8 @@ def create_agent(
             envelope and materialized team members both do). Embedded agents
             without such a loop leave it False so a load/unload takes effect on
             the next request instead of truncating the run.
+        supports_native_tool_approval: Whether the caller can persist and resume
+            Agno confirmation pauses. Gated functions are hidden when false.
         eager_deferred_tools: Whether to materialize every deferred toolkit and
             omit the dynamic-tools manager for a runtime with an immutable tool
             schema.
@@ -1901,6 +1929,7 @@ def create_agent(
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
         dynamic_tool_continuation=dynamic_tool_continuation,
+        supports_native_tool_approval=supports_native_tool_approval,
         native_deferred_tools=native_deferred_tools,
         eager_deferred_tools=eager_deferred_tools,
     )

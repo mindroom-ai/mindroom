@@ -2973,6 +2973,38 @@ class TestApprovalCards:
         assert stored.resolution is None
         assert stored.card_event_id == "$card"
 
+    async def test_malformed_legacy_card_does_not_block_later_rows(self, alice: PrincipalStore) -> None:
+        """One unreadable old row must fail closed without poisoning the startup page."""
+        await self.remember(alice, "$malformed")
+        await self.remember(alice, "$valid")
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE approval_cards SET card_json = ? WHERE principal_id = ? AND card_event_id = ?",
+                ("{", alice._principal_id, "$malformed"),
+            ),
+        )
+
+        assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$malformed") is None
+        scanned = await alice.pending_approval_cards(room_id=ROOM)
+        assert [stored.card_event_id for stored in scanned] == ["$valid"]
+
+    async def test_wrong_shaped_legacy_resolution_does_not_crash_startup_reader(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Old or damaged resolution JSON is never reinterpreted as executable permission."""
+        await self.remember(alice, "$malformed")
+        await self.remember(alice, "$valid")
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE approval_cards SET resolution_json = ? WHERE principal_id = ? AND card_event_id = ?",
+                ("[]", alice._principal_id, "$malformed"),
+            ),
+        )
+
+        scanned = await alice.pending_approval_cards(room_id=ROOM)
+        assert [stored.card_event_id for stored in scanned] == ["$valid"]
+
     async def test_a_claim_is_recoverable_before_anything_knows_its_event(self, alice: PrincipalStore) -> None:
         """The window a crash lands in holds a row, not a stranded card.
 

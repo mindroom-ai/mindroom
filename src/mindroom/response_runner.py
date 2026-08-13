@@ -95,7 +95,6 @@ from mindroom.tool_approval import (
     ToolApprovalCall,
     evaluate_tool_approval,
     expire_suspended_tool_approval,
-    native_approval_continuation,
     resolve_tool_approval_approver,
     send_suspended_tool_approval,
 )
@@ -1212,13 +1211,11 @@ class ResponseRunner:
             msg = "Approval continuation execution identity no longer matches its target"
             raise RuntimeError(msg)
         decisions = {call.tool_call_id: call.decision is ContinuationDecision.APPROVED for call in continuation.calls}
-        approved_call_ids = frozenset(tool_call_id for tool_call_id, approved in decisions.items() if approved)
         if continuation.entity_kind == "team":
             orchestrator = self.deps.runtime.orchestrator
 
             async def continue_team() -> str | PausedAttempt:
-                with native_approval_continuation(approved_call_ids):
-                    return await continue_paused_team_run(
+                return await continue_paused_team_run(
                         member_names=continuation.team_member_names,
                         mode=TeamMode(continuation.team_mode or "coordinate"),
                         config=self.deps.runtime.config,
@@ -1296,16 +1293,14 @@ class ResponseRunner:
                 tool.confirmation_note = "Approved by requester" if tool.confirmed else "Not approved by requester"
 
             async def continue_run() -> RunOutput:
-                approved_call_ids = frozenset(tool_call_id for tool_call_id, approved in decisions.items() if approved)
-                with native_approval_continuation(approved_call_ids):
-                    result = agent.acontinue_run(
-                        run_id=continuation.run_id,
-                        updated_tools=updated_tools,
-                        session_id=continuation.session_id,
-                        user_id=continuation.requester_id,
-                        stream=False,
-                    )
-                    return await cast("Awaitable[RunOutput]", result)
+                result = agent.acontinue_run(
+                    run_id=continuation.run_id,
+                    updated_tools=updated_tools,
+                    session_id=continuation.session_id,
+                    user_id=continuation.requester_id,
+                    stream=False,
+                )
+                return await cast("Awaitable[RunOutput]", result)
 
             async with typing_indicator(self._client(), continuation.room_id):
                 response = await self._run_in_tool_context(tool_dispatch=tool_dispatch, operation=continue_run)
@@ -3212,6 +3207,7 @@ class ResponseRunner:
                 ),
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
+                supports_native_tool_approval=True,
             )
 
         try:
@@ -3304,6 +3300,7 @@ class ResponseRunner:
             ),
             turn_recorder=turn_recorder,
             pipeline_timing=pipeline_timing,
+            supports_native_tool_approval=True,
         )
 
         try:

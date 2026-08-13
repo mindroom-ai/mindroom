@@ -167,6 +167,7 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
         config,
         runtime_paths_for(config),
         execution_identity=execution_identity,
+        supports_native_tool_approval=True,
         **kwargs,
     )
 
@@ -3203,8 +3204,8 @@ def test_tool_function_filter_prunes_resolved_functions() -> None:
     assert toolkit.async_functions == {}
 
 
-def test_mark_toolkit_approval_requirements_only_pauses_potentially_gated_calls() -> None:
-    """Removing native confirmation marking would put approval back inside the live tool hook."""
+def test_native_approval_capability_marks_only_potentially_gated_calls() -> None:
+    """Continuation-capable runners expose gated calls through Agno confirmation only."""
 
     async def dangerous_async() -> None:
         return None
@@ -3229,11 +3230,53 @@ def test_mark_toolkit_approval_requirements_only_pauses_potentially_gated_calls(
         ],
     )
 
-    agents_module._mark_toolkit_approval_requirements(toolkit, config)
+    filtered = agents_module._apply_tool_approval_capability(
+        toolkit,
+        config,
+        supports_native_tool_approval=True,
+    )
 
+    assert filtered is toolkit
     assert toolkit.functions["dangerous"].requires_confirmation is True
     assert toolkit.async_functions["dangerous_async"].requires_confirmation is True
     assert toolkit.functions["safe"].requires_confirmation is not True
+
+
+def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
+    """An embedded agent must not receive a gated function it cannot suspend and resume."""
+
+    async def dangerous_async() -> None:
+        return None
+
+    config = Config.model_validate(
+        {
+            "tool_approval": {
+                "default": "auto_approve",
+                "rules": [
+                    {"match": "dangerous*", "action": "require_approval"},
+                    {"match": "safe", "action": "auto_approve"},
+                ],
+            },
+        },
+    )
+    toolkit = Toolkit(
+        name="approval-test",
+        tools=[
+            Function(name="dangerous", entrypoint=lambda: None),
+            Function(name="dangerous_async", entrypoint=dangerous_async),
+            Function(name="safe", entrypoint=lambda: None),
+        ],
+    )
+
+    filtered = agents_module._apply_tool_approval_capability(
+        toolkit,
+        config,
+        supports_native_tool_approval=False,
+    )
+
+    assert filtered is toolkit
+    assert set(toolkit.functions) == {"safe"}
+    assert toolkit.async_functions == {}
 
 
 @pytest.mark.asyncio

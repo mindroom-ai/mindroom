@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -15,7 +14,6 @@ import nio
 import pytest
 
 from mindroom import interactive
-from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
     get_approval_store,
     initialize_approval_store,
@@ -37,7 +35,6 @@ from tests.approval_test_support import FakeApprovalCards
 from tests.bot_helpers import (
     AgentBotTestBase,
     _hook_plugin,
-    _start_live_approval,
     make_mock_agent_user,
 )
 from tests.bot_helpers import (
@@ -511,87 +508,6 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._coalescing_gate.lanes.all_settled()
 
     @pytest.mark.asyncio
-    async def test_unknown_tool_approval_response_with_approval_id_and_denial_reason_resolves_live_waiter(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Cinny custom approval responses should resolve by approval_id alone."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        _store, pending, task, editor = await _start_live_approval(runtime_paths)
-
-        try:
-            event = SimpleNamespace(
-                type="io.mindroom.tool_approval_response",
-                source={
-                    "sender": "@user:localhost",
-                    "content": {
-                        "approval_id": pending.approval_id,
-                        "status": "denied",
-                        "denial_reason": "Not this time.",
-                    },
-                },
-            )
-            await bot._on_unknown_event(room, event)
-            decision = await task
-
-            assert decision.status == "denied"
-            assert decision.reason == "Not this time."
-            assert editor.await_args.args[1] == "$approval"
-        finally:
-            if not task.done():
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-            await _shutdown_approval_store()
-
-    @pytest.mark.asyncio
-    async def test_unknown_tool_approval_response_with_approval_id_and_non_card_reply_resolves_live_waiter(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Custom approval responses should fall back to approval_id when reply metadata is not the card."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        _store, pending, task, editor = await _start_live_approval(runtime_paths)
-
-        try:
-            event = SimpleNamespace(
-                type="io.mindroom.tool_approval_response",
-                source={
-                    "sender": "@user:localhost",
-                    "content": {
-                        "approval_id": pending.approval_id,
-                        "status": "denied",
-                        "denial_reason": "Wrong arguments.",
-                        "m.relates_to": {
-                            "rel_type": "m.thread",
-                            "event_id": "$thread",
-                            "m.in_reply_to": {"event_id": "$latest-thread-event"},
-                        },
-                    },
-                },
-            )
-            await bot._on_unknown_event(room, event)
-            decision = await task
-
-            assert decision.status == "denied"
-            assert decision.reason == "Wrong arguments."
-            assert editor.await_args.args[1] == "$approval"
-        finally:
-            if not task.done():
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-            await _shutdown_approval_store()
-
-    @pytest.mark.asyncio
     async def test_unknown_tool_approval_response_with_approval_id_uses_live_id_entrypoint(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -628,164 +544,6 @@ class TestAgentBot(AgentBotTestBase):
             ),
             before_consume=None,
         )
-
-    @pytest.mark.asyncio
-    async def test_unknown_truncated_approval_id_response_sends_notice_with_card_event_id(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Approval-id-only responses should still send truncated-argument denial notices."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot.client = make_matrix_client_mock()
-        orchestrator = MagicMock()
-        orchestrator.send_approval_notice = AsyncMock(return_value=True)
-        bot.orchestrator = orchestrator
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        _store, pending, task, editor = await _start_live_approval(
-            runtime_paths,
-            arguments={"content": "x" * 3_000_000},
-        )
-
-        try:
-            event = SimpleNamespace(
-                type="io.mindroom.tool_approval_response",
-                source={
-                    "sender": "@user:localhost",
-                    "content": {"approval_id": pending.approval_id, "status": "approved"},
-                },
-            )
-            await bot._on_unknown_event(room, event)
-            decision = await task
-
-            assert decision.status == "denied"
-            assert "too large to show in full" in (decision.reason or "")
-            replacement = editor.await_args.args[2]
-            assert replacement["status"] == "denied"
-            assert "too large to show in full" in replacement["resolution_reason"]
-            orchestrator.send_approval_notice.assert_awaited_once_with(
-                room_id="!test:localhost",
-                approval_event_id=pending.card_event_id,
-                thread_id=pending.thread_id,
-                reason=replacement["resolution_reason"],
-            )
-        finally:
-            if not task.done():
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-            await _shutdown_approval_store()
-
-    @pytest.mark.asyncio
-    async def test_non_router_bot_truncated_approval_race_sends_notice_via_orchestrator(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A non-router bot that wins the approval callback race should still trigger notice delivery."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        agent_bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        agent_bot.client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
-        router_bot = MagicMock()
-        router_bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
-        orchestrator = MagicMock()
-        orchestrator.send_approval_notice = AsyncMock(return_value=True)
-        agent_bot.orchestrator = orchestrator
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        _store, pending, task, editor = await _start_live_approval(
-            runtime_paths,
-            arguments={"content": "x" * 3_000_000},
-        )
-
-        try:
-            handled = await handle_tool_approval_action(
-                room=room,
-                sender_id="@user:localhost",
-                config=agent_bot.config,
-                runtime_paths=agent_bot.runtime_paths,
-                orchestrator=agent_bot.orchestrator,
-                logger=agent_bot.logger,
-                approval_event_id=pending.card_event_id,
-                status="approved",
-                reason=None,
-            )
-            decision = await task
-
-            assert handled is True
-            assert decision.status == "denied"
-            replacement = editor.await_args.args[2]
-            assert "too large to show in full" in replacement["resolution_reason"]
-            orchestrator.send_approval_notice.assert_awaited_once_with(
-                room_id="!test:localhost",
-                approval_event_id=pending.card_event_id,
-                thread_id=pending.thread_id,
-                reason=replacement["resolution_reason"],
-            )
-        finally:
-            if not task.done():
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-            await _shutdown_approval_store()
-
-    @pytest.mark.asyncio
-    async def test_reply_text_from_non_approver_falls_through_to_normal_handler(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Non-approver approval replies should fall through to normal text handling."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        store, pending, task, editor = await _start_live_approval(
-            runtime_paths,
-            approver_user_id="@approver:localhost",
-        )
-        event = MagicMock(spec=nio.RoomMessageText)
-        event.event_id = "$reply"
-        event.sender = "@other:localhost"
-        event.body = "I should not resolve this."
-        event.server_timestamp = 1234
-        event.source = {
-            "event_id": "$reply",
-            "sender": "@other:localhost",
-            "origin_server_ts": 1234,
-            "content": {
-                "m.relates_to": {"m.in_reply_to": {"event_id": pending.card_event_id}},
-            },
-        }
-
-        try:
-            await _dispatch_message(bot, room, event)
-
-            handle_text_event.assert_awaited_once()
-            assert handle_text_event.await_args.args == (room, event)
-            assert isinstance(handle_text_event.await_args.kwargs["receipt_time"], float)
-            editor.assert_not_awaited()
-            assert task.done() is False
-
-            await store.handle_card_response(
-                room_id="!test:localhost",
-                sender_id="@approver:localhost",
-                card_event_id=pending.card_event_id,
-                status="approved",
-                reason=None,
-            )
-            decision = await task
-            assert decision.status == "approved"
-        finally:
-            if not task.done():
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-            await _shutdown_approval_store()
 
     @pytest.mark.asyncio
     async def test_plain_rich_reply_falls_through_after_approval_card_point_lookup(
@@ -960,131 +718,6 @@ class TestAgentBot(AgentBotTestBase):
             assert handle_text_event.await_args.args == (room, event)
             assert isinstance(handle_text_event.await_args.kwargs["receipt_time"], float)
         finally:
-            await _shutdown_approval_store()
-
-    @pytest.mark.asyncio
-    async def test_duplicate_live_approval_reply_is_consumed_without_falling_through(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Duplicate approver replies should be consumed while the first resolution is in flight."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        edit_started = asyncio.Event()
-        release_edit = asyncio.Event()
-
-        async def slow_editor(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
-            edit_started.set()
-            await release_edit.wait()
-            return True
-
-        store, pending, task, editor = await _start_live_approval(
-            runtime_paths,
-            editor=AsyncMock(side_effect=slow_editor),
-        )
-        first_resolution = asyncio.create_task(
-            store.handle_card_response(
-                room_id="!test:localhost",
-                sender_id="@user:localhost",
-                card_event_id=pending.card_event_id,
-                status="approved",
-                reason=None,
-            ),
-        )
-        event = MagicMock(spec=nio.RoomMessageText)
-        event.event_id = "$duplicate-approval-reply"
-        event.sender = "@user:localhost"
-        event.body = "No, deny it."
-        event.server_timestamp = 1234
-        event.source = {
-            "event_id": "$duplicate-approval-reply",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1234,
-            "content": {
-                "m.relates_to": {"m.in_reply_to": {"event_id": pending.card_event_id}},
-            },
-        }
-
-        try:
-            await asyncio.wait_for(edit_started.wait(), timeout=1)
-            await _dispatch_message(bot, room, event)
-
-            handle_text_event.assert_not_awaited()
-            release_edit.set()
-            first_result = await first_resolution
-            decision = await task
-
-            assert first_result.resolved is True
-            assert decision.status == "approved"
-            assert editor.await_count == 1
-        finally:
-            release_edit.set()
-            if not first_resolution.done():
-                first_resolution.cancel()
-                with suppress(asyncio.CancelledError):
-                    await first_resolution
-            if not task.done():
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-            await _shutdown_approval_store()
-
-    @pytest.mark.asyncio
-    async def test_reply_to_resolved_approval_card_falls_through_to_normal_text(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Follow-up text on a terminal approval card should remain a normal message."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        store, pending, task, _editor = await _start_live_approval(runtime_paths)
-
-        try:
-            result = await store.handle_card_response(
-                room_id="!test:localhost",
-                sender_id="@user:localhost",
-                card_event_id=pending.card_event_id,
-                status="approved",
-                reason=None,
-            )
-            decision = await task
-            assert result.resolved is True
-            assert decision.status == "approved"
-
-            event = MagicMock(spec=nio.RoomMessageText)
-            event.event_id = "$follow-up-reply"
-            event.sender = "@user:localhost"
-            event.body = "Why did this fail?"
-            event.server_timestamp = 1234
-            event.source = {
-                "event_id": "$follow-up-reply",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1234,
-                "content": {
-                    "m.relates_to": {"m.in_reply_to": {"event_id": pending.card_event_id}},
-                },
-            }
-
-            await _dispatch_message(bot, room, event)
-
-            handle_text_event.assert_awaited_once()
-            assert handle_text_event.await_args.args == (room, event)
-            assert isinstance(handle_text_event.await_args.kwargs["receipt_time"], float)
-        finally:
-            if not task.done():
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
             await _shutdown_approval_store()
 
     @pytest.mark.asyncio

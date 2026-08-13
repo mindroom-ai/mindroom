@@ -682,6 +682,7 @@ class TestUserIdPassthrough:
                 prompt="test",
                 runtime_paths=runtime_paths,
                 config=config,
+                supports_native_tool_approval=True,
             )
 
         agent = prepared_run.agent
@@ -696,6 +697,7 @@ class TestUserIdPassthrough:
         assert prepared_history.replay_plan is not None
         assert prepared_history.replay_plan.mode == "configured"
         assert "runtime_paths" not in mock_create_agent.call_args.kwargs
+        assert mock_create_agent.call_args.kwargs["supports_native_tool_approval"] is True
 
     @pytest.mark.asyncio
     async def test_prepare_agent_and_prompt_uses_raw_prompt_for_memory_and_appends_additional_context(

@@ -46,12 +46,15 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.logging_config import get_logger
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from .backend import Row, Transaction
 
 _DEFAULT_ROOM_CARD_LIMIT = 256
+logger = get_logger(__name__)
 _CARD_COLUMNS = """
     cards.card_json AS card_json, cards.resolution_json AS resolution_json,
     cards.transaction_id AS transaction_id, cards.card_event_id AS card_event_id,
@@ -351,22 +354,39 @@ def pending_cards(
         """,  # noqa: S608 - a fixed column list and a fixed clause, not input
         (principal_id, room_id, *cursor_params, limit),
     )
-    return tuple(_card(row) for row in rows)
+    return tuple(card for row in rows if (card := _card(row)) is not None)
 
 
-def _card(row: Row) -> StoredApprovalCard:
-    card = json.loads(row["card_json"])
+def _card(row: Row) -> StoredApprovalCard | None:
+    """Decode one durable card, skipping corrupt legacy rows fail-closed."""
+    try:
+        card = json.loads(row["card_json"])
+    except (json.JSONDecodeError, TypeError):
+        _log_unreadable_card(row)
+        return None
     if not isinstance(card, dict):
-        msg = "Stored approval card is not an object"
-        raise TypeError(msg)
-    return StoredApprovalCard(
-        card=card,
-        resolution=_resolution(row["resolution_json"]),
+        _log_unreadable_card(row)
+        return None
+    try:
+        return StoredApprovalCard(
+            card=card,
+            resolution=_resolution(row["resolution_json"]),
+            transaction_id=str(row["transaction_id"]),
+            card_event_id=row["card_event_id"],
+            attempted=bool(row["attempted"]),
+            sending_device_id=row["sending_device_id"],
+            created_at_ns=int(row["created_at_ns"]),
+        )
+    except (json.JSONDecodeError, TypeError, ValueError):
+        _log_unreadable_card(row)
+        return None
+
+
+def _log_unreadable_card(row: Row) -> None:
+    logger.warning(
+        "approval_card_row_unreadable",
         transaction_id=str(row["transaction_id"]),
         card_event_id=row["card_event_id"],
-        attempted=bool(row["attempted"]),
-        sending_device_id=row["sending_device_id"],
-        created_at_ns=int(row["created_at_ns"]),
     )
 
 
