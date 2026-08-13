@@ -22,10 +22,12 @@ if TYPE_CHECKING:
     display_name="Google Calendar",
     description=(
         "Read and search Google Calendar and check availability; create, update, move, respond to, "
-        "and delete events through requester-scoped MindRoom OAuth. Writes follow the deployment's "
-        "configured approval policy. If authorization is missing or expired, call a Calendar tool "
-        "to get a fresh, short-lived MindRoom connection link for that requester; if it expires, "
-        "call again for a new link."
+        "and delete events through MindRoom OAuth. OAuth credentials are requester-scoped for user "
+        "and user-agent execution (including private agents), and agent-scoped for shared agents. "
+        "Writes follow the deployment's configured approval policy. If authorization is missing or "
+        "expired, call a Calendar tool to get a fresh MindRoom connection link. In worker-routed "
+        "execution, the link is short-lived and bound to the current requester and credential "
+        "target; if it expires, call again for a new link."
     ),
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,

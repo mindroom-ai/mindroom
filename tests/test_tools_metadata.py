@@ -184,9 +184,13 @@ def test_native_google_metadata_explains_capabilities_and_oauth_recovery(
 
     for fragment in capability_fragments:
         assert fragment in description
-    assert "requester-scoped mindroom oauth" in description
+    assert "requester-scoped for user and user-agent execution" in description
+    assert "including private agents" in description
+    assert "agent-scoped for shared agents" in description
     assert "configured approval policy" in description
-    assert "fresh, short-lived mindroom connection link" in description
+    assert "fresh mindroom connection link" in description
+    assert "worker-routed execution, the link is short-lived" in description
+    assert "bound to the current requester and credential target" in description
     assert "call again for a new link" in description
 
 

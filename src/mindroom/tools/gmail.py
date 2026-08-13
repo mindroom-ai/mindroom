@@ -22,10 +22,12 @@ if TYPE_CHECKING:
     display_name="Gmail",
     description=(
         "Read and search Gmail; draft, send, reply to, and manage mailbox state through "
-        "requester-scoped MindRoom OAuth. Writes and mailbox-state changes follow the deployment's "
-        "configured approval policy. If authorization is missing or expired, call a Gmail tool to "
-        "get a fresh, short-lived MindRoom connection link for that requester; if it expires, call "
-        "again for a new link."
+        "MindRoom OAuth. OAuth credentials are requester-scoped for user and user-agent execution "
+        "(including private agents), and agent-scoped for shared agents. Writes and mailbox-state "
+        "changes follow the deployment's configured approval policy. If authorization is missing "
+        "or expired, call a Gmail tool to get a fresh MindRoom connection link. In worker-routed "
+        "execution, the link is short-lived and bound to the current requester and credential "
+        "target; if it expires, call again for a new link."
     ),
     category=ToolCategory.EMAIL,
     status=ToolStatus.REQUIRES_CONFIG,
