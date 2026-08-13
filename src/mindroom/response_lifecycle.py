@@ -367,10 +367,12 @@ def _response_outcome_label(final_delivery_outcome: FinalDeliveryOutcome | None)
     """Return one pipeline outcome label for the canonical final delivery outcome."""
     if final_delivery_outcome is not None and final_delivery_outcome.suppressed:
         return "suppressed"
-    if final_delivery_outcome is not None and final_delivery_outcome.terminal_status == "cancelled":
-        return "cancelled"
-    if final_delivery_outcome is not None and final_delivery_outcome.terminal_status == "error":
-        return "error"
+    if final_delivery_outcome is not None and final_delivery_outcome.terminal_status in {
+        "cancelled",
+        "error",
+        "suspended",
+    }:
+        return final_delivery_outcome.terminal_status
     if final_delivery_outcome is not None and final_delivery_outcome.delivery_kind is not None:
         return final_delivery_outcome.delivery_kind
     if (
@@ -523,6 +525,10 @@ class ResponseLifecycle:
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
     ) -> FinalDeliveryOutcome:
         """Run outer lifecycle finalization and return the canonical terminal outcome."""
+        if final_delivery_outcome.terminal_status == "suspended":
+            if self.pipeline_timing is not None:
+                self.pipeline_timing.emit_summary(self.deps.logger, outcome="suspended")
+            return final_delivery_outcome
         response_event_id = final_delivery_outcome.final_visible_event_id
         try:
             if final_delivery_outcome.terminal_status == "completed":

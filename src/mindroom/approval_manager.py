@@ -519,21 +519,14 @@ class _ApprovalManager:
     ) -> asyncio.Event:
         """Register binding and expiry owners for one delivered detached card."""
         sent_card = _sent_card_body(claimed_card, sent_event)
+        self._ensure_detached_expiry_owner(
+            room_id=room_id,
+            card_event_id=sent_event.event_id,
+            expires_at=expires_at,
+            task_name=f"approval-expiry-{approval_id}",
+        )
         with self._live_lock:
             shutting_down = self._shutdown_reason is not None
-            if not shutting_down:
-                expiry_task = asyncio.create_task(
-                    self._expire_detached_after(
-                        room_id=room_id,
-                        card_event_id=sent_event.event_id,
-                        expires_at=expires_at,
-                    ),
-                    name=f"approval-expiry-{approval_id}",
-                )
-                self._detached_expiry_tasks[sent_event.event_id] = expiry_task
-                expiry_task.add_done_callback(
-                    lambda task: self._finish_detached_expiry_task(sent_event.event_id, task),
-                )
         return self._schedule_detached_card_binding(
             room_id=room_id,
             transaction_id=transaction_id,
@@ -542,6 +535,44 @@ class _ApprovalManager:
             continuation_id=continuation_id,
             tool_call_id=tool_call_id,
             expire_after_bind=shutting_down,
+        )
+
+    def _ensure_detached_expiry_owner(
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+        expires_at: datetime,
+        task_name: str,
+    ) -> None:
+        """Give one unresolved durable card its sole in-process expiry owner."""
+        with self._live_lock:
+            if self._shutdown_reason is not None or card_event_id in self._detached_expiry_tasks:
+                return
+            expiry_task = asyncio.create_task(
+                self._expire_detached_after(
+                    room_id=room_id,
+                    card_event_id=card_event_id,
+                    expires_at=expires_at,
+                ),
+                name=task_name,
+            )
+            self._detached_expiry_tasks[card_event_id] = expiry_task
+            expiry_task.add_done_callback(
+                lambda task: self._finish_detached_expiry_task(card_event_id, task),
+            )
+
+    @staticmethod
+    def _pending_expiry(pending: PendingApproval) -> datetime:
+        """Return a safe expiry for a persisted card with tolerant legacy timestamps."""
+        try:
+            parsed = parse_approval_datetime(pending.expires_at)
+        except (TypeError, ValueError):
+            parsed = None
+        if parsed is not None:
+            return parsed
+        return datetime.fromtimestamp(pending.created_at_ms / 1000, tz=UTC) + timedelta(
+            seconds=max(pending.timeout_seconds, 0),
         )
 
     async def _cleanup_cancelled_detached_send_when_event_arrives(
@@ -896,6 +927,12 @@ class _ApprovalManager:
             return await self._redeliver_recorded_resolution(pending, identified.card)
         content = identified.card.card.get("content")
         if isinstance(content, dict) and isinstance(content.get("continuation_id"), str):
+            self._ensure_detached_expiry_owner(
+                room_id=room_id,
+                card_event_id=pending.card_event_id,
+                expires_at=self._pending_expiry(pending),
+                task_name=f"approval-recovered-expiry-{pending.card_event_id}",
+            )
             return None
         result = await self._discard_matrix_only_card(
             pending=pending,

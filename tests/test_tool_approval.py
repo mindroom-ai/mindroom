@@ -205,41 +205,6 @@ async def _await_claim(cards: FakeApprovalCards, *, count: int = 1) -> None:
             await asyncio.sleep(0)
 
 
-async def _wait_for_pending(
-    store: _ApprovalManager,
-    *,
-    room_id: str = "!room:localhost",
-    approval_id: str | None = None,
-    sender: AsyncMock | None = None,
-    call_index: int | None = None,
-) -> PendingApproval:
-    async with asyncio.timeout(5):
-        while True:
-            resolved_approval_id = approval_id
-            if resolved_approval_id is None and sender is not None:
-                if call_index is None and sender.await_args is not None:
-                    resolved_approval_id = sender.await_args.args[2]["approval_id"]
-                elif call_index is not None and len(sender.await_args_list) > call_index:
-                    resolved_approval_id = sender.await_args_list[call_index].args[2]["approval_id"]
-            if resolved_approval_id is not None:
-                pending = await _live_pending_approval(store, room_id=room_id, approval_id=resolved_approval_id)
-                if pending is not None:
-                    return pending
-            await asyncio.sleep(0)
-
-
-async def _live_pending_approval(
-    store: _ApprovalManager,
-    *,
-    room_id: str,
-    approval_id: str,
-) -> PendingApproval | None:
-    card_event_id = store._live_card_event_id_for_approval(approval_id)
-    if card_event_id is None:
-        return None
-    return store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
-
-
 @pytest.mark.asyncio
 async def test_detached_card_displays_the_durable_winning_decision(tmp_path: Path) -> None:
     """A human click racing expiry must not overwrite the decision that released the continuation."""
@@ -324,6 +289,30 @@ async def test_detached_approval_expiry_resolves_continuation_without_waiter(tmp
         "Tool approval request timed out.",
     )
     assert editor.await_args.args[2]["status"] == "expired"
+
+
+@pytest.mark.asyncio
+async def test_startup_reclaims_expiry_for_unresolved_continuation_card(tmp_path: Path) -> None:
+    """The card coordinator alone must restore expiry ownership after restart."""
+    cards = FakeApprovalCards()
+    card = _approval_card()
+    card["content"]["continuation_id"] = "continuation-1"
+    card["content"]["tool_call_id"] = "call-1"
+    await cards.store_card("$approval", "!room:localhost", card)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+    )
+
+    sweep = await store.discard_pending_on_startup()
+
+    assert sweep.failed == 0
+    assert tuple(store._detached_expiry_tasks) == ("$approval",)
+    await store.shutdown(reason="test complete")
 
 
 @pytest.mark.asyncio

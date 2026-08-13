@@ -18,6 +18,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
+    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_INTERRUPTED,
     STREAM_STATUS_KEY,
 )
@@ -64,6 +65,16 @@ if TYPE_CHECKING:
 BOT_USER_ID = "@actual_test_agent:localhost"
 OTHER_BOT_USER_ID = "@actual_other:localhost"
 ROOM_ID = "!room:example.com"
+
+
+def test_approval_waiting_message_is_not_a_stale_stream_candidate() -> None:
+    """A restart must leave a valid persisted approval placeholder untouched."""
+    state = stale_stream_cleanup_module._MessageState(
+        latest_body="Waiting for approval: `run_shell_command`",
+        stream_status=STREAM_STATUS_APPROVAL_PENDING,
+    )
+
+    assert stale_stream_cleanup_module._is_cleanup_candidate(state) is False
 NOW_MS = 1_000_000
 STALE_AGE_MS = stale_stream_cleanup_module._STALE_STREAM_RECENCY_GUARD_MS + 60_000
 OLD_STALE_AGE_MS = stale_stream_cleanup_module._STALE_STREAM_LOOKBACK_MS + 60_000

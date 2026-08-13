@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 
 import nio
@@ -56,8 +55,6 @@ _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
 _STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION = 10
 _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS = 0.25
 _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS = 30.0
-_CONTINUATION_EXPIRY_INITIAL_RETRY_SECONDS = 0.25
-_CONTINUATION_EXPIRY_MAX_RETRY_SECONDS = 30.0
 
 
 class _ApprovalTransportBot(Protocol):
@@ -142,6 +139,7 @@ class ApprovalMatrixTransport:
     bot_provider: Callable[[str], _ApprovalTransportBot | None]
     cards_provider: Callable[[], ApprovalView | None]
     entity_configured: Callable[[str], bool] | None = None
+    entity_permanently_unavailable: Callable[[str], bool] | None = None
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
@@ -156,7 +154,6 @@ class ApprovalMatrixTransport:
     )
     _continuations: ApprovalContinuationStore = field(init=False, repr=False)
     _continuation_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
-    _expiry_tasks: dict[tuple[str, str], asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
     _startup_cleanup_attempts: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -292,7 +289,13 @@ class ApprovalMatrixTransport:
                 await asyncio.sleep(retry_seconds)
                 retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
                 continue
-            if self.entity_configured is None or self.entity_configured(continuation.entity_name):
+            permanently_unavailable = (
+                self.entity_permanently_unavailable is not None
+                and self.entity_permanently_unavailable(continuation.entity_name)
+            )
+            if not permanently_unavailable and (
+                self.entity_configured is None or self.entity_configured(continuation.entity_name)
+            ):
                 if not waiting_logged:
                     logger.warning(
                         "approval_continuation_waiting_for_owner",
@@ -304,7 +307,11 @@ class ApprovalMatrixTransport:
                 await asyncio.sleep(retry_seconds)
                 retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
                 continue
-            reason = f"Requesting agent '{continuation.entity_name}' is no longer available."
+            reason = (
+                f"Requesting agent '{continuation.entity_name}' could not start and is unavailable."
+                if permanently_unavailable
+                else f"Requesting agent '{continuation.entity_name}' is no longer available."
+            )
             fallback = self.bot_provider(ROUTER_AGENT_NAME)
             if fallback is not None and fallback.running:
                 await fallback.fail_approval_continuation(continuation, reason)
@@ -319,69 +326,6 @@ class ApprovalMatrixTransport:
                 waiting_logged = True
             await asyncio.sleep(retry_seconds)
             retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
-
-    def _schedule_expiry(self, continuation: ApprovalContinuation) -> None:
-        for call in continuation.calls:
-            key = (continuation.approval_id, call.tool_call_id)
-            if (
-                (call.decision is not None and call.decision_recorded)
-                or call.card_event_id is None
-                or key in self._expiry_tasks
-            ):
-                continue
-
-            async def expire(
-                room_id: str = continuation.room_id,
-                card_event_id: str = call.card_event_id,
-                expires_at: str = call.expires_at,
-                approval_id: str = continuation.approval_id,
-                tool_call_id: str = call.tool_call_id,
-            ) -> None:
-                delay = max(
-                    0.0,
-                    (datetime.fromisoformat(expires_at).astimezone(UTC) - datetime.now(UTC)).total_seconds(),
-                )
-                await asyncio.sleep(delay)
-                retry_seconds = _CONTINUATION_EXPIRY_INITIAL_RETRY_SECONDS
-                while True:
-                    try:
-                        settled = await expire_suspended_tool_approval(room_id, card_event_id)
-                    except Exception:
-                        logger.warning(
-                            "approval_continuation_expiry_retry",
-                            approval_id=approval_id,
-                            tool_call_id=tool_call_id,
-                            retry_seconds=retry_seconds,
-                            exc_info=True,
-                        )
-                        settled = False
-                    if settled:
-                        return
-                    await asyncio.sleep(retry_seconds)
-                    retry_seconds = min(retry_seconds * 2, _CONTINUATION_EXPIRY_MAX_RETRY_SECONDS)
-
-            task = asyncio.create_task(
-                expire(),
-                name=f"approval-expiry-{continuation.approval_id}-{call.tool_call_id}",
-            )
-            self._expiry_tasks[key] = task
-            task.add_done_callback(lambda completed, task_key=key: self._finish_expiry_task(task_key, completed))
-
-    def _finish_expiry_task(self, key: tuple[str, str], task: asyncio.Task[None]) -> None:
-        """Retire one expiry task and observe any Matrix settlement failure."""
-        if self._expiry_tasks.get(key) is task:
-            self._expiry_tasks.pop(key)
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error is not None:
-            logger.error(
-                "approval_continuation_expiry_failed",
-                approval_id=key[0],
-                tool_call_id=key[1],
-                error=str(error),
-                exception_type=type(error).__name__,
-            )
 
     async def _recover_continuations(self) -> bool:
         complete = True
@@ -407,7 +351,6 @@ class ApprovalMatrixTransport:
                 refreshed = await asyncio.to_thread(self._continuations.get, recovered.approval_id)
                 if refreshed is None or refreshed.state != "pending":
                     continue
-                self._schedule_expiry(refreshed)
             elif continuation.state == "ready":
                 self._schedule_continuation(continuation)
             else:
@@ -786,7 +729,7 @@ class ApprovalMatrixTransport:
         """
         retry = self._startup_cleanup_retry
         self._startup_cleanup_retry = None
-        tasks: list[asyncio.Task[None]] = [*self._continuation_tasks, *self._expiry_tasks.values()]
+        tasks: list[asyncio.Task[None]] = [*self._continuation_tasks]
         if retry is not None and not retry.done():
             retry.cancel()
             tasks.append(retry)
@@ -795,7 +738,6 @@ class ApprovalMatrixTransport:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._continuation_tasks.clear()
-        self._expiry_tasks.clear()
 
     async def close(self) -> None:
         """Close the transport-owned continuation-store handle."""

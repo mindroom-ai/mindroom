@@ -2677,7 +2677,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
         waiting = FinalDeliveryOutcome(
-            terminal_status="completed",
+            terminal_status="suspended",
             event_id="$waiting",
             is_visible_response=True,
             final_visible_body="Waiting for approval",
@@ -2687,9 +2687,10 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(ResponseRunner, "_run_cancellable_response", new=AsyncMock(side_effect=pause)),
             patch.object(ResponseRunner, "_suspend_for_approval", new=AsyncMock(return_value=waiting)) as suspend,
             patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-            patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
+            patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()) as effects,
         ):
             assert await bot._response_runner.generate_response(request) == "$waiting"
             assert not bot._response_runner.has_active_response_for_target(target.target)
 
         suspend.assert_awaited_once()
+        effects.assert_not_awaited()

@@ -54,6 +54,9 @@ def _continuation() -> ApprovalContinuation:
                 decision_recorded=True,
             ),
         ),
+        request_body="Run the dangerous tool",
+        transport_sender_id="@owner:example.org",
+        source_kind="message",
     )
 
 
@@ -454,89 +457,15 @@ async def test_removed_owner_waits_for_router_before_retiring_ready_continuation
 
 
 @pytest.mark.asyncio
-async def test_expiry_task_failure_is_retired_and_observed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed Matrix expiry must not leave a stale key or an unobserved task exception."""
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path,
-    )
-    transport = ApprovalMatrixTransport(
-        runtime_paths=runtime_paths,
-        bot_provider=lambda _name: None,
-        cards_provider=lambda: None,
-    )
-    continuation = replace(
-        _continuation(),
-        calls=(
-            replace(
-                _continuation().calls[0],
-                card_event_id="$approval",
-                expires_at="2020-01-01T00:00:00+00:00",
-            ),
-        ),
-    )
-    expire = AsyncMock(side_effect=[RuntimeError("Matrix unavailable"), True])
-    monkeypatch.setattr("mindroom.approval_transport.expire_suspended_tool_approval", expire)
+async def test_permanently_failed_configured_owner_is_terminalized_by_router(tmp_path: Path) -> None:
+    """A configured bot with a permanent startup error must not be retried forever."""
+    transport: ApprovalMatrixTransport
 
-    transport._continuations.create(continuation)
-    transport._schedule_expiry(continuation)
-    tasks = tuple(transport._expiry_tasks.values())
-    await asyncio.gather(*tasks, return_exceptions=True)
+    async def fail(owned: ApprovalContinuation, reason: str) -> None:
+        assert "could not start" in reason
+        transport._continuations.fail(owned.approval_id, reason)
 
-    assert expire.await_count == 2
-    assert transport._expiry_tasks == {}
-
-
-@pytest.mark.asyncio
-async def test_expiry_task_retries_false_outcome_until_settled(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A false settlement result must keep the expiry task alive for another attempt."""
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path,
-    )
-    transport = ApprovalMatrixTransport(
-        runtime_paths=runtime_paths,
-        bot_provider=lambda _name: None,
-        cards_provider=lambda: None,
-    )
-    continuation = replace(
-        _continuation(),
-        calls=(
-            replace(
-                _continuation().calls[0],
-                card_event_id="$approval",
-                expires_at="2020-01-01T00:00:00+00:00",
-            ),
-        ),
-    )
-    expire = AsyncMock(side_effect=[False, True])
-    monkeypatch.setattr("mindroom.approval_transport.expire_suspended_tool_approval", expire)
-
-    transport._continuations.create(continuation)
-    transport._schedule_expiry(continuation)
-    tasks = tuple(transport._expiry_tasks.values())
-    await asyncio.gather(*tasks)
-
-    assert expire.await_count == 2
-    assert transport._expiry_tasks == {}
-
-
-@pytest.mark.asyncio
-async def test_expiry_task_keeps_retrying_after_continuation_becomes_ready(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Durable continuation readiness does not prove its Matrix card edit landed."""
+    router = SimpleNamespace(running=True, fail_approval_continuation=AsyncMock(side_effect=fail))
     transport = ApprovalMatrixTransport(
         runtime_paths=RuntimePaths(
             config_path=tmp_path / "config.yaml",
@@ -544,39 +473,23 @@ async def test_expiry_task_keeps_retrying_after_continuation_becomes_ready(
             env_path=tmp_path / ".env",
             storage_root=tmp_path,
         ),
-        bot_provider=lambda _name: None,
+        bot_provider=lambda name: cast("Any", router if name == "router" else None),
         cards_provider=lambda: None,
+        entity_configured=lambda name: name == "research",
+        entity_permanently_unavailable=lambda name: name == "research",
     )
-    continuation = replace(
-        _continuation(),
-        calls=(
-            replace(
-                _continuation().calls[0],
-                card_event_id="$approval",
-                expires_at="2020-01-01T00:00:00+00:00",
-            ),
-        ),
-    )
-    transport._continuations.create(continuation)
-    attempts = 0
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    ready = transport._continuations.acknowledge_call("approval-1", "call-1")
+    assert ready is not None
+    assert ready.state == "ready"
 
-    async def expire(_room_id: str, _card_event_id: str) -> bool:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.EXPIRED)
-            transport._continuations.acknowledge_call("approval-1", "call-1")
-            return False
-        return True
+    await transport._dispatch_continuation("approval-1")
 
-    monkeypatch.setattr("mindroom.approval_transport.expire_suspended_tool_approval", AsyncMock(side_effect=expire))
-
-    transport._schedule_expiry(continuation)
-    tasks = tuple(transport._expiry_tasks.values())
-    await asyncio.gather(*tasks)
-
-    assert attempts == 2
-    assert transport._expiry_tasks == {}
+    settled = transport._continuations.get("approval-1")
+    assert settled is not None
+    assert settled.state == "failed"
+    router.fail_approval_continuation.assert_awaited_once()
 
 
 @pytest.mark.asyncio

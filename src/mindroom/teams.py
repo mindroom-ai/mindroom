@@ -1826,7 +1826,7 @@ def build_materialized_team_instance(
     )
 
 
-async def continue_paused_team_run(
+async def continue_paused_team_run(  # noqa: C901
     *,
     member_names: tuple[str, ...],
     mode: TeamMode,
@@ -1840,6 +1840,7 @@ async def continue_paused_team_run(
     model_name: str,
     decisions: dict[str, bool],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
+    tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> str | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run."""
     members = await asyncio.to_thread(
@@ -1851,25 +1852,25 @@ async def continue_paused_team_run(
         session_id=session_id,
         refresh_scheduler=refresh_scheduler,
         dynamic_tool_continuation=True,
+        supports_native_tool_approval=True,
     )
     stack = ExitStack()
-    scope = stack.enter_context(
-        open_bound_scope_session_context(
-            agents=members.agents,
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            team_name=configured_team_name,
-        ),
-    )
-    if scope is None:
-        close_team_runtime_state_dbs(agents=members.agents, team_db=None)
-        stack.close()
-        msg = "Paused team history is no longer available"
-        raise RuntimeError(msg)
+    scope: ScopeSessionContext | None = None
     team: Team | None = None
     try:
+        scope = stack.enter_context(
+            open_bound_scope_session_context(
+                agents=members.agents,
+                session_id=session_id,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+                team_name=configured_team_name,
+            ),
+        )
+        if scope is None:
+            msg = "Paused team history is no longer available"
+            raise RuntimeError(msg)
         team = build_materialized_team_instance(
             requested_agent_names=list(member_names),
             agents=members.agents,
@@ -1926,12 +1927,14 @@ async def continue_paused_team_run(
             return paused
         if continued.status is not RunStatus.completed:
             raise RuntimeError(str(continued.content or "Team continuation did not complete"))
+        if tool_trace_collector is not None:
+            tool_trace_collector.extend(_extract_completed_team_tool_trace(continued))
         return _format_terminal_team_response(continued, team_display_names=members.display_names)
     finally:
         close_team_runtime_state_dbs(
             agents=members.agents,
             team_db=cast("BaseDb | None", team.db) if team is not None else None,
-            shared_scope_storage=scope.storage,
+            shared_scope_storage=scope.storage if scope is not None else None,
         )
         stack.close()
 

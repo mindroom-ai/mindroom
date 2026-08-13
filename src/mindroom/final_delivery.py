@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from mindroom.interactive import InteractiveMetadata
     from mindroom.tool_system.events import ToolTraceEntry
 
-_TerminalStatus = Literal["completed", "cancelled", "error"]
+_TerminalStatus = Literal["completed", "cancelled", "error", "suspended"]
 VisibleBodyState = Literal["none", "placeholder_only", "visible_body"]
 _VisibleDeliveryKind = Literal["sent", "edited"]
 

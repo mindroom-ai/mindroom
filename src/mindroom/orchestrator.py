@@ -240,6 +240,7 @@ class _MultiAgentOrchestrator:
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _bot_start_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
+    _permanently_failed_entities: set[str] = field(default_factory=set, init=False)
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     _todo_poke_runtime: TodoPokeRuntimeCoordinator = field(init=False, repr=False)
@@ -295,6 +296,7 @@ class _MultiAgentOrchestrator:
             entity_configured=lambda name: (
                 self.config is not None and (name in self.config.agents or name in self.config.teams)
             ),
+            entity_permanently_unavailable=lambda name: name in self._permanently_failed_entities,
         )
         self._startup_maintenance = StartupMaintenanceController(
             recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (
@@ -602,8 +604,10 @@ class _MultiAgentOrchestrator:
                 else:
                     start_status = await self._try_start_bot_once(entity_name, bot)
                 if start_status is None:
+                    self._permanently_failed_entities.add(entity_name)
                     return
                 if start_status:
+                    self._permanently_failed_entities.discard(entity_name)
                     logger.info("Bot recovered after startup failure", agent_name=entity_name)
                     bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
                     self._bind_started_runtime_support_services([bot])
@@ -967,13 +971,16 @@ class _MultiAgentOrchestrator:
         )
         for (entity_name, bot), start_status in zip(entity_bots, start_statuses):
             if start_status:
+                self._permanently_failed_entities.discard(entity_name)
                 results.started_bots.append(bot)
                 if start_sync_tasks:
                     self._start_sync_task(entity_name, bot)
                 continue
             if start_status is None:
+                self._permanently_failed_entities.add(entity_name)
                 results.permanently_failed_entities.append(entity_name)
                 continue
+            self._permanently_failed_entities.discard(entity_name)
             results.retryable_entities.append(entity_name)
         return results
 
@@ -1392,6 +1399,9 @@ class _MultiAgentOrchestrator:
         already_stopped_entities: set[str] | None = None,
     ) -> tuple[set[str], list[str], list[str]]:
         """Restart or create entities affected by the config change."""
+        self._permanently_failed_entities.difference_update(
+            plan.entities_to_restart | plan.new_entities | plan.removed_entities,
+        )
         entities_to_stop = plan.entities_to_restart - (already_stopped_entities or set())
         replaced_bots = self._replacement_bots(plan.entities_to_restart)
         if entities_to_stop:
@@ -1461,6 +1471,7 @@ class _MultiAgentOrchestrator:
                 server_id=server_id,
                 entities=sorted(changed_entities),
             )
+            self._permanently_failed_entities.difference_update(changed_entities)
             self._external_trigger_runtime.unbind_for_entity_changes(changed_entities)
             replaced_bots = self._replacement_bots(changed_entities)
             for entity_name in changed_entities:

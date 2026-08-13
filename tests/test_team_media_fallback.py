@@ -77,6 +77,7 @@ from mindroom.teams import (
     _PreparedMaterializedTeamExecution,
     _team_response_stream_raw,
     build_materialized_team_instance,
+    continue_paused_team_run,
     materialize_exact_team_members,
     prepare_materialized_team_execution,
     team_response,
@@ -301,6 +302,65 @@ def test_materialize_exact_requested_team_members_short_circuits_missing_live_me
     assert team_members.materialized_agent_names == set()
     assert team_members.failed_agent_names == ["research"]
     build_member.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_paused_team_scope_open_failure_closes_materialized_member_databases() -> None:
+    """A scope __enter__ failure must still release every newly materialized member DB."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    agent = _make_test_agent("GeneralAgent")
+    members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[agent],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    class ThrowingScope:
+        def __enter__(self) -> None:
+            msg = "scope open failed"
+            raise RuntimeError(msg)
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    with (
+        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
+        patch("mindroom.teams.open_bound_scope_session_context", return_value=ThrowingScope()),
+        patch("mindroom.teams.close_team_runtime_state_dbs") as close_dbs,
+        pytest.raises(RuntimeError, match="scope open failed"),
+    ):
+        await continue_paused_team_run(
+            member_names=("general",),
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            session_id="session-1",
+            run_id="run-1",
+            user_id="@user:localhost",
+            configured_team_name="research",
+            model_name="default",
+            decisions={"call-1": True},
+            refresh_scheduler=None,
+        )
+
+    close_dbs.assert_called_once_with(
+        agents=[agent],
+        team_db=None,
+        shared_scope_storage=None,
+    )
 
 
 def test_materialize_exact_team_members_closes_partial_agents_on_failure() -> None:

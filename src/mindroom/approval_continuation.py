@@ -103,6 +103,9 @@ class ApprovalContinuation:
     team_member_names: tuple[str, ...] = ()
     team_mode: str | None = None
     generation: int = 0
+    request_body: str = ""
+    transport_sender_id: str | None = None
+    source_kind: str = "message"
 
     def _to_context(self) -> dict[str, object]:
         """Serialize the continuation into Agno approval context."""
@@ -123,6 +126,9 @@ class ApprovalContinuation:
             "team_member_names": list(self.team_member_names),
             "team_mode": self.team_mode,
             "generation": self.generation,
+            "request_body": self.request_body,
+            "transport_sender_id": self.transport_sender_id,
+            "source_kind": self.source_kind,
         }
 
     @classmethod
@@ -150,6 +156,9 @@ class ApprovalContinuation:
             team_member_names=tuple(cast("list[str]", context.get("team_member_names", []))),
             team_mode=cast("str | None", context.get("team_mode")),
             generation=cast("int", context.get("generation", 0)),
+            request_body=cast("str", context.get("request_body", "")),
+            transport_sender_id=cast("str | None", context.get("transport_sender_id")),
+            source_kind=cast("str", context.get("source_kind", "message")),
         )
 
 
