@@ -13,7 +13,7 @@ from weakref import WeakValueDictionary
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, SKIP_MENTIONS_KEY
 from mindroom.event_journal import OutboxDelivery, OutboxView, TerminalTurnWrite
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
@@ -1158,6 +1158,13 @@ class DeliveryGateway:
 
         interactive_response = interactive.parse_and_format_interactive(draft.response_text, extract_mapping=True)
         display_text = interactive_response.formatted_text
+        delivery_extra_content = dict(draft.extra_content or {})
+        if request.defer_source_handoff:
+            metadata = interactive_response.interactive_metadata
+            delivery_extra_content[DURABLE_FINAL_OUTCOME_KEY] = {
+                "body": display_text,
+                "interactive": metadata.to_metadata() if metadata is not None else None,
+            }
 
         if request.existing_event_id is not None:
             edited = await self.edit_text(
@@ -1166,7 +1173,7 @@ class DeliveryGateway:
                     event_id=request.existing_event_id,
                     new_text=display_text,
                     tool_trace=draft.tool_trace,
-                    extra_content=draft.extra_content,
+                    extra_content=delivery_extra_content,
                     delivery_turn_id=request.identity.response_envelope.source_event_id,
                     retry_sync_recovery=True,
                     defer_source_handoff=request.defer_source_handoff,
@@ -1180,7 +1187,7 @@ class DeliveryGateway:
                     final_visible_body=display_text,
                     delivery_kind="edited",
                     tool_trace=tuple(draft.tool_trace or ()),
-                    extra_content=draft.extra_content,
+                    extra_content=delivery_extra_content,
                     interactive_metadata=interactive_response.interactive_metadata,
                 )
 
@@ -1192,7 +1199,7 @@ class DeliveryGateway:
                         identity=request.identity,
                         failure_reason="delivery_failed",
                         tool_trace=draft.tool_trace,
-                        extra_content=draft.extra_content,
+                        extra_content=delivery_extra_content,
                     ),
                 )
             return FinalDeliveryOutcome(
@@ -1201,7 +1208,7 @@ class DeliveryGateway:
                 is_visible_response=True,
                 failure_reason="delivery_failed",
                 tool_trace=tuple(draft.tool_trace or ()),
-                extra_content=draft.extra_content,
+                extra_content=delivery_extra_content,
             )
         event_id = await self.send_text(
             SendTextRequest(
@@ -1209,7 +1216,7 @@ class DeliveryGateway:
                 response_text=display_text,
                 skip_mentions=request.skip_mentions,
                 tool_trace=draft.tool_trace,
-                extra_content=draft.extra_content,
+                extra_content=delivery_extra_content,
                 retry_sync_recovery=True,
                 # The Matrix event that caused this turn. The handled-turn
                 # ledger already keys on it, and it re-derives to the same
@@ -1224,7 +1231,7 @@ class DeliveryGateway:
                 event_id=None,
                 failure_reason="delivery_failed",
                 tool_trace=tuple(draft.tool_trace or ()),
-                extra_content=draft.extra_content,
+                extra_content=delivery_extra_content,
             )
         return FinalDeliveryOutcome(
             terminal_status="completed",
@@ -1233,7 +1240,7 @@ class DeliveryGateway:
             final_visible_body=display_text,
             delivery_kind="sent",
             tool_trace=tuple(draft.tool_trace or ()),
-            extra_content=draft.extra_content,
+            extra_content=delivery_extra_content,
             interactive_metadata=interactive_response.interactive_metadata,
         )
 

@@ -368,8 +368,13 @@ async def test_paused_team_scope_open_failure_closes_materialized_member_databas
     )
 
 
+@pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
 @pytest.mark.asyncio
-async def test_team_continuation_executes_real_agno_confirmation(tmp_path: Path) -> None:
+async def test_team_continuation_executes_real_agno_confirmation(
+    tmp_path: Path,
+    approved: bool,
+    reason: str | None,
+) -> None:
     """Exercise the real persisted Agno team pause and continuation spine."""
     executed: list[list[str]] = []
 
@@ -399,6 +404,7 @@ async def test_team_continuation_executes_real_agno_confirmation(tmp_path: Path)
         db=SqliteDb(db_file=str(tmp_path / "team-continuation.db"), session_table="sessions"),
     )
     paused = await team.arun("exercise the tool", session_id="session-1", user_id="@user:localhost", stream=False)
+    continue_run = MagicMock(wraps=team.acontinue_run)
     requirement = (paused.requirements or [])[0]
     assert requirement.tool_execution is not None
     tool_call_id = requirement.tool_execution.tool_call_id
@@ -430,6 +436,7 @@ async def test_team_continuation_executes_real_agno_confirmation(tmp_path: Path)
             return_value=nullcontext(SimpleNamespace(storage=None)),
         ) as open_scope,
         patch("mindroom.teams.build_materialized_team_instance", return_value=team),
+        patch.object(team, "acontinue_run", new=continue_run),
         patch("mindroom.teams.close_team_runtime_state_dbs"),
     ):
         result = await continue_paused_team_run(
@@ -443,16 +450,111 @@ async def test_team_continuation_executes_real_agno_confirmation(tmp_path: Path)
             user_id="@user:localhost",
             configured_team_name="research",
             model_name="default",
-            decisions={tool_call_id: True},
-            denial_reasons={tool_call_id: None},
+            decisions={tool_call_id: approved},
+            denial_reasons={tool_call_id: reason},
             refresh_scheduler=None,
             history_scope=persisted_scope,
         )
 
     assert isinstance(result, CompletedApprovalRun)
     assert AI_RUN_METADATA_KEY in result.metadata_content
-    assert executed == [["echo", "hi"]]
+    assert bool(executed) is approved
+    continued_requirement = continue_run.call_args.kwargs["requirements"][0]
+    assert continued_requirement.tool_execution is not None
+    assert continued_requirement.tool_execution.confirmed is approved
+    assert continued_requirement.tool_execution.confirmation_note == (None if approved else reason)
     assert open_scope.call_args.kwargs["scope"] == persisted_scope
+
+
+@pytest.mark.parametrize(
+    ("persisted_call_ids", "decision_call_ids"),
+    [
+        pytest.param((None,), ("call-1",), id="missing"),
+        pytest.param(("call-1", "call-1"), ("call-1",), id="duplicate"),
+        pytest.param(("call-1",), ("call-1", "call-extra"), id="extra"),
+        pytest.param(("call-new",), ("call-stale",), id="stale"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_team_continuation_rejects_non_exact_persisted_call_ids(
+    persisted_call_ids: tuple[str | None, ...],
+    decision_call_ids: tuple[str, ...],
+) -> None:
+    """A malformed persisted team pause must never reach Agno continuation execution."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    requirements = [
+        RunRequirement(
+            ToolExecution(
+                tool_call_id=call_id,
+                tool_name="dangerous",
+                requires_confirmation=True,
+            ),
+        )
+        for call_id in persisted_call_ids
+    ]
+    persisted = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        requirements=requirements,
+    )
+    team = MagicMock()
+    team.db = None
+    team.aget_session = AsyncMock(return_value=SimpleNamespace(get_run=lambda _run_id: persisted))
+    team.acontinue_run = AsyncMock(
+        return_value=TeamRunOutput(
+            run_id="run-1",
+            session_id="session-1",
+            status=RunStatus.completed,
+        ),
+    )
+    members = ResolvedExactTeamMembers(
+        requested_agent_names=[],
+        agents=[],
+        display_names=[],
+        materialized_agent_names=set(),
+        failed_agent_names=[],
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="research",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    decisions = dict.fromkeys(decision_call_ids, True)
+    denial_reasons = dict.fromkeys(decision_call_ids)
+
+    with (
+        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
+        patch(
+            "mindroom.teams.open_bound_scope_session_context",
+            return_value=nullcontext(SimpleNamespace(storage=None)),
+        ),
+        patch("mindroom.teams.build_materialized_team_instance", return_value=team),
+        patch("mindroom.teams.close_team_runtime_state_dbs"),
+        pytest.raises(RuntimeError, match="no longer match the approval continuation"),
+    ):
+        await continue_paused_team_run(
+            member_names=(),
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            session_id="session-1",
+            run_id="run-1",
+            user_id="@user:localhost",
+            configured_team_name="research",
+            model_name="default",
+            decisions=decisions,
+            denial_reasons=denial_reasons,
+            refresh_scheduler=None,
+        )
+
+    team.acontinue_run.assert_not_awaited()
 
 
 def test_materialize_exact_team_members_closes_partial_agents_on_failure() -> None:

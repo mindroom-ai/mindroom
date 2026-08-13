@@ -18,6 +18,9 @@ import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.db.sqlite import SqliteDb
 from agno.models.response import ToolExecution
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
+from agno.run.requirement import RunRequirement
 from agno.tools.function import Function
 
 from mindroom import background_tasks as background_tasks_module
@@ -1108,6 +1111,93 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     assert continued_requirement.tool_execution.confirmation_note == (None if approved else reason)
 
 
+@pytest.mark.parametrize(
+    ("persisted_call_ids", "decision_call_ids"),
+    [
+        pytest.param((None,), ("call-1",), id="missing"),
+        pytest.param(("call-1", "call-1"), ("call-1",), id="duplicate"),
+        pytest.param(("call-1",), ("call-1", "call-extra"), id="extra"),
+        pytest.param(("call-new",), ("call-stale",), id="stale"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
+    tmp_path: Path,
+    persisted_call_ids: tuple[str | None, ...],
+    decision_call_ids: tuple[str, ...],
+) -> None:
+    """A malformed persisted pause must never reach Agno continuation execution."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    requirements = [
+        RunRequirement(
+            ToolExecution(
+                tool_call_id=call_id,
+                tool_name="dangerous",
+                requires_confirmation=True,
+            ),
+        )
+        for call_id in persisted_call_ids
+    ]
+    persisted = RunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        requirements=requirements,
+    )
+    agent = MagicMock()
+    agent.aget_session = AsyncMock(return_value=SimpleNamespace(get_run=lambda _run_id: persisted))
+    agent.acontinue_run = AsyncMock(
+        return_value=RunOutput(
+            run_id="run-1",
+            session_id="session-1",
+            status=RunStatus.completed,
+        ),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-invalid-agent",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="claimed",
+    )
+    decisions = dict.fromkeys(decision_call_ids, True)
+    denial_reasons = dict.fromkeys(decision_call_ids)
+
+    with (
+        patch.object(runner.deps.knowledge_access, "for_agent", return_value=MagicMock()),
+        patch("mindroom.approval_execution.create_agent", return_value=agent),
+        patch("mindroom.approval_execution.close_agent_runtime_state_dbs"),
+        pytest.raises(RuntimeError, match="no longer match the approval continuation"),
+    ):
+        await runner._approval_execution.continue_run(
+            continuation,
+            execution_identity=identity,
+            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            decisions=decisions,
+            denial_reasons=denial_reasons,
+            tool_trace_collector=[],
+        )
+
+    agent.acontinue_run.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path: Path) -> None:
     """Unchanged bots must apply reloaded approval policy and agent configuration."""
@@ -1266,6 +1356,192 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_path: Path) -> None:
+    """Restart recovery must replay semantic final facts, not rendered Matrix HTML."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-final-semantic",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    await store.enqueue_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={
+            "body": "plain fallback",
+            "formatted_body": "<strong>rendered html</strong>",
+            "io.mindroom.final_delivery": {
+                "body": "plain final",
+                "interactive": {
+                    "question_text": "Pick",
+                    "option_map": {"1": "yes", "✅": "yes"},
+                    "option_labels": {"1": "Yes", "✅": "Yes"},
+                    "options_list": [{"emoji": "✅", "label": "Yes", "value": "yes"}],
+                },
+            },
+        },
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    await store.acknowledge_delivery(turn_id="$source", stage=DeliveryStage.FINAL, event_id="$final")
+    lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
+
+    with patch.object(runner, "_build_lifecycle", return_value=lifecycle):
+        event_id = await runner._recover_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert event_id == "$final"
+    final = lifecycle.finalize.await_args.args[0]
+    assert final.final_visible_body == "plain final"
+    assert final.interactive_metadata is not None
+    assert final.interactive_metadata.question_text == "Pick"
+    assert final.option_map == {"1": "yes", "✅": "yes"}
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_path: Path) -> None:
+    """A visible successful FINAL must complete even if the live caller is cancelled afterward."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-final-cancelled-return",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+
+    async def acknowledge_then_cancel(*_args: object, **_kwargs: object) -> tuple[object, object]:
+        await store.enqueue_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            payload={
+                "body": "plain final",
+                "io.mindroom.final_delivery": {"body": "plain final", "interactive": None},
+            },
+            edits_event_id="$waiting",
+        )
+        assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+        await store.acknowledge_delivery(turn_id="$source", stage=DeliveryStage.FINAL, event_id="$final")
+        raise asyncio.CancelledError
+
+    lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
+    with (
+        patch.object(runner, "_execute_claimed_approval", side_effect=acknowledge_then_cancel),
+        patch.object(runner, "_build_lifecycle", return_value=lifecycle),
+        patch.object(runner, "_approval_post_response_outcome", return_value=ResponseOutcome()),
+    ):
+        outcome = await runner._run_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert outcome.terminal_status == "completed"
+    assert outcome.event_id == "$final"
+    assert await store.approval_continuation(continuation.approval_id) is None
+    finalized = [call.args[0] for call in lifecycle.finalize.await_args_list]
+    assert [item.terminal_status for item in finalized] == ["completed"]
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp_path: Path) -> None:
+    """Late lifecycle cancellation must adopt the visible success before failure fencing."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-final-late-cancel",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+
+    async def acknowledge_then_cancel(claimed: ApprovalContinuation, **_kwargs: object) -> None:
+        await store.enqueue_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            payload={
+                "body": "plain final",
+                "io.mindroom.final_delivery": {"body": "plain final", "interactive": None},
+            },
+            edits_event_id="$waiting",
+        )
+        assert claimed.state == "claimed"
+        assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+        await store.acknowledge_delivery(turn_id="$source", stage=DeliveryStage.FINAL, event_id="$final")
+        raise asyncio.CancelledError
+
+    lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
+    with (
+        patch.object(runner, "_run_claimed_approval_lifecycle", side_effect=acknowledge_then_cancel),
+        patch.object(runner, "_build_lifecycle", return_value=lifecycle),
+        patch.object(runner, "_approval_post_response_outcome", return_value=ResponseOutcome()),
+    ):
+        event_id = await runner._run_owned_or_locked_response(
+            request,
+            target=request.response_envelope.target,
+            early_placeholder=response_runner._EarlyPlaceholderState(),
+            locked_operation=AsyncMock(return_value="$duplicate"),
+        )
+
+    assert event_id == "$final"
+    assert await store.approval_continuation(continuation.approval_id) is None
+    assert not await store.is_pending("$source")
+
+
+@pytest.mark.asyncio
 async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: Path) -> None:
     """An inconclusive FINAL retry must retain the exact paused-run ownership."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -1358,6 +1634,56 @@ async def test_continuation_rejects_missing_persisted_execution_identity(tmp_pat
             target=_target(),
             tool_trace_collector=[],
         )
+
+
+@pytest.mark.asyncio
+async def test_approval_request_restores_exact_hook_envelope_after_store_reload(tmp_path: Path) -> None:
+    """Resume hooks must observe the same ingress identity and correlation as suspension."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    original_envelope = replace(
+        _envelope(_target(thread_id="$thread"), source_event_id="$source"),
+        mentioned_agents=("research", "general"),
+        hook_source="plugin:message_received",
+        dispatch_policy_source_kind="plugin",
+        message_received_depth=3,
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-hook-context",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+        request_body=original_envelope.body,
+        origin=original_envelope.origin,
+        mentioned_agents=original_envelope.mentioned_agents,
+        hook_source=original_envelope.hook_source,
+        dispatch_policy_source_kind=original_envelope.dispatch_policy_source_kind,
+        message_received_depth=original_envelope.message_received_depth,
+        correlation_id="correlation-original",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    reloaded = await store.approval_continuation(continuation.approval_id)
+    assert reloaded is not None
+
+    restored = runner._approval_response_request(
+        reloaded,
+        target=_target(thread_id="$thread", reply_to_event_id="$source"),
+    )
+
+    assert restored.correlation_id == "correlation-original"
+    assert restored.response_envelope.mentioned_agents == ("research", "general")
+    assert restored.response_envelope.hook_source == "plugin:message_received"
+    assert restored.response_envelope.dispatch_policy_source_kind == "plugin"
+    assert restored.response_envelope.message_received_depth == 3
 
 
 @pytest.mark.asyncio

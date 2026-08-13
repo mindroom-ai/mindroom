@@ -41,7 +41,7 @@ from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from contextlib import AbstractContextManager
 
     from agno.models.response import ToolExecution
@@ -77,6 +77,7 @@ __all__ = [
     "TurnPartialSnapshot",
     "TurnRunState",
     "TurnSinks",
+    "apply_exact_approval_decisions",
     "build_matrix_run_metadata",
     "paused_attempt_from_event",
     "paused_attempt_from_response",
@@ -91,6 +92,33 @@ class CompletedApprovalRun:
 
     response_text: str
     metadata_content: dict[str, Any]
+
+
+def apply_exact_approval_decisions(
+    requirements: Sequence[RunRequirement],
+    *,
+    decisions: Mapping[str, bool],
+    denial_reasons: Mapping[str, str | None],
+) -> list[RunRequirement]:
+    """Apply decisions only when they exactly identify one persisted call each."""
+    pending = [requirement for requirement in requirements if requirement.needs_confirmation]
+    call_ids: list[str] = []
+    for requirement in pending:
+        tool = requirement.tool_execution
+        if tool is None or not tool.tool_call_id:
+            msg = "Paused tools no longer match the approval continuation"
+            raise RuntimeError(msg)
+        call_ids.append(tool.tool_call_id)
+    decision_ids = set(decisions)
+    if len(call_ids) != len(set(call_ids)) or set(call_ids) != decision_ids or set(denial_reasons) != decision_ids:
+        msg = "Paused tools no longer match the approval continuation"
+        raise RuntimeError(msg)
+    for requirement, tool_call_id in zip(pending, call_ids, strict=True):
+        if decisions[tool_call_id]:
+            requirement.confirm()
+        else:
+            requirement.reject(denial_reasons[tool_call_id] or "Not approved by requester")
+    return pending
 
 
 def _normalized_string_list(values: object) -> list[str]:

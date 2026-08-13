@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import nio
 
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.event_journal import DeliveryStage, unavailable_notice_turn_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     can_send_to_encrypted_room,
@@ -17,7 +19,11 @@ from mindroom.matrix.client_delivery import (
 )
 from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_upload_is_usable, upload_json_sidecar
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
-from mindroom.matrix.room_history_reads import find_approval_card_event_id_via_room_messages
+from mindroom.matrix.room_history_reads import (
+    find_approval_card_event_id_via_room_messages,
+    find_response_event_ids_via_room_messages,
+)
+from mindroom.response_delivery import ResponseDelivery
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
@@ -32,7 +38,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterable
 
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import ApprovalContinuation, ApprovalView, EventJournalStore
+    from mindroom.event_journal import (
+        ApprovalContinuation,
+        ApprovalView,
+        EventJournalStore,
+        OutboxDelivery,
+        PrincipalStore,
+    )
 
 logger = get_logger(__name__)
 
@@ -40,6 +52,8 @@ _TApprovalTransportResult = TypeVar("_TApprovalTransportResult")
 _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS = 1.0
 _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
 _STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION = 10
+_UNAVAILABLE_OWNER_SCAN_LIMIT = 100
+_UNAVAILABLE_NOTICE_APPROVAL_ID_KEY = "io.mindroom.approval_unavailable_id"
 
 
 class _ApprovalTransportBot(Protocol):
@@ -51,6 +65,9 @@ class _ApprovalTransportBot(Protocol):
 
     @property
     def approval_room_ids(self) -> frozenset[str]: ...
+
+    @property
+    def approval_store(self) -> PrincipalStore: ...
 
     async def latest_thread_event_id_if_needed(
         self,
@@ -182,13 +199,112 @@ class ApprovalMatrixTransport:
         if not names or journal is None:
             return
         complete = True
-        for principal_id, continuation in await journal.approval_continuations_for_entities(names):
-            reason = self._unavailable_entity_reason(continuation.entity_name)
-            if reason is not None:
-                complete = await self._discard_unavailable(principal_id, continuation, reason) and complete
+        cursor: tuple[str, str] | None = None
+        while True:
+            owners = await journal.approval_continuations_for_entities(
+                names,
+                limit=_UNAVAILABLE_OWNER_SCAN_LIMIT,
+                after=cursor,
+            )
+            if not owners:
+                break
+            cursor = (owners[-1][1].entity_name, owners[-1][1].approval_id)
+            for principal_id, continuation in owners:
+                reason = self._unavailable_entity_reason(continuation.entity_name)
+                if reason is not None:
+                    complete = await self._discard_unavailable(principal_id, continuation, reason) and complete
+            if len(owners) < _UNAVAILABLE_OWNER_SCAN_LIMIT:
+                break
         if not complete:
             self._startup_cleanup_done = False
             self._schedule_startup_cleanup_retry()
+
+    @staticmethod
+    def _is_unavailable_notice(event_source: Mapping[str, Any], *, approval_id: str) -> bool:
+        """Return whether one room event is the exact durable fallback notice."""
+        content = event_source.get("content")
+        return isinstance(content, Mapping) and content.get(_UNAVAILABLE_NOTICE_APPROVAL_ID_KEY) == approval_id
+
+    async def _deliver_unavailable_notice(
+        self,
+        continuation: ApprovalContinuation,
+        reason: str,
+    ) -> PrincipalStore | None:
+        """Durably send or adopt one router-owned unavailable-owner notice."""
+        bot = self.transport_bot(continuation.room_id)
+        if bot is None or bot.client is None:
+            return None
+        client = bot.client
+        if not can_send_to_encrypted_room(client, continuation.room_id, operation="send_approval_notice"):
+            return None
+        store = bot.approval_store
+        content = build_message_content(
+            reason,
+            thread_event_id=continuation.thread_id,
+            reply_to_event_id=continuation.response_event_id,
+            extra_content={
+                "msgtype": "m.notice",
+                _UNAVAILABLE_NOTICE_APPROVAL_ID_KEY: continuation.approval_id,
+            },
+        )
+
+        async def send(claimed: OutboxDelivery) -> str:
+            response = await send_room_event_result(
+                client,
+                claimed.room_id,
+                "m.room.message",
+                dict(claimed.payload),
+                transaction_id=claimed.transaction_id,
+                operation="send_approval_notice",
+            )
+            if not isinstance(response, nio.RoomSendResponse):
+                msg = f"Matrix refused unavailable-owner notice for {continuation.approval_id!r}: {response}"
+                raise ToolApprovalTransportError(msg)
+            return str(response.event_id)
+
+        async def resolve_delivered(claimed: OutboxDelivery) -> str | None:
+            response_sender = client.user_id
+            if not response_sender:
+                return None
+            delivered = await find_response_event_ids_via_room_messages(
+                client,
+                claimed.room_id,
+                response_sender=response_sender,
+                source_event_ids=(continuation.response_event_id,),
+                response_source_filter=lambda source: self._is_unavailable_notice(
+                    source,
+                    approval_id=continuation.approval_id,
+                ),
+            )
+            if len(delivered) > 1:
+                msg = (
+                    f"Approval continuation {continuation.approval_id!r} has {len(delivered)} unavailable-owner notices"
+                )
+                raise RuntimeError(msg)
+            return next(iter(delivered), None)
+
+        try:
+            delivered = await ResponseDelivery(
+                store=store,
+                send=send,
+                sending_device_id=self.transport_device_id(),
+                resolve_delivered=resolve_delivered,
+            ).deliver(
+                turn_id=unavailable_notice_turn_id(continuation.approval_id),
+                stage=DeliveryStage.FINAL,
+                room_id=continuation.room_id,
+                thread_id=continuation.thread_id,
+                payload=content,
+            )
+        except ToolApprovalTransportError:
+            logger.warning(
+                "approval_unavailable_notice_send_failed",
+                approval_id=continuation.approval_id,
+                room_id=continuation.room_id,
+                exc_info=True,
+            )
+            return None
+        return store if delivered is not None else None
 
     async def _discard_unavailable(
         self,
@@ -214,15 +330,13 @@ class ApprovalMatrixTransport:
                 return False
         if not await expire_continuation_approval_cards(current.approval_id):
             return False
-        if not await self.send_notice(
-            room_id=current.room_id,
-            approval_event_id=current.response_event_id,
-            thread_id=current.thread_id,
-            reason=reason,
-            transaction_id=f"approval-unavailable-{current.approval_id}",
-        ):
+        notice_store = await self._deliver_unavailable_notice(current, reason)
+        if notice_store is None:
             return False
-        return await store.discard_unavailable_approval_continuation(current.approval_id)
+        return await store.discard_unavailable_approval_continuation(
+            current.approval_id,
+            notice_principal_id=notice_store.principal_id,
+        )
 
     async def _reconcile_startup_unavailable(self) -> bool:
         """Clean rows left by entities removed while the process was offline."""
@@ -230,10 +344,21 @@ class ApprovalMatrixTransport:
         if journal is None:
             return True
         complete = True
-        for principal_id, continuation in await journal.approval_continuations():
-            reason = self._unavailable_entity_reason(continuation.entity_name)
-            if reason is not None:
-                complete = await self._discard_unavailable(principal_id, continuation, reason) and complete
+        cursor: tuple[str, str] | None = None
+        while True:
+            owners = await journal.approval_continuations(
+                limit=_UNAVAILABLE_OWNER_SCAN_LIMIT,
+                after=cursor,
+            )
+            if not owners:
+                break
+            cursor = (owners[-1][1].entity_name, owners[-1][1].approval_id)
+            for principal_id, continuation in owners:
+                reason = self._unavailable_entity_reason(continuation.entity_name)
+                if reason is not None:
+                    complete = await self._discard_unavailable(principal_id, continuation, reason) and complete
+            if len(owners) < _UNAVAILABLE_OWNER_SCAN_LIMIT:
+                break
         return complete
 
     async def _run_on_runtime_loop(

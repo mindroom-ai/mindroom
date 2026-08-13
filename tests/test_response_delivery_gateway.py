@@ -359,6 +359,36 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         # would be permanent for those clients, not a one-attempt glitch.
         assert stored["body"] == "* the answer"
 
+    async def test_deferred_final_edit_freezes_semantic_interactive_outcome(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Approval recovery must restore plain text and interactive registration facts."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        edited = DeliveredMatrixEvent("$placeholder", {"msgtype": "m.text", "body": "Choose"})
+        interactive_text = (
+            'Choose one.\n```interactive\n{"question":"Pick",'
+            '"options":[{"emoji":"✅","label":"Yes","value":"yes"}]}\n```'
+        )
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=edited)):
+            outcome = await gateway.deliver_final(
+                replace(
+                    self._final_request(interactive_text),
+                    existing_event_id="$placeholder",
+                    defer_source_handoff=True,
+                ),
+            )
+
+        frozen = outbox.rows["$cause", "final"].payload
+        new_content = frozen["m.new_content"]
+        semantic = new_content["io.mindroom.final_delivery"]
+        assert semantic["body"] == outcome.final_visible_body
+        assert semantic["interactive"]["question_text"] == "Pick"
+        assert semantic["interactive"]["option_map"] == {"1": "yes", "✅": "yes"}
+
     async def test_a_regenerated_answer_cannot_go_out_under_a_frozen_edit(
         self,
         tmp_path: Path,

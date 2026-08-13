@@ -3948,7 +3948,7 @@ class TestApprovalContinuations:
             card_event_id="$approval",
             requested_status="approved",
             reason=None,
-            resolution={"status": "approved", "body": "Approved: shell"},
+            resolution={"status": "approved", "body": "Approved: shell", "resolved_by": ALICE},
         )
 
         assert recorded.recorded is True
@@ -3956,6 +3956,7 @@ class TestApprovalContinuations:
             "status": "expired",
             "body": "Expired: shell",
             "resolution_reason": "Tool approval request timed out.",
+            "resolved_by": None,
         }
         continuation = await alice.approval_continuation_for_source("$source-1")
         assert continuation is not None
@@ -3981,7 +3982,7 @@ class TestApprovalContinuations:
             card_event_id="$approval",
             requested_status="approved",
             reason=None,
-            resolution={"status": "approved", "body": "Approved: shell"},
+            resolution={"status": "approved", "body": "Approved: shell", "resolved_by": ALICE},
         )
 
         assert recorded.recorded is True
@@ -3990,6 +3991,7 @@ class TestApprovalContinuations:
             "status": "denied",
             "body": "Denied: shell",
             "resolution_reason": "Approval publication failed safely.",
+            "resolved_by": None,
         }
         continuation = await alice.approval_continuation_for_source("$source-1")
         assert continuation is not None
@@ -4076,7 +4078,7 @@ class TestApprovalContinuations:
         journal_store: EventJournalStore,
         alice: PrincipalStore,
     ) -> None:
-        """Only explicit permanent-unavailability cleanup may finish without a FINAL."""
+        """Permanent-unavailability cleanup requires its durable terminal notice."""
         await self.admit_sources(alice)
         await alice.create_approval_continuation(self.continuation(state="waiting"))
 
@@ -4091,10 +4093,98 @@ class TestApprovalContinuations:
             expected_state="waiting",
         )
         assert failing is not None
-        assert await alice.discard_unavailable_approval_continuation("approval-1") is True
+        assert (
+            await alice.discard_unavailable_approval_continuation(
+                "approval-1",
+                notice_principal_id="router@alice",
+            )
+            is False
+        )
+        assert await alice.is_pending("$source-1")
+        assert await alice.is_pending("$source-2")
+
+        router = journal_store.principal("router@alice")
+        await router.enqueue_delivery(
+            turn_id="approval-unavailable:approval-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("agent removed"),
+        )
+        await router.claim_delivery(
+            turn_id="approval-unavailable:approval-1",
+            stage=DeliveryStage.FINAL,
+        )
+        await router.acknowledge_delivery(
+            turn_id="approval-unavailable:approval-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$unavailable",
+        )
+
+        assert (
+            await alice.discard_unavailable_approval_continuation(
+                "approval-1",
+                notice_principal_id="router@alice",
+            )
+            is True
+        )
         assert await alice.approval_continuation("approval-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
+
+    async def test_continuation_owner_scans_are_cursor_paginated(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """Unavailable-owner scans visit a bounded page and resume after its final approval."""
+        for index in range(5):
+            source_event_id = f"$page-source-{index}"
+            await admit(alice, source_event_id, ts=2_000 + index)
+            continuation = replace(
+                self.continuation(state="waiting"),
+                approval_id=f"approval-page-{index}",
+                entity_name="removed" if index != 2 else "configured",
+                source_event_ids=(source_event_id,),
+            )
+            assert await alice.create_approval_continuation(continuation) == continuation
+
+        first = await journal_store.approval_continuations(limit=2)
+        second = await journal_store.approval_continuations(
+            limit=2,
+            after=(first[-1][1].entity_name, first[-1][1].approval_id),
+        )
+        third = await journal_store.approval_continuations(
+            limit=2,
+            after=(second[-1][1].entity_name, second[-1][1].approval_id),
+        )
+        assert [continuation.approval_id for _principal, continuation in first] == [
+            "approval-page-2",
+            "approval-page-0",
+        ]
+        assert [continuation.approval_id for _principal, continuation in second] == [
+            "approval-page-1",
+            "approval-page-3",
+        ]
+        assert [continuation.approval_id for _principal, continuation in third] == ["approval-page-4"]
+
+        removed_first = await journal_store.approval_continuations_for_entities(
+            {"removed"},
+            limit=2,
+        )
+        removed_second = await journal_store.approval_continuations_for_entities(
+            {"removed"},
+            limit=2,
+            after=(removed_first[-1][1].entity_name, removed_first[-1][1].approval_id),
+        )
+        assert [continuation.approval_id for _principal, continuation in removed_first] == [
+            "approval-page-0",
+            "approval-page-1",
+        ]
+        assert [continuation.approval_id for _principal, continuation in removed_second] == [
+            "approval-page-3",
+            "approval-page-4",
+        ]
 
     async def test_room_departure_discards_continuation_and_cards_with_its_sources(
         self,
@@ -4639,6 +4729,16 @@ class TestHotQueriesAreIndexCovered:
             "ORDER BY created_at_ns, transaction_id LIMIT 50"
         ),
         "approval card point lookup": ("SELECT * FROM approval_cards WHERE principal_id=? AND card_event_id=?"),
+        "continuation owner page": (
+            "SELECT * FROM approval_continuations "
+            "WHERE (entity_name, approval_id) > (?, ?) "
+            "ORDER BY entity_name, approval_id LIMIT 50"
+        ),
+        "continuation owners for entities": (
+            "SELECT * FROM approval_continuations WHERE entity_name IN (?, ?) "
+            "AND (entity_name, approval_id) > (?, ?) "
+            "ORDER BY entity_name, approval_id LIMIT 50"
+        ),
     }
 
     async def test_no_hot_query_falls_back_to_a_scan_or_a_temporary_sort(self, tmp_path: Path) -> None:
@@ -4704,7 +4804,9 @@ class TestHotQueriesAreIndexCovered:
         indexes = [s for s in rendered if "CREATE INDEX" in s]
 
         assert not [s for s in rendered if "/*bytes*/" in s], "byte-order marker left unexpanded"
-        ordered_text_indexes = [s for s in indexes if "turn_id" in s or "card_event_id" in s]
+        ordered_text_indexes = [
+            s for s in indexes if "turn_id" in s or "card_event_id" in s or "approval_continuations_owner_scan" in s
+        ]
         assert ordered_text_indexes, "expected indexes over the unpinned text columns"
         for statement in ordered_text_indexes:
             assert 'COLLATE "C"' in statement, statement

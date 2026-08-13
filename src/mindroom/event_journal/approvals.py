@@ -345,6 +345,7 @@ def _resolved_continuation_content(
         return stored
     stored["status"] = decision
     stored["resolution_reason"] = reason
+    stored["resolved_by"] = None
     body = stored.get("body")
     if isinstance(body, str) and body.startswith("Approved:"):
         stored["body"] = f"{decision.title()}:{body.removeprefix('Approved:')}"
@@ -561,14 +562,14 @@ def finish(
     """Retire delivered card payload while keeping its shared approval-only identity."""
     remembered = transaction.fetchone(
         """
-        INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id, created_at_ns)
-        SELECT principal_id, room_id, card_event_id, ?
+        INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
+        SELECT principal_id, room_id, card_event_id
         FROM approval_cards
         WHERE principal_id = ? AND transaction_id = ? AND card_event_id = ?
         ON CONFLICT (principal_id, card_event_id) DO NOTHING
         RETURNING card_event_id
         """,
-        (time.time_ns(), principal_id, transaction_id, card_event_id),
+        (principal_id, transaction_id, card_event_id),
     )
     existing = transaction.fetchone(
         """

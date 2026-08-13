@@ -26,7 +26,6 @@ _USER_STOP_VISIBLE_NOTE = "**[Response cancelled by user]**"
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    import structlog
     from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
@@ -81,10 +80,7 @@ class ApprovalResponseCoordinator:
     config: Callable[[], Config]
     runtime_paths: RuntimePaths
     store: PrincipalStore
-    agent_name: str
     delivery_gateway: DeliveryGateway
-    logger: structlog.stdlib.BoundLogger
-    runtime_generation: Callable[[], str]
     retry_sources: Callable[[tuple[str, ...]], None]
 
     async def create(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
@@ -94,10 +90,6 @@ class ApprovalResponseCoordinator:
             msg = f"Could not create approval continuation {continuation.approval_id!r}"
             raise RuntimeError(msg)
         return created
-
-    async def get(self, approval_id: str) -> ApprovalContinuation | None:
-        """Return one principal-owned paused run."""
-        return await self.store.approval_continuation(approval_id)
 
     async def activate(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
         """Expose one generation after every human-gated card is durable."""
@@ -109,17 +101,6 @@ class ApprovalResponseCoordinator:
             msg = f"Could not activate approval continuation {continuation.approval_id!r}"
             raise RuntimeError(msg)
         return activated
-
-    async def for_source_event(self, source_event_id: str) -> ApprovalContinuation | None:
-        """Return continuation ownership for one original source."""
-        return await self.store.approval_continuation_for_source(source_event_id)
-
-    async def claim(self, approval_id: str) -> ApprovalContinuation | None:
-        """Claim one ready continuation for this response-runner generation."""
-        return await self.store.claim_approval_continuation(
-            approval_id,
-            runtime_generation=self.runtime_generation(),
-        )
 
     async def plan_pause(
         self,
@@ -177,7 +158,7 @@ class ApprovalResponseCoordinator:
         *,
         target: MessageTarget,
         failure_reason: str,
-    ) -> ApprovalContinuation:
+    ) -> None:
         """Publish every human-gated card already linked by durable identity."""
         config = self.config()
         for index, (tool, tool_call_id, tool_name, invoking_agent) in enumerate(plan.tools):
@@ -203,7 +184,6 @@ class ApprovalResponseCoordinator:
             )
             if sent is None:
                 raise RuntimeError(failure_reason)
-        return continuation
 
     async def publish_generation(
         self,
@@ -212,7 +192,7 @@ class ApprovalResponseCoordinator:
         *,
         target: MessageTarget,
         failure_reason: str,
-    ) -> ApprovalContinuation:
+    ) -> None:
         """Publish every required card, release its lease, and wake executable work."""
         if continuation.state == "waiting":
             await self._publish_cards(
@@ -224,7 +204,6 @@ class ApprovalResponseCoordinator:
             continuation = await self.activate(continuation)
         if continuation.state == "ready":
             self.retry_sources(continuation.source_event_ids)
-        return continuation
 
     async def advance_pause(
         self,
@@ -233,7 +212,7 @@ class ApprovalResponseCoordinator:
         *,
         target: MessageTarget,
         tool_trace: list[ToolTraceEntry],
-    ) -> tuple[ApprovalContinuation, str]:
+    ) -> str:
         """Replace one claim with Agno's next exact pause generation."""
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await self.plan_pause(identified, requester_id=current.requester_id)
@@ -259,7 +238,7 @@ class ApprovalResponseCoordinator:
             msg = "Could not persist the chained approval pause"
             raise RuntimeError(msg)
         try:
-            advanced = await self.publish_generation(
+            await self.publish_generation(
                 publishing,
                 plan,
                 target=target,
@@ -271,7 +250,7 @@ class ApprovalResponseCoordinator:
                 "Chained approval card creation failed",
             )
             raise
-        return advanced, plan.waiting_text
+        return plan.waiting_text
 
     async def request_failure(
         self,
@@ -292,12 +271,12 @@ class ApprovalResponseCoordinator:
 
     async def fail_publication(self, approval_id: str, *, reason: str) -> ApprovalContinuation | None:
         """Fence a born continuation whose card publication did not finish."""
-        continuation = await self.get(approval_id)
+        continuation = await self.store.approval_continuation(approval_id)
         return None if continuation is None else await self.request_failure(continuation, reason)
 
     async def settle_failure(self, continuation: ApprovalContinuation, reason: str) -> bool:
         """Settle cards and one durable failure edit from the owning source worker."""
-        current = await self.get(continuation.approval_id)
+        current = await self.store.approval_continuation(continuation.approval_id)
         if current is None:
             return True
         if current.state == "claimed" and await self.final_delivery(current) is not None:

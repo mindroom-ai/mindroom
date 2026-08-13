@@ -329,11 +329,11 @@ class _PostCancelCleanupTask:
 
 @dataclass(frozen=True, slots=True)
 class _DetachedCardWrite:
-    """One cancelled request's recovery, owned by its originating loop."""
+    """One post-send card binding, owned by its originating loop."""
 
-    done_future: Future[None]
+    done_future: Future[bool]
     owner_loop: asyncio.AbstractEventLoop
-    recovery_task: asyncio.Task[None]
+    recovery_task: asyncio.Task[bool]
     card_event_id: str
 
 
@@ -386,7 +386,6 @@ class _ApprovalManager:
         self._detached_card_writes: set[_DetachedCardWrite] = set()
         self._detached_expiry_sweep_task: asyncio.Task[None] | None = None
         self._detached_expiry_wakeup = asyncio.Event()
-        self._post_bind_expiry_tasks: set[asyncio.Task[None]] = set()
         self._shutdown_reason: str | None = None
 
     async def create_detached_approval(
@@ -488,7 +487,7 @@ class _ApprovalManager:
         if sent_event is None:
             await self._forget_card(transaction_id)
             return None
-        first_attempt = self._register_sent_detached_approval(
+        self._register_sent_detached_approval(
             room_id=room_id,
             transaction_id=transaction_id,
             claimed_card=claimed_card,
@@ -497,15 +496,6 @@ class _ApprovalManager:
             tool_call_id=tool_call_id,
             expires_at=expires_at,
         )
-        try:
-            await asyncio.shield(first_attempt.wait())
-        except asyncio.CancelledError:
-            self._schedule_post_bind_expiry(
-                first_attempt=first_attempt,
-                room_id=room_id,
-                card_event_id=sent_event.event_id,
-            )
-            raise
         return sent_event
 
     def _register_sent_detached_approval(
@@ -518,7 +508,7 @@ class _ApprovalManager:
         continuation_id: str,
         tool_call_id: str,
         expires_at: datetime,
-    ) -> asyncio.Event:
+    ) -> _DetachedCardWrite:
         """Register durable binding and wake the shared expiry sweep."""
         sent_card = _sent_card_body(claimed_card, sent_event)
         self._ensure_detached_expiry_sweep()
@@ -580,7 +570,7 @@ class _ApprovalManager:
         if sent_event is None:
             await self._forget_card(transaction_id)
             return
-        first_attempt = self._register_sent_detached_approval(
+        binding = self._register_sent_detached_approval(
             room_id=room_id,
             transaction_id=transaction_id,
             claimed_card=claimed_card,
@@ -589,7 +579,8 @@ class _ApprovalManager:
             tool_call_id=tool_call_id,
             expires_at=expires_at,
         )
-        await asyncio.shield(first_attempt.wait())
+        if not await self._wait_for_detached_card_binding(binding):
+            return
         if not await self.expire_detached_card(room_id=room_id, card_event_id=sent_event.event_id):
             self._detached_expiry_wakeup.set()
 
@@ -602,32 +593,27 @@ class _ApprovalManager:
         card: dict[str, Any],
         continuation_id: str,
         tool_call_id: str,
-    ) -> asyncio.Event:
+    ) -> _DetachedCardWrite:
         """Give post-send journal binding an owner independent of its caller."""
-        first_attempt = asyncio.Event()
-        done_future: Future[None] = Future()
+        done_future: Future[bool] = Future()
         owner_loop = asyncio.get_running_loop()
 
-        async def recover() -> None:
-            try:
-                retry_seconds = _DETACHED_RETRY_INITIAL_SECONDS
-                while True:
-                    acknowledged = await self._acknowledge_detached_card(
-                        room_id=room_id,
-                        transaction_id=transaction_id,
-                        card_event_id=card_event_id,
-                        card=card,
-                    )
-                    first_attempt.set()
-                    if acknowledged:
-                        self._detached_expiry_wakeup.set()
-                        return
-                    if self._current_shutdown_reason() is not None:
-                        return
-                    await asyncio.sleep(retry_seconds)
-                    retry_seconds = min(retry_seconds * 2, _DETACHED_RETRY_MAX_SECONDS)
-            finally:
-                first_attempt.set()
+        async def recover() -> bool:
+            retry_seconds = _DETACHED_RETRY_INITIAL_SECONDS
+            while True:
+                acknowledged = await self._acknowledge_detached_card(
+                    room_id=room_id,
+                    transaction_id=transaction_id,
+                    card_event_id=card_event_id,
+                    card=card,
+                )
+                if acknowledged:
+                    self._detached_expiry_wakeup.set()
+                    return True
+                if self._current_shutdown_reason() is not None:
+                    return False
+                await asyncio.sleep(retry_seconds)
+                retry_seconds = min(retry_seconds * 2, _DETACHED_RETRY_MAX_SECONDS)
 
         recovery_task = asyncio.create_task(
             recover(),
@@ -642,7 +628,22 @@ class _ApprovalManager:
         with self._live_lock:
             self._detached_card_writes.add(detached_write)
         recovery_task.add_done_callback(lambda _future: self._discard_detached_card_write(detached_write))
-        return first_attempt
+        return detached_write
+
+    @staticmethod
+    async def _wait_for_detached_card_binding(binding: _DetachedCardWrite) -> bool:
+        """Wait without letting one cancelled observer cancel shared recovery."""
+        return await asyncio.shield(asyncio.wrap_future(binding.done_future))
+
+    async def _wait_for_in_flight_card_binding(self, card_event_id: str) -> None:
+        """Keep a Matrix action behind the durable row that will own it."""
+        with self._live_lock:
+            binding = next(
+                (write for write in self._detached_card_writes if write.card_event_id == card_event_id),
+                None,
+            )
+        if binding is not None:
+            await self._wait_for_detached_card_binding(binding)
 
     async def _acknowledge_detached_card(
         self,
@@ -669,46 +670,6 @@ class _ApprovalManager:
             )
             return False
         return True
-
-    def _schedule_post_bind_expiry(
-        self,
-        *,
-        first_attempt: asyncio.Event,
-        room_id: str,
-        card_event_id: str,
-    ) -> None:
-        """Terminalize a delivered card after its cancelled caller hands off binding."""
-
-        async def expire_after_binding() -> None:
-            await first_attempt.wait()
-            retry_seconds = _DETACHED_RETRY_INITIAL_SECONDS
-            while self._current_shutdown_reason() is None:
-                if await self.expire_detached_card(room_id=room_id, card_event_id=card_event_id):
-                    return
-                await asyncio.sleep(retry_seconds)
-                retry_seconds = min(retry_seconds * 2, _DETACHED_RETRY_MAX_SECONDS)
-
-        task = asyncio.create_task(
-            expire_after_binding(),
-            name=f"approval-post-bind-expiry-{card_event_id}",
-        )
-        with self._live_lock:
-            self._post_bind_expiry_tasks.add(task)
-        task.add_done_callback(self._finish_post_bind_expiry)
-
-    def _finish_post_bind_expiry(self, task: asyncio.Task[None]) -> None:
-        """Retire one finite cancellation handoff and observe its failure."""
-        with self._live_lock:
-            self._post_bind_expiry_tasks.discard(task)
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error is not None:
-            logger.error(
-                "detached_approval_post_bind_expiry_failed",
-                error=str(error),
-                exception_type=type(error).__name__,
-            )
 
     async def _run_detached_expiry_sweep(self) -> None:
         """Expire and redeliver every due continuation card from one periodic owner."""
@@ -948,6 +909,7 @@ class _ApprovalManager:
                 await before_consume()
             return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
 
+        await self._wait_for_in_flight_card_binding(card_event_id)
         cards = self._cards
         stored = (
             None if cards is None else await cards.pending_approval_card(room_id=room_id, card_event_id=card_event_id)
@@ -1763,10 +1725,9 @@ class _ApprovalManager:
         """Stop the expiry sweep and drain finite approval-card handoffs."""
         with self._live_lock:
             self._shutdown_reason = reason
-            expiry_tasks = tuple(self._post_bind_expiry_tasks)
-            self._post_bind_expiry_tasks.clear()
+            expiry_tasks: tuple[asyncio.Task[None], ...] = ()
             if self._detached_expiry_sweep_task is not None:
-                expiry_tasks = (*expiry_tasks, self._detached_expiry_sweep_task)
+                expiry_tasks = (self._detached_expiry_sweep_task,)
                 self._detached_expiry_sweep_task = None
         for task in expiry_tasks:
             task.cancel()
@@ -1854,12 +1815,13 @@ class _ApprovalManager:
 
     def _discard_detached_card_write(self, detached_write: _DetachedCardWrite) -> None:
         """Drop one finished recovery from the set shutdown drains."""
+        bound = False
         with suppress(asyncio.CancelledError, Exception):
-            detached_write.recovery_task.result()
+            bound = detached_write.recovery_task.result()
         with self._live_lock:
             self._detached_card_writes.discard(detached_write)
         with suppress(InvalidStateError):
-            detached_write.done_future.set_result(None)
+            detached_write.done_future.set_result(bound)
 
     async def _drain_post_cancel_cleanup_tasks(self) -> None:
         while True:
@@ -1907,8 +1869,7 @@ class _ApprovalManager:
             has_active_sends = bool(self._active_approval_sends)
             has_cleanup_tasks = bool(self._post_cancel_cleanup_tasks)
             has_detached_writes = bool(self._detached_card_writes)
-            has_post_bind_expiries = bool(self._post_bind_expiry_tasks)
-        return has_resolution or has_active_sends or has_cleanup_tasks or has_detached_writes or has_post_bind_expiries
+        return has_resolution or has_active_sends or has_cleanup_tasks or has_detached_writes
 
     def _send_is_in_flight(self, transaction_id: str) -> bool:
         """Return whether this row is still owned by a send that has not come back.

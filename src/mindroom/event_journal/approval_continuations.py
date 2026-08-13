@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 type ApprovalContinuationState = Literal["waiting", "ready", "claimed", "failing"]
 
 _CONTINUATION_COLUMNS = """
-    approval_id, primary_source_event_id, entity_name, state, generation,
+    approval_id, entity_name, state, generation,
     runtime_generation, failure_reason, context_json
 """
 
@@ -112,7 +112,11 @@ class ApprovalContinuation:
     transport_sender_id: str | None = None
     source_kind: str = "message"
     attachment_ids: tuple[str, ...] = ()
+    mentioned_agents: tuple[str, ...] = ()
+    hook_source: str | None = None
     message_received_depth: int = 0
+    dispatch_policy_source_kind: str | None = None
+    correlation_id: str | None = None
     history_scope: HistoryScope | None = None
     origin: TurnOrigin | None = None
     memory_prompt: str | None = None
@@ -141,7 +145,11 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "transport_sender_id": continuation.transport_sender_id,
         "source_kind": continuation.source_kind,
         "attachment_ids": list(continuation.attachment_ids),
+        "mentioned_agents": list(continuation.mentioned_agents),
+        "hook_source": continuation.hook_source,
         "message_received_depth": continuation.message_received_depth,
+        "dispatch_policy_source_kind": continuation.dispatch_policy_source_kind,
+        "correlation_id": continuation.correlation_id,
         "history_scope": continuation.history_scope.to_metadata() if continuation.history_scope is not None else None,
         "origin": _origin_to_dict(continuation.origin) if continuation.origin is not None else None,
         "memory_prompt": continuation.memory_prompt,
@@ -157,7 +165,7 @@ def _json(value: Mapping[str, object]) -> str:
     return json.dumps(dict(value), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
-def _load(
+def get(
     transaction: Transaction,
     principal_id: str,
     *,
@@ -237,7 +245,11 @@ def _from_rows(
         transport_sender_id=cast("str | None", stored.get("transport_sender_id")),
         source_kind=cast("str", stored.get("source_kind", "message")),
         attachment_ids=tuple(cast("list[str]", stored.get("attachment_ids", []))),
+        mentioned_agents=tuple(cast("list[str]", stored.get("mentioned_agents", []))),
+        hook_source=cast("str | None", stored.get("hook_source")),
         message_received_depth=int(stored.get("message_received_depth", 0)),
+        dispatch_policy_source_kind=cast("str | None", stored.get("dispatch_policy_source_kind")),
+        correlation_id=cast("str | None", stored.get("correlation_id")),
         history_scope=HistoryScope.from_metadata(stored.get("history_scope")),
         origin=_origin_from_dict(stored.get("origin")),
         memory_prompt=cast("str | None", stored.get("memory_prompt")),
@@ -307,16 +319,15 @@ def create(
     inserted = transaction.fetchone(
         """
         INSERT INTO approval_continuations (
-            principal_id, approval_id, primary_source_event_id, entity_name, state,
+            principal_id, approval_id, entity_name, state,
             generation, runtime_generation, failure_reason, context_json, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (approval_id) DO NOTHING
         RETURNING approval_id
         """,
         (
             principal_id,
             continuation.approval_id,
-            continuation.source_event_ids[0],
             continuation.entity_name,
             continuation.state,
             continuation.generation,
@@ -327,7 +338,7 @@ def create(
         ),
     )
     if inserted is None:
-        existing = _load(transaction, principal_id, approval_id=continuation.approval_id)
+        existing = get(transaction, principal_id, approval_id=continuation.approval_id)
         return existing if existing == continuation else None
     for ordinal, event_id in enumerate(continuation.source_event_ids):
         transaction.execute(
@@ -345,7 +356,7 @@ def create(
         continuation.generation,
         continuation.calls,
     )
-    return _load(transaction, principal_id, approval_id=continuation.approval_id)
+    return get(transaction, principal_id, approval_id=continuation.approval_id)
 
 
 def for_source(
@@ -362,59 +373,106 @@ def for_source(
         """,
         (principal_id, event_id),
     )
-    return None if row is None else _load(transaction, principal_id, approval_id=str(row["approval_id"]))
-
-
-def get(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    approval_id: str,
-) -> ApprovalContinuation | None:
-    """Return one principal-owned continuation by its stable identity."""
-    return _load(transaction, principal_id, approval_id=approval_id)
+    return None if row is None else get(transaction, principal_id, approval_id=str(row["approval_id"]))
 
 
 def for_entities(
     transaction: Transaction,
     entity_names: set[str],
+    *,
+    limit: int,
+    after: tuple[str, str] | None = None,
 ) -> tuple[tuple[str, ApprovalContinuation], ...]:
-    """Return every nonterminal continuation owned by exact managed entities."""
+    """Return one bounded page owned by exact managed entities."""
     if not entity_names:
         return ()
     ordered_names = sorted(entity_names)
     placeholders = ", ".join("?" for _name in ordered_names)
+    cursor_clause = "" if after is None else " AND (entity_name/*bytes*/, approval_id/*bytes*/) > (?, ?)"
+    cursor_params: tuple[object, ...] = () if after is None else after
     rows = transaction.fetchall(
         f"""
-        SELECT principal_id, approval_id FROM approval_continuations
-        WHERE entity_name IN ({placeholders})
-        ORDER BY created_at_ns, approval_id
+        SELECT principal_id, {_CONTINUATION_COLUMNS} FROM approval_continuations
+        WHERE entity_name IN ({placeholders}){cursor_clause}
+        ORDER BY entity_name/*bytes*/, approval_id/*bytes*/
+        LIMIT ?
         """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
-        tuple(ordered_names),
+        (*ordered_names, *cursor_params, limit),
     )
     return _load_owners(transaction, rows)
 
 
 def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple[str, ApprovalContinuation], ...]:
-    """Load ordered continuation identities with their owning principals."""
-    found: list[tuple[str, ApprovalContinuation]] = []
-    for row in rows:
-        principal_id = str(row["principal_id"])
-        continuation = _load(transaction, principal_id, approval_id=str(row["approval_id"]))
-        if continuation is not None:
-            found.append((principal_id, continuation))
-    return tuple(found)
+    """Load one page's normalized children without one query per owner."""
+    if not rows:
+        return ()
+    approval_ids = tuple(str(row["approval_id"]) for row in rows)
+    placeholders = ", ".join("?" for _approval_id in approval_ids)
+    source_rows = transaction.fetchall(
+        f"""
+        SELECT approval_id, event_id FROM approval_continuation_sources
+        WHERE approval_id IN ({placeholders})
+        ORDER BY approval_id/*bytes*/, source_ordinal
+        """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
+        approval_ids,
+    )
+    call_rows = transaction.fetchall(
+        f"""
+        SELECT calls.approval_id, calls.tool_call_id, calls.tool_name,
+               calls.invoking_agent, calls.expires_at_ns, calls.decision, calls.reason
+        FROM approval_continuation_calls AS calls
+        JOIN approval_continuations AS continuations
+          ON continuations.principal_id = calls.principal_id
+         AND continuations.approval_id = calls.approval_id
+         AND continuations.generation = calls.generation
+        WHERE calls.approval_id IN ({placeholders})
+        ORDER BY calls.approval_id/*bytes*/, calls.call_ordinal
+        """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
+        approval_ids,
+    )
+    sources_by_approval: dict[str, list[Row]] = {approval_id: [] for approval_id in approval_ids}
+    for source in source_rows:
+        sources_by_approval[str(source["approval_id"])].append(source)
+    calls_by_approval: dict[str, list[Row]] = {approval_id: [] for approval_id in approval_ids}
+    for call in call_rows:
+        calls_by_approval[str(call["approval_id"])].append(call)
+    return tuple(
+        (
+            str(row["principal_id"]),
+            _from_rows(
+                row,
+                tuple(sources_by_approval[str(row["approval_id"])]),
+                tuple(calls_by_approval[str(row["approval_id"])]),
+            ),
+        )
+        for row in rows
+    )
 
 
-def all_owners(transaction: Transaction) -> tuple[tuple[str, ApprovalContinuation], ...]:
-    """Return every nonterminal continuation with its journal principal."""
+def all_owners(
+    transaction: Transaction,
+    *,
+    limit: int,
+    after: tuple[str, str] | None = None,
+) -> tuple[tuple[str, ApprovalContinuation], ...]:
+    """Return one bounded owner page with its journal principals."""
+    cursor_clause = "" if after is None else " WHERE (entity_name/*bytes*/, approval_id/*bytes*/) > (?, ?)"
+    cursor_params: tuple[object, ...] = () if after is None else after
     rows = transaction.fetchall(
-        """
-        SELECT principal_id, approval_id FROM approval_continuations
-        ORDER BY created_at_ns, approval_id
-        """,
+        f"""
+        SELECT principal_id, {_CONTINUATION_COLUMNS} FROM approval_continuations
+        {cursor_clause}
+        ORDER BY entity_name/*bytes*/, approval_id/*bytes*/
+        LIMIT ?
+        """,  # noqa: S608 - a fixed cursor clause, not input
+        (*cursor_params, limit),
     )
     return _load_owners(transaction, rows)
+
+
+def unavailable_notice_turn_id(approval_id: str) -> str:
+    """Return the outbox turn that durably terminalizes an unavailable owner."""
+    return f"approval-unavailable:{approval_id}"
 
 
 def claim(
@@ -434,7 +492,7 @@ def claim(
         """,
         (runtime_generation, principal_id, approval_id),
     )
-    return None if claimed is None else _load(transaction, principal_id, approval_id=approval_id)
+    return None if claimed is None else get(transaction, principal_id, approval_id=approval_id)
 
 
 def advance(
@@ -448,7 +506,7 @@ def advance(
     calls: tuple[ApprovalCall, ...],
 ) -> ApprovalContinuation | None:
     """Replace one claimed generation with the next exact Agno pause."""
-    current = _load(transaction, principal_id, approval_id=approval_id)
+    current = get(transaction, principal_id, approval_id=approval_id)
     if current is None:
         return None
     next_generation = claimant_generation + 1
@@ -486,7 +544,7 @@ def advance(
     if updated is None:
         return None
     _insert_calls(transaction, principal_id, approval_id, next_generation, calls)
-    return _load(transaction, principal_id, approval_id=approval_id)
+    return get(transaction, principal_id, approval_id=approval_id)
 
 
 def activate(
@@ -515,7 +573,7 @@ def activate(
         """,
         (state, principal_id, approval_id, expected_generation),
     )
-    return None if updated is None else _load(transaction, principal_id, approval_id=approval_id)
+    return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
 
 
 def request_failure(
@@ -546,7 +604,7 @@ def request_failure(
             expected_runtime_generation,
         ),
     )
-    return None if updated is None else _load(transaction, principal_id, approval_id=approval_id)
+    return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
 
 
 def finish(
@@ -556,7 +614,7 @@ def finish(
     approval_id: str,
 ) -> bool:
     """Release sources only after the continuation's FINAL delivery is acknowledged."""
-    continuation = _load(transaction, principal_id, approval_id=approval_id)
+    continuation = get(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return False
     delivered = transaction.fetchone(
@@ -582,10 +640,21 @@ def discard_unavailable(
     principal_id: str,
     *,
     approval_id: str,
+    notice_principal_id: str,
 ) -> bool:
     """Release a permanently unavailable owner's sources after visible card cleanup."""
-    continuation = _load(transaction, principal_id, approval_id=approval_id)
+    continuation = get(transaction, principal_id, approval_id=approval_id)
     if continuation is None or continuation.state != "failing":
+        return False
+    delivered = transaction.fetchone(
+        """
+        SELECT 1 AS present FROM response_outbox
+        WHERE principal_id = ? AND turn_id = ? AND stage = ?
+          AND acknowledged_event_id IS NOT NULL
+        """,
+        (notice_principal_id, unavailable_notice_turn_id(approval_id), DeliveryStage.FINAL.value),
+    )
+    if delivered is None:
         return False
     journal.settle_many(transaction, principal_id, continuation.source_event_ids)
     transaction.execute(

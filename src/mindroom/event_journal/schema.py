@@ -232,7 +232,6 @@ _TABLES = (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
         card_event_id TEXT NOT NULL,
-        created_at_ns BIGINT NOT NULL,
         PRIMARY KEY (principal_id, card_event_id)
     )
     """,
@@ -240,7 +239,6 @@ _TABLES = (
     CREATE TABLE IF NOT EXISTS approval_continuations (
         principal_id TEXT NOT NULL,
         approval_id TEXT NOT NULL UNIQUE,
-        primary_source_event_id TEXT NOT NULL,
         entity_name TEXT NOT NULL,
         state TEXT NOT NULL CHECK (state IN ('waiting', 'ready', 'claimed', 'failing')),
         generation BIGINT NOT NULL DEFAULT 0,
@@ -248,10 +246,7 @@ _TABLES = (
         failure_reason TEXT,
         context_json TEXT NOT NULL,
         created_at_ns BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, approval_id),
-        UNIQUE (principal_id, primary_source_event_id),
-        FOREIGN KEY (principal_id, primary_source_event_id)
-            REFERENCES journal_events (principal_id, event_id)
+        PRIMARY KEY (principal_id, approval_id)
     )
     """,
     """
@@ -375,12 +370,8 @@ _INDEXES = (
     WHERE card_event_id IS NOT NULL
     """,
     """
-    CREATE INDEX IF NOT EXISTS approval_continuation_sources_event
-    ON approval_continuation_sources (principal_id, event_id)
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS approval_continuations_entity_state
-    ON approval_continuations (entity_name, state, created_at_ns)
+    CREATE INDEX IF NOT EXISTS approval_continuations_owner_scan
+    ON approval_continuations (entity_name/*bytes*/, approval_id/*bytes*/)
     """,
 )
 

@@ -57,6 +57,7 @@ if TYPE_CHECKING:
 _DEFAULT_PENDING_LIMIT = 256
 _DEFAULT_UNACKNOWLEDGED_LIMIT = 256
 _DEFAULT_ROOM_CARD_LIMIT = 256
+_DEFAULT_APPROVAL_CONTINUATION_OWNER_LIMIT = 100
 # A strict export can retain one million messages from as many as two million
 # fetched events. Keeping each write to 256 projected events puts a hard ceiling
 # on the work done while SQLite holds its global writer, independently of the
@@ -983,15 +984,26 @@ class PrincipalStore:
             ),
         )
 
-    async def discard_unavailable_approval_continuation(self, approval_id: str) -> bool:
+    async def discard_unavailable_approval_continuation(
+        self,
+        approval_id: str,
+        *,
+        notice_principal_id: str,
+    ) -> bool:
         """Release sources after permanent owner loss and visible card cleanup."""
         return await self._backend.write(
             lambda transaction: approval_continuations.discard_unavailable(
                 transaction,
                 self._principal_id,
                 approval_id=approval_id,
+                notice_principal_id=notice_principal_id,
             ),
         )
+
+    @property
+    def principal_id(self) -> str:
+        """Return this view's durable principal identity."""
+        return self._principal_id
 
 
 def _turn_membership_is_current(
@@ -1257,15 +1269,34 @@ class EventJournalStore:
     async def approval_continuations_for_entities(
         self,
         entity_names: set[str],
+        *,
+        limit: int = _DEFAULT_APPROVAL_CONTINUATION_OWNER_LIMIT,
+        after: tuple[str, str] | None = None,
     ) -> tuple[tuple[str, ApprovalContinuation], ...]:
-        """Return nonterminal continuation owners for unavailable entities."""
+        """Return one bounded page of owners for unavailable entities."""
         return await self.backend.read(
-            lambda transaction: approval_continuations.for_entities(transaction, entity_names),
+            lambda transaction: approval_continuations.for_entities(
+                transaction,
+                entity_names,
+                limit=limit,
+                after=after,
+            ),
         )
 
-    async def approval_continuations(self) -> tuple[tuple[str, ApprovalContinuation], ...]:
-        """Return every nonterminal continuation with its journal principal."""
-        return await self.backend.read(approval_continuations.all_owners)
+    async def approval_continuations(
+        self,
+        *,
+        limit: int = _DEFAULT_APPROVAL_CONTINUATION_OWNER_LIMIT,
+        after: tuple[str, str] | None = None,
+    ) -> tuple[tuple[str, ApprovalContinuation], ...]:
+        """Return one bounded page with its journal principals."""
+        return await self.backend.read(
+            lambda transaction: approval_continuations.all_owners(
+                transaction,
+                limit=limit,
+                after=after,
+            ),
+        )
 
     async def generation(self, *, new_generation: str) -> str:
         """Return this database's identity, minting it the first time it is opened.

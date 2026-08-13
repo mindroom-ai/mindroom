@@ -949,6 +949,11 @@ class AgentBot:
         return self._journal_store.principal(self._journal_principal_id)
 
     @property
+    def approval_store(self) -> PrincipalStore:
+        """Return this bot principal's complete event-journal view."""
+        return self._journal_store.principal(self._journal_principal_id)
+
+    @property
     def runtime_started_at(self) -> float:
         """Return when this bot runtime started."""
         return self._runtime_view.runtime_started_at

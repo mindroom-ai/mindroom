@@ -773,7 +773,7 @@ def _pending_rows(
           AND (
             approval_sources.approval_id IS NULL
             OR (
-              events.event_id = continuations.primary_source_event_id
+              approval_sources.source_ordinal = 0
               AND (
                 continuations.state IN ('ready', 'failing')
                 OR (
@@ -789,7 +789,7 @@ def _pending_rows(
                     OR EXISTS (
                       SELECT 1 FROM response_outbox AS approval_final
                       WHERE approval_final.principal_id = events.principal_id
-                        AND approval_final.turn_id = continuations.primary_source_event_id
+                        AND approval_final.turn_id = events.event_id
                         AND approval_final.stage = 'final'
                     )
                   )

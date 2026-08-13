@@ -92,6 +92,7 @@ from mindroom.response_turn import (
     StreamingTurnAdapter,
     TurnPartialSnapshot,
     TurnSinks,
+    apply_exact_approval_decisions,
     build_matrix_run_metadata,
     paused_attempt_from_event,
     paused_attempt_from_response,
@@ -1827,7 +1828,7 @@ def build_materialized_team_instance(
     )
 
 
-async def continue_paused_team_run(  # noqa: C901
+async def continue_paused_team_run(
     *,
     member_names: tuple[str, ...],
     mode: TeamMode,
@@ -1891,24 +1892,11 @@ async def continue_paused_team_run(  # noqa: C901
         if not isinstance(persisted, TeamRunOutput) or persisted.status != RunStatus.paused:
             msg = f"Paused team run {run_id!r} is no longer available"
             raise RuntimeError(msg)
-        requirements = [requirement for requirement in persisted.requirements or () if requirement.needs_confirmation]
-        persisted_ids = {
-            requirement.tool_execution.tool_call_id
-            for requirement in requirements
-            if requirement.tool_execution is not None
-        }
-        if persisted_ids != decisions.keys():
-            msg = "Paused team tools no longer match the approval continuation"
-            raise RuntimeError(msg)
-        for requirement in requirements:
-            if requirement.tool_execution is not None:
-                tool_call_id = requirement.tool_execution.tool_call_id
-                assert tool_call_id is not None
-                approved = decisions[tool_call_id]
-                if approved:
-                    requirement.confirm()
-                else:
-                    requirement.reject(denial_reasons[tool_call_id] or "Not approved by requester")
+        requirements = apply_exact_approval_decisions(
+            persisted.requirements or (),
+            decisions=decisions,
+            denial_reasons=denial_reasons,
+        )
         continued = await cast(
             "Any",
             team.acontinue_run(

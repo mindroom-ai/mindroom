@@ -262,7 +262,7 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.logging_config",
 ]
-visibility = ["mindroom.bot", "mindroom.delivery_gateway"]
+visibility = ["mindroom.approval_transport", "mindroom.bot", "mindroom.delivery_gateway"]
 
 [[modules]]
 path = "mindroom.reaction_dispatch"
@@ -583,6 +583,7 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.message_builder",
     "mindroom.matrix.room_history_reads",
+    "mindroom.response_delivery",
     "mindroom.sync_bridge_state",
     "mindroom.tool_approval",
 ]
