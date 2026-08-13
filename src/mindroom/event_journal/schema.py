@@ -223,6 +223,57 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS approval_continuations (
+        principal_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL UNIQUE,
+        primary_source_event_id TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('waiting', 'ready', 'claimed', 'failing')),
+        generation BIGINT NOT NULL DEFAULT 0,
+        runtime_generation TEXT,
+        failure_reason TEXT,
+        context_json TEXT NOT NULL,
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, approval_id),
+        UNIQUE (principal_id, primary_source_event_id),
+        FOREIGN KEY (principal_id, primary_source_event_id)
+            REFERENCES journal_events (principal_id, event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS approval_continuation_sources (
+        principal_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        source_ordinal BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, approval_id, event_id),
+        UNIQUE (principal_id, event_id),
+        UNIQUE (principal_id, approval_id, source_ordinal),
+        FOREIGN KEY (principal_id, approval_id)
+            REFERENCES approval_continuations (principal_id, approval_id) ON DELETE CASCADE,
+        FOREIGN KEY (principal_id, event_id)
+            REFERENCES journal_events (principal_id, event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS approval_continuation_calls (
+        principal_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        generation BIGINT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        call_ordinal BIGINT NOT NULL,
+        tool_name TEXT NOT NULL,
+        invoking_agent TEXT NOT NULL,
+        expires_at_ns BIGINT NOT NULL,
+        decision TEXT CHECK (decision IS NULL OR decision IN ('approved', 'denied', 'expired')),
+        reason TEXT,
+        PRIMARY KEY (principal_id, approval_id, generation, tool_call_id),
+        UNIQUE (principal_id, approval_id, generation, call_ordinal),
+        FOREIGN KEY (principal_id, approval_id)
+            REFERENCES approval_continuations (principal_id, approval_id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS turn_records (
         -- Scoped to the agent, not to a journal principal. Every other table
         -- here is per (agent, Matrix identity), because what it holds is only
@@ -308,6 +359,14 @@ _INDEXES = (
     CREATE UNIQUE INDEX IF NOT EXISTS approval_cards_event
     ON approval_cards (principal_id, card_event_id)
     WHERE card_event_id IS NOT NULL
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS approval_continuation_sources_event
+    ON approval_continuation_sources (principal_id, event_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS approval_continuations_entity_state
+    ON approval_continuations (entity_name, state, created_at_ns)
     """,
 )
 

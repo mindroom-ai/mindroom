@@ -63,7 +63,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from mindroom.event_journal import OutboxDelivery, PrincipalStore, RefreshRequest, TurnRecordStore
+    from mindroom.event_journal import (
+        ApprovalContinuation,
+        OutboxDelivery,
+        PrincipalStore,
+        RefreshRequest,
+        TurnRecordStore,
+    )
     from mindroom.event_journal.backend import Backend, Operation, Transaction
     from mindroom.history_recovery import RoomHistoryRecovery
 
@@ -3685,6 +3691,165 @@ class TestApprovalCards:
         assert await bob.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
         assert await bob.pending_approval_cards(room_id=ROOM) == ()
         assert await alice.pending_approval_cards(room_id=ROOM) != ()
+
+
+class TestApprovalContinuations:
+    """A paused Agno run remains owned by its original journal sources."""
+
+    @staticmethod
+    def continuation(*, state: str = "ready") -> ApprovalContinuation:
+        """Return one exact paused-run owner without importing it at collection time."""
+        from mindroom.event_journal import (  # noqa: PLC0415
+            ApprovalCall,
+            ApprovalContinuation,
+            ApprovalDecision,
+        )
+
+        return ApprovalContinuation(
+            approval_id="approval-1",
+            run_id="run-1",
+            session_id="session-1",
+            entity_kind="agent",
+            entity_name="agent",
+            room_id=ROOM,
+            thread_id="$thread",
+            requester_id=ALICE,
+            response_event_id="$waiting",
+            source_event_ids=("$source-1", "$source-2"),
+            calls=(
+                ApprovalCall(
+                    tool_call_id="call-1",
+                    tool_name="shell",
+                    invoking_agent="agent",
+                    expires_at_ns=time.time_ns() + 60_000_000_000,
+                    decision=ApprovalDecision.APPROVED if state == "ready" else None,
+                ),
+            ),
+            snapshot={"request_body": "run it"},
+            state=state,
+        )
+
+    @staticmethod
+    async def admit_sources(store: PrincipalStore) -> None:
+        """Admit the two sources one coalesced approval turn owns."""
+        await admit(store, "$source-1", ts=1_001)
+        await admit(store, "$source-2", ts=1_002)
+
+    async def test_continuation_is_reachable_from_every_owned_source(self, alice: PrincipalStore) -> None:
+        """A coalesced source cannot replay outside its one paused-run owner."""
+        await self.admit_sources(alice)
+        continuation = self.continuation()
+
+        created = await alice.create_approval_continuation(continuation)
+
+        assert created == continuation
+        assert await alice.approval_continuation_for_source("$source-1") == continuation
+        assert await alice.approval_continuation_for_source("$source-2") == continuation
+
+    async def test_ready_continuation_has_one_claim_winner(self, alice: PrincipalStore) -> None:
+        """Only one response lifecycle may continue the exact persisted Agno run."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+
+        winner = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        loser = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-b")
+
+        assert winner is not None
+        assert winner.state == "claimed"
+        assert winner.runtime_generation == "runtime-a"
+        assert loser is None
+
+    async def test_claimed_continuation_advances_only_from_its_current_generation(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A stale lifecycle cannot replace a newer chained approval pause."""
+        from mindroom.event_journal import ApprovalCall  # noqa: PLC0415
+
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        calls = (
+            ApprovalCall(
+                tool_call_id="call-2",
+                tool_name="write_file",
+                invoking_agent="agent",
+                expires_at_ns=time.time_ns() + 60_000_000_000,
+            ),
+        )
+
+        stale = await alice.advance_approval_continuation(
+            "approval-1",
+            claimant_generation=1,
+            run_id="run-2",
+            session_id="session-1",
+            calls=calls,
+        )
+        advanced = await alice.advance_approval_continuation(
+            "approval-1",
+            claimant_generation=0,
+            run_id="run-2",
+            session_id="session-1",
+            calls=calls,
+        )
+
+        assert stale is None
+        assert advanced is not None
+        assert advanced.state == "waiting"
+        assert advanced.generation == 1
+        assert advanced.run_id == "run-2"
+        assert advanced.runtime_generation is None
+        assert advanced.calls == calls
+
+    async def test_failure_request_is_guarded_by_observed_state(self, alice: PrincipalStore) -> None:
+        """A stale failure observer cannot fence work that already made progress."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+
+        stale = await alice.request_approval_failure(
+            "approval-1",
+            "stale recovery",
+            expected_state="waiting",
+        )
+        failing = await alice.request_approval_failure(
+            "approval-1",
+            "entity is unavailable",
+            expected_state="ready",
+        )
+
+        assert stale is None
+        assert failing is not None
+        assert failing.state == "failing"
+        assert failing.failure_reason == "entity is unavailable"
+
+    async def test_finish_requires_acknowledged_final_before_releasing_sources(self, alice: PrincipalStore) -> None:
+        """A paused run cannot disappear before its frozen final answer is visible."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+
+        assert await alice.finish_approval_continuation("approval-1") is False
+        assert await alice.is_pending("$source-1")
+        assert await alice.is_pending("$source-2")
+
+        await alice.enqueue_delivery(
+            turn_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("finished"),
+        )
+        await alice.claim_delivery(turn_id="$source-1", stage=DeliveryStage.FINAL)
+        await alice.acknowledge_delivery(
+            turn_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$finished",
+        )
+
+        assert await alice.finish_approval_continuation("approval-1") is True
+        assert await alice.approval_continuation_for_source("$source-1") is None
+        assert not await alice.is_pending("$source-1")
+        assert not await alice.is_pending("$source-2")
 
 
 class TestConcurrency:

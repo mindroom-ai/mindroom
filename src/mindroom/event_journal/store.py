@@ -17,7 +17,12 @@ from mindroom.history_recovery import (
     RoomHistoryRecovery,
 )
 
-from . import approvals, journal, outbox, reads, turn_records
+from . import approval_continuations, approvals, journal, outbox, reads, turn_records
+from .approval_continuations import (  # noqa: TC001 - runtime return and input types
+    ApprovalCall,
+    ApprovalContinuation,
+    ApprovalContinuationState,
+)
 from .approvals import (  # noqa: TC001 - part of this module's runtime return types
     RecordedApprovalDecision,
     StoredApprovalCard,
@@ -827,6 +832,98 @@ class PrincipalStore:
                 room_id=room_id,
                 limit=limit,
                 after=after,
+            ),
+        )
+
+    async def create_approval_continuation(
+        self,
+        continuation: ApprovalContinuation,
+    ) -> ApprovalContinuation | None:
+        """Create one paused-run owner while all original sources remain pending."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.create(
+                transaction,
+                self._principal_id,
+                continuation,
+            ),
+        )
+
+    async def approval_continuation_for_source(
+        self,
+        event_id: str,
+    ) -> ApprovalContinuation | None:
+        """Return the paused run that owns one original source event."""
+        return await self._backend.read(
+            lambda transaction: approval_continuations.for_source(
+                transaction,
+                self._principal_id,
+                event_id=event_id,
+            ),
+        )
+
+    async def claim_approval_continuation(
+        self,
+        approval_id: str,
+        *,
+        runtime_generation: str,
+    ) -> ApprovalContinuation | None:
+        """Claim one ready paused run for exactly one response lifecycle."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.claim(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                runtime_generation=runtime_generation,
+            ),
+        )
+
+    async def advance_approval_continuation(
+        self,
+        approval_id: str,
+        *,
+        claimant_generation: int,
+        run_id: str,
+        session_id: str,
+        calls: tuple[ApprovalCall, ...],
+    ) -> ApprovalContinuation | None:
+        """Replace one claimed generation with the next exact Agno pause."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.advance(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                claimant_generation=claimant_generation,
+                run_id=run_id,
+                session_id=session_id,
+                calls=calls,
+            ),
+        )
+
+    async def request_approval_failure(
+        self,
+        approval_id: str,
+        reason: str,
+        *,
+        expected_state: ApprovalContinuationState,
+    ) -> ApprovalContinuation | None:
+        """Fence one observed continuation state against any later execution."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.request_failure(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                reason=reason,
+                expected_state=expected_state,
+            ),
+        )
+
+    async def finish_approval_continuation(self, approval_id: str) -> bool:
+        """Settle one paused run only after its FINAL delivery is acknowledged."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.finish(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
             ),
         )
 
