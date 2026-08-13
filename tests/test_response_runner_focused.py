@@ -1637,9 +1637,15 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     continue_run = MagicMock(wraps=agent.acontinue_run)
+    knowledge = MagicMock()
 
     with (
-        patch("mindroom.approval_execution.create_agent", return_value=agent),
+        patch.object(
+            runner.deps.knowledge_access,
+            "for_agent",
+            return_value=knowledge,
+        ) as resolve_knowledge,
+        patch("mindroom.approval_execution.create_agent", return_value=agent) as create_agent,
         patch.object(agent, "acontinue_run", new=continue_run),
         patch("mindroom.approval_execution.typing_indicator", _noop_typing),
         patch("mindroom.approval_execution.close_agent_runtime_state_dbs"),
@@ -1656,6 +1662,8 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     assert isinstance(result, CompletedApprovalRun)
     assert "io.mindroom.ai_run" in result.metadata_content
     assert bool(executed) is approved
+    resolve_knowledge.assert_called_once_with("general", execution_identity=identity)
+    assert create_agent.call_args.kwargs["knowledge"] is knowledge
     continued_requirement = continue_run.call_args.kwargs["requirements"][0]
     assert continued_requirement.tool_execution.confirmed is approved
     assert continued_requirement.tool_execution.confirmation_note == (None if approved else reason)

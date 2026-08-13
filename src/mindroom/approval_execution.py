@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from mindroom.approval_continuation import ApprovalContinuation
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolDispatchContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -40,6 +41,7 @@ class AgentApprovalExecution:
     runtime_paths: RuntimePaths
     client: Callable[[], nio.AsyncClient]
     tool_runtime: ToolRuntimeSupport
+    knowledge_access: KnowledgeAccessSupport
 
     async def continue_run(  # noqa: C901
         self,
@@ -56,6 +58,10 @@ class AgentApprovalExecution:
         if continuation.entity_name not in config.agents:
             msg = f"Agent {continuation.entity_name!r} is no longer configured"
             raise RuntimeError(msg)
+        knowledge = self.knowledge_access.for_agent(
+            continuation.entity_name,
+            execution_identity=execution_identity,
+        )
         agent = await asyncio.to_thread(
             create_agent,
             continuation.entity_name,
@@ -64,6 +70,7 @@ class AgentApprovalExecution:
             execution_identity,
             session_id=continuation.session_id,
             active_model_name=continuation.runtime_model_name,
+            knowledge=knowledge,
             dynamic_tool_continuation=True,
             supports_native_tool_approval=True,
         )

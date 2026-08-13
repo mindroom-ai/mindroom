@@ -557,6 +557,7 @@ class ResponseRunner:
             runtime_paths=self.deps.runtime_paths,
             client=self._client,
             tool_runtime=self.deps.tool_runtime,
+            knowledge_access=self.deps.knowledge_access,
         )
 
     def _approval_runtime_generation(self) -> str:
