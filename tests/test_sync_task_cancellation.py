@@ -50,6 +50,7 @@ from mindroom.matrix.sync_loop import (
 )
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.membership_models import ReportedDeparture
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import (
@@ -1755,12 +1756,16 @@ def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> Non
 
     assert membership.joined_room_ids == {"!joined:localhost", "!window:localhost"}
     assert membership.departed_room_ids == {"!kicked:localhost", "!banned:localhost"}
-    assert sorted(membership.departures) == ["!banned:localhost", "!kicked:localhost"]
-    assert membership.departure_observation_ids == (
-        "sliding:pos:!kicked:localhost",
-        "sliding:pos:!banned:localhost",
+    assert membership.departures == (
+        ReportedDeparture(
+            room_id="!kicked:localhost",
+            observation_id="sliding:pos:!kicked:localhost",
+        ),
+        ReportedDeparture(
+            room_id="!banned:localhost",
+            observation_id="sliding:pos:!banned:localhost",
+        ),
     )
-    assert membership.departure_rejoined_after == (False, False)
 
 
 def test_sliding_own_membership_counts_a_rejoined_room_departing_twice() -> None:
@@ -1782,9 +1787,10 @@ def test_sliding_own_membership_counts_a_rejoined_room_departing_twice() -> None
 
     membership = own_membership_from_sliding_sync(response, self_user_id=user_id)
 
-    assert membership.departures == ("!churned:localhost", "!churned:localhost")
-    assert membership.departure_observation_ids == ("$leave", "$kick")
-    assert membership.departure_rejoined_after == (True, False)
+    assert membership.departures == (
+        ReportedDeparture(room_id="!churned:localhost", observation_id="$leave", rejoined_after=True),
+        ReportedDeparture(room_id="!churned:localhost", observation_id="$kick"),
+    )
 
 
 def test_sliding_own_membership_does_not_invent_a_rejoin_between_departures() -> None:
@@ -1805,9 +1811,10 @@ def test_sliding_own_membership_does_not_invent_a_rejoin_between_departures() ->
 
     membership = own_membership_from_sliding_sync(response, self_user_id=user_id)
 
-    assert membership.departures == ("!departed:localhost", "!departed:localhost")
-    assert membership.departure_observation_ids == ("$leave", "$ban")
-    assert membership.departure_rejoined_after == (False, False)
+    assert membership.departures == (
+        ReportedDeparture(room_id="!departed:localhost", observation_id="$leave"),
+        ReportedDeparture(room_id="!departed:localhost", observation_id="$ban"),
+    )
 
 
 def test_classic_own_membership_does_not_invent_a_rejoin_between_departures() -> None:
@@ -1838,9 +1845,10 @@ def test_classic_own_membership_does_not_invent_a_rejoin_between_departures() ->
 
     membership = own_membership_from_sync(response, self_user_id=user_id)
 
-    assert membership.departures == (room_id, room_id)
-    assert membership.departure_observation_ids == ("$leave", "$ban")
-    assert membership.departure_rejoined_after == (False, False)
+    assert membership.departures == (
+        ReportedDeparture(room_id=room_id, observation_id="$leave"),
+        ReportedDeparture(room_id=room_id, observation_id="$ban"),
+    )
 
 
 def _member_event(event_id: str, *, user_id: str, membership: str, ts: int) -> nio.Event:

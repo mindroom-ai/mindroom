@@ -31,34 +31,21 @@ def _question_json(question: InteractiveQuestion) -> str:
     )
 
 
-def _question_from_row(row: Row) -> InteractiveQuestion:
-    """Decode one stored question row."""
+def _selection_from_row(row: Row, selection_key: str) -> InteractiveSelection | None:
+    """Decode one validated selection from a stored question row."""
     payload = cast("dict[str, object]", json.loads(str(row["question_json"])))
     raw_options = cast("dict[object, object]", payload["options"])
-    raw_labels = cast("dict[object, object]", payload["option_labels"])
-    return InteractiveQuestion(
-        question_event_id=str(row["question_event_id"]),
-        room_id=str(row["room_id"]),
-        thread_id=decode_thread_id(str(row["thread_id"])),
-        creator_agent=str(row["creator_agent"]),
-        question_text=str(payload["question_text"]),
-        options={str(key): str(value) for key, value in raw_options.items()},
-        option_labels={str(key): str(value) for key, value in raw_labels.items()},
-    )
-
-
-def _selection(question: InteractiveQuestion, selection_key: str) -> InteractiveSelection | None:
-    """Return one validated selection from an immutable question payload."""
-    selected_value = question.options.get(selection_key)
+    selected_value = raw_options.get(selection_key)
     if selected_value is None:
         return None
+    raw_labels = cast("dict[object, object]", payload["option_labels"])
     return InteractiveSelection(
-        question_event_id=question.question_event_id,
-        question_text=question.question_text,
+        question_event_id=str(row["question_event_id"]),
+        question_text=str(payload["question_text"]),
         selection_key=selection_key,
-        selected_label=question.option_labels.get(selection_key, selected_value),
-        selected_value=selected_value,
-        thread_id=question.thread_id,
+        selected_label=str(raw_labels.get(selection_key, selected_value)),
+        selected_value=str(selected_value),
+        thread_id=decode_thread_id(str(row["thread_id"])),
     )
 
 
@@ -89,19 +76,20 @@ def _question_row(transaction: Transaction, principal_id: str, question_event_id
     )
 
 
-def _membership_is_current(
+def _bind_question_to_source(
     transaction: Transaction,
     principal_id: str,
-    *,
-    room_id: str,
-    membership_epoch: int,
-) -> bool:
-    """Lock and validate the active membership that owns a question."""
-    return reads.claim_membership_epoch(
-        transaction,
-        principal_id,
-        room_id=room_id,
-        expected_membership_epoch=membership_epoch,
+    question_event_id: str,
+    source_event_id: str,
+) -> None:
+    """Bind one locked question to its durable selecting source."""
+    transaction.execute(
+        """
+        UPDATE interactive_questions
+        SET claimed_source_event_id = ?
+        WHERE principal_id = ? AND question_event_id = ?
+        """,
+        (source_event_id, principal_id, question_event_id),
     )
 
 
@@ -140,11 +128,11 @@ def claim_reaction(
         return None
     room_id = str(candidate["question_room_id"])
     membership_epoch = int(candidate["question_membership_epoch"])
-    if not _membership_is_current(
+    if not reads.claim_membership_epoch(
         transaction,
         principal_id,
         room_id=room_id,
-        membership_epoch=membership_epoch,
+        expected_membership_epoch=membership_epoch,
     ):
         return None
 
@@ -166,7 +154,7 @@ def claim_reaction(
         or question_row["claimed_source_event_id"] not in (None, source_event_id)
     ):
         return None
-    selection = _selection(_question_from_row(question_row), selection_key)
+    selection = _selection_from_row(question_row, selection_key)
     if selection is None:
         return None
 
@@ -178,14 +166,7 @@ def claim_reaction(
         """,
         (SemanticConsumer.INTERACTIVE_REACTION.value, principal_id, source_event_id),
     )
-    transaction.execute(
-        """
-        UPDATE interactive_questions
-        SET claimed_source_event_id = ?
-        WHERE principal_id = ? AND question_event_id = ?
-        """,
-        (source_event_id, principal_id, question_event_id),
-    )
+    _bind_question_to_source(transaction, principal_id, question_event_id, source_event_id)
     return selection
 
 
@@ -216,11 +197,11 @@ def claim_text(  # noqa: PLR0911 - each failed ownership predicate is terminal
     stored_thread_id = str(candidate_source["thread_id"])
     thread_id = decode_thread_id(stored_thread_id)
     membership_epoch = int(candidate_source["membership_epoch"])
-    if not _membership_is_current(
+    if not reads.claim_membership_epoch(
         transaction,
         principal_id,
         room_id=room_id,
-        membership_epoch=membership_epoch,
+        expected_membership_epoch=membership_epoch,
     ):
         return None
     source = _source_row(transaction, principal_id, source_event_id)
@@ -267,16 +248,14 @@ def claim_text(  # noqa: PLR0911 - each failed ownership predicate is terminal
         or question_row["claimed_source_event_id"] not in (None, source_event_id)
     ):
         return None
-    selection = _selection(_question_from_row(question_row), selection_key)
+    selection = _selection_from_row(question_row, selection_key)
     if selection is None:
         return None
-    transaction.execute(
-        """
-        UPDATE interactive_questions
-        SET claimed_source_event_id = ?
-        WHERE principal_id = ? AND question_event_id = ?
-        """,
-        (source_event_id, principal_id, question_row["question_event_id"]),
+    _bind_question_to_source(
+        transaction,
+        principal_id,
+        str(question_row["question_event_id"]),
+        source_event_id,
     )
     return selection
 

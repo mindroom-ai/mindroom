@@ -324,7 +324,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     generate_response_mock = AsyncMock(side_effect=generate_response)
     install_generate_response_mock(bot, generate_response_mock)
 
-    await bot._turn_controller.handle_interactive_selection(
+    await bot._turn_controller._handle_interactive_selection(
         room,
         selection=selection,
         user_id="@user:localhost",
@@ -411,7 +411,7 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
     install_generate_response_mock(bot, generate_response_mock)
 
     with pytest.raises(RuntimeError, match="no durable terminal outcome"):
-        await bot._turn_controller.handle_interactive_selection(
+        await bot._turn_controller._handle_interactive_selection(
             room,
             selection=selection,
             user_id="@user:localhost",

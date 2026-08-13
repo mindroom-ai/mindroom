@@ -33,7 +33,7 @@ from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
     make_pending_event,
     prepared_dispatch_result,
-    replace_reaction_dispatcher_deps,
+    replace_interactive_selection_handlers,
     replace_turn_controller_deps,
     unwrap_extracted_collaborator,
 )
@@ -1072,9 +1072,9 @@ async def test_edit_and_reaction_slots_settle_before_their_execution_finishes(tm
     edit_task: asyncio.Task[None] | None = None
     reaction_task: asyncio.Task[None] | None = None
     try:
-        replace_reaction_dispatcher_deps(
+        replace_interactive_selection_handlers(
             bot,
-            handle_interactive_selection=blocked_selection,
+            handle=blocked_selection,
         )
         with (
             patch.object(bot._edit_regenerator, "handle_message_edit", new=AsyncMock(side_effect=blocked_edit)),

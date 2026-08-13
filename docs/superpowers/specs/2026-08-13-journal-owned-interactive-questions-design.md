@@ -2,8 +2,8 @@
 
 ## Summary
 
-Interactive questions will move from a process-global JSON store into the existing event journal.
-The event journal will become the sole durable authority for question registration, selection ownership, membership invalidation, and terminal consumption.
+Interactive questions move from a process-global JSON store into the existing event journal.
+The event journal becomes the sole durable authority for question registration, selection ownership, membership invalidation, and terminal consumption.
 Runtime objects will continue to own executing asyncio tasks, but they will no longer own durable question state.
 
 ## Problem
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS interactive_questions (
     principal_id TEXT NOT NULL,
     question_event_id TEXT NOT NULL,
     room_id TEXT NOT NULL,
-    thread_id TEXT,
+    thread_id TEXT NOT NULL,
     creator_agent TEXT NOT NULL,
     question_json TEXT NOT NULL,
     membership_epoch BIGINT NOT NULL,
@@ -115,6 +115,8 @@ The same transaction advances the membership epoch, removes derived conversation
 `MembershipFence` no longer carries `clear_departed_room`.
 The store no longer exposes cleanup callbacks, cleanup-on-rejoin, or an external cleanup retry transaction.
 The reported-departure ledger and pre-fanout join ordering remain because delayed and replayed Matrix membership observations are independent of question persistence.
+Matrix parsing and journal fencing exchange one immutable `ReportedDeparture` record per observation.
+That record keeps room, observation identity, and same-response rejoin evidence together instead of exposing parallel tuples that can disagree in length.
 
 ## Runtime Shutdown
 
@@ -135,7 +137,9 @@ After implementation, a merge-tree and focused combined test run against PR #180
 
 ## File Structure
 
-- Create `src/mindroom/event_journal/interactive_questions.py` for question SQL and stored selection dataclasses.
+- Create `src/mindroom/interactive_models.py` for the leaf question and selection dataclasses.
+- Create `src/mindroom/event_journal/interactive_questions.py` for question SQL and transactional operations.
+- Create `src/mindroom/membership_models.py` for the leaf reported-departure record shared by sync parsing and journal fencing.
 - Modify `src/mindroom/event_journal/schema.py` for the table and lookup indexes.
 - Modify `src/mindroom/event_journal/store.py` and `views.py` for typed async APIs.
 - Modify `src/mindroom/event_journal/journal.py` so settlement and membership invalidation delete question rows transactionally.
@@ -162,6 +166,7 @@ Tests that exist only to exercise JSON corruption, advisory locks, dirty overlay
 - No process-global active or claimed question dictionary remains.
 - No production `commit_selection` or `restore_selection` function remains.
 - No membership transaction invokes an external question-cleanup callback.
+- No public membership boundary represents one reported departure with parallel tuples.
 - Claiming a reaction and its question is one transaction.
 - Settling a selected source and consuming its question is one transaction.
 - Fencing a departure and removing its questions is one transaction.

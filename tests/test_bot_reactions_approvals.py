@@ -59,6 +59,7 @@ from tests.bot_helpers import (
 from tests.conftest import (
     install_relation_lookup,
     make_matrix_client_mock,
+    replace_interactive_selection_handlers,
     replace_reaction_dispatcher_deps,
     replace_turn_controller_deps,
     request_envelope,
@@ -330,7 +331,7 @@ class TestAgentBot(AgentBotTestBase):
         room.room_id = "!test:localhost"
         room.canonical_alias = None
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
-        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=AsyncMock())
+        replace_interactive_selection_handlers(bot, handle=AsyncMock())
         selection = interactive.InteractiveSelection(
             question_event_id="$question",
             question_text="Choose one",
@@ -555,7 +556,7 @@ class TestAgentBot(AgentBotTestBase):
             selection_started.set()
             assert bot._coalescing_gate.lanes.unsettled_slots()
 
-        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=handle_selection)
+        replace_interactive_selection_handlers(bot, handle=handle_selection)
         with _mock_interactive_claim(bot, selection):
             await _dispatch_reaction(bot, room, event)
 
@@ -650,7 +651,7 @@ class TestAgentBot(AgentBotTestBase):
             execution_order.append("reaction")
 
         monkeypatch.setattr(bot._coalescing_gate, "_dispatch_turn", dispatch_turn)
-        replace_reaction_dispatcher_deps(bot, start_interactive_selection=start_selection)
+        replace_interactive_selection_handlers(bot, start=start_selection)
         earlier_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
         earlier_event = PreparedIngress(
             sender="@user:localhost",
@@ -712,7 +713,7 @@ class TestAgentBot(AgentBotTestBase):
             message_started.set()
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
-        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=blocked_selection)
+        replace_interactive_selection_handlers(bot, handle=blocked_selection)
         monkeypatch.setattr(
             unwrap_extracted_collaborator(bot._turn_controller),
             "handle_text_event",
@@ -783,7 +784,7 @@ class TestAgentBot(AgentBotTestBase):
         async def handle_selection(*_args: object, **_kwargs: object) -> None:
             preparation_started.set()
 
-        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=handle_selection)
+        replace_interactive_selection_handlers(bot, handle=handle_selection)
         older: asyncio.Task[str | None] | None = None
         try:
             with (
@@ -831,7 +832,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-a",
             reply_to_event_id="$question",
         )
-        await bot._turn_controller.start_interactive_selection(
+        await bot._turn_controller._start_interactive_selection(
             prepare_forever,
             response_target=target,
             source_event_id="$reaction",
@@ -843,20 +844,6 @@ class TestAgentBot(AgentBotTestBase):
 
         assert await bot._response_runner.drain_inbox_responses(cancel_after_seconds=0.01) is False
         assert not bot._response_runner.has_active_response_for_target(target)
-
-    def test_replaced_turn_controller_rebinds_interactive_reaction_callbacks(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Reaction dispatch must use the controller rebuilt by test dependency swaps."""
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-        controller = replace_turn_controller_deps(bot)
-
-        assert bot._reaction_dispatcher.deps.enqueue_interactive_selection == controller.enqueue_interactive_selection
-        assert bot._reaction_dispatcher.deps.start_interactive_selection == controller.start_interactive_selection
 
     @pytest.mark.asyncio
     async def test_interactive_postresponse_settlement_failure_does_not_run_prestart_cleanup(
@@ -885,7 +872,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-a",
             reply_to_event_id="$question",
         )
-        await controller.start_interactive_selection(
+        await controller._start_interactive_selection(
             response,
             response_target=target,
             source_event_id="$reaction",
@@ -924,7 +911,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             pytest.raises(asyncio.CancelledError, match="restart"),
         ):
-            await controller.handle_interactive_selection(
+            await controller._handle_interactive_selection(
                 room,
                 selection=selection,
                 user_id="@user:localhost",
@@ -962,7 +949,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with patch.object(controller, "_execute_interactive_selection", new=execute_selection):
             response = asyncio.create_task(
-                controller.handle_interactive_selection(
+                controller._handle_interactive_selection(
                     room,
                     selection=selection,
                     user_id="@user:localhost",
@@ -1138,7 +1125,7 @@ class TestAgentBot(AgentBotTestBase):
 
         try:
             with acquire_patch:
-                await controller.start_interactive_selection(
+                await controller._start_interactive_selection(
                     response,
                     response_target=target,
                     source_event_id="$reaction",
@@ -1225,7 +1212,7 @@ class TestAgentBot(AgentBotTestBase):
             newer_entered.set()
             return "$newer-response"
 
-        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=handle_selection)
+        replace_interactive_selection_handlers(bot, handle=handle_selection)
         newer_task: asyncio.Task[str | None] | None = None
         try:
             with (
@@ -1350,7 +1337,7 @@ class TestAgentBot(AgentBotTestBase):
             await release_approval.wait()
             return False
 
-        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=AsyncMock())
+        replace_interactive_selection_handlers(bot, handle=AsyncMock())
         with (
             patch("mindroom.reaction_dispatch.handle_tool_approval_action", side_effect=delayed_approval),
             _mock_interactive_claim(bot, selection),
@@ -2580,9 +2567,9 @@ class TestAgentBot(AgentBotTestBase):
             thread_id=None,
         )
         failure = RuntimeError("crash after interactive reaction claim")
-        replace_reaction_dispatcher_deps(
+        replace_interactive_selection_handlers(
             bot,
-            handle_interactive_selection=AsyncMock(side_effect=failure),
+            handle=AsyncMock(side_effect=failure),
         )
         store = bot._journal_store.principal(bot._journal_principal_id)
         assert await store.register_interactive_question_for_epoch(
@@ -2613,7 +2600,7 @@ class TestAgentBot(AgentBotTestBase):
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
-        replace_reaction_dispatcher_deps(restarted, handle_interactive_selection=AsyncMock())
+        replace_interactive_selection_handlers(restarted, handle=AsyncMock())
         await restarted._journal_dispatcher.drain_once()
         await restarted._response_runner.drain_inbox_responses()
 

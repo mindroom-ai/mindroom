@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.logging_config import get_logger
+from mindroom.membership_models import ReportedDeparture
 
 from .models import DepartureOutcome, DepartureSource
 
@@ -125,10 +126,7 @@ class MembershipFence:
 
     async def fence_reported_departures(
         self,
-        room_ids: Iterable[str],
-        *,
-        observation_ids: Iterable[str | None] | None = None,
-        rejoined_after: Iterable[bool] | None = None,
+        departures: Iterable[ReportedDeparture],
     ) -> None:
         """Fence departures a sync reported, absorbing the report local ones are owed.
 
@@ -139,20 +137,9 @@ class MembershipFence:
         sync responses and process restarts. A proven later join rearms only
         the epoch this report owns.
         """
-        reported = tuple(room_ids)
-        report_observation_ids = (None,) * len(reported) if observation_ids is None else tuple(observation_ids)
-        report_rejoins = (False,) * len(reported) if rejoined_after is None else tuple(rejoined_after)
-        if len(report_observation_ids) != len(reported) or len(report_rejoins) != len(reported):
-            msg = "Each reported departure must have matching identity and rejoin state"
-            raise ValueError(msg)
         await self._recover_owed_reports()
-        for room_id, observation_id, rejoined in zip(
-            reported,
-            report_observation_ids,
-            report_rejoins,
-            strict=True,
-        ):
-            await self._apply_reported_departure(room_id, observation_id, rejoined)
+        for departure in departures:
+            await self._apply_reported_departure(departure)
         await self._expire_unarrived_reports()
 
     async def observe_reported_transition(
@@ -169,7 +156,9 @@ class MembershipFence:
             )
             return
         await self._recover_owed_reports()
-        await self._apply_reported_departure(room_id, observation_id, False)
+        await self._apply_reported_departure(
+            ReportedDeparture(room_id=room_id, observation_id=observation_id),
+        )
 
     async def note_membership_restarted(self, room_id: str) -> None:
         """Record a confirmed join, so this room's next departure fences again."""
@@ -177,21 +166,19 @@ class MembershipFence:
 
     async def _apply_reported_departure(
         self,
-        room_id: str,
-        observation_id: str | None,
-        rejoined: bool,
+        departure: ReportedDeparture,
     ) -> None:
         """Apply one reported departure without advancing the sync-response window."""
         outcome = await self.store.fence_departure(
-            room_id,
+            departure.room_id,
             source=DepartureSource.REPORTED,
-            report_observation_id=observation_id,
+            report_observation_id=departure.observation_id,
         )
-        self._log(room_id, outcome)
-        self._track(room_id, outcome)
-        if rejoined and outcome.reported_run_epoch is not None:
+        self._log(departure.room_id, outcome)
+        self._track(departure.room_id, outcome)
+        if departure.rejoined_after and outcome.reported_run_epoch is not None:
             await self.store.close_reported_departure_run(
-                room_id,
+                departure.room_id,
                 outcome.reported_run_epoch,
             )
 

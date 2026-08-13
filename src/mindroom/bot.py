@@ -838,8 +838,6 @@ class AgentBot:
                 ingress=self._ingress_validator,
                 reserve_prompt_ingress_order=self._turn_controller.reserve_prompt_ingress_order,
                 enqueue_interactive_selection=self._turn_controller.enqueue_interactive_selection,
-                handle_interactive_selection=self._turn_controller.handle_interactive_selection,
-                start_interactive_selection=self._turn_controller.start_interactive_selection,
                 emit_reaction_received_hooks=self._emit_reaction_received_hooks,
                 config_confirmation=config_confirmation.ConfigConfirmationContext(
                     runtime=self._runtime_view,
@@ -1835,11 +1833,7 @@ class AgentBot:
 
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
-        await self._membership_fence.fence_reported_departures(
-            membership.departures,
-            observation_ids=membership.departure_observation_ids,
-            rejoined_after=membership.departure_rejoined_after,
-        )
+        await self._membership_fence.fence_reported_departures(membership.departures)
         departed_room_ids = membership.departed_room_ids
         for room_id in departed_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)

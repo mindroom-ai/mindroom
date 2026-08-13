@@ -113,6 +113,7 @@ depends_on = [
     "mindroom.interactive_models",
     "mindroom.logging_config",
     "mindroom.matrix.sidecar_content",
+    "mindroom.membership_models",
 ]
 visibility = [
     "mindroom.bot",
@@ -144,6 +145,14 @@ visibility = [
     "mindroom.event_journal",
     "mindroom.interactive",
     "mindroom.post_response_effects",
+]
+
+[[modules]]
+path = "mindroom.membership_models"
+depends_on = []
+visibility = [
+    "mindroom.event_journal",
+    "mindroom.matrix.sync_loop",
 ]
 
 [[modules]]
@@ -2169,7 +2178,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.matrix.sync_loop"
-depends_on = []
+depends_on = ["mindroom.membership_models"]
 visibility = ["mindroom.bot"]
 
 [[modules]]

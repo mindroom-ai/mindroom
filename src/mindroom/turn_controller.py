@@ -156,7 +156,6 @@ class _InteractiveSelectionDispatch:
     """Deferred selection work carried through receipt-ordered coalescing."""
 
     response_factory: Callable[[], Awaitable[None]]
-    start_response: Callable[..., Awaitable[None]]
     response_target: MessageTarget
     source_event_id: str
     user_id: str
@@ -749,7 +748,7 @@ class TurnController:
                 # response may wait behind this conversation's active turn; the
                 # sender's lane slot must settle now, not at response completion.
                 await reservation_owner.release()
-                await self.handle_interactive_selection(
+                await self._handle_interactive_selection(
                     room,
                     selection=selection,
                     user_id=envelope.requester_id,
@@ -1176,7 +1175,7 @@ class TurnController:
             ),
         )
 
-    async def start_interactive_selection(
+    async def _start_interactive_selection(
         self,
         response_factory: Callable[[], Awaitable[None]],
         *,
@@ -1258,21 +1257,18 @@ class TurnController:
         requester_user_id: str,
         user_id: str,
         source_event_id: str,
-        handle_interactive_selection: Callable[..., Awaitable[None]],
-        start_interactive_selection: Callable[..., Awaitable[None]],
     ) -> None:
         """Queue a selection handoff as a FIFO barrier behind earlier ingress."""
         response_target = self._interactive_selection_target(room.room_id, selection)
 
         dispatch = _InteractiveSelectionDispatch(
-            response_factory=lambda: handle_interactive_selection(
+            response_factory=lambda: self._handle_interactive_selection(
                 room,
                 selection=selection,
                 user_id=user_id,
                 source_event_id=source_event_id,
                 response_target=response_target,
             ),
-            start_response=start_interactive_selection,
             response_target=response_target,
             source_event_id=source_event_id,
             user_id=user_id,
@@ -1319,7 +1315,7 @@ class TurnController:
             raise ValueError(msg)
         item = items[0]
         dispatch = cast("_InteractiveSelectionDispatch", item.payload)
-        await dispatch.start_response(
+        await self._start_interactive_selection(
             dispatch.response_factory,
             response_target=dispatch.response_target,
             source_event_id=dispatch.source_event_id,
@@ -1329,7 +1325,7 @@ class TurnController:
         item.finish_once(lambda: None)
         return True
 
-    async def handle_interactive_selection(
+    async def _handle_interactive_selection(
         self,
         room: nio.MatrixRoom,
         *,

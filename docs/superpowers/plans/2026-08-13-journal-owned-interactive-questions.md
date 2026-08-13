@@ -36,6 +36,7 @@ The event journal binds a question to its admitted source, consumes it during so
 - `src/mindroom/post_response_effects.py` registers delivered response questions through `PrincipalStore`.
 - `src/mindroom/custom_tools/matrix_conversation_operations.py` registers and clears direct-tool questions through `PrincipalStore`.
 - `src/mindroom/event_journal/membership.py` translates membership evidence without external cleanup callbacks.
+- `src/mindroom/membership_models.py` keeps one reported departure's room, durable identity, and rejoin evidence in one immutable record.
 - `src/mindroom/bot.py` wires the journal methods and no longer initializes interactive JSON persistence.
 - `tests/test_event_journal_store.py` proves storage invariants against SQLite and PostgreSQL.
 - `tests/test_bot_reactions_approvals.py`, `tests/test_turn_controller_focused.py`, and `tests/test_matrix_message_tool.py` prove runtime integration.
@@ -432,3 +433,32 @@ Do not modify PR #1807's existing dirty worktree.
 
 Run: `git status --short`, `git log --oneline -8`, and `git diff --check`.
 Push `fix/pr-1825-followup` to `origin/fix/interactive-reaction-cancel-before-start` only after every required verification succeeds.
+
+### Task 9: Final Boundary Simplification
+
+**Files:**
+
+- Create: `src/mindroom/membership_models.py`
+- Modify: `src/mindroom/matrix/sync_loop.py`
+- Modify: `src/mindroom/event_journal/membership.py`
+- Modify: `src/mindroom/event_journal/interactive_questions.py`
+- Test: `tests/test_sync_task_cancellation.py`
+- Test: `tests/test_journal_membership_fence.py`
+- Test: `tests/test_event_journal_store.py`
+
+**Interfaces:**
+
+- Replace the three parallel departure tuples with `tuple[ReportedDeparture, ...]`.
+- Give `ReactionDispatcher` one interactive-selection handoff instead of round-tripping two controller methods through its dependencies.
+- Preserve the membership, source, and question row-lock order.
+- Remove only local wrappers and duplicated SQL that do not own a distinct invariant.
+
+- [x] **Step 1: Prove the record boundary with a failing parser test**
+
+- [x] **Step 2: Consolidate reported-departure transport into one immutable record**
+
+- [x] **Step 3: Simplify question decoding and binding without changing transaction order**
+
+- [x] **Step 4: Collapse the circular reaction-to-controller callback seam**
+
+- [ ] **Step 5: Run the complete affected suite, static checks, and exact PR #1807 integration**

@@ -48,8 +48,6 @@ class ReactionDispatcherDeps:
     ingress: IngressValidator
     reserve_prompt_ingress_order: Callable[..., PromptIngressReservationOwner]
     enqueue_interactive_selection: Callable[..., Awaitable[None]]
-    handle_interactive_selection: Callable[..., Awaitable[None]]
-    start_interactive_selection: Callable[..., Awaitable[None]]
     emit_reaction_received_hooks: Callable[..., Awaitable[None]]
     config_confirmation: ConfigConfirmationContext
 
@@ -175,8 +173,6 @@ class ReactionDispatcher:
             requester_user_id=requester_user_id,
             user_id=event.sender,
             source_event_id=event.event_id,
-            handle_interactive_selection=self.deps.handle_interactive_selection,
-            start_interactive_selection=self.deps.start_interactive_selection,
         )
         return TurnDispatchOutcome.DEFERRED
 
