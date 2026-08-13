@@ -14,6 +14,7 @@ import nio
 from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.durable_write import write_json_file_durable
 from mindroom.matrix.client_session import (
+    MatrixSyncStorage,
     PermanentMatrixStartupError,
     login,
     login_flows,
@@ -33,6 +34,13 @@ if TYPE_CHECKING:
 
 class DesktopSessionError(RuntimeError):
     """Desktop Matrix session state is missing, exposed, or invalid."""
+
+
+_DESKTOP_SYNC_STORAGE = MatrixSyncStorage(
+    recover_limited_timelines=False,
+    persist_recovery=False,
+    store_tokens=True,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +97,13 @@ def desktop_session_path(runtime_paths: RuntimePaths) -> Path:
 
 def save_desktop_session(path: Path, session: DesktopMatrixSession) -> None:
     """Durably persist a Matrix access token with owner-only permissions."""
-    write_json_file_durable(path, session.to_payload(), indent=2, sort_keys=True, trailing_newline=True)
+    write_json_file_durable(
+        path,
+        session.to_payload(),
+        indent=2,
+        sort_keys=True,
+        trailing_newline=True,
+    )
     path.chmod(0o600)
 
 
@@ -153,7 +167,13 @@ async def resolve_desktop_login_method(
             runtime_paths,
             http_headers=http_headers,
         )
-    except (PermanentMatrixStartupError, aiohttp.ClientError, OSError, TimeoutError, ValueError) as exc:
+    except (
+        PermanentMatrixStartupError,
+        aiohttp.ClientError,
+        OSError,
+        TimeoutError,
+        ValueError,
+    ) as exc:
         msg = f"Could not discover Matrix login methods: {exc}"
         raise DesktopSessionError(msg) from exc
     if "m.login.sso" in flows:
@@ -190,12 +210,26 @@ async def login_desktop_client(
                 runtime_paths,
                 expected_user_id=user_id,
                 http_headers=http_headers,
+                sync_storage=_DESKTOP_SYNC_STORAGE,
             )
         else:
             assert user_id is not None
             assert password is not None
-            client = await login(homeserver, user_id, password, runtime_paths, http_headers=http_headers)
-    except (PermanentMatrixStartupError, aiohttp.ClientError, OSError, TimeoutError, ValueError) as exc:
+            client = await login(
+                homeserver,
+                user_id,
+                password,
+                runtime_paths,
+                http_headers=http_headers,
+                sync_storage=_DESKTOP_SYNC_STORAGE,
+            )
+    except (
+        PermanentMatrixStartupError,
+        aiohttp.ClientError,
+        OSError,
+        TimeoutError,
+        ValueError,
+    ) as exc:
         msg = f"Desktop Matrix login failed: {exc}"
         raise DesktopSessionError(msg) from exc
     try:
@@ -248,7 +282,11 @@ async def restore_desktop_client(
     http_headers: Mapping[str, str] | None = None,
 ) -> nio.AsyncClient:
     """Restore the exact desktop Matrix device and its Olm identity."""
-    client = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
+    client = await open_desktop_client(
+        session,
+        runtime_paths=runtime_paths,
+        http_headers=http_headers,
+    )
     try:
         await prepare_desktop_client(client)
     except Exception:
@@ -275,6 +313,7 @@ async def open_desktop_client(
             session.access_token,
             runtime_paths,
             http_headers=http_headers,
+            sync_storage=_DESKTOP_SYNC_STORAGE,
         )
     except (PermanentMatrixStartupError, ValueError) as exc:
         msg = f"Desktop Matrix session restore failed: {exc}"

@@ -30,7 +30,9 @@ from mindroom.matrix.client_session import (
 )
 
 
-def test_encryption_exposes_only_mindroom_recovery_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_encryption_exposes_only_mindroom_recovery_markers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Encrypted events expose recovery markers but no private message fields."""
     relation = {"event_id": "$original:example.org", "rel_type": "m.replace"}
 
@@ -73,7 +75,9 @@ def test_encryption_exposes_only_mindroom_recovery_markers(monkeypatch: pytest.M
     }
 
 
-def test_encryption_does_not_add_metadata_to_ordinary_events(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_encryption_does_not_add_metadata_to_ordinary_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ordinary encrypted messages retain nio's standard envelope."""
 
     def fake_encrypt(
@@ -96,7 +100,9 @@ def test_encryption_does_not_add_metadata_to_ordinary_events(monkeypatch: pytest
     assert encrypted_content == {"ciphertext": "encrypted payload"}
 
 
-def test_explicit_zero_one_time_key_count_requests_replenishment(tmp_path: Path) -> None:
+def test_explicit_zero_one_time_key_count_requests_replenishment(
+    tmp_path: Path,
+) -> None:
     """A drained server OTK pool must make nio upload replacement keys."""
     user_id = "@agent:example.org"
     client = _MindRoomAsyncClient(
@@ -236,7 +242,10 @@ async def test_unrecovered_timeline_gap_survives_client_restart(tmp_path: Path) 
         await restarted.close()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX permission bits are unavailable on Windows",
+)
 def test_matrix_store_directory_is_owner_only(tmp_path: Path) -> None:
     """Private Olm identity material is inaccessible to other local users."""
     runtime_paths = RuntimePaths(
@@ -263,7 +272,11 @@ async def test_login_with_token_restores_returned_device(
     tmp_path: Path,
 ) -> None:
     """Token exchange uses no guessed identity and restores exactly returned credentials."""
-    response = nio.LoginResponse("@desktop:example.org", "DESKTOP", "matrix-access-token")
+    response = nio.LoginResponse(
+        "@desktop:example.org",
+        "DESKTOP",
+        "matrix-access-token",
+    )
     login_client = SimpleNamespace(
         login=AsyncMock(return_value=response),
         close=AsyncMock(),
@@ -272,7 +285,11 @@ async def test_login_with_token_restores_returned_device(
     restored_client = object()
     create_authenticated = Mock(return_value=restored_client)
     monkeypatch.setattr(client_session, "_create_matrix_client", create_login_client)
-    monkeypatch.setattr(client_session, "create_authenticated_client", create_authenticated)
+    monkeypatch.setattr(
+        client_session,
+        "create_authenticated_client",
+        create_authenticated,
+    )
     runtime_paths = RuntimePaths(
         config_path=tmp_path / "config.yaml",
         config_dir=tmp_path,
@@ -293,6 +310,7 @@ async def test_login_with_token_restores_returned_device(
         "https://matrix.example.org",
         runtime_paths,
         http_headers={"X-Access-Client": "test-secret"},
+        sync_storage=MatrixSyncStorage(),
     )
     login_client.login.assert_awaited_once_with(
         token="short-lived-token",  # noqa: S106 - Test-only login token.
@@ -306,7 +324,60 @@ async def test_login_with_token_restores_returned_device(
         "matrix-access-token",
         runtime_paths,
         http_headers={"X-Access-Client": "test-secret"},
+        sync_storage=MatrixSyncStorage(),
     )
+
+
+@pytest.mark.asyncio
+async def test_login_with_token_uses_supplied_sync_storage_for_both_clients(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Token exchange and restored client retain one caller's sync policy.
+
+    This fails if ``login_with_token`` drops the policy at either client
+    construction boundary.
+    """
+    response = nio.LoginResponse(
+        "@desktop:example.org",
+        "DESKTOP",
+        "matrix-access-token",
+    )
+    login_client = SimpleNamespace(
+        login=AsyncMock(return_value=response),
+        close=AsyncMock(),
+    )
+    create_login_client = Mock(return_value=login_client)
+    restored_client = object()
+    create_authenticated = Mock(return_value=restored_client)
+    monkeypatch.setattr(client_session, "_create_matrix_client", create_login_client)
+    monkeypatch.setattr(
+        client_session,
+        "create_authenticated_client",
+        create_authenticated,
+    )
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "data",
+    )
+    sync_storage = MatrixSyncStorage(
+        recover_limited_timelines=False,
+        persist_recovery=False,
+        store_tokens=True,
+    )
+
+    result = await login_with_token(
+        "https://matrix.example.org",
+        "short-lived-token",
+        runtime_paths,
+        sync_storage=sync_storage,
+    )
+
+    assert result is restored_client
+    assert create_login_client.call_args.kwargs["sync_storage"] is sync_storage
+    assert create_authenticated.call_args.kwargs["sync_storage"] is sync_storage
 
 
 @pytest.mark.asyncio
@@ -316,13 +387,27 @@ async def test_login_with_token_revokes_unexpected_identity(
 ) -> None:
     """SSO cannot silently enroll a different Matrix account than requested."""
     login_client = SimpleNamespace(
-        login=AsyncMock(return_value=nio.LoginResponse("@wrong:example.org", "WRONG", "access-token")),
+        login=AsyncMock(
+            return_value=nio.LoginResponse(
+                "@wrong:example.org",
+                "WRONG",
+                "access-token",
+            ),
+        ),
         logout=AsyncMock(return_value=nio.LogoutResponse()),
         close=AsyncMock(),
     )
-    monkeypatch.setattr(client_session, "_create_matrix_client", Mock(return_value=login_client))
+    monkeypatch.setattr(
+        client_session,
+        "_create_matrix_client",
+        Mock(return_value=login_client),
+    )
     create_authenticated = Mock()
-    monkeypatch.setattr(client_session, "create_authenticated_client", create_authenticated)
+    monkeypatch.setattr(
+        client_session,
+        "create_authenticated_client",
+        create_authenticated,
+    )
 
     with pytest.raises(PermanentMatrixStartupError, match=r"@wrong:example\.org"):
         await login_with_token(
@@ -349,7 +434,9 @@ async def test_login_flows_uses_proxy_headers_and_closes_client(
 ) -> None:
     """Automatic method discovery crosses the same authenticated proxy as login."""
     client = SimpleNamespace(
-        login_info=AsyncMock(return_value=nio.LoginInfoResponse(["m.login.token", "m.login.sso"])),
+        login_info=AsyncMock(
+            return_value=nio.LoginInfoResponse(["m.login.token", "m.login.sso"]),
+        ),
         close=AsyncMock(),
     )
     create_client = Mock(return_value=client)

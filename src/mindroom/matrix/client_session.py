@@ -63,6 +63,7 @@ class PermanentMatrixStartupError(PermanentStartupError):
 class MatrixSyncStorage:
     """Select which sync state nio persists for one Matrix client."""
 
+    recover_limited_timelines: bool = True
     store_tokens: bool = True
     persist_recovery: bool = True
 
@@ -104,7 +105,11 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         content: dict[Any, Any],
     ) -> tuple[str, dict[str, Any]]:
         """Expose coarse delivery markers needed without decrypting room history."""
-        encrypted_message_type, encrypted_content = super().encrypt(room_id, message_type, content)
+        encrypted_message_type, encrypted_content = super().encrypt(
+            room_id,
+            message_type,
+            content,
+        )
         stream_status = content.get(STREAM_STATUS_KEY)
         if isinstance(stream_status, str):
             encrypted_content[STREAM_STATUS_KEY] = stream_status
@@ -115,16 +120,25 @@ class _MindRoomAsyncClient(nio.AsyncClient):
             encrypted_content[CONFIG_CONFIRMATION_REACTION_KEY] = config_reaction_id
         return encrypted_message_type, encrypted_content
 
-    def _handle_olm_events(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
+    def _handle_olm_events(
+        self,
+        response: nio.SyncResponse | nio.SlidingSyncResponse,
+    ) -> None:
         """Preserve an explicit zero OTK count so nio replenishes a drained pool."""
         super()._handle_olm_events(response)
         count = response.device_key_count.signed_curve25519
         if self.olm is not None and count is not None:
             self.olm.uploaded_key_count = count
 
-    def _handle_decrypt_to_device(self, to_device_event: nio.ToDeviceEvent) -> nio.ToDeviceEvent | None:
+    def _handle_decrypt_to_device(
+        self,
+        to_device_event: nio.ToDeviceEvent,
+    ) -> nio.ToDeviceEvent | None:
         decrypted = super()._handle_decrypt_to_device(to_device_event)
-        if not isinstance(to_device_event, nio.OlmEvent) or not isinstance(decrypted, nio.UnknownToDeviceEvent):
+        if not isinstance(to_device_event, nio.OlmEvent) or not isinstance(
+            decrypted,
+            nio.UnknownToDeviceEvent,
+        ):
             return decrypted
         if self.olm is None:
             _log_custom_olm_rejection(decrypted, "missing_olm_machine")
@@ -211,7 +225,10 @@ def matrix_startup_error(
     return ValueError(message)
 
 
-def _maybe_ssl_context(homeserver: str, runtime_paths: RuntimePaths) -> ssl_module.SSLContext | None:
+def _maybe_ssl_context(
+    homeserver: str,
+    runtime_paths: RuntimePaths,
+) -> ssl_module.SSLContext | None:
     if homeserver.startswith("https://"):
         if not runtime_matrix_ssl_verify(runtime_paths=runtime_paths):
             ssl_context = ssl_module.create_default_context()
@@ -243,7 +260,7 @@ def matrix_client_config(
     """Return nio config, copying plain headers while preserving request-time mappings."""
     custom_headers = dict(http_headers) if isinstance(http_headers, dict) else http_headers
     return nio.AsyncClientConfig(
-        backfill_limited_timelines=True,
+        backfill_limited_timelines=sync_storage.recover_limited_timelines,
         backfill_max_events=_BACKFILL_MAX_EVENTS,
         backfill_persist_recovery=sync_storage.persist_recovery,
         store_sync_tokens=sync_storage.store_tokens,
@@ -370,10 +387,16 @@ async def login_with_token(
     *,
     expected_user_id: str | None = None,
     http_headers: Mapping[str, str] | None = None,
+    sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
 ) -> nio.AsyncClient:
     """Exchange one short-lived Matrix login token and restore its exact device."""
     runtime_paths = _require_runtime_paths_arg(runtime_paths)
-    login_client = _create_matrix_client(homeserver, runtime_paths, http_headers=http_headers)
+    login_client = _create_matrix_client(
+        homeserver,
+        runtime_paths,
+        http_headers=http_headers,
+        sync_storage=sync_storage,
+    )
     try:
         response = await login_client.login(
             token=login_token,
@@ -403,6 +426,7 @@ async def login_with_token(
         access_token,
         runtime_paths,
         http_headers=http_headers,
+        sync_storage=sync_storage,
     )
 
 
@@ -478,7 +502,11 @@ async def restore_login(
         client.user_id = response.user_id
         if response.device_id:
             client.device_id = response.device_id
-        logger.info("matrix_login_restored", user_id=response.user_id, device_id=client.device_id)
+        logger.info(
+            "matrix_login_restored",
+            user_id=response.user_id,
+            device_id=client.device_id,
+        )
         return client
 
     await client.close()

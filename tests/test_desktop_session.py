@@ -23,7 +23,11 @@ from mindroom.desktop.session import (
     resolve_desktop_login_method,
     save_desktop_session,
 )
-from mindroom.matrix.client_session import PermanentMatrixStartupError
+from mindroom.matrix.client_session import (
+    MatrixSyncStorage,
+    PermanentMatrixStartupError,
+    matrix_client_config,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,7 +53,9 @@ def test_session_round_trip_uses_owner_only_permissions(tmp_path: Path) -> None:
         assert path.stat().st_mode & 0o777 == 0o600
 
 
-def test_session_round_trip_remembers_interactive_access_transport(tmp_path: Path) -> None:
+def test_session_round_trip_remembers_interactive_access_transport(
+    tmp_path: Path,
+) -> None:
     """Bridge startup can renew Access without requiring the flag again."""
     path = tmp_path / "desktop" / "matrix_session.json"
     session = DesktopMatrixSession(
@@ -65,7 +71,10 @@ def test_session_round_trip_remembers_interactive_access_transport(tmp_path: Pat
     assert load_desktop_session(path) == session
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Unix permission bits are not authoritative on Windows")
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Unix permission bits are not authoritative on Windows",
+)
 def test_session_refuses_group_readable_token(tmp_path: Path) -> None:
     """An accidentally exposed token stops the bridge instead of being used."""
     path = tmp_path / "matrix_session.json"
@@ -92,7 +101,10 @@ def test_session_missing_path_has_setup_instruction(tmp_path: Path) -> None:
         load_desktop_session(tmp_path / "missing.json")
 
 
-def test_session_preserves_unexpected_filesystem_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_session_preserves_unexpected_filesystem_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Permission and device errors retain their native exception and traceback."""
     path = tmp_path / "matrix_session.json"
     path.write_text(json.dumps(_session().to_payload()), encoding="utf-8")
@@ -117,7 +129,10 @@ def test_http_headers_file_loads_string_mapping(tmp_path: Path) -> None:
     assert load_desktop_http_headers(path) == {"X-Access-Client": "test-secret"}
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Unix permission bits are not authoritative on Windows")
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Unix permission bits are not authoritative on Windows",
+)
 def test_http_headers_file_refuses_group_readable_secrets(tmp_path: Path) -> None:
     """An exposed proxy credential file stops before any Matrix request."""
     path = tmp_path / "matrix-http-headers.json"
@@ -129,7 +144,10 @@ def test_http_headers_file_refuses_group_readable_secrets(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize("payload", ['["not-an-object"]', '{"X-Access-Client": 1}'])
-def test_http_headers_file_requires_string_mapping(tmp_path: Path, payload: str) -> None:
+def test_http_headers_file_requires_string_mapping(
+    tmp_path: Path,
+    payload: str,
+) -> None:
     """Malformed header configuration fails before nio receives it."""
     path = tmp_path / "matrix-http-headers.json"
     path.write_text(payload, encoding="utf-8")
@@ -174,7 +192,9 @@ async def test_auto_login_method_uses_advertised_matrix_flows(
 
 
 @pytest.mark.asyncio
-async def test_explicit_login_method_skips_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_explicit_login_method_skips_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Operators can force SSO when a homeserver also advertises password login."""
     query = AsyncMock()
     monkeypatch.setattr("mindroom.desktop.session.login_flows", query)
@@ -190,7 +210,9 @@ async def test_explicit_login_method_skips_discovery(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_auto_login_method_rejects_unsupported_flows(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_auto_login_method_rejects_unsupported_flows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Application-service-only servers produce a clear local setup error."""
     monkeypatch.setattr(
         "mindroom.desktop.session.login_flows",
@@ -206,14 +228,19 @@ async def test_auto_login_method_rejects_unsupported_flows(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-async def test_auto_login_method_translates_network_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_auto_login_method_translates_network_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Login discovery reports transport failure as one actionable desktop error."""
     monkeypatch.setattr(
         "mindroom.desktop.session.login_flows",
         AsyncMock(side_effect=aiohttp.ClientConnectionError("homeserver unavailable")),
     )
 
-    with pytest.raises(DesktopSessionError, match=r"Could not discover.*homeserver unavailable"):
+    with pytest.raises(
+        DesktopSessionError,
+        match=r"Could not discover.*homeserver unavailable",
+    ):
         await resolve_desktop_login_method(
             DesktopLoginMethod.AUTO,
             homeserver="https://matrix.example.org",
@@ -232,14 +259,22 @@ async def test_initial_crypto_sync_does_not_announce_bridge_online() -> None:
 
     await _prepare_crypto(client)
 
-    client.sync.assert_awaited_once_with(timeout=0, full_state=False, set_presence="offline")
+    client.sync.assert_awaited_once_with(
+        timeout=0,
+        full_state=False,
+        set_presence="offline",
+    )
 
 
 @pytest.mark.asyncio
-async def test_login_translates_expected_matrix_authentication_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_login_translates_expected_matrix_authentication_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Bad desktop credentials become one actionable session-domain error."""
     runtime_paths = SimpleNamespace()
-    matrix_login = AsyncMock(side_effect=PermanentMatrixStartupError("invalid credentials"))
+    matrix_login = AsyncMock(
+        side_effect=PermanentMatrixStartupError("invalid credentials"),
+    )
     monkeypatch.setattr(
         "mindroom.desktop.session.login",
         matrix_login,
@@ -260,18 +295,70 @@ async def test_login_translates_expected_matrix_authentication_failure(monkeypat
         "wrong-password",
         runtime_paths,
         http_headers={"X-Access-Client": "test-secret"},
+        sync_storage=MatrixSyncStorage(
+            recover_limited_timelines=False,
+            persist_recovery=False,
+            store_tokens=True,
+        ),
     )
 
 
 @pytest.mark.asyncio
-async def test_login_translates_network_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_password_login_uses_desktop_upstream_sync_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Desktop password login disables nio limited-timeline recovery only.
+
+    This fails if the Desktop boundary omits its upstream-compatible sync
+    policy or the config builder does not consume that policy.
+    """
+    client = SimpleNamespace(
+        user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        access_token="matrix-access-token",  # noqa: S106 - Test-only access token.
+        close=AsyncMock(),
+    )
+    matrix_login = AsyncMock(return_value=client)
+    monkeypatch.setattr("mindroom.desktop.session.login", matrix_login)
+    monkeypatch.setattr("mindroom.desktop.session._prepare_crypto", AsyncMock())
+    monkeypatch.setattr(
+        "mindroom.desktop.session.ensure_agent_cross_signing",
+        AsyncMock(),
+    )
+
+    await login_desktop_client(
+        homeserver="https://matrix.example.org",
+        user_id="@desktop:example.org",
+        password="correct-password",  # noqa: S106 - Test-only password.
+        runtime_paths=SimpleNamespace(),
+    )
+
+    sync_storage = matrix_login.await_args.kwargs["sync_storage"]
+    assert sync_storage == MatrixSyncStorage(
+        recover_limited_timelines=False,
+        persist_recovery=False,
+        store_tokens=True,
+    )
+    config = matrix_client_config(sync_storage=sync_storage)
+    assert config.backfill_limited_timelines is False
+    assert config.backfill_persist_recovery is False
+    assert config.store_sync_tokens is True
+
+
+@pytest.mark.asyncio
+async def test_login_translates_network_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Desktop login reports exhausted transport retries without a traceback."""
     monkeypatch.setattr(
         "mindroom.desktop.session.login_with_token",
         AsyncMock(side_effect=aiohttp.ClientConnectionError("connection refused")),
     )
 
-    with pytest.raises(DesktopSessionError, match=r"Desktop Matrix login failed.*connection refused"):
+    with pytest.raises(
+        DesktopSessionError,
+        match=r"Desktop Matrix login failed.*connection refused",
+    ):
         await login_desktop_client(
             homeserver="https://matrix.example.org",
             user_id=None,
@@ -281,7 +368,9 @@ async def test_login_translates_network_failure(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
-async def test_sso_login_uses_returned_identity_without_password(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_sso_login_uses_returned_identity_without_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """SSO token exchange owns user identity and still prepares one encrypted device."""
     client = SimpleNamespace(
         user_id="@desktop:example.org",
@@ -294,7 +383,10 @@ async def test_sso_login_uses_returned_identity_without_password(monkeypatch: py
     cross_sign = AsyncMock()
     monkeypatch.setattr("mindroom.desktop.session.login_with_token", token_login)
     monkeypatch.setattr("mindroom.desktop.session._prepare_crypto", prepare)
-    monkeypatch.setattr("mindroom.desktop.session.ensure_agent_cross_signing", cross_sign)
+    monkeypatch.setattr(
+        "mindroom.desktop.session.ensure_agent_cross_signing",
+        cross_sign,
+    )
     runtime_paths = SimpleNamespace()
 
     returned_client, session = await login_desktop_client(
@@ -320,16 +412,28 @@ async def test_sso_login_uses_returned_identity_without_password(monkeypatch: py
         runtime_paths,
         expected_user_id=None,
         http_headers={"X-Access-Client": "test-secret"},
+        sync_storage=MatrixSyncStorage(
+            recover_limited_timelines=False,
+            persist_recovery=False,
+            store_tokens=True,
+        ),
     )
     prepare.assert_awaited_once_with(client)
     cross_sign.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_restore_translates_expected_revoked_session_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_restore_translates_expected_revoked_session_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A revoked saved access token becomes one actionable session-domain error."""
-    monkeypatch.setattr("mindroom.desktop.session.olm_store_exists", lambda *_args: True)
-    matrix_restore = AsyncMock(side_effect=PermanentMatrixStartupError("access token revoked"))
+    monkeypatch.setattr(
+        "mindroom.desktop.session.olm_store_exists",
+        lambda *_args: True,
+    )
+    matrix_restore = AsyncMock(
+        side_effect=PermanentMatrixStartupError("access token revoked"),
+    )
     monkeypatch.setattr(
         "mindroom.desktop.session.restore_login",
         matrix_restore,
@@ -342,4 +446,11 @@ async def test_restore_translates_expected_revoked_session_failure(monkeypatch: 
             http_headers={"X-Access-Client": "test-secret"},
         )
 
-    assert matrix_restore.await_args.kwargs["http_headers"] == {"X-Access-Client": "test-secret"}
+    assert matrix_restore.await_args.kwargs == {
+        "http_headers": {"X-Access-Client": "test-secret"},
+        "sync_storage": MatrixSyncStorage(
+            recover_limited_timelines=False,
+            persist_recovery=False,
+            store_tokens=True,
+        ),
+    }
