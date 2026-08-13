@@ -29,6 +29,9 @@ from mindroom.tool_approval import (
     send_suspended_tool_approval,
 )
 
+_USER_STOP_FAILURE_REASON = "cancelled_by_user"
+_USER_STOP_VISIBLE_NOTE = "**[Response cancelled by user]**"
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -478,6 +481,7 @@ class ApprovalResponseCoordinator:
         reason: str,
     ) -> tuple[bool, ApprovalContinuation]:
         """Edit the owner's response or send a principal-safe terminal notice."""
+        visible_reason = _USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else reason
         target = MessageTarget(
             room_id=current.room_id,
             source_thread_id=current.thread_id,
@@ -486,13 +490,13 @@ class ApprovalResponseCoordinator:
             session_id=current.session_id,
         )
         if current.response_event_id is not None and self.agent_name == current.entity_name:
-            delivered = await self._edit_response(current, target=target, text=reason)
+            delivered = await self._edit_response(current, target=target, text=visible_reason)
             response_event_id = None
         else:
             response_event_id = await self.delivery_gateway.send_text(
                 SendTextRequest(
                     target=target,
-                    response_text=reason,
+                    response_text=visible_reason,
                     delivery_turn_id=current.source_event_ids[0],
                     delivery_stage=DeliveryStage.FINAL,
                 ),

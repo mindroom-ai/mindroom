@@ -1107,6 +1107,8 @@ class ResponseRunner:
                         persist_response_event_id=self._approval_response_event_persistence(claimed),
                     ),
                 )
+                if final_outcome is None:
+                    final_outcome = progress.delivery_outcome
             except asyncio.CancelledError:
                 raise
             except Exception:

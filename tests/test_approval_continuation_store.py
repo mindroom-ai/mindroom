@@ -888,6 +888,58 @@ async def test_running_owner_that_cannot_claim_is_polled_with_backoff(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_chained_ready_generation_does_not_inherit_retry_backoff(tmp_path: Path) -> None:
+    """A newly persisted auto-approved pause is progress, not a failed dispatch attempt."""
+    transport: ApprovalMatrixTransport
+    resume_generations: list[int] = []
+
+    async def resume(continuation: ApprovalContinuation) -> FinalDeliveryOutcome | None:
+        resume_generations.append(continuation.generation)
+        claimant_id = f"worker-{continuation.generation}"
+        claimed = transport._continuations.claim(continuation.approval_id, claimant_id)
+        assert claimed is not None
+        if continuation.generation < 2:
+            advanced = transport._continuations.advance_pause(
+                continuation.approval_id,
+                claimant_id,
+                run_id=f"run-{continuation.generation + 2}",
+                session_id=continuation.session_id,
+                calls=(
+                    replace(
+                        continuation.calls[0],
+                        decision=ApprovalDecision.APPROVED,
+                        decision_recorded=True,
+                    ),
+                ),
+            )
+            assert advanced is not None
+            assert advanced.state == "ready"
+            return None
+        return FinalDeliveryOutcome(terminal_status="completed", event_id="$answer")
+
+    bot = SimpleNamespace(running=True, resume_approval_continuation=resume)
+    transport = ApprovalMatrixTransport(
+        runtime_paths=RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path,
+        ),
+        bot_provider=lambda _name: cast("Any", bot),
+        cards_provider=lambda: None,
+    )
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    assert transport._continuations.acknowledge_call("approval-1", "call-1") is not None
+
+    with patch("mindroom.approval_transport.asyncio.sleep", new=AsyncMock()) as sleep:
+        await transport._dispatch_continuation("approval-1")
+
+    assert resume_generations == [0, 1, 2]
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_transient_resume_exception_retries_ready_continuation(tmp_path: Path) -> None:
     """A transient pre-claim failure must not retire the only READY dispatcher."""
     runtime_paths = RuntimePaths(
@@ -927,6 +979,54 @@ async def test_transient_resume_exception_retries_ready_continuation(tmp_path: P
     assert completed is not None
     assert completed.state == "completed"
     assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_startup_missing_card_cannot_fail_a_concurrently_ready_decision(tmp_path: Path) -> None:
+    """Recovery must not overwrite a decision committed while it checks Matrix card ownership."""
+    card_check_started = asyncio.Event()
+    finish_card_check = asyncio.Event()
+
+    async def missing_card(**_kwargs: object) -> None:
+        card_check_started.set()
+        await finish_card_check.wait()
+
+    cards = SimpleNamespace(pending_approval_card=missing_card)
+    transport = ApprovalMatrixTransport(
+        runtime_paths=RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path,
+        ),
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: cast("Any", cards),
+        entity_configured=lambda _name: True,
+    )
+    pending = replace(
+        _continuation(),
+        calls=(replace(_continuation().calls[0], card_event_id="$card"),),
+    )
+    transport._continuations.create(pending)
+    observed = transport._continuations.get(pending.approval_id)
+    assert observed is not None
+    recovery = asyncio.create_task(transport._recover_pending_continuation(observed))
+    await asyncio.wait_for(card_check_started.wait(), timeout=2)
+
+    transport._continuations.resolve_call(pending.approval_id, "call-1", ApprovalDecision.APPROVED)
+    ready = transport._continuations.acknowledge_call(pending.approval_id, "call-1")
+    assert ready is not None
+    assert ready.state == "ready"
+    finish_card_check.set()
+
+    try:
+        assert await asyncio.wait_for(recovery, timeout=2) is True
+        persisted = transport._continuations.get(pending.approval_id)
+        assert persisted is not None
+        assert persisted.state == "ready"
+        assert persisted.calls[0].decision is ApprovalDecision.APPROVED
+    finally:
+        await transport.close()
 
 
 @pytest.mark.asyncio

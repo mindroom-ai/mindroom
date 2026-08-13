@@ -354,6 +354,14 @@ class ApprovalMatrixTransport:
                     return
                 if await self._dispatch_ready_once(continuation, retry_seconds=retry_seconds):
                     return
+                refreshed = await self._read_continuation_with_retry(approval_id)
+                if (
+                    refreshed is not None
+                    and refreshed.state == "ready"
+                    and refreshed.generation != continuation.generation
+                ):
+                    retry_seconds = _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS
+                    continue
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -617,12 +625,12 @@ class ApprovalMatrixTransport:
         if publication_unresolved:
             return False
         if any(not call.decision_recorded and call.card_event_id is None for call in recovered.calls):
-            return await self._fail_recovered_continuation(
+            return await self._fail_recovered_continuation_if_unchanged(
                 recovered,
                 "Tool approval card was not delivered before the restart.",
             )
         if not await self._attached_cards_exist(recovered):
-            return await self._fail_recovered_continuation(
+            return await self._fail_recovered_continuation_if_unchanged(
                 recovered,
                 "Tool approval card no longer exists after room membership changed; the tool was denied safely.",
             )
@@ -709,6 +717,29 @@ class ApprovalMatrixTransport:
         await self.request_continuation_failure(continuation, reason)
         refreshed = await asyncio.to_thread(self._continuations.get, continuation.approval_id)
         return refreshed is not None and refreshed.state in {"claimed", "settling", "completed", "failed"}
+
+    async def _fail_recovered_continuation_if_unchanged(
+        self,
+        continuation: ApprovalContinuation,
+        reason: str,
+    ) -> bool:
+        """Fail one stale-card snapshot only if no live decision changed it."""
+        requested = await asyncio.to_thread(
+            self._continuations.request_failure,
+            continuation.approval_id,
+            reason,
+            claimant_id=continuation.claimant_id,
+            runtime_generation=self.runtime_generation,
+            expected=continuation,
+        )
+        if requested is None:
+            refreshed = await asyncio.to_thread(self._continuations.get, continuation.approval_id)
+            if refreshed is not None and refreshed.state == "ready":
+                self._schedule_continuation(refreshed)
+            return refreshed is None or refreshed.state != "pending"
+        if requested.state in {"claimed", "settling"}:
+            self._schedule_continuation(requested)
+        return requested.state in {"claimed", "settling", "completed", "failed"}
 
     async def _run_on_runtime_loop(
         self,

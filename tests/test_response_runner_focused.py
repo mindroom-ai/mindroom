@@ -2258,6 +2258,15 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
 async def test_user_stop_leaves_terminal_state_write_to_dispatcher(tmp_path: Path) -> None:
     """A stopped runner does not become a second continuation-state writer."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
     continuation = ApprovalContinuation(
         approval_id="approval-stopped",
         run_id="run-paused",
@@ -2278,26 +2287,26 @@ async def test_user_stop_leaves_terminal_state_write_to_dispatcher(tmp_path: Pat
                 decision_recorded=True,
             ),
         ),
-        execution_identity={},
+        execution_identity=serialize_tool_execution_identity(execution_identity),
         source_event_ids=("$source",),
         state="ready",
     )
     runner._approval_responses._store.create(continuation)
+    started = asyncio.Event()
 
-    async def stopped_lifecycle(*_args: object, **kwargs: object) -> None:
-        progress = cast("response_runner._DeliveryProgress", kwargs["progress"])
-        progress.settle(
-            FinalDeliveryOutcome(
-                terminal_status="cancelled",
-                event_id="$waiting",
-                is_visible_response=True,
-                failure_reason="cancelled_by_user",
-            ),
-        )
+    async def wait_for_stop(*_args: object, **_kwargs: object) -> None:
+        started.set()
+        await asyncio.Event().wait()
 
-    with patch.object(runner, "_run_and_settle_locked_response", new=stopped_lifecycle):
-        await runner.resume_approval_continuation(continuation)
+    with patch.object(runner, "_execute_claimed_approval", new=wait_for_stop):
+        resume = asyncio.create_task(runner.resume_approval_continuation(continuation))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        assert runner.deps.stop_manager.request_stop_if("$waiting", lambda: True) is True
+        outcome = await asyncio.wait_for(resume, timeout=2)
 
+    assert outcome is not None
+    assert outcome.terminal_status == "cancelled"
+    assert outcome.resolved_cancel_source == "user_stop"
     settled = runner._approval_responses._store.get(continuation.approval_id)
     assert settled is not None
     assert settled.state == "claimed"
@@ -2644,6 +2653,45 @@ async def test_terminal_failure_expires_outstanding_cards_before_retiring_contin
     failed = runner._approval_responses._store.get(continuation.approval_id)
     assert failed is not None
     assert failed.state == "failed"
+
+
+@pytest.mark.asyncio
+async def test_stopped_approval_settlement_renders_normal_user_stop_note(tmp_path: Path) -> None:
+    """Transport keeps canonical provenance in storage but never exposes its wire value to the user."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-user-stopped",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at="2099-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.APPROVED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+    )
+    runner._approval_responses._store.create(continuation)
+
+    with patch.object(runner._approval_responses, "_edit_response", new=AsyncMock(return_value=True)) as edit:
+        assert await runner._approval_responses.settle_failure(continuation, "cancelled_by_user") is True
+
+    edit.assert_awaited_once()
+    assert edit.await_args.kwargs["text"] == "**[Response cancelled by user]**"
+    failed = runner._approval_responses._store.get(continuation.approval_id)
+    assert failed is not None
+    assert failed.failure_reason == "cancelled_by_user"
 
 
 @pytest.mark.asyncio

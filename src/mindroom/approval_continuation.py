@@ -566,12 +566,15 @@ class ApprovalContinuationStore:
         *,
         claimant_id: str | None,
         runtime_generation: str,
+        expected: ApprovalContinuation | None = None,
     ) -> ApprovalContinuation | None:
         """Fence one continuation for the transport's sole settlement driver."""
         with self._lock:
             current = self.get(approval_id)
             if current is None or current.state in {"completed", "failed"}:
                 return current
+            if expected is not None and current != expected:
+                return None
             if current.state == "claimed" and current.claimant_id != claimant_id:
                 return None
             if current.state == "claimed":
