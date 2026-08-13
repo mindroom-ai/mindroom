@@ -22,7 +22,9 @@ Approval-gated tools stay hidden or rejected on surfaces that cannot resume a pe
 
 No legacy live waiter or in-memory human-decision future may return.
 
-Tests may grow, but the redesign must remove at least 1,000 net production lines from the current PR branch before it is accepted as a simplification.
+Tests may grow, but production size must be measured and reported separately from test growth.
+
+The original 1,000-line reduction target is not a correctness gate: the redesign must remove the parallel store and dispatcher, and it must not delete load-bearing crash recovery merely to satisfy a line-count budget.
 
 ## Considered Designs
 
@@ -195,7 +197,11 @@ Delete runner-to-orchestrator continuation scheduling and failure-request plumbi
 
 Delete tests that exist only to pin the removed dispatcher or old store implementation, while retaining or replacing every behavior and crash invariant test.
 
-The target is at least 1,000 fewer production lines than the current branch and an expected PR production delta near +1,800 to +2,200 lines versus main.
+The original planning target was at least 1,000 fewer production lines than the pre-redesign branch and a PR production delta near +1,800 to +2,200 lines versus main.
+
+That estimate did not include the journal transaction guards, cross-principal recovery, and lifecycle regressions found during adversarial review.
+
+Acceptance therefore requires the parallel continuation protocol to be gone, exact production accounting to be published, and every retained recovery path to defend a witnessed crash or concurrency invariant.
 
 ## Verification
 

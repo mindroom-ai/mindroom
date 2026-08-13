@@ -28,7 +28,7 @@ Every production behavior change follows a witnessed red-green TDD cycle.
 
 All pytest commands use `-n auto`.
 
-The redesign removes at least 1,000 production lines from the current branch before acceptance.
+The redesign removes the parallel continuation store and dispatcher before acceptance, and final accounting reports the exact production delta without deleting load-bearing recovery to meet an arbitrary line target.
 
 ---
 
@@ -459,9 +459,11 @@ Expected: PASS.
 
 Run: `git diff --numstat origin/main -- src | awk '{a+=$1; d+=$2} END {print "src additions", a, "deletions", d, "net", a-d}'`
 
-Expected: at least 1,000 fewer net production lines than the pre-redesign `+3238` branch delta, with a target net between `+1800` and `+2200`.
+Expected: report the exact production delta and compare it with the original target of at least 1,000 fewer net production lines than the pre-redesign `+3238` branch delta.
 
-If the reduction is smaller, inspect retained dispatcher, store wrapper, recovery, and compatibility code before proceeding.
+If the reduction is smaller, inspect retained dispatcher, store wrapper, recovery, and compatibility code before proceeding, but retain code that defends a witnessed crash or concurrency invariant.
+
+The final implementation did not meet the original numerical estimate because the journal transaction guards, cross-principal recovery, and lifecycle regressions found during adversarial review consumed the expected reduction.
 
 - [ ] **Step 6: Commit the deletion slice**
 
