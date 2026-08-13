@@ -11,7 +11,6 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4, uuid5
 
-import nio
 import pytest
 import pytest_asyncio
 from nio.ingest import (
@@ -197,7 +196,6 @@ def _admission(
 def test_validation_freezes_task5_golden_and_exact_conversion() -> None:
     batch = _batch()
 
-    assert nio.__file__ == "/tmp/nio-task5-install.yiFetw/nio/__init__.py"
     assert canonical_batch_payload(batch) == GOLDEN_BATCH
     assert batch.ref == BatchRef(
         STREAM_ID,
