@@ -1139,10 +1139,8 @@ class TurnController:
         thread_id: str | None,
     ) -> None:
         """Transfer one selection response from journal dispatch to runner ownership."""
-        response_started = asyncio.Event()
 
         async def run_owned_response() -> None:
-            response_started.set()
             await response
             # Terminal delivery normally settles the discovery alias in its
             # outbox transaction. This idempotent fallback also handles an
@@ -1158,10 +1156,8 @@ class TurnController:
             on_failure=lambda: self.deps.retry_dispatch_sources((source_event_id,)),
             source_event_ids=(source_event_id,),
         )
-        # Let the owned task enter before its journal callback reports the
-        # handoff. It may then wait on its canonical per-thread response lock
-        # without holding the room-wide journal lane.
-        await response_started.wait()
+        # Ownership registration is synchronous, and the task cannot execute
+        # until this callback yields after reporting its deferred handoff.
 
     async def handle_interactive_selection(
         self,
