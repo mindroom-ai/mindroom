@@ -383,11 +383,7 @@ def _expand_byte_order(sql: str, dialect: _Dialect) -> str:
 
 
 def schema_statements(dialect: _Dialect) -> tuple[str, ...]:
-    """Return every DDL statement needed to create the schema.
-
-    Creation only. There is no upgrade path and deliberately so: incompatible
-    shapes are rejected by the backends with an instruction to recreate the
-    journal rather than being opened under semantics their rows cannot satisfy.
+    """Return every DDL statement needed to create the current schema.
 
     The byte-order marker is substituted here as well as in queries. An index
     whose trailing columns sort in the server's own collation cannot satisfy an

@@ -1996,6 +1996,46 @@ class TestInteractiveQuestionConsumption:
         assert await _interactive_selection_rows(journal_store) == []
 
 
+class TestIncompatibleInteractiveSchemaRefusal:
+    """An old question-claim shape must not be read under new ownership semantics."""
+
+    async def test_sqlite_refuses_the_legacy_claim_column(self, tmp_path: Path) -> None:
+        """SQLite fails loudly instead of treating an owned question as active."""
+        database_path = tmp_path / "legacy.db"
+        with sqlite3.connect(database_path) as database:
+            database.execute(
+                """
+                CREATE TABLE interactive_questions (
+                    principal_id TEXT NOT NULL,
+                    question_event_id TEXT NOT NULL,
+                    claimed_source_event_id TEXT
+                )
+                """,
+            )
+
+        with pytest.raises(RuntimeError, match="incompatible pre-selection schema"):
+            EventJournalStore.open_sqlite(database_path)
+
+    async def test_postgres_refuses_the_legacy_claim_column(self, postgres_journal_url: str) -> None:
+        """PostgreSQL applies the same explicit schema boundary as SQLite."""
+        import psycopg  # noqa: PLC0415
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        with psycopg.connect(database_url, autocommit=True) as database:
+            database.execute(
+                """
+                CREATE TABLE interactive_questions (
+                    principal_id TEXT NOT NULL,
+                    question_event_id TEXT NOT NULL,
+                    claimed_source_event_id TEXT
+                )
+                """,
+            )
+
+        with pytest.raises(RuntimeError, match="incompatible pre-selection schema"):
+            EventJournalStore.open_postgres(database_url)
+
+
 class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
     """A turn that outlived its membership must not answer into the next one.
 
@@ -4470,46 +4510,6 @@ class TestConnectionSecretsStayOutOfLogs:
         assert "hunter2" not in rendered
         assert "someone" not in rendered
         assert "db.example" not in rendered
-
-
-class TestIncompatibleSchemaRefusal:
-    """A shipped question-claim shape must not be read under new ownership semantics."""
-
-    async def test_sqlite_refuses_the_legacy_claim_column(self, tmp_path: Path) -> None:
-        """SQLite fails loudly instead of treating an owned question as active."""
-        database_path = tmp_path / "legacy.db"
-        with sqlite3.connect(database_path) as database:
-            database.execute(
-                """
-                CREATE TABLE interactive_questions (
-                    principal_id TEXT NOT NULL,
-                    question_event_id TEXT NOT NULL,
-                    claimed_source_event_id TEXT
-                )
-                """,
-            )
-
-        with pytest.raises(RuntimeError, match="incompatible pre-selection schema"):
-            EventJournalStore.open_sqlite(database_path)
-
-    async def test_postgres_refuses_the_legacy_claim_column(self, postgres_journal_url: str) -> None:
-        """PostgreSQL applies the same explicit schema boundary as SQLite."""
-        import psycopg  # noqa: PLC0415
-
-        database_url = postgres_journal_schema_url(postgres_journal_url)
-        with psycopg.connect(database_url, autocommit=True) as database:
-            database.execute(
-                """
-                CREATE TABLE interactive_questions (
-                    principal_id TEXT NOT NULL,
-                    question_event_id TEXT NOT NULL,
-                    claimed_source_event_id TEXT
-                )
-                """,
-            )
-
-        with pytest.raises(RuntimeError, match="incompatible pre-selection schema"):
-            EventJournalStore.open_postgres(database_url)
 
 
 class TestHotQueriesAreIndexCovered:
