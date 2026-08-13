@@ -684,6 +684,7 @@ class AgentBot:
             room_lifecycle_admission_enabled=lambda: (
                 self.agent_name == ROUTER_AGENT_NAME and self._first_sync_done and self._room_member_join_hooks_armed
             ),
+            on_own_membership_transition=self._membership_fence.observe_reported_transition,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,

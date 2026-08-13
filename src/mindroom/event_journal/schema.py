@@ -126,15 +126,25 @@ _TABLES = (
     """,
     """
     CREATE TABLE IF NOT EXISTS reported_departures (
+        report_order {receipt_order_column},
         -- Matrix may replay an old leave after a later join has re-armed the
         -- room. Event identity, or the sync token when the event was omitted,
         -- keeps that replay from fencing again.
         principal_id TEXT NOT NULL,
         observation_id {ordered_text} NOT NULL,
-        -- The exact epoch this observation may rearm, retained so a replay can
-        -- retry failed cleanup without touching a newer departure fence.
-        rearm_epoch BIGINT,
-        PRIMARY KEY (principal_id, observation_id)
+        room_id TEXT NOT NULL,
+        -- The latest journal receipt visible when this observation arrived.
+        -- Synthetic sync-token observations have no event row of their own,
+        -- so this is what still orders a later explicit join after them.
+        journal_order BIGINT NOT NULL,
+        -- Consecutive leave/ban observations are aliases for one ended
+        -- membership. They share its epoch so only the run's first observation
+        -- consumes a locally owed report.
+        run_epoch BIGINT NOT NULL,
+        -- A join closes the whole alias run. Keeping closure beside every
+        -- alias lets any replayed subset recover the same answer.
+        run_closed INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (principal_id, observation_id)
     )
     """,
     """
@@ -270,6 +280,11 @@ _TABLES = (
 
 
 _INDEXES = (
+    """
+    CREATE INDEX IF NOT EXISTS reported_departures_open
+    ON reported_departures (principal_id, room_id, report_order)
+    WHERE run_closed = 0
+    """,
     """
     CREATE INDEX IF NOT EXISTS journal_events_pending
     ON journal_events (principal_id, receipt_order)

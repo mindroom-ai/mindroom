@@ -1086,7 +1086,7 @@ class FencedRoomRecorder:
             DepartureObservation.FENCED,
             epoch,
             0,
-            reported_rearm_epoch=(epoch if source is DepartureSource.REPORTED else None),
+            reported_run_epoch=(epoch if source is DepartureSource.REPORTED else None),
         )
 
     async def cleanup_fenced_departure(self, room_id: str, cleanup: Callable[[], None]) -> None:
@@ -1104,6 +1104,28 @@ class FencedRoomRecorder:
         """Accept a confirmed join without recording it."""
         del expected_membership_epoch
         if cleanup is not None and room_id in self.fenced_room_ids:
+            cleanup()
+
+    async def close_preceding_reported_departure(
+        self,
+        room_id: str,
+        join_event_id: str,
+        cleanup: Callable[[], None],
+    ) -> None:
+        """Accept a join after one reported departure."""
+        del join_event_id
+        if room_id in self.fenced_room_ids:
+            cleanup()
+
+    async def close_reported_departure_run(
+        self,
+        room_id: str,
+        run_epoch: int,
+        cleanup: Callable[[], None],
+    ) -> None:
+        """Accept closure of one reported departure run."""
+        del run_epoch
+        if room_id in self.fenced_room_ids:
             cleanup()
 
     async def retire_owed_departure_reports(self, room_id: str) -> None:

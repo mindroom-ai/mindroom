@@ -86,6 +86,24 @@ class MembershipView(Protocol):
         """Record a confirmed join, so the room's next departure fences again."""
         ...
 
+    async def close_preceding_reported_departure(
+        self,
+        room_id: str,
+        join_event_id: str,
+        cleanup: Callable[[], None],
+    ) -> None:
+        """Close the reported departure immediately preceding one join."""
+        ...
+
+    async def close_reported_departure_run(
+        self,
+        room_id: str,
+        run_epoch: int,
+        cleanup: Callable[[], None],
+    ) -> None:
+        """Close one contiguous reported-departure run."""
+        ...
+
     async def retire_owed_departure_reports(self, room_id: str) -> None:
         """Forget sync reports that can no longer arrive for one room."""
         ...
@@ -144,22 +162,25 @@ class MembershipFence:
             report_rejoins,
             strict=True,
         ):
-            outcome = await self.store.fence_departure(
-                room_id,
-                source=DepartureSource.REPORTED,
-                report_observation_id=observation_id,
-            )
-            self._log(room_id, outcome)
-            self._track(room_id, outcome)
-            if rejoined and outcome.reported_rearm_epoch is not None:
-                await self.store.note_membership_restarted(
-                    room_id,
-                    cleanup=partial(self.clear_departed_room, room_id),
-                    expected_membership_epoch=outcome.reported_rearm_epoch,
-                )
-            else:
-                await self._clear_room(room_id, outcome)
+            await self._apply_reported_departure(room_id, observation_id, rejoined)
         await self._expire_unarrived_reports()
+
+    async def observe_reported_transition(
+        self,
+        room_id: str,
+        observation_id: str,
+        rejoined: bool,
+    ) -> None:
+        """Apply one explicit self-membership transition before later timeline events."""
+        if rejoined:
+            await self.store.close_preceding_reported_departure(
+                room_id,
+                observation_id,
+                lambda: self.clear_departed_room(room_id),
+            )
+            return
+        await self._recover_owed_reports()
+        await self._apply_reported_departure(room_id, observation_id, False)
 
     async def note_membership_restarted(self, room_id: str) -> None:
         """Record a confirmed join, so this room's next departure fences again."""
@@ -172,6 +193,29 @@ class MembershipFence:
                 room_id,
                 lambda: self.clear_departed_room(room_id),
             )
+
+    async def _apply_reported_departure(
+        self,
+        room_id: str,
+        observation_id: str | None,
+        rejoined: bool,
+    ) -> None:
+        """Apply one reported departure without advancing the sync-response window."""
+        outcome = await self.store.fence_departure(
+            room_id,
+            source=DepartureSource.REPORTED,
+            report_observation_id=observation_id,
+        )
+        self._log(room_id, outcome)
+        self._track(room_id, outcome)
+        if rejoined and outcome.reported_run_epoch is not None:
+            await self.store.close_reported_departure_run(
+                room_id,
+                outcome.reported_run_epoch,
+                partial(self.clear_departed_room, room_id),
+            )
+        else:
+            await self._clear_room(room_id, outcome)
 
     def _track(self, room_id: str, outcome: DepartureOutcome) -> None:
         """Start, keep, or drop the window an owed report may still arrive in."""

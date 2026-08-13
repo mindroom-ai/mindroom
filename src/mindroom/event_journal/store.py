@@ -281,6 +281,40 @@ class PrincipalStore:
             ),
         )
 
+    async def close_preceding_reported_departure(
+        self,
+        room_id: str,
+        join_event_id: str,
+        cleanup: Callable[[], None],
+    ) -> None:
+        """Close the reported departure immediately preceding one join."""
+        await self._backend.write(
+            lambda transaction: journal.close_preceding_reported_departure(
+                transaction,
+                self._principal_id,
+                room_id,
+                join_event_id,
+                cleanup,
+            ),
+        )
+
+    async def close_reported_departure_run(
+        self,
+        room_id: str,
+        run_epoch: int,
+        cleanup: Callable[[], None],
+    ) -> None:
+        """Close one contiguous reported-departure run."""
+        await self._backend.write(
+            lambda transaction: journal.close_reported_departure_run(
+                transaction,
+                self._principal_id,
+                room_id,
+                run_epoch,
+                cleanup,
+            ),
+        )
+
     async def retire_owed_departure_reports(self, room_id: str) -> None:
         """Forget sync reports that can no longer arrive for one room."""
         await self._backend.write(

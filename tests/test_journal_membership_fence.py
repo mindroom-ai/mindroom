@@ -93,6 +93,32 @@ class RecordingStore:
             expected_membership_epoch=expected_membership_epoch,
         )
 
+    async def close_preceding_reported_departure(
+        self,
+        room_id: str,
+        join_event_id: str,
+        cleanup: Callable[[], None],
+    ) -> None:
+        """Close the reported departure immediately preceding one join."""
+        await self.principal.close_preceding_reported_departure(
+            room_id,
+            join_event_id,
+            cleanup,
+        )
+
+    async def close_reported_departure_run(
+        self,
+        room_id: str,
+        run_epoch: int,
+        cleanup: Callable[[], None],
+    ) -> None:
+        """Close one contiguous reported-departure run."""
+        await self.principal.close_reported_departure_run(
+            room_id,
+            run_epoch,
+            cleanup,
+        )
+
     async def retire_owed_departure_reports(self, room_id: str) -> None:
         """Forget reports that can no longer arrive."""
         failure = self.fails_next_retirement
@@ -286,19 +312,18 @@ async def test_joined_report_cannot_rearm_a_newer_concurrent_departure(
 
     @dataclass
     class ConcurrentDepartureStore(RecordingStore):
-        async def note_membership_restarted(
+        async def close_reported_departure_run(
             self,
             room_id: str,
-            *,
-            cleanup: Callable[[], None] | None = None,
-            expected_membership_epoch: int | None = None,
+            run_epoch: int,
+            cleanup: Callable[[], None],
         ) -> None:
             await self.principal.note_membership_restarted(room_id)
             await self.principal.fence_departure(room_id, source=DepartureSource.LOCAL)
-            await super().note_membership_restarted(
+            await super().close_reported_departure_run(
                 room_id,
-                cleanup=cleanup,
-                expected_membership_epoch=expected_membership_epoch,
+                run_epoch,
+                cleanup,
             )
 
     racing_store = ConcurrentDepartureStore(principal=principal)
@@ -424,6 +449,89 @@ async def test_consecutive_departure_states_then_join_rearm_one_membership(
     assert await principal.run_if_membership_epoch(
         room_id=ROOM,
         expected_membership_epoch=1,
+        operation=lambda: None,
+    )
+
+
+async def test_aliases_for_an_old_local_leave_consume_only_its_report(
+    store: RecordingStore,
+    principal: PrincipalStore,
+) -> None:
+    """Leave and ban aliases cannot spend the next membership's report debt."""
+    membership = MembershipFence(store=store)
+    await membership.fence_local_departure(ROOM)
+    await membership.note_membership_restarted(ROOM)
+    await membership.fence_local_departure(ROOM)
+
+    await membership.fence_reported_departures(
+        [ROOM, ROOM],
+        observation_ids=["$leave-1", "$ban-1"],
+        rejoined_after=[False, True],
+    )
+
+    assert await principal.rooms_owing_departure_reports() == frozenset({ROOM})
+    assert not await principal.run_if_membership_epoch(
+        room_id=ROOM,
+        expected_membership_epoch=2,
+        operation=lambda: None,
+    )
+
+
+async def test_departure_alias_run_survives_restart(
+    store: RecordingStore,
+    principal: PrincipalStore,
+) -> None:
+    """A later alias remains in the first report's run after process restart."""
+    membership = MembershipFence(store=store)
+    await membership.fence_local_departure(ROOM)
+    await membership.note_membership_restarted(ROOM)
+    await membership.fence_local_departure(ROOM)
+    await membership.fence_reported_departures(
+        [ROOM],
+        observation_ids=["$leave-1"],
+    )
+
+    restarted = MembershipFence(store=store)
+    await restarted.fence_reported_departures(
+        [ROOM],
+        observation_ids=["$ban-1"],
+        rejoined_after=[True],
+    )
+
+    assert await principal.rooms_owing_departure_reports() == frozenset({ROOM})
+    assert not await principal.run_if_membership_epoch(
+        room_id=ROOM,
+        expected_membership_epoch=2,
+        operation=lambda: None,
+    )
+
+
+async def test_replayed_subset_closes_every_alias_in_its_departure_run(
+    store: RecordingStore,
+    principal: PrincipalStore,
+) -> None:
+    """A join replayed with one alias cannot leave its sibling run open."""
+    membership = MembershipFence(store=store)
+    await membership.fence_reported_departures(
+        [ROOM, ROOM],
+        observation_ids=["$leave", "$ban"],
+    )
+
+    restarted = MembershipFence(store=store)
+    await restarted.fence_reported_departures(
+        [ROOM],
+        observation_ids=["$leave"],
+        rejoined_after=[True],
+    )
+    await restarted.fence_reported_departures(
+        [ROOM],
+        observation_ids=["$later-leave"],
+    )
+
+    assert await principal.membership_epoch(ROOM) == 2
+    assert not await principal.run_if_membership_epoch(
+        room_id=ROOM,
+        expected_membership_epoch=2,
         operation=lambda: None,
     )
 

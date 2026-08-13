@@ -1754,6 +1754,121 @@ class TestByteOrderPinning:
 class TestMembershipEpoch:
     """Leaving and rejoining invalidates what the previous membership saw."""
 
+    async def test_a_join_closes_only_its_preceding_reported_departure(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Replaying an old join cannot clear a later departure fence."""
+        departure = replace(
+            message("$leave")[0],
+            kind=EventKind.ROOM_LIFECYCLE,
+            event_class=EventClass.CONTEXT_ONLY,
+        )
+        await alice.admit(departure, None)
+        await alice.fence_departure(
+            ROOM,
+            source=DepartureSource.REPORTED,
+            report_observation_id=departure.event_id,
+        )
+        join = replace(
+            message("$join")[0],
+            kind=EventKind.ROOM_LIFECYCLE,
+            event_class=EventClass.CONTEXT_ONLY,
+        )
+        await alice.admit(join, None)
+        cleanups: list[str] = []
+
+        await alice.close_preceding_reported_departure(
+            ROOM,
+            join.event_id,
+            lambda: cleanups.append("joined"),
+        )
+        assert await alice.run_if_membership_epoch(
+            room_id=ROOM,
+            expected_membership_epoch=1,
+            operation=lambda: None,
+        )
+
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.close_preceding_reported_departure(
+            ROOM,
+            join.event_id,
+            lambda: cleanups.append("stale"),
+        )
+
+        assert cleanups == ["joined"]
+        assert not await alice.run_if_membership_epoch(
+            room_id=ROOM,
+            expected_membership_epoch=2,
+            operation=lambda: None,
+        )
+
+    async def test_an_old_join_cannot_rearm_a_newer_local_departure(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Delayed reports retain the leave/join pairing from their timeline order."""
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        for event_id in ("$leave-1", "$join-1", "$leave-2"):
+            event = replace(
+                message(event_id)[0],
+                kind=EventKind.ROOM_LIFECYCLE,
+                event_class=EventClass.CONTEXT_ONLY,
+            )
+            await alice.admit(event, None)
+            if event_id.startswith("$leave"):
+                await alice.fence_departure(
+                    ROOM,
+                    source=DepartureSource.REPORTED,
+                    report_observation_id=event_id,
+                )
+            else:
+                await alice.close_preceding_reported_departure(ROOM, event_id, lambda: None)
+
+        await alice.fence_departure(
+            ROOM,
+            source=DepartureSource.REPORTED,
+            report_observation_id="$leave-1",
+        )
+        await alice.fence_departure(
+            ROOM,
+            source=DepartureSource.REPORTED,
+            report_observation_id="$leave-2",
+        )
+
+        assert not await alice.run_if_membership_epoch(
+            room_id=ROOM,
+            expected_membership_epoch=2,
+            operation=lambda: None,
+        )
+
+    async def test_a_join_closes_a_preceding_truncated_departure_report(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Synthetic sync-token observations participate in journal ordering."""
+        await alice.fence_departure(
+            ROOM,
+            source=DepartureSource.REPORTED,
+            report_observation_id="classic:s-left:!room:example.org",
+        )
+        join = replace(
+            message("$join-after-truncated-leave")[0],
+            kind=EventKind.ROOM_LIFECYCLE,
+            event_class=EventClass.CONTEXT_ONLY,
+        )
+        await alice.admit(join, None)
+
+        await alice.close_preceding_reported_departure(ROOM, join.event_id, lambda: None)
+
+        assert await alice.run_if_membership_epoch(
+            room_id=ROOM,
+            expected_membership_epoch=1,
+            operation=lambda: None,
+        )
+
     async def test_hydration_is_recorded_per_membership(self, alice: PrincipalStore) -> None:
         """Hydration is recorded per membership."""
         epoch = await alice.membership_epoch(ROOM)
