@@ -125,9 +125,12 @@ When the preview is truncated, the complete redacted arguments are delivered wit
 They ride inline in a `full_arguments` content field when they fit the Matrix event, and otherwise as an uploaded JSON sidecar referenced by `full_arguments_url` plus `full_arguments_info` in plain rooms or `full_arguments_file` (standard Matrix encrypted-file schema) in encrypted rooms.
 When the complete redacted arguments cannot be delivered — over the 2MB completeness cap or because the sidecar upload failed — the card sets `approvable: false` and any approve action is converted into a denial, because a human must be able to review exactly what would run.
 Clients should disable or hide the approve action when `approvable` is `false`.
-Approval responses only resolve the live Matrix approval card in the same room; approval IDs are used only as a live client hint.
-If MindRoom restarts before a tool call is approved, the live tool call is cancelled.
-On startup, MindRoom attempts to mark recent unresolved approval cards sent by the current router as expired.
+Approval cards are keyed to a durable Agno continuation that stores the exact paused tool calls and arguments.
+While approval is pending, MindRoom releases the response coroutine, typing indicator, and per-conversation lock.
+Current-format pending cards and recorded decisions recover after restart or configuration reload, and an accepted decision resumes the exact paused run through the normal stoppable response lifecycle.
+Legacy, malformed, and orphan approval rows never authorize tool execution.
+When Matrix transport is available, startup terminally expires or denies those old rows, and a temporary delivery failure leaves them recoverable for a later startup retry.
+If recovery cannot prove whether a claimed tool already executed, it fails closed instead of risking a duplicate side effect.
 Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 

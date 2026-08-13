@@ -1697,7 +1697,7 @@ class ResponseRunner:
         response_event_id: str | None,
     ) -> None:
         """Persist one failed or interrupted turn that never completed."""
-        if recorder.outcome == "completed" or recorder.original_status is RunStatus.cancelled:
+        if recorder.outcome in {"completed", "suspended"} or recorder.original_status is RunStatus.cancelled:
             return
         if recorder.outcome == "pending":
             recorder.mark_interrupted(RunStatus.error)
@@ -3913,6 +3913,8 @@ class ResponseRunner:
                     ),
                 ),
             )
+        except ResponsePausedForApproval:
+            raise
         except asyncio.CancelledError as exc:
             log_cancelled_response(
                 self.deps.logger,

@@ -346,18 +346,16 @@ class _ActiveApprovalSend:
     done_future: Future[None]
     owner_loop: asyncio.AbstractEventLoop
     send_task: asyncio.Future[SentApprovalEvent | None]
-    # The row this send belongs to. The claim is durable before the send
-    # starts and the live waiter is built out of what the send returns, so for
-    # the length of the send this is the only thing that says the row is
-    # spoken for.
+    # The claim is durable before the send starts, so this tracks the sole
+    # in-process publisher until the Matrix event is attached to that row.
     transaction_id: str
 
 
 class _ApprovalManager:
-    """Coordinate live approval waiters against Matrix approval cards.
+    """Publish and settle durable Matrix cards for paused Agno continuations.
 
-    Recovered approval cards support terminal cleanup only; they never make an
-    approval actionable after its live waiter is gone.
+    Current-format cards reconnect to persisted continuations after restart.
+    Legacy and orphan cards are terminally settled and never authorize execution.
     """
 
     def __init__(

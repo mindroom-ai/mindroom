@@ -734,6 +734,8 @@ def _settle_blocking_attempt(
     # for attempts that end the turn: a discarded empty run's or a superseded
     # continuation attempt's payload must not ride out on a later resolution.
     if isinstance(resolution, PausedAttempt):
+        if sinks.turn_recorder is not None:
+            sinks.turn_recorder.mark_suspended()
         raise ResponsePausedForApproval(resolution)
     if isinstance(resolution, ExcludedAttempt):
         _publish_run_metadata(sinks, resolution.metadata_content)
@@ -912,6 +914,8 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     if resolution is None:
                         _raise_missing_stream_resolution(ctx.entity_label)
                     if isinstance(resolution, PausedAttempt):
+                        if sinks.turn_recorder is not None:
+                            sinks.turn_recorder.mark_suspended()
                         raise ResponsePausedForApproval(resolution)
                     if isinstance(resolution, HandledAttempt):
                         _record_turn_excluded_fallback(

@@ -2046,8 +2046,8 @@ def test_participant_run_config_requires_approval_for_granted_tools(tmp_path: Pa
     assert context.config.tool_approval.default == "auto_approve"
 
 
-def test_non_resumable_participant_hides_gated_functions(tmp_path: Path) -> None:
-    """Ephemeral participants expose only functions their policy can auto-approve."""
+def test_non_resumable_participant_rejects_gated_functions(tmp_path: Path) -> None:
+    """Ephemeral participants must clearly reject grants that require approval."""
     context = _make_context(tmp_path)
     toolkit = Toolkit(
         name="mixed",
@@ -2067,12 +2067,11 @@ def test_non_resumable_participant_hides_gated_functions(tmp_path: Path) -> None
         },
     )
 
-    filtered = dynamic_workflow_module._filter_nonresumable_toolkits(
-        {"mixed": toolkit},
-        run_config,
-    )
-
-    assert set(filtered["mixed"].functions) == {"safe"}
+    with pytest.raises(DynamicWorkflowExecutionError, match=r"dangerous.*cannot suspend"):
+        dynamic_workflow_module._filter_nonresumable_toolkits(
+            {"mixed": toolkit},
+            run_config,
+        )
 
 
 def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> None:

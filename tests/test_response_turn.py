@@ -111,6 +111,10 @@ class _FakeTurnRecorder:
             },
         )
 
+    def mark_suspended(self) -> None:
+        """Record a native pause without classifying it as terminal."""
+        self.outcome = "suspended"
+
 
 def _trace(tool_name: str) -> ToolTraceEntry:
     return ToolTraceEntry(type="tool_call_completed", tool_name=tool_name)
@@ -232,7 +236,7 @@ async def test_blocking_paused_attempt_escapes_without_recording_terminal_interr
         )
 
     assert raised.value.paused.tools == (tool,)
-    assert recorder.outcome == "pending"
+    assert recorder.outcome == "suspended"
     assert log.closed == 1
 
 
@@ -324,7 +328,7 @@ async def test_streaming_paused_attempt_escapes_without_recording_terminal_inter
         )
 
     assert raised.value.paused.run_id == "run-stream"
-    assert recorder.outcome == "pending"
+    assert recorder.outcome == "suspended"
     assert log.closed == 1
 
 

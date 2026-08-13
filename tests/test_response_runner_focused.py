@@ -51,7 +51,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     prepare_memory_and_model_context,
 )
-from mindroom.response_turn import PausedAttempt
+from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.stop import StopManager
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
@@ -1945,6 +1945,53 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
     assert finalize_request.stream_transport_outcome is transport
     assert finalize_request.initial_delivery_kind == "sent"
     assert finalize_request.identity.response_kind == "ai"
+
+
+@pytest.mark.asyncio
+async def test_streaming_approval_pause_reaches_outer_lifecycle(tmp_path: Path) -> None:
+    """The agent streaming wrapper must not convert a native pause into an error response."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    pause = ResponsePausedForApproval(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-paused",
+            tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+        ),
+    )
+    finalize = AsyncMock()
+
+    with (
+        patch.object(coordinator, "generate_streaming_ai_response", new=AsyncMock(side_effect=pause)),
+        patch.object(DeliveryGateway, "finalize_streamed_response", new=finalize),
+        pytest.raises(ResponsePausedForApproval) as raised,
+    ):
+        await coordinator._process_and_respond_streaming(_plain_request(_target()))
+
+    assert raised.value is pause
+    finalize.assert_not_awaited()
+
+
+@pytest.mark.parametrize("is_team", [False, True])
+@pytest.mark.asyncio
+async def test_suspended_turn_is_never_persisted_as_failed(tmp_path: Path, *, is_team: bool) -> None:
+    """Failure cleanup must not overwrite the Agno run that owns a native pause."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    recorder = TurnRecorder(user_message="Run it")
+    recorder.mark_suspended()
+    persist = AsyncMock()
+
+    with patch.object(coordinator, "_persist_interrupted_recorder_off_loop", new=persist):
+        await coordinator._persist_failed_turn(
+            recorder,
+            is_team=is_team,
+            session_scope=coordinator.deps.state_writer.history_scope(),
+            session_id="session-1",
+            execution_identity=None,
+            run_id="run-paused",
+            response_event_id="$waiting",
+        )
+
+    persist.assert_not_awaited()
 
 
 @pytest.mark.asyncio
