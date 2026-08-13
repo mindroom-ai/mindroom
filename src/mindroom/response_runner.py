@@ -125,6 +125,7 @@ from .response_lifecycle import (
     ResponseLifecycle,
     ResponseLifecycleCoordinator,
     ResponseLifecycleDeps,
+    ResponseLifecycleReservation,
 )
 
 if TYPE_CHECKING:
@@ -508,6 +509,7 @@ class _InboxResponseOwnership:
 
     recovery_proof_ready: Callable[[], bool]
     on_failure: Callable[[], None] | None
+    source_event_ids: frozenset[str]
 
 
 @dataclass
@@ -605,15 +607,21 @@ class ResponseRunner:
         name: str,
         recovery_proof_ready: Callable[[], bool],
         on_failure: Callable[[], None] | None = None,
+        source_event_ids: tuple[str, ...] = (),
     ) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it."""
         task = asyncio.create_task(response, name=name)
         self._inbox_response_tasks[task] = _InboxResponseOwnership(
             recovery_proof_ready=recovery_proof_ready,
             on_failure=on_failure,
+            source_event_ids=frozenset(source_event_ids),
         )
         task.add_done_callback(self._finish_inbox_response_task)
         return task
+
+    def has_live_inbox_response(self, source_event_id: str) -> bool:
+        """Return whether a managed response task still owns one journal source."""
+        return any(source_event_id in ownership.source_event_ids for ownership in self._inbox_response_tasks.values())
 
     @property
     def pending_inbox_response_count(self) -> int:
@@ -1671,6 +1679,13 @@ class ResponseRunner:
             response_envelope=response_envelope,
         )
 
+    async def reserve_response_lifecycle(
+        self,
+        response_envelope: MessageEnvelope,
+    ) -> ResponseLifecycleReservation:
+        """Reserve one canonical response lifecycle before detached preparation starts."""
+        return await self._lifecycle_coordinator.reserve_response_lifecycle(response_envelope)
+
     async def _run_in_tool_context(
         self,
         *,
@@ -2531,6 +2546,7 @@ class ResponseRunner:
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
                 interactive_agent_name=self.deps.agent_name,
+                membership_turn_id=request.response_envelope.source_event_id,
             ),
         )
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
@@ -2652,6 +2668,7 @@ class ResponseRunner:
                 post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                     room_id=request.room_id,
                     interactive_agent_name=self.deps.agent_name,
+                    membership_turn_id=request.response_envelope.source_event_id,
                 ),
             )
         requester_user_id = request.user_id or ""
@@ -3089,6 +3106,7 @@ class ResponseRunner:
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
                 interactive_agent_name=self.deps.agent_name,
+                membership_turn_id=request.response_envelope.source_event_id,
                 persist_response_event_id=persist_response_event_id,
             ),
             streaming_delivery_error_handler=settle_team_streaming_delivery_error,
@@ -3851,6 +3869,7 @@ class ResponseRunner:
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
                 interactive_agent_name=self.deps.agent_name,
+                membership_turn_id=request.response_envelope.source_event_id,
                 queue_memory_persistence=queue_memory_persistence,
                 persist_response_event_id=persist_response_event_id,
             ),

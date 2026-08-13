@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
+    from mindroom.event_journal import PrincipalStore
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
@@ -88,6 +89,8 @@ class ToolRuntimeContext:
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
     tool_function_filter: Callable[[Function], bool] | None = None
+    membership: PrincipalStore | None = None
+    membership_turn_id: str | None = None
 
     @property
     def room_id(self) -> str:
@@ -212,6 +215,7 @@ class ToolRuntimeSupport:
     matrix_id: MatrixID
     resolver: ConversationResolver
     hook_context: HookContextSupport
+    membership: PrincipalStore
 
     def build_context(
         self,
@@ -250,6 +254,8 @@ class ToolRuntimeSupport:
             room_state_putter=self.hook_context.room_state_putter(),
             message_received_depth=(source_envelope.message_received_depth if source_envelope is not None else 0),
             orchestrator=self.runtime.orchestrator,
+            membership=self.membership,
+            membership_turn_id=source_envelope.source_event_id if source_envelope is not None else None,
         )
 
     def build_dispatch_context(

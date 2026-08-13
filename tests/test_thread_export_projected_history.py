@@ -554,6 +554,7 @@ async def test_rejoining_the_room_forces_one_fresh_hydration(router: PrincipalSt
     homeserver.reset_counts()
 
     await router.fence_departure(ROOM, source=DepartureSource.LOCAL)
+    await router.note_membership_restarted(ROOM)
     homeserver.relations[ROOT] = [
         raw("$a:example.org", "first", ts=200, thread_id=ROOT),
         raw("$b:example.org", "second", ts=300, thread_id=ROOT),

@@ -21,6 +21,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.event_journal import (
     DepartureSource,
     EventClass,
@@ -1930,6 +1931,28 @@ class TestDeferralOwnership:
         message = await self._admitted(alice, text_event("$m"), EventKind.MESSAGE)
 
         assert dispatcher._deferral_is_live(message) is True
+
+    async def test_interactive_reaction_replay_waits_for_fleet_recovery(self, alice: PrincipalStore) -> None:
+        """A claimed selection needs the same startup boundary as the turn it resumes."""
+        recovered: list[bool] = []
+
+        async def on_reaction(_room: nio.MatrixRoom, _event: nio.Event) -> TurnDispatchOutcome:
+            recovered.append(turn_dispatch_recovery_active())
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        dispatcher = self._dispatcher(alice)
+        dispatcher.callbacks = replace(dispatcher.callbacks, on_reaction=on_reaction)
+        await self._admitted(alice, reaction_event("$r"), EventKind.REACTION)
+        await alice.claim_semantic_consumer("$r", SemanticConsumer.INTERACTIVE_REACTION)
+        reaction = await alice.load_event("$r")
+        assert reaction is not None
+
+        assert await dispatcher._run_event(reaction) is False
+        assert recovered == []
+
+        dispatcher.release_turn_replay()
+        assert await dispatcher._run_event(reaction) is True
+        assert recovered == [True]
 
     async def test_a_source_the_coalescing_gate_still_holds_is_owned(self, alice: PrincipalStore) -> None:
         """A batch still debouncing has no turn claim yet, and is not abandoned."""

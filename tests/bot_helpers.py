@@ -959,8 +959,20 @@ class FencedRoomRecorder:
         self.fenced_room_ids.append(room_id)
         return DepartureOutcome(DepartureObservation.FENCED, len(self.fenced_room_ids), 0)
 
-    async def note_membership_restarted(self, room_id: str) -> None:
+    async def cleanup_fenced_departure(self, room_id: str, cleanup: Callable[[], None]) -> None:
+        """Run cleanup for every departure this focused recorder accepted."""
+        if room_id in self.fenced_room_ids:
+            cleanup()
+
+    async def note_membership_restarted(
+        self,
+        room_id: str,
+        *,
+        cleanup: Callable[[], None] | None = None,
+    ) -> None:
         """Accept a confirmed join without recording it."""
+        if cleanup is not None and room_id in self.fenced_room_ids:
+            cleanup()
 
     async def retire_owed_departure_reports(self, room_id: str) -> None:
         """Accept a retirement that can never happen here: nothing is ever owed."""

@@ -90,6 +90,8 @@ def _make_context(
     storage_path: Path | None = None,
     attachment_ids: tuple[str, ...] = (),
     agent_thread_mode: str = "thread",
+    membership: object | None = None,
+    membership_turn_id: str | None = None,
 ) -> ToolRuntimeContext:
     runtime_root = storage_path or Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
@@ -134,6 +136,8 @@ def _make_context(
         room=None,
         storage_path=storage_path,
         attachment_ids=attachment_ids,
+        membership=membership,
+        membership_turn_id=membership_turn_id,
     )
 
 
@@ -621,6 +625,98 @@ async def test_matrix_message_send_interactive_block_registers_question_and_adds
             {"emoji": "❌", "label": "Reject", "value": "reject"},
         ],
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["send", "edit"])
+@pytest.mark.parametrize("guard", ["source turn", "target epoch"])
+async def test_matrix_message_does_not_register_interactive_state_after_membership_changes(
+    action: str,
+    guard: str,
+) -> None:
+    """Direct sends and edits retain the membership that authorized transport."""
+    tool = MatrixMessageTools()
+    operation_order: list[str] = []
+
+    async def membership_epoch(_room_id: str) -> int:
+        operation_order.append("epoch")
+        return 7
+
+    async def reject_turn_registration(**_kwargs: object) -> bool:
+        operation_order.append("turn guard")
+        return False
+
+    async def reject_epoch_registration(**_kwargs: object) -> bool:
+        operation_order.append("epoch guard")
+        return False
+
+    delivered = delivered_matrix_side_effect("$delivered")
+
+    async def transport(*args: object, **kwargs: object) -> DeliveredMatrixEvent:
+        operation_order.append("transport")
+        return await delivered(*args, **kwargs)
+
+    membership = MagicMock()
+    membership.membership_epoch = AsyncMock(side_effect=membership_epoch)
+    membership.run_if_turn_membership_current = AsyncMock(side_effect=reject_turn_registration)
+    membership.run_if_membership_epoch = AsyncMock(side_effect=reject_epoch_registration)
+    ctx = _make_context(
+        thread_id="$ctx-thread:localhost",
+        membership=membership,
+        membership_turn_id="$source" if guard == "source turn" else None,
+    )
+    serve_conversation_reader(
+        ctx.conversation_reader,
+        [make_visible_message(event_id="$latest", timestamp=1, sender="@alice:localhost", body="latest")],
+    )
+    interactive_message = """Please choose.
+
+```interactive
+{"question":"Pick","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
+```"""
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=transport),
+        ),
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
+            new=AsyncMock(side_effect=transport),
+        ),
+        patch("mindroom.custom_tools.matrix_conversation_operations.register_interactive_question") as register,
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
+            new_callable=AsyncMock,
+        ) as add_reactions,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action=action,
+                message=interactive_message,
+                target="$target" if action == "edit" else None,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    register.assert_not_called()
+    add_reactions.assert_not_awaited()
+    if guard == "source turn":
+        membership.membership_epoch.assert_awaited_once_with(ctx.room_id)
+        membership.run_if_turn_membership_current.assert_awaited_once_with(
+            turn_id="$source",
+            room_id=ctx.room_id,
+            fallback_membership_epoch=7,
+            operation=ANY,
+        )
+        membership.run_if_membership_epoch.assert_not_awaited()
+        assert operation_order == ["epoch", "transport", "turn guard"]
+    else:
+        membership.membership_epoch.assert_awaited_once_with(ctx.room_id)
+        membership.run_if_turn_membership_current.assert_not_awaited()
+        membership.run_if_membership_epoch.assert_awaited_once()
+        assert operation_order == ["epoch", "transport", "epoch guard"]
 
 
 @pytest.mark.asyncio
