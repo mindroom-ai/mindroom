@@ -61,7 +61,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
     from pathlib import Path
 
     from mindroom.matrix.users import AgentMatrixUser
@@ -148,6 +148,36 @@ def _message_event(event_id: str) -> nio.RoomMessageText:
     )
     assert isinstance(event, nio.RoomMessageText)
     return event
+
+
+def _claimed_test_selection(
+    bot: AgentBot,
+    *,
+    room_id: str = "!test:localhost",
+) -> tuple[interactive.InteractiveSelection, MessageTarget]:
+    """Create one claimed interactive selection and its canonical target."""
+    question = interactive._InteractiveQuestion(
+        room_id=room_id,
+        thread_id="$thread-a",
+        options={"👍": "Selected"},
+        creator_agent=bot.agent_name,
+    )
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question",
+        question_text="Choose one",
+        selection_key="👍",
+        selected_label="Selected",
+        selected_value="Selected",
+        thread_id=question.thread_id,
+        claimed_question=question,
+    )
+    interactive._claimed_questions[selection.question_event_id] = question
+    target = bot._conversation_resolver.build_message_target(
+        room_id=room_id,
+        thread_id=selection.thread_id,
+        reply_to_event_id=selection.question_event_id,
+    )
+    return selection, target
 
 
 def _install_reaction_recorder(bot: AgentBot) -> list[str]:
@@ -1040,28 +1070,7 @@ class TestAgentBot(AgentBotTestBase):
         interactive._cleanup()
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
-        question = interactive._InteractiveQuestion(
-            room_id=room.room_id,
-            thread_id="$thread-a",
-            options={"👍": "Selected"},
-            creator_agent=bot.agent_name,
-        )
-        selection = interactive.InteractiveSelection(
-            question_event_id="$question",
-            question_text="Choose one",
-            selection_key="👍",
-            selected_label="Selected",
-            selected_value="Selected",
-            thread_id="$thread-a",
-            claimed_question=question,
-        )
-        interactive._claimed_questions[selection.question_event_id] = question
-        target = bot._conversation_resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=selection.thread_id,
-            reply_to_event_id=selection.question_event_id,
-        )
+        selection, target = _claimed_test_selection(bot)
         response_entered = asyncio.Event()
 
         async def response() -> None:
@@ -1108,6 +1117,78 @@ class TestAgentBot(AgentBotTestBase):
         finally:
             if lock_owned_by_test:
                 lifecycle_lock.release()
+            await bot._response_runner.drain_inbox_responses()
+            interactive._cleanup()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("cancel_immediately", [False, True])
+    async def test_unstarted_interactive_task_restores_claimed_selection(
+        self,
+        cancel_immediately: bool,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A task cancelled before its first response step must restore its claim."""
+        interactive._cleanup()
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        selection, target = _claimed_test_selection(bot)
+        response_entered = asyncio.Event()
+        real_track = bot._response_runner.track_inbox_response
+        restore_selection = MagicMock(side_effect=lambda: interactive.restore_selection(selection))
+
+        async def response() -> None:
+            response_entered.set()
+
+        def track_then_cancel(
+            owned_response: Coroutine[Any, Any, None],
+            *,
+            name: str,
+            recovery_proof_ready: Callable[[], bool],
+            on_failure: Callable[[], None] | None = None,
+            source_event_ids: tuple[str, ...] = (),
+        ) -> asyncio.Task[None]:
+            task = real_track(
+                owned_response,
+                name=name,
+                recovery_proof_ready=recovery_proof_ready,
+                on_failure=on_failure,
+                source_event_ids=source_event_ids,
+            )
+            task.cancel()
+            return task
+
+        try:
+            with (
+                patch.object(bot._response_runner, "track_inbox_response", new=track_then_cancel)
+                if cancel_immediately
+                else nullcontext()
+            ):
+                start = bot._turn_controller.start_interactive_selection(
+                    response,
+                    response_target=target,
+                    source_event_id="$reaction",
+                    user_id="@user:localhost",
+                    selected_value=selection.selected_value,
+                    on_failure=restore_selection,
+                )
+                if cancel_immediately:
+                    with pytest.raises(asyncio.CancelledError):
+                        await start
+                else:
+                    await start
+                    runner = unwrap_extracted_collaborator(bot._response_runner)
+                    response_task = next(iter(runner._inbox_response_tasks))
+                    response_task.cancel()
+                    await asyncio.gather(response_task, return_exceptions=True)
+            await asyncio.sleep(0)
+
+            assert not response_entered.is_set()
+            assert selection.question_event_id in interactive._active_questions
+            assert selection.question_event_id not in interactive._claimed_questions
+            assert not bot._response_runner.has_active_response_for_target(target)
+            restore_selection.assert_called_once_with()
+        finally:
             await bot._response_runner.drain_inbox_responses()
             interactive._cleanup()
 
