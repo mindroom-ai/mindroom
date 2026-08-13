@@ -44,13 +44,13 @@ def _continuation() -> ApprovalContinuation:
                 tool_call_id="call-1",
                 tool_name="dangerous",
                 invoking_agent="researcher",
-                expires_at="2026-08-12T00:00:00+00:00",
+                expires_at="2099-08-12T00:00:00+00:00",
             ),
             ApprovalCall(
                 tool_call_id="call-2",
                 tool_name="safe",
                 invoking_agent="analyst",
-                expires_at="2026-08-12T00:00:00+00:00",
+                expires_at="2099-08-12T00:00:00+00:00",
                 decision=ApprovalDecision.APPROVED,
                 decision_recorded=True,
             ),
@@ -93,6 +93,24 @@ def test_continuation_store_commits_first_call_decision_and_one_claim(tmp_path: 
     assert acknowledged.state == "ready"
     assert store.claim("approval-1", "worker-1") is not None
     assert store.claim("approval-1", "worker-2") is None
+
+
+def test_approval_commit_rechecks_exact_call_deadline(tmp_path: Path) -> None:
+    """An approval that reaches the durable boundary after expiry must not authorize execution."""
+    store = ApprovalContinuationStore(tmp_path)
+    continuation = _continuation()
+    store.create(
+        replace(
+            continuation,
+            calls=(replace(continuation.calls[0], expires_at="2000-01-01T00:00:00+00:00"),),
+        ),
+    )
+
+    resolved = store.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+
+    assert resolved is not None
+    assert resolved.calls[0].decision is ApprovalDecision.EXPIRED
+    assert resolved.calls[0].reason == "Tool approval request timed out."
 
 
 def test_failure_fence_cannot_take_a_claim_won_by_another_owner(tmp_path: Path) -> None:

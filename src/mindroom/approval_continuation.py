@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -38,6 +39,7 @@ type _ApprovalContinuationState = Literal[
 type _PublishedContinuationState = Literal["pending", "ready"]
 _PAGE_SIZE = 100
 _RECOVERABLE_STATES = ("publishing", "pending", "ready", "claimed", "settling")
+_TIMEOUT_REASON = "Tool approval request timed out."
 
 _STORE_LOCKS_GUARD = threading.Lock()
 _STORE_LOCKS: dict[str, threading.RLock] = {}
@@ -345,7 +347,15 @@ class ApprovalContinuationStore:
             for call in current.calls:
                 if call.tool_call_id == tool_call_id:
                     matched = True
-                    calls.append(call if call.decision is not None else replace(call, decision=decision, reason=reason))
+                    if call.decision is not None:
+                        calls.append(call)
+                        continue
+                    committed_decision = decision
+                    committed_reason = reason
+                    if decision is ApprovalDecision.APPROVED and _call_expired(call):
+                        committed_decision = ApprovalDecision.EXPIRED
+                        committed_reason = _TIMEOUT_REASON
+                    calls.append(replace(call, decision=committed_decision, reason=committed_reason))
                 else:
                     calls.append(call)
             if not matched:
@@ -531,3 +541,12 @@ class ApprovalContinuationStore:
     def close(self) -> None:
         """Close this store handle."""
         self._db.close()
+
+
+def _call_expired(call: ApprovalCall) -> bool:
+    """Fail closed when an exact paused call is past or lacks a valid deadline."""
+    try:
+        expires_at = datetime.fromisoformat(call.expires_at)
+    except ValueError:
+        return True
+    return expires_at.tzinfo is None or expires_at <= datetime.now(UTC)
