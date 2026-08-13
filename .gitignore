@@ -264,3 +264,6 @@ docs/superpowers/
 
 # Swift Package Manager build artifacts (macOS menubar app)
 macos/MindRoom/.build/
+
+# Agent task scratch files
+.claude/TASK-*.md

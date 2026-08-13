@@ -210,7 +210,7 @@ Matrix sync callback
 - `learning/` – Per-agent Agno Learning preference data
 - `chroma/` – ChromaDB storage backing the memory system
 - `knowledge_db/` – Knowledge base vector stores for file-backed RAG
-- `tracking/` – Durable handled-turn ledger plus exact callback obligations and compact terminal tombstones
+- `tracking/` – The event journal database (`event_journal.db` plus its lock and binding files), which owns handled-turn records, and sidecar runtime state such as room-member join tracking; `<agent>_responded.json` files here are pre-journal ledgers kept only for the one-time upgrade import
 - `credentials/` – JSON secrets synchronized from `.env`
 - `encryption_keys/` – Matrix E2E encryption keys
 - `sync_continuity/` – Crash-atomic Matrix checkpoints and pending join decrypt fences
