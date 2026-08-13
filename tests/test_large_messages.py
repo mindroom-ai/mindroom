@@ -71,6 +71,7 @@ async def test_oversized_interactive_values_do_not_escape_the_matrix_event_limit
     )
     parsed = parse_and_format_interactive(f"```interactive\n{raw}\n```", extract_mapping=True)
     assert parsed.interactive_metadata is None
+    assert "React with an emoji" not in parsed.formatted_text
     content: dict[str, object] = {"msgtype": "m.text", "body": parsed.formatted_text}
     if is_edit:
         content = {

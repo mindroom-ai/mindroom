@@ -343,7 +343,22 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
             option_labels[emoji_char] = label
             option_labels[str(i)] = label
 
-    rendered = [(matches[0], _render_question_text(question, options, include_instruction=True))]
+    interactive_metadata = InteractiveMetadata._from_parts(
+        option_map,
+        options if extract_mapping else None,
+        question_text=question,
+        option_labels=option_labels,
+    )
+    rendered = [
+        (
+            matches[0],
+            _render_question_text(
+                question,
+                options,
+                include_instruction=not extract_mapping or interactive_metadata is not None,
+            ),
+        ),
+    ]
     for extra_match in matches[1:]:
         extra_payload = _coerce_interactive_payload(extra_match.group(1))
         if extra_payload is None:
@@ -366,15 +381,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
     parts.append(response_text[last_end:])
     final_text = _remove_inline_unparsed_interactive_fences("".join(parts).strip())
 
-    return _InteractiveResponse(
-        final_text,
-        InteractiveMetadata._from_parts(
-            option_map,
-            options if extract_mapping else None,
-            question_text=question,
-            option_labels=option_labels,
-        ),
-    )
+    return _InteractiveResponse(final_text, interactive_metadata)
 
 
 async def add_reaction_buttons(
