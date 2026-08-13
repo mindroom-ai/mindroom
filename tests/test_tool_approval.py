@@ -458,8 +458,8 @@ async def test_detached_decision_retries_terminal_edit_without_waiting_for_deadl
 
 
 @pytest.mark.asyncio
-async def test_cancelled_detached_card_bind_keeps_retry_owner(tmp_path: Path) -> None:
-    """Cancellation after send must hand card binding and continuation attachment to recovery."""
+async def test_cancelled_detached_card_bind_expires_after_recovery(tmp_path: Path) -> None:
+    """Cancellation after send must bind and immediately terminalize the delivered card."""
     cards = FakeApprovalCards()
     first_bind_started = asyncio.Event()
     release_first_bind = asyncio.Event()
@@ -478,10 +478,11 @@ async def test_cancelled_detached_card_bind_keeps_retry_owner(tmp_path: Path) ->
 
     cards.acknowledge_approval_card = flaky_acknowledge  # type: ignore[method-assign]
     card_ready = AsyncMock(return_value=True)
+    editor = AsyncMock(return_value=True)
     store = initialize_approval_store(
         test_runtime_paths(tmp_path),
         sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
-        editor=AsyncMock(return_value=True),
+        editor=editor,
         cards=cards,
         transport_sender=lambda: "@mindroom_router:localhost",
         sending_device=lambda: CLAIMING_DEVICE_ID,
@@ -510,15 +511,14 @@ async def test_cancelled_detached_card_bind_keeps_retry_owner(tmp_path: Path) ->
     with pytest.raises(asyncio.CancelledError):
         await create
     for _attempt in range(100):
-        row = next(iter(cards.rows.values()))
-        if row.card_event_id == "$approval" and card_ready.await_count:
+        if not cards.rows and editor.await_count:
             break
         await asyncio.sleep(0.01)
 
     assert bind_attempts >= 2
-    assert next(iter(cards.rows.values())).card_event_id == "$approval"
     card_ready.assert_awaited_with("continuation-bind", "call-bind", "$approval")
-    assert "$approval" in store._detached_expiry_tasks
+    assert cards.rows == {}
+    assert editor.await_args.args[2]["status"] == "expired"
 
 
 @pytest.mark.asyncio

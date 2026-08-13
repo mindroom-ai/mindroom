@@ -28,7 +28,7 @@ from mindroom.tool_approval import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from collections.abc import Callable, Coroutine
 
     import structlog
     from agno.models.response import ToolExecution
@@ -81,7 +81,7 @@ def identify_approval_tools(
 class ApprovalResponseCoordinator:
     """Own response-side continuation persistence, cards, and terminal settlement."""
 
-    config: Config
+    config: Callable[[], Config]
     runtime_paths: RuntimePaths
     agent_name: str
     delivery_gateway: DeliveryGateway
@@ -92,13 +92,36 @@ class ApprovalResponseCoordinator:
         """Open the response coordinator's continuation-store handle."""
         self._store = ApprovalContinuationStore(self.runtime_paths.storage_root)
 
+    async def _write[WriteResult](
+        self,
+        operation: Callable[..., WriteResult],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> WriteResult:
+        """Finish one durable mutation before propagating caller cancellation."""
+        write = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+        try:
+            return await asyncio.shield(write)
+        except asyncio.CancelledError:
+            while not write.done():
+                try:
+                    await asyncio.shield(write)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if write.done() and not write.cancelled():
+                write.exception()
+            raise
+
     async def close(self) -> None:
         """Close the response coordinator's continuation-store handle."""
         await asyncio.to_thread(self._store.close)
 
     async def create(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
         """Persist a newly publishing continuation."""
-        return await asyncio.to_thread(self._store.create, continuation)
+        return await self._write(self._store.create, continuation)
 
     async def get(self, approval_id: str) -> ApprovalContinuation | None:
         """Read one continuation without blocking the event loop."""
@@ -113,11 +136,11 @@ class ApprovalResponseCoordinator:
         approval_id: str,
         response_event_id: str,
         *,
-        state: Literal["publishing", "pending", "ready"],
+        state: Literal["publishing", "pending", "ready", "settling"],
         calls: tuple[ApprovalCall, ...] | None = None,
     ) -> ApprovalContinuation | None:
         """Atomically bind the waiting event and optional normalized calls."""
-        return await asyncio.to_thread(
+        return await self._write(
             self._store.bind_response_event,
             approval_id,
             response_event_id,
@@ -127,15 +150,30 @@ class ApprovalResponseCoordinator:
 
     async def claim(self, approval_id: str, claimant_id: str) -> ApprovalContinuation | None:
         """Claim one ready continuation exactly once."""
-        return await asyncio.to_thread(self._store.claim, approval_id, claimant_id)
+        return await self._write(self._store.claim, approval_id, claimant_id)
 
     async def complete(self, approval_id: str, claimant_id: str) -> ApprovalContinuation | None:
         """Complete one claimed continuation exactly once."""
-        return await asyncio.to_thread(self._store.complete, approval_id, claimant_id)
+        return await self._write(self._store.complete, approval_id, claimant_id)
 
     async def fail(self, approval_id: str, reason: str) -> ApprovalContinuation | None:
         """Persist terminal continuation failure."""
-        return await asyncio.to_thread(self._store.fail, approval_id, reason)
+        return await self._write(self._store.fail, approval_id, reason)
+
+    async def _begin_failure(
+        self,
+        approval_id: str,
+        reason: str,
+        *,
+        claimant_id: str | None,
+    ) -> ApprovalContinuation | None:
+        """Fence continuation execution before visible terminal settlement."""
+        return await self._write(
+            self._store.begin_failure,
+            approval_id,
+            reason,
+            claimant_id=claimant_id,
+        )
 
     async def plan_pause(
         self,
@@ -144,15 +182,16 @@ class ApprovalResponseCoordinator:
         requester_id: str,
     ) -> _ApprovalPausePlan:
         """Evaluate approval policy once and build the durable call generation."""
+        config = self.config()
         approver_id = resolve_tool_approval_approver(
-            self.config,
+            config,
             self.runtime_paths,
             requester_id,
         )
         decisions: dict[str, tuple[ContinuationDecision | None, float]] = {}
         for tool, tool_call_id, tool_name, invoking_agent in identified:
             requires_approval, timeout_seconds = await evaluate_tool_approval(
-                self.config,
+                config,
                 self.runtime_paths,
                 tool_name,
                 dict(tool.tool_args or {}),
@@ -196,6 +235,7 @@ class ApprovalResponseCoordinator:
     ) -> ApprovalContinuation:
         """Publish and attach every human-gated card for one persisted generation."""
         current = continuation
+        config = self.config()
         for index, (tool, tool_call_id, tool_name, invoking_agent) in enumerate(plan.tools):
             decision, timeout_seconds = plan.decisions[tool_call_id]
             if decision is not None:
@@ -203,7 +243,7 @@ class ApprovalResponseCoordinator:
             try:
                 sent = await send_suspended_tool_approval(
                     ToolApprovalCall(
-                        config=self.config,
+                        config=config,
                         runtime_paths=self.runtime_paths,
                         tool_name=tool_name,
                         arguments=dict(tool.tool_args or {}),
@@ -223,7 +263,12 @@ class ApprovalResponseCoordinator:
             if sent is None:
                 await self.fail_publication(current.approval_id, reason=failure_reason)
                 raise RuntimeError(failure_reason)
-            attached = await self.get(current.approval_id)
+            attached = await self._write(
+                self._store.attach_card,
+                current.approval_id,
+                tool_call_id,
+                sent.event_id,
+            )
             if attached is not None:
                 current = attached
         return current
@@ -254,7 +299,7 @@ class ApprovalResponseCoordinator:
         ):
             msg = "Could not publish the chained approval response"
             raise RuntimeError(msg)
-        advanced = await asyncio.to_thread(
+        advanced = await self._write(
             self._store.advance_pause,
             current.approval_id,
             claimant_id,
@@ -286,6 +331,14 @@ class ApprovalResponseCoordinator:
             return
         if await self._reconcile_claimed_delivery(current):
             return
+        current = await self._adopt_waiting_delivery(current)
+        current = await self._begin_failure(
+            current.approval_id,
+            reason,
+            claimant_id=continuation.claimant_id,
+        )
+        if current is None or current.state != "settling":
+            return
         terminalized = await asyncio.gather(
             *(
                 expire_suspended_tool_approval(current.room_id, call.card_event_id)
@@ -302,7 +355,6 @@ class ApprovalResponseCoordinator:
                 incomplete_cards=incomplete,
             )
             return
-        current = await self._adopt_waiting_delivery(current)
         target = MessageTarget(
             room_id=current.room_id,
             source_thread_id=current.thread_id,
@@ -323,12 +375,15 @@ class ApprovalResponseCoordinator:
                 ),
             )
             delivered = response_event_id is not None
-        if delivered and current.state == "publishing" and current.response_event_id is None:
+        if delivered and current.response_event_id is None:
             assert response_event_id is not None
-            await self.bind_response_event(
-                current.approval_id,
-                response_event_id,
-                state="publishing",
+            current = (
+                await self.bind_response_event(
+                    current.approval_id,
+                    response_event_id,
+                    state="settling",
+                )
+                or current
             )
         if delivered:
             await self.fail(current.approval_id, reason)

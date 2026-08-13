@@ -503,7 +503,14 @@ class _ApprovalManager:
             tool_call_id=tool_call_id,
             expires_at=expires_at,
         )
-        await asyncio.shield(first_attempt.wait())
+        try:
+            await asyncio.shield(first_attempt.wait())
+        except asyncio.CancelledError:
+            self._schedule_detached_expiry_retry(
+                room_id=room_id,
+                card_event_id=sent_event.event_id,
+            )
+            raise
         return sent_event
 
     def _register_sent_detached_approval(

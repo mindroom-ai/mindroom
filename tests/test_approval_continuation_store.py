@@ -7,7 +7,7 @@ import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -17,6 +17,7 @@ from mindroom.approval_continuation import (
     ApprovalContinuationStore,
     ApprovalDecision,
 )
+from mindroom.approval_manager import ApprovalStartupSweep
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.constants import RuntimePaths
 from mindroom.event_journal import StoredApprovalCard
@@ -79,6 +80,23 @@ def test_continuation_store_commits_first_call_decision_and_one_claim(tmp_path: 
     assert store.claim("approval-1", "worker-2") is None
 
 
+def test_failure_fence_cannot_take_a_claim_won_by_another_owner(tmp_path: Path) -> None:
+    """A stale failure path must not invalidate a claim whose tool execution already won."""
+    store = ApprovalContinuationStore(tmp_path)
+    store.create(_continuation())
+    store.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    ready = store.acknowledge_call("approval-1", "call-1")
+    assert ready is not None
+    claimed = store.claim("approval-1", "resume-owner")
+    assert claimed is not None
+
+    fenced = store.begin_failure("approval-1", "stale publication failure", claimant_id=None)
+
+    assert fenced is not None
+    assert fenced.state == "claimed"
+    assert fenced.claimant_id == "resume-owner"
+
+
 def test_distinct_store_handles_serialize_pending_context_updates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -123,6 +141,18 @@ def test_distinct_store_handles_serialize_pending_context_updates(
     assert persisted is not None
     assert persisted.calls[0].card_event_id == "$card"
     assert persisted.calls[0].decision is ApprovalDecision.APPROVED
+
+
+def test_same_state_write_rejects_a_stale_context_revision(tmp_path: Path) -> None:
+    """Two pending-state writers must not overwrite the first committed context update."""
+    store = ApprovalContinuationStore(tmp_path)
+    original = store.create(_continuation())
+    first = replace(original, request_body="first writer")
+    stale_second = replace(original, request_body="stale second writer")
+
+    assert store._persist(original, first) == first
+    assert store._persist(original, stale_second) is None
+    assert store.get(original.approval_id) == first
 
 
 def test_decision_write_failure_never_reads_as_a_winning_decision(
@@ -302,6 +332,60 @@ async def test_recovery_attaches_card_delivered_before_crash(tmp_path: Path) -> 
 
     assert recovered.calls[0].card_event_id == "$approval"
     assert transport._continuations.get("approval-1") == recovered
+
+
+@pytest.mark.asyncio
+async def test_startup_identifies_unacknowledged_card_before_continuation_recovery(tmp_path: Path) -> None:
+    """A Matrix-accepted card must be adopted before missing-card recovery can fail its continuation."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    unacknowledged = StoredApprovalCard(
+        card={
+            "content": {
+                "continuation_id": "approval-1",
+                "tool_call_id": "call-1",
+            },
+        },
+        resolution=None,
+        transaction_id="mindroom-approval-approval-1-0",
+        card_event_id=None,
+        attempted=True,
+        sending_device_id="DEVICE",
+        created_at_ns=1,
+    )
+    acknowledged = replace(unacknowledged, card_event_id="$approval")
+    cards = AsyncMock()
+    cards.pending_approval_cards.side_effect = [(unacknowledged,), ()]
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: cards,
+    )
+    transport._continuations.create(_continuation())
+    transport._startup_router_ready_for_cleanup = True
+    transport._startup_runtime_support_ready_for_cleanup = True
+
+    async def identify_matrix_card() -> ApprovalStartupSweep:
+        cards.pending_approval_cards.side_effect = None
+        cards.pending_approval_cards.return_value = (acknowledged,)
+        return ApprovalStartupSweep(discarded=0, failed=0, scanned=1)
+
+    with patch(
+        "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
+        new=AsyncMock(side_effect=identify_matrix_card),
+    ) as sweep:
+        await transport._run_startup_cleanup_if_ready()
+
+    await transport.cancel_startup_cleanup_retry()
+    recovered = transport._continuations.get("approval-1")
+    assert recovered is not None
+    assert recovered.state == "pending"
+    assert recovered.calls[0].card_event_id == "$approval"
+    sweep.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

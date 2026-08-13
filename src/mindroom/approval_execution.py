@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 class AgentApprovalExecution:
     """Rebuild and continue one persisted paused agent run."""
 
-    config: Config
+    config: Callable[[], Config]
     runtime_paths: RuntimePaths
     client: Callable[[], nio.AsyncClient]
     tool_runtime: ToolRuntimeSupport
@@ -51,13 +51,14 @@ class AgentApprovalExecution:
         tool_trace_collector: list[ToolTraceEntry],
     ) -> str | PausedAttempt:
         """Apply exact decisions and continue the matching persisted Agno run."""
-        if continuation.entity_name not in self.config.agents:
+        config = self.config()
+        if continuation.entity_name not in config.agents:
             msg = f"Agent {continuation.entity_name!r} is no longer configured"
             raise RuntimeError(msg)
         agent = await asyncio.to_thread(
             create_agent,
             continuation.entity_name,
-            self.config,
+            config,
             self.runtime_paths,
             execution_identity,
             session_id=continuation.session_id,

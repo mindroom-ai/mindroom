@@ -12,7 +12,8 @@ if TYPE_CHECKING:
     from mindroom.interactive import InteractiveMetadata
     from mindroom.tool_system.events import ToolTraceEntry
 
-_TerminalStatus = Literal["completed", "cancelled", "error", "suspended"]
+_StreamTerminalStatus = Literal["completed", "cancelled", "error"]
+_TerminalStatus = Literal[_StreamTerminalStatus, "suspended"]
 VisibleBodyState = Literal["none", "placeholder_only", "visible_body"]
 _VisibleDeliveryKind = Literal["sent", "edited"]
 
@@ -20,7 +21,7 @@ _VisibleDeliveryKind = Literal["sent", "edited"]
 @dataclass(frozen=True)
 class StreamTransportOutcome:  # noqa: D101
     last_physical_stream_event_id: str | None
-    terminal_status: _TerminalStatus
+    terminal_status: _StreamTerminalStatus
     rendered_body: str | None
     visible_body_state: VisibleBodyState
     terminal_update_committed: bool = False

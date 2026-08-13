@@ -26,10 +26,18 @@ class ApprovalDecision(StrEnum):
     EXPIRED = "expired"
 
 
-type _ApprovalContinuationState = Literal["publishing", "pending", "ready", "claimed", "completed", "failed"]
+type _ApprovalContinuationState = Literal[
+    "publishing",
+    "pending",
+    "ready",
+    "claimed",
+    "settling",
+    "completed",
+    "failed",
+]
 type _PublishedContinuationState = Literal["pending", "ready"]
 _PAGE_SIZE = 100
-_RECOVERABLE_STATES = ("publishing", "pending", "ready", "claimed")
+_RECOVERABLE_STATES = ("publishing", "pending", "ready", "claimed", "settling")
 
 _STORE_LOCKS_GUARD = threading.Lock()
 _STORE_LOCKS: dict[str, threading.RLock] = {}
@@ -110,6 +118,8 @@ class ApprovalContinuation:
     request_body: str = ""
     transport_sender_id: str | None = None
     source_kind: str = "message"
+    attachment_ids: tuple[str, ...] = ()
+    message_received_depth: int = 0
 
     def _to_context(self) -> dict[str, object]:
         """Serialize the continuation into Agno approval context."""
@@ -133,6 +143,8 @@ class ApprovalContinuation:
             "request_body": self.request_body,
             "transport_sender_id": self.transport_sender_id,
             "source_kind": self.source_kind,
+            "attachment_ids": list(self.attachment_ids),
+            "message_received_depth": self.message_received_depth,
         }
 
     @classmethod
@@ -163,6 +175,8 @@ class ApprovalContinuation:
             request_body=cast("str", context.get("request_body", "")),
             transport_sender_id=cast("str | None", context.get("transport_sender_id")),
             source_kind=cast("str", context.get("source_kind", "message")),
+            attachment_ids=tuple(cast("list[str]", context.get("attachment_ids", []))),
+            message_received_depth=cast("int", context.get("message_received_depth", 0)),
         )
 
 
@@ -242,7 +256,11 @@ class ApprovalContinuationStore:
         with self._db.Session() as session, session.begin():
             result = session.execute(
                 table.update()
-                .where(table.c.id == current.approval_id, table.c.status == current.state)
+                .where(
+                    table.c.id == current.approval_id,
+                    table.c.status == current.state,
+                    table.c.context == current._to_context(),
+                )
                 .values(**values),
             )
             if result.rowcount == 0:
@@ -281,13 +299,17 @@ class ApprovalContinuationStore:
         approval_id: str,
         response_event_id: str,
         *,
-        state: Literal["publishing"] | _PublishedContinuationState,
+        state: Literal["publishing", "settling"] | _PublishedContinuationState,
         calls: tuple[ApprovalCall, ...] | None = None,
     ) -> ApprovalContinuation | None:
         """Atomically bind visible delivery and optionally publish the continuation."""
         with self._lock:
             current = self.get(approval_id)
-            if current is None or current.state != "publishing":
+            if current is None:
+                return None
+            publishing_transition = current.state == "publishing" and state in {"publishing", "pending", "ready"}
+            settling_binding = current.state == state == "settling"
+            if not publishing_transition and not settling_binding:
                 return current
             published = replace(
                 current,
@@ -382,6 +404,23 @@ class ApprovalContinuationStore:
                 return None
             completed = replace(current, state="completed")
             return self._persist(current, completed, run_status="COMPLETED")
+
+    def begin_failure(
+        self,
+        approval_id: str,
+        reason: str,
+        *,
+        claimant_id: str | None,
+    ) -> ApprovalContinuation | None:
+        """Fence claims and decision callbacks before terminal failure settlement."""
+        with self._lock:
+            current = self.get(approval_id)
+            if current is None or current.state in {"settling", "completed", "failed"}:
+                return current
+            if current.state == "claimed" and current.claimant_id != claimant_id:
+                return current
+            settling = replace(current, state="settling", failure_reason=reason)
+            return self._persist(current, settling)
 
     def advance_pause(
         self,

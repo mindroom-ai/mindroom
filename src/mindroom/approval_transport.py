@@ -771,6 +771,20 @@ class ApprovalMatrixTransport:
             self._startup_cleanup_attempts += 1
             if not self._continuations_recovered:
                 try:
+                    await asyncio.to_thread(self._continuations.recoverable)
+                except Exception:
+                    logger.warning(
+                        "tool_approval_continuation_read_failed",
+                        attempt=self._startup_cleanup_attempts,
+                        exc_info=True,
+                    )
+                    self._schedule_startup_cleanup_retry()
+                    return
+            if not await self._discard_orphaned_approval_cards_on_startup():
+                self._schedule_startup_cleanup_retry()
+                return
+            if not self._continuations_recovered:
+                try:
                     recovered = await self._recover_continuations()
                 except Exception:
                     logger.warning(
@@ -783,9 +797,6 @@ class ApprovalMatrixTransport:
                     self._schedule_startup_cleanup_retry()
                     return
                 self._continuations_recovered = True
-            if not await self._discard_orphaned_approval_cards_on_startup():
-                self._schedule_startup_cleanup_retry()
-                return
             self._startup_cleanup_done = True
             self._retire_startup_cleanup_retry()
 
