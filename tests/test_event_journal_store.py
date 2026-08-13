@@ -2475,6 +2475,58 @@ def _watch_until_queued_or_finished(
             time.sleep(_QUEUE_POLL_SECONDS)
 
 
+class TestDepartureCleanupAndRejoinAreCrossProcessOrdered:
+    """Departure cleanup and rejoin share one PostgreSQL membership-row lock."""
+
+    async def test_rejoin_waits_for_departure_cleanup_claim(
+        self,
+        rival_stores: RivalStores,
+    ) -> None:
+        """A second store cannot rearm a room while old-state cleanup owns it."""
+        principal_id = "agent@alice"
+        first = rival_stores.first.principal(principal_id)
+        second = rival_stores.second.principal(principal_id)
+        await first.fence_departure(ROOM, source=DepartureSource.REPORTED)
+        cleanup_claimed = threading.Event()
+        release_cleanup = threading.Event()
+        operation_order: list[str] = []
+
+        def pause_after_claim() -> None:
+            cleanup_claimed.set()
+            assert release_cleanup.wait(_WORKER_WAIT_SECONDS), "the departure cleanup was never released"
+
+        cleaning = EventJournalStore(
+            backend=_PausingBackend(
+                rival_stores.first.backend,
+                pause_after_claim,
+                statement_matches=lambda sql: "UPDATE room_membership SET departure_fenced" in sql,
+            ),
+        ).principal(principal_id)
+        cleanup = asyncio.create_task(
+            cleaning.cleanup_fenced_departure(ROOM, lambda: operation_order.append("departure cleanup")),
+        )
+        try:
+            await asyncio.to_thread(cleanup_claimed.wait, _WORKER_WAIT_SECONDS)
+            assert cleanup_claimed.is_set(), "the departure cleanup never claimed the membership row"
+            rejoin = asyncio.create_task(
+                second.note_membership_restarted(ROOM, cleanup=lambda: operation_order.append("rejoin cleanup")),
+            )
+            await _await_queued_racers(
+                rival_stores.database_url,
+                application_name=rival_stores.racer_application_name,
+                expected=1,
+            )
+            assert not rejoin.done()
+
+            release_cleanup.set()
+            await asyncio.gather(cleanup, rejoin)
+        finally:
+            release_cleanup.set()
+            await asyncio.gather(cleanup, return_exceptions=True)
+
+        assert operation_order == ["departure cleanup", "rejoin cleanup"]
+
+
 class TestAFenceCannotBeSteppedOverByAConcurrentWalk:
     """What a hydrating writer and a fencing writer do to one PostgreSQL database.
 

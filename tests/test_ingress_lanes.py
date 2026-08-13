@@ -1010,7 +1010,7 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
                 await answer_task
         with interactive._thread_lock:
             interactive._remove_active_question_locked("$question")
-            interactive._claimed_question_ids.discard("$question")
+            interactive._claimed_questions.pop("$question", None)
 
 
 @pytest.mark.asyncio

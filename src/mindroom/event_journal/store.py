@@ -26,7 +26,7 @@ from .models import DeliveryAcknowledgement
 from .projection import drop_refetched_message, install_refetched_revision, project
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from .backend import Backend, Transaction
@@ -207,10 +207,36 @@ class PrincipalStore:
             ),
         )
 
-    async def note_membership_restarted(self, room_id: str) -> None:
-        """Record a confirmed join, so the room's next departure fences again."""
+    async def cleanup_fenced_departure(self, room_id: str, cleanup: Callable[[], None]) -> None:
+        """Clean external state only while one room remains durably departed."""
         await self._backend.write(
-            lambda transaction: journal.note_membership_restarted(transaction, self._principal_id, room_id),
+            lambda transaction: journal.cleanup_fenced_departure(
+                transaction,
+                self._principal_id,
+                room_id,
+                cleanup,
+            ),
+        )
+
+    async def note_membership_restarted(
+        self,
+        room_id: str,
+        *,
+        cleanup: Callable[[], None] | None = None,
+    ) -> None:
+        """Rearm one room after any committed-departure cleanup succeeds."""
+        if cleanup is None:
+            await self._backend.write(
+                lambda transaction: journal.note_membership_restarted(transaction, self._principal_id, room_id),
+            )
+            return
+        await self._backend.write(
+            lambda transaction: journal.note_membership_restarted_after(
+                transaction,
+                self._principal_id,
+                room_id,
+                cleanup,
+            ),
         )
 
     async def retire_owed_departure_reports(self, room_id: str) -> None:

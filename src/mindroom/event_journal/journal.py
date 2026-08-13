@@ -40,6 +40,8 @@ from .projection import ProjectedEvent, project
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .backend import Row, Transaction
     from .models import InboundEvent
 
@@ -427,6 +429,30 @@ def note_membership_restarted(transaction: Transaction, principal_id: str, room_
     )
 
 
+def note_membership_restarted_after(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    cleanup: Callable[[], None],
+) -> None:
+    """Clear external departure state before atomically rearming one room."""
+    if not _claim_departure_fence(transaction, principal_id, room_id):
+        return
+    cleanup()
+    note_membership_restarted(transaction, principal_id, room_id)
+
+
+def cleanup_fenced_departure(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    cleanup: Callable[[], None],
+) -> None:
+    """Clean external state only while this room is still durably departed."""
+    if _claim_departure_fence(transaction, principal_id, room_id):
+        cleanup()
+
+
 def retire_owed_departure_reports(transaction: Transaction, principal_id: str, room_id: str) -> None:
     """Forget reports that can no longer arrive, so a real departure still fences."""
     transaction.execute(
@@ -470,6 +496,19 @@ def _membership_state(transaction: Transaction, principal_id: str, room_id: str)
         departure_fenced=bool(row["departure_fenced"]),
         owed_reports=int(row["owed_departure_reports"]),
     )
+
+
+def _claim_departure_fence(transaction: Transaction, principal_id: str, room_id: str) -> bool:
+    """Lock one room's membership row and return its departure-fence state."""
+    row = transaction.fetchone(
+        """
+        UPDATE room_membership SET departure_fenced = departure_fenced
+        WHERE principal_id = ? AND room_id = ?
+        RETURNING departure_fenced
+        """,
+        (principal_id, room_id),
+    )
+    return row is not None and bool(row["departure_fenced"])
 
 
 def _write_departure_state(

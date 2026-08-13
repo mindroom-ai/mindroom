@@ -444,6 +444,59 @@ class TestAgentBot(AgentBotTestBase):
             interactive._cleanup()
 
     @pytest.mark.asyncio
+    async def test_departure_consumes_question_restored_after_selection_failure(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A departure retires retry state whose reaction it makes terminal."""
+        interactive._cleanup()
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        room = MagicMock(room_id="!test:localhost")
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.source = {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$question",
+                    "key": "👍",
+                },
+            },
+        }
+        interactive.register_interactive_question(
+            "$question",
+            room.room_id,
+            None,
+            {"👍": "approve"},
+            bot.agent_name,
+        )
+
+        try:
+            with patch.object(
+                bot._turn_controller,
+                "_execute_interactive_selection",
+                new=AsyncMock(side_effect=OSError("pending write failed")),
+            ):
+                await _dispatch_reaction(bot, room, event)
+                await bot._response_runner.drain_inbox_responses()
+
+            assert "$question" in interactive._active_questions
+            assert event.event_id in await bot._journal_dispatcher.unsettled_event_ids()
+
+            await bot._membership_fence.fence_local_departure(room.room_id)
+
+            assert "$question" not in interactive._active_questions
+            assert event.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
+            interactive._cleanup()
+            interactive.init_persistence(tmp_path)
+            assert "$question" not in interactive._active_questions
+        finally:
+            await bot._response_runner.drain_inbox_responses()
+            interactive._cleanup()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_stage", ["reserve", "track"])
     async def test_interactive_reaction_start_failure_restores_claimed_selection(
         self,
@@ -577,17 +630,24 @@ class TestAgentBot(AgentBotTestBase):
             stored_reaction = await bot._journal_principal().load_event(reaction.event_id)
             assert stored_reaction is not None
             assert stored_reaction.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
-            assert question.event_id in interactive._claimed_question_ids
+            assert question.event_id in interactive._claimed_questions
 
-            await bot._journal_principal().fence_departure(room.room_id, source=DepartureSource.LOCAL)
+            await bot._membership_fence.fence_local_departure(room.room_id)
             assert reaction.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
+
+            # Model a process exit before the detached response gets the lock.
+            # The departure itself must already have consumed the persisted
+            # question because its reaction is now terminal and cannot replay.
+            interactive._cleanup()
+            interactive.init_persistence(tmp_path)
+            assert question.event_id not in interactive._active_questions
 
             lifecycle_lock.release()
             await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
             await asyncio.wait_for(bot._response_runner.drain_inbox_responses(), timeout=1.0)
 
             assert question.event_id not in interactive._active_questions
-            assert question.event_id not in interactive._claimed_question_ids
+            assert question.event_id not in interactive._claimed_questions
         finally:
             if lifecycle_lock.locked():
                 lifecycle_lock.release()
@@ -996,7 +1056,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-a",
             claimed_question=question,
         )
-        interactive._claimed_question_ids.add(selection.question_event_id)
+        interactive._claimed_questions[selection.question_event_id] = question
         target = bot._conversation_resolver.build_message_target(
             room_id=room.room_id,
             thread_id=selection.thread_id,
@@ -1040,7 +1100,7 @@ class TestAgentBot(AgentBotTestBase):
 
             assert not response_entered.is_set()
             assert selection.question_event_id in interactive._active_questions
-            assert selection.question_event_id not in interactive._claimed_question_ids
+            assert selection.question_event_id not in interactive._claimed_questions
             if lock_owned_by_test:
                 lifecycle_lock.release()
                 lock_owned_by_test = False

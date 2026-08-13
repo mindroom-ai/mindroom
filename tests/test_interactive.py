@@ -35,7 +35,7 @@ class TestInteractiveFunctions:
         interactive._active_questions.clear()
         interactive._dirty_question_ids.clear()
         interactive._deleted_question_ids.clear()
-        interactive._claimed_question_ids.clear()
+        interactive._claimed_questions.clear()
         interactive._persistence_file = None
         interactive._persistence_lock_file = None
         runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
@@ -61,7 +61,7 @@ class TestInteractiveFunctions:
         interactive._active_questions.clear()
         interactive._dirty_question_ids.clear()
         interactive._deleted_question_ids.clear()
-        interactive._claimed_question_ids.clear()
+        interactive._claimed_questions.clear()
         interactive._persistence_file = None
         interactive._persistence_lock_file = None
 
@@ -1360,6 +1360,125 @@ Just let me know your preference!"""
         interactive._cleanup()
         interactive.init_persistence(tmp_path)
 
+        assert interactive._active_questions == {}
+
+    @pytest.mark.asyncio
+    async def test_clear_departed_agent_questions_consumes_active_and_claimed_state(
+        self,
+        mock_client: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """A departure consumes only that agent's questions, including an in-flight claim."""
+        interactive.init_persistence(tmp_path)
+        target_room = "!departed:localhost"
+        questions = {
+            "$active": (target_room, "test_agent"),
+            "$claimed": (target_room, "test_agent"),
+            "$other-agent": (target_room, "other_agent"),
+            "$other-room": ("!other:localhost", "test_agent"),
+        }
+        for event_id, (room_id, agent_name) in questions.items():
+            interactive.register_interactive_question(
+                event_id,
+                room_id,
+                None,
+                {"✅": "yes"},
+                agent_name,
+            )
+
+        event = MagicMock(spec=nio.ReactionEvent)
+        event.sender = "@user:localhost"
+        event.reacts_to = "$claimed"
+        event.key = "✅"
+        selection = await interactive.handle_reaction(
+            mock_client,
+            event,
+            "test_agent",
+            self.config,
+            runtime_paths_for(self.config),
+        )
+        assert selection is not None
+
+        interactive.clear_interactive_questions_for_room(target_room, "test_agent")
+        interactive.restore_selection(selection)
+
+        assert set(interactive._active_questions) == {"$other-agent", "$other-room"}
+
+        interactive._cleanup()
+        interactive.init_persistence(tmp_path)
+
+        assert set(interactive._active_questions) == {"$other-agent", "$other-room"}
+
+    def test_clear_departed_agent_questions_retries_failed_persistence(self, tmp_path: Path) -> None:
+        """A failed active-question deletion remains flushable on join retry."""
+        interactive.init_persistence(tmp_path)
+        persistence_file = tmp_path / "tracking" / "interactive_questions.json"
+        interactive.register_interactive_question(
+            "$question",
+            "!departed:localhost",
+            None,
+            {"✅": "yes"},
+            "test_agent",
+        )
+        original_write = interactive._write_active_questions_atomically_locked
+
+        with patch(
+            "mindroom.interactive._write_active_questions_atomically_locked",
+            side_effect=(OSError("disk unavailable"), None),
+        ) as write:
+            with pytest.raises(OSError, match="disk unavailable"):
+                interactive.clear_interactive_questions_for_room("!departed:localhost", "test_agent")
+            write.side_effect = original_write
+            interactive.clear_interactive_questions_for_room("!departed:localhost", "test_agent")
+
+        interactive._cleanup()
+        interactive.init_persistence(tmp_path)
+
+        assert json.loads(persistence_file.read_text()) == {}
+        assert interactive._active_questions == {}
+
+    @pytest.mark.asyncio
+    async def test_failed_commit_keeps_claim_recoverable(
+        self,
+        mock_client: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """A failed durable consume leaves its claim available for departure cleanup."""
+        interactive.init_persistence(tmp_path)
+        interactive.register_interactive_question(
+            "$question",
+            "!departed:localhost",
+            None,
+            {"✅": "yes"},
+            "test_agent",
+        )
+        event = MagicMock(spec=nio.ReactionEvent)
+        event.sender = "@user:localhost"
+        event.reacts_to = "$question"
+        event.key = "✅"
+        selection = await interactive.handle_reaction(
+            mock_client,
+            event,
+            "test_agent",
+            self.config,
+            runtime_paths_for(self.config),
+        )
+        assert selection is not None
+
+        with (
+            patch(
+                "mindroom.interactive._write_active_questions_atomically_locked",
+                side_effect=OSError("disk unavailable"),
+            ),
+            pytest.raises(OSError, match="disk unavailable"),
+        ):
+            interactive.commit_selection(selection)
+
+        assert "$question" in interactive._claimed_questions
+        interactive.clear_interactive_questions_for_room("!departed:localhost", "test_agent")
+
+        interactive._cleanup()
+        interactive.init_persistence(tmp_path)
         assert interactive._active_questions == {}
 
     @pytest.mark.asyncio

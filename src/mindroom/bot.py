@@ -573,6 +573,10 @@ class AgentBot:
         )
         self._membership_fence = MembershipFence(
             store=self._journal_store.principal(self._journal_principal_id),
+            clear_departed_room=lambda room_id: interactive.clear_interactive_questions_for_room(
+                room_id,
+                self.agent_name,
+            ),
         )
         self._relations = RelationLookup(
             store=self._journal_store.principal(self._journal_principal_id),
