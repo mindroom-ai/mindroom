@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.ingress_validation import IngressValidator
     from mindroom.journal_dispatch import JournalDispatcher
-    from mindroom.message_target import MessageTarget
     from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
     from mindroom.stop import StopManager
@@ -49,7 +48,6 @@ class ReactionDispatcherDeps:
     user_stop_reconciler: UserStopReconciler
     ingress: IngressValidator
     reserve_prompt_ingress_order: Callable[..., PromptIngressReservationOwner]
-    build_message_target: Callable[..., MessageTarget]
     enqueue_interactive_selection: Callable[..., Awaitable[None]]
     handle_interactive_selection: Callable[..., Awaitable[None]]
     start_interactive_selection: Callable[..., Awaitable[None]]
@@ -180,11 +178,6 @@ class ReactionDispatcher:
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
         try:
-            response_target = self.deps.build_message_target(
-                room_id=room.room_id,
-                thread_id=selection.thread_id,
-                reply_to_event_id=selection.question_event_id,
-            )
             await self.deps.enqueue_interactive_selection(
                 reservation_owner,
                 room,
@@ -192,7 +185,6 @@ class ReactionDispatcher:
                 requester_user_id=requester_user_id,
                 user_id=event.sender,
                 source_event_id=event.event_id,
-                response_target=response_target,
                 handle_interactive_selection=self.deps.handle_interactive_selection,
                 start_interactive_selection=self.deps.start_interactive_selection,
             )
