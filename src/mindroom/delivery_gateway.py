@@ -657,6 +657,7 @@ class DeliveryGateway:
             dict(claimed.payload),
             retry_sync_recovery=retry_sync_recovery,
             transaction_id=claimed.transaction_id,
+            content_is_prepared=True,
         )
         if isinstance(outcome, MatrixDeliveryFailure):
             detail = _matrix_delivery_failure_reason(outcome)
@@ -966,6 +967,7 @@ class DeliveryGateway:
                 operation="edit_message",
                 retry_sync_recovery=request.retry_sync_recovery,
                 transaction_id=claimed.transaction_id,
+                content_is_prepared=True,
             )
             if isinstance(outcome, MatrixDeliveryFailure):
                 detail = _matrix_delivery_failure_reason(outcome)

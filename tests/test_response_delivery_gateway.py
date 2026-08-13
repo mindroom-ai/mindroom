@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
@@ -503,6 +504,65 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert list(outbox.rows) == [("$cause", "final")]
         assert outbox.rows["$cause", "final"].acknowledged_event_id == "$streamed"
+
+    async def test_an_oversized_terminal_edit_sends_the_frozen_payload_verbatim(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Wire delivery must not prepare an already-frozen outbox payload again.
+
+        A large edit becomes a sidecar-backed ``m.file`` replacement before
+        the outbox freezes it. Preparing that envelope a second time promotes
+        the inner ``m.file`` type to the outer edit without its required URL,
+        so nio rejects the event and later history reads cannot hydrate it.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        client = AsyncMock(spec=nio.AsyncClient)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/sidecar"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+        terminal = gateway._durable_terminal_edit(
+            "$cause",
+            MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+        )
+        assert terminal is not None
+        answer = "x" * 125_000
+
+        delivered = await terminal(
+            client,
+            _ROOM_ID,
+            "$streamed",
+            {
+                "msgtype": "m.text",
+                "body": answer,
+                "io.mindroom.stream_status": "completed",
+            },
+            answer,
+        )
+
+        assert delivered is not None
+        assert client.upload.await_count == 1, "wire delivery uploaded a second sidecar"
+        frozen = outbox.rows["$cause", "final"].payload
+        wire_content = client.room_send.await_args.kwargs["content"]
+        assert wire_content == frozen
+        parsed = nio.Event.parse_event(
+            {
+                "event_id": "$edit",
+                "sender": _AGENT_USER_ID,
+                "origin_server_ts": 1,
+                "type": "m.room.message",
+                "content": wire_content,
+            },
+        )
+        assert not isinstance(parsed, nio.BadEvent)
 
     async def test_a_streamed_terminal_edit_freezes_its_fallback_body_too(
         self,
