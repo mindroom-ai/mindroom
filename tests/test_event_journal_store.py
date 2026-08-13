@@ -1708,7 +1708,7 @@ class TestInteractiveQuestionClaims:
         self,
         alice: PrincipalStore,
     ) -> None:
-        """SQL NULL thread identity must preserve room-level numeric answers."""
+        """Canonical room-level thread identity must preserve numeric answers."""
         await admit(alice, "$turn")
         assert await alice.register_interactive_question_for_turn(
             "$turn",
