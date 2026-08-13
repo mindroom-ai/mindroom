@@ -5,8 +5,8 @@
 
 **Goal:** Replace JSON and process-global interactive-question ownership with one event-journal transaction boundary for registration, selection, settlement, and membership invalidation.
 
-**Architecture:** A focused `event_journal.interactive_questions` module owns one narrow table and returns immutable selection dataclasses.
-The event journal binds a question to its admitted source, consumes it during source settlement, and deletes it during membership fencing, while runtime code only executes the durable selection.
+**Architecture:** A focused `event_journal.interactive_questions` module owns active-question rows and immutable source-selection rows.
+The event journal transfers a validated selection from the active question to its admitted source, consumes that selection during source settlement, and deletes membership-scoped interactive state during fencing, while runtime code only executes the durable selection.
 
 **Tech Stack:** Python 3.13, asyncio, dataclasses, SQLite, PostgreSQL, pytest, Ruff, ty, Tach.
 
@@ -26,7 +26,7 @@ The event journal binds a question to its admitted source, consumes it during so
 ## File Structure
 
 - `src/mindroom/event_journal/interactive_questions.py` owns question serialization and transactional registration and claim operations.
-- `src/mindroom/event_journal/schema.py` owns the `interactive_questions` table and its active-question lookup index.
+- `src/mindroom/event_journal/schema.py` owns the `interactive_questions` and `interactive_selections` tables plus the active-question lookup index.
 - `src/mindroom/event_journal/store.py` exposes typed async `PrincipalStore` methods and composes turn membership proof with registration.
 - `src/mindroom/event_journal/views.py` exposes only the methods required by typed runtime collaborators.
 - `src/mindroom/event_journal/journal.py` composes question consumption with source settlement and question deletion with membership invalidation.
@@ -43,7 +43,7 @@ The event journal binds a question to its admitted source, consumes it during so
 - `tests/test_journal_membership_fence.py` proves atomic membership deletion.
 - `tests/test_interactive.py` retains pure parsing, prompt, policy, and Matrix I/O tests and drops persistence-only cases.
 
-### Task 1: Add the Durable Question Record and Registration APIs
+### Task 1: Add Durable Interactive Records and Registration APIs
 
 **Files:**
 
@@ -121,7 +121,7 @@ Run: `git add src/mindroom/event_journal tests/test_event_journal_store.py && gi
 
 - [ ] **Step 1: Write failing atomic-claim tests**
 
-Add tests proving a pending reaction and active question become `INTERACTIVE_REACTION` plus one durable source binding in one call.
+Add tests proving a pending reaction and active question become `INTERACTIVE_REACTION` plus one immutable source-owned selection in one call.
 Assert replay by the same reaction returns the same literal selection.
 Assert a second reaction cannot steal the question and does not gain the interactive semantic consumer.
 Assert a reaction in another room, a terminal reaction, an old-membership reaction, an invalid option, and another agent all return `None` without mutation.
@@ -177,10 +177,8 @@ Run: `git add src/mindroom/event_journal tests/test_event_journal_store.py && gi
 
 **Interfaces:**
 
-- Produce: `interactive_questions.consume_for_sources(transaction, principal_id, source_event_ids) -> None`.
-- Produce: `interactive_questions.delete_for_room(transaction, principal_id, room_id) -> None`.
-- Modify: `journal.settle_many` to consume source-owned selections while terminalizing sources.
-- Modify: `_advance_membership_epoch` to delete room questions before settling stale work.
+- Modify: `journal.settle` to consume its source-owned selection while terminalizing the source.
+- Modify: `_advance_membership_epoch` to delete active room questions and the selections owned by sources it settles.
 
 - [ ] **Step 1: Write failing transaction-boundary tests**
 
@@ -196,8 +194,8 @@ Expected: FAIL because settlement and membership invalidation do not touch the n
 
 - [ ] **Step 3: Implement transactional deletion**
 
-Call `consume_for_sources` from the sole `settle_many` implementation before compacting source rows.
-Call `delete_for_room` from `_advance_membership_epoch` beside existing approval-card and derived-state deletion.
+Delete a source's selection from the sole `settle` implementation after compacting that source row in the same transaction.
+Delete active room questions from `_advance_membership_epoch`, then delete selections for the stale sources that transition to settled there.
 Do not introduce callbacks, retry tables, or cleanup state.
 
 - [ ] **Step 4: Run the boundary tests and verify GREEN**
@@ -227,7 +225,7 @@ Run: `git add src/mindroom/event_journal tests/test_event_journal_store.py tests
 
 - Consume: Task 1 registration APIs.
 - Consume: Task 2 reaction and text claim APIs.
-- Produce: Journal dispatcher methods that bind the current admitted source ID to store claims without exposing transaction details.
+- Produce: Journal dispatcher methods that transfer a validated selection to the current admitted source ID without exposing transaction details.
 
 - [ ] **Step 1: Write failing runtime-boundary tests**
 
@@ -291,7 +289,7 @@ Expected: FAIL because current runtime callbacks still restore or commit process
 
 Remove restore callbacks from `_InteractiveSelectionDispatch` and `PendingDispatchMetadata`.
 Remove commit and restore branches from `handle_interactive_selection`.
-On prestart or execution failure, leave the question bound to the pending source and release that source through the existing retry path.
+On prestart or execution failure, leave the immutable selection owned by the pending source and release that source through the existing retry path.
 Preserve `CancelledError` propagation.
 Keep the restart-only wait for live source-owned tasks because task execution ownership is not durable.
 
@@ -457,7 +455,7 @@ Push `fix/pr-1825-followup` to `origin/fix/interactive-reaction-cancel-before-st
 
 - [x] **Step 2: Consolidate reported-departure transport into one immutable record**
 
-- [x] **Step 3: Simplify question decoding and binding without changing transaction order**
+- [x] **Step 3: Simplify question and selection decoding without changing transaction order**
 
 - [x] **Step 4: Collapse the circular reaction-to-controller callback seam**
 
