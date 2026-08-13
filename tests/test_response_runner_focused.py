@@ -22,11 +22,14 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
 from agno.tools.function import Function
+from agno.tools.toolkit import Toolkit
 
+from mindroom import agents as agents_module
 from mindroom import background_tasks as background_tasks_module
 from mindroom import response_runner
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import (
@@ -80,6 +83,7 @@ from mindroom.streaming import (
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
@@ -1396,6 +1400,93 @@ async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_defa
 
 
 @pytest.mark.asyncio
+async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Path) -> None:
+    """The synthetic Agno pause marker must not turn an exempt policy call into human approval."""
+    register_tool_approval_exemption("synthetic_exempt", lambda arguments: arguments.get("dry_run") is True)
+    bot = _bot(tmp_path)
+    bot.config.tool_approval = bot.config.tool_approval.model_copy(update={"default": "require_approval"})
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    toolkit = Toolkit(
+        name="approval-test",
+        tools=[Function(name="synthetic_exempt", entrypoint=lambda: None)],
+    )
+    agents_module.apply_tool_approval_capability(
+        toolkit,
+        bot.config,
+        supports_native_tool_approval=True,
+    )
+    function = toolkit.functions["synthetic_exempt"]
+    tool = ToolExecution(
+        tool_call_id="call-exempt",
+        tool_name=function.name,
+        tool_args={"dry_run": True},
+        requires_confirmation=function.requires_confirmation,
+        approval_type=function.approval_type,
+    )
+
+    with patch(
+        "mindroom.approval_response.resolve_tool_approval_approver",
+        return_value="@user:localhost",
+    ):
+        plan = await runner._approval_responses.plan_pause(
+            ((tool, "call-exempt", function.name, "general"),),
+            requester_id="@user:localhost",
+        )
+
+    assert plan.calls[0].decision is ApprovalDecision.APPROVED
+
+
+@pytest.mark.asyncio
+async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -> None:
+    """An exact-call script decision remains authoritative after Agno pauses a potentially gated tool."""
+    script_path = tmp_path / "approval.py"
+    script_path.write_text(
+        "def check(tool_name, arguments, agent_name):\n    return arguments['requires_approval']\n",
+        encoding="utf-8",
+    )
+    bot = _bot(tmp_path)
+    bot.config.tool_approval = bot.config.tool_approval.model_copy(
+        update={
+            "rules": [
+                ApprovalRuleConfig(
+                    match="scripted_tool",
+                    script=str(script_path),
+                ),
+            ],
+        },
+    )
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    toolkit = Toolkit(
+        name="approval-test",
+        tools=[Function(name="scripted_tool", entrypoint=lambda: None)],
+    )
+    agents_module.apply_tool_approval_capability(
+        toolkit,
+        bot.config,
+        supports_native_tool_approval=True,
+    )
+    function = toolkit.functions["scripted_tool"]
+    tool = ToolExecution(
+        tool_call_id="call-script",
+        tool_name=function.name,
+        tool_args={"requires_approval": False},
+        requires_confirmation=function.requires_confirmation,
+        approval_type=function.approval_type,
+    )
+
+    with patch(
+        "mindroom.approval_response.resolve_tool_approval_approver",
+        return_value="@user:localhost",
+    ):
+        plan = await runner._approval_responses.plan_pause(
+            ((tool, "call-script", function.name, "general"),),
+            requester_id="@user:localhost",
+        )
+
+    assert plan.calls[0].decision is ApprovalDecision.APPROVED
+
+
+@pytest.mark.asyncio
 async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_path: Path) -> None:
     """An attempted FINAL is recovered and completed without invoking Agno twice."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -1793,6 +1884,67 @@ async def test_approval_request_restores_exact_hook_envelope_after_store_reload(
     assert restored.response_envelope.hook_source == "plugin:message_received"
     assert restored.response_envelope.dispatch_policy_source_kind == "plugin"
     assert restored.response_envelope.message_received_depth == 3
+
+
+@pytest.mark.asyncio
+async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_path: Path) -> None:
+    """Resumed tool hooks and runtime events stay correlated with the originating Matrix turn."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-correlation",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="claimed",
+        execution_identity={},
+        correlation_id="correlation-original",
+    )
+    request = replace(
+        _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
+        correlation_id="correlation-original",
+    )
+    observed: list[str | None] = []
+
+    def build_dispatch_context(
+        *_args: object,
+        correlation_id: str | None = None,
+        **_kwargs: object,
+    ) -> ToolDispatchContext:
+        observed.append(correlation_id)
+        return ToolDispatchContext(execution_identity=identity)
+
+    with (
+        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
+        patch.object(runner.deps.tool_runtime, "build_dispatch_context", side_effect=build_dispatch_context),
+        patch(
+            "mindroom.approval_execution.AgentApprovalExecution.continue_run",
+            new=AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={})),
+        ),
+    ):
+        await runner._continue_entity_call(
+            continuation,
+            request=request,
+            target=request.response_envelope.target,
+            tool_trace_collector=[],
+        )
+
+    assert observed == ["correlation-original"]
 
 
 @pytest.mark.asyncio

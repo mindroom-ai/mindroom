@@ -2074,6 +2074,21 @@ def test_non_resumable_participant_rejects_gated_functions(tmp_path: Path) -> No
         )
 
 
+def test_non_resumable_participant_rejects_native_confirmation(tmp_path: Path) -> None:
+    """A tool-authored Agno confirmation cannot enter an embedded participant with no resume owner."""
+    context = _make_context(tmp_path)
+    toolkit = Toolkit(
+        name="native",
+        tools=[Function(name="native_confirmation", entrypoint=lambda: None, requires_confirmation=True)],
+    )
+
+    with pytest.raises(DynamicWorkflowExecutionError, match=r"native_confirmation.*cannot suspend"):
+        dynamic_workflow_module._reject_nonresumable_toolkits(
+            {"native": toolkit},
+            context.config,
+        )
+
+
 def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> None:
     """Tools listed in the dynamic_workflow allowed_tools config skip per-call approval."""
     context = _make_context(tmp_path)

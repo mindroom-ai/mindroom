@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
+    "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
     "ApprovalStartupSweep",
     "MatrixApprovalAction",
@@ -62,6 +63,8 @@ __all__ = [
     "tool_may_require_approval",
 ]
 
+# Agno copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
+POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
 _SCRIPT_CACHE: dict[tuple[str, int], ModuleType] = {}
 _SCRIPT_CACHE_LOCK = threading.Lock()
 logger = get_logger(__name__)

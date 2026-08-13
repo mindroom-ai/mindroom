@@ -13,6 +13,7 @@ from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import (
+    POLICY_CONFIRMATION_APPROVAL_TYPE,
     ToolApprovalCall,
     evaluate_tool_approval,
     expire_continuation_approval_cards,
@@ -120,7 +121,10 @@ class ApprovalResponseCoordinator:
                 dict(tool.tool_args or {}),
                 invoking_agent,
             )
-            requires_approval = requires_approval or tool.requires_confirmation is True
+            tool_authored_confirmation = (
+                tool.requires_confirmation is True and tool.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE
+            )
+            requires_approval = requires_approval or tool_authored_confirmation
             decisions[tool_call_id] = (
                 None
                 if requires_approval and approver_id is not None

@@ -4579,6 +4579,7 @@ from = ["mindroom.approval_transport"]
 [[interfaces]]
 expose = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
+    "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
     "MatrixApprovalAction",
     "SentApprovalEvent",

@@ -719,7 +719,7 @@ def _reject_nonresumable_toolkits(toolkits: dict[str, Toolkit], config: Config) 
             function.name
             for toolkit in toolkits.values()
             for function in (*toolkit.functions.values(), *toolkit.async_functions.values())
-            if tool_may_require_approval(config, function.name)
+            if function.requires_confirmation is True or tool_may_require_approval(config, function.name)
         },
     )
     if unavailable:

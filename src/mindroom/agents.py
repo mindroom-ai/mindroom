@@ -35,7 +35,7 @@ from mindroom.runtime_resolution import (
     resolve_private_requester_scope_root,
 )
 from mindroom.timing import timed, timed_block
-from mindroom.tool_approval import tool_may_require_approval
+from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     default_worker_routed_tools,
@@ -1279,8 +1279,9 @@ def apply_tool_approval_capability(
         return None
     if supports_native_tool_approval:
         for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
-            if tool_may_require_approval(config, function.name):
+            if tool_may_require_approval(config, function.name) and function.requires_confirmation is not True:
                 function.requires_confirmation = True
+                function.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
         return toolkit
     toolkit.functions = {
         name: function

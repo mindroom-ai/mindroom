@@ -3239,6 +3239,8 @@ def test_native_approval_capability_marks_only_potentially_gated_calls() -> None
     assert filtered is toolkit
     assert toolkit.functions["dangerous"].requires_confirmation is True
     assert toolkit.async_functions["dangerous_async"].requires_confirmation is True
+    assert toolkit.functions["dangerous"].approval_type == "mindroom_policy"
+    assert toolkit.async_functions["dangerous_async"].approval_type == "mindroom_policy"
     assert toolkit.functions["safe"].requires_confirmation is not True
 
 
@@ -3298,6 +3300,25 @@ def test_non_resumable_tool_surface_hides_native_confirmation_calls() -> None:
 
     assert filtered is toolkit
     assert set(toolkit.functions) == {"safe"}
+
+
+def test_native_approval_capability_preserves_tool_authored_confirmation() -> None:
+    """MindRoom marks only policy pauses, leaving an authored confirmation distinguishable."""
+    config = Config.model_validate({"tool_approval": {"default": "require_approval"}})
+    toolkit = Toolkit(
+        name="approval-test",
+        tools=[Function(name="native_confirmation", entrypoint=lambda: None, requires_confirmation=True)],
+    )
+
+    filtered = agents_module.apply_tool_approval_capability(
+        toolkit,
+        config,
+        supports_native_tool_approval=True,
+    )
+
+    assert filtered is toolkit
+    assert toolkit.functions["native_confirmation"].requires_confirmation is True
+    assert toolkit.functions["native_confirmation"].approval_type is None
 
 
 def test_non_resumable_tool_surface_drops_an_empty_toolkit() -> None:
