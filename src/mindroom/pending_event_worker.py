@@ -133,6 +133,7 @@ class PendingEventWorker:
     _pump: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _retry: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _deferral_scan: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _stopped: bool = field(default=False, init=False, repr=False)
     _retry_delay_seconds: float = field(default=_INITIAL_RETRY_DELAY_SECONDS, init=False, repr=False)
     _failed_rooms: set[str] = field(default_factory=set, init=False, repr=False)
     # Events handed to a turn that is still running, kept whole rather than by
@@ -156,6 +157,7 @@ class PendingEventWorker:
         """Begin draining, including anything a previous process left behind."""
         if self._pump is not None and not self._pump.done():
             return
+        self._stopped = False
         self._wake.set()
         self._pump = asyncio.create_task(self._run(), name="pending_event_worker")
 
@@ -200,6 +202,7 @@ class PendingEventWorker:
 
     async def stop(self) -> None:
         """Stop draining, leaving unfinished events pending for the next start."""
+        self._stopped = True
         pump = self._pump
         self._pump = None
         retry = self._retry
@@ -250,8 +253,10 @@ class PendingEventWorker:
         """
         drained = 0
         attempted: frozenset[str] = frozenset()
-        while True:
+        while not self._stopped:
             by_room = await self._collect_whole_backlog()
+            if self._stopped:
+                return drained
             if not by_room:
                 return drained
             ids = frozenset(event.event_id for events in by_room.values() for event in events)
@@ -262,6 +267,7 @@ class PendingEventWorker:
             attempted = ids
             drained += len(ids)
             await asyncio.gather(*(self._drain_room(room_id, events) for room_id, events in by_room.items()))
+        return drained
 
     async def _drain_room(self, room_id: str, events: list[JournalEvent]) -> None:
         """Run one room's events, once whatever lane owns that room is done.
@@ -273,6 +279,8 @@ class PendingEventWorker:
         """
         while (active := self._lanes.get(room_id)) is not None and not active.done():
             await asyncio.wait([active])
+        if self._stopped:
+            return
         lane = self._start_lane(room_id, events)
         await asyncio.wait([lane])
         # This lane is the drain's own, so whatever ended it is the drain's to

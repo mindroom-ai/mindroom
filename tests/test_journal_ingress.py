@@ -1393,6 +1393,58 @@ class TestPendingEventWorker:
         assert peak_concurrent == 1
         assert await alice.unsettled_event_ids() == frozenset()
 
+    async def test_stop_prevents_a_waiting_recovery_drain_from_starting_a_late_lane(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A drain already waiting on a lane cannot outlive worker shutdown."""
+        existing_lane_started = asyncio.Event()
+        existing_lane_cancelled = asyncio.Event()
+        finish_cancellation = asyncio.Event()
+        late_lane_started = asyncio.Event()
+
+        async def handle(event: JournalEvent) -> bool:
+            del event
+            late_lane_started.set()
+            await asyncio.Event().wait()
+            return True
+
+        async def existing_lane() -> None:
+            existing_lane_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                existing_lane_cancelled.set()
+                await finish_cancellation.wait()
+                raise
+
+        await self._admit(alice, text_event("$message"))
+        event = (await alice.pending())[0]
+        worker = PendingEventWorker(store=alice, handle=handle)
+        lane = asyncio.create_task(existing_lane())
+        worker._lanes[ROOM] = lane
+        await existing_lane_started.wait()
+
+        draining = asyncio.create_task(worker._drain_room(ROOM, [event]))
+        await asyncio.sleep(0)
+        stopping = asyncio.create_task(worker.stop())
+        try:
+            await existing_lane_cancelled.wait()
+            finish_cancellation.set()
+
+            await stopping
+            await asyncio.wait_for(draining, timeout=1.0)
+            await asyncio.sleep(0)
+
+            assert not late_lane_started.is_set()
+            assert worker._lanes == {}
+        finally:
+            finish_cancellation.set()
+            draining.cancel()
+            for tracked_lane in worker._lanes.values():
+                tracked_lane.cancel()
+            await asyncio.gather(stopping, draining, *worker._lanes.values(), return_exceptions=True)
+
     async def test_one_stalled_room_does_not_block_another(
         self,
         alice: PrincipalStore,
