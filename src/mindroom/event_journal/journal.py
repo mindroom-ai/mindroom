@@ -415,7 +415,7 @@ def fence_departure(
     )
 
 
-def note_membership_restarted(transaction: Transaction, principal_id: str, room_id: str) -> None:
+def _note_membership_restarted(transaction: Transaction, principal_id: str, room_id: str) -> None:
     """Record that the bot is in a room again, so its next departure fences.
 
     Only the fenced mark is cleared. An owed sync report survives a rejoin on
@@ -441,7 +441,7 @@ def note_membership_restarted_after(
     and the fence claim above still gates the cleanup itself.
     """
     cleanup_fenced_departure(transaction, principal_id, room_id, cleanup)
-    note_membership_restarted(transaction, principal_id, room_id)
+    _note_membership_restarted(transaction, principal_id, room_id)
 
 
 def cleanup_fenced_departure(
