@@ -536,6 +536,7 @@ class ResponseRunner:
         init=False,
     )
     _inbox_response_tasks: dict[asyncio.Task[None], _InboxResponseOwnership] = field(default_factory=dict, init=False)
+    _approval_resume_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _user_stop_receipt_orders: dict[str, set[int]] = field(default_factory=dict, init=False, repr=False)
@@ -569,7 +570,7 @@ class ResponseRunner:
     @property
     def pending_inbox_response_count(self) -> int:
         """Return an event-loop-local snapshot of runner-owned unsettled responses."""
-        return sum(not task.done() for task in self._inbox_response_tasks)
+        return sum(not task.done() for task in {*self._inbox_response_tasks, *self._approval_resume_tasks})
 
     @property
     def incomplete_inbox_responses_recoverable(self) -> bool:
@@ -607,9 +608,16 @@ class ResponseRunner:
         A bounded drain may take up to two cancel_after_seconds windows: one
         waiting for completion and one letting cancelled tasks run cleanup.
         """
-        tasks = [task for task in self._inbox_response_tasks if not task.done()]
+        tasks = [task for task in {*self._inbox_response_tasks, *self._approval_resume_tasks} if not task.done()]
         # Done callbacks pop tasks, so snapshot proofs before an await can run them.
-        recovery_checks = {task: self._inbox_response_tasks[task].recovery_proof_ready for task in tasks}
+        recovery_checks = {
+            task: (
+                self._inbox_response_tasks[task].recovery_proof_ready
+                if task in self._inbox_response_tasks
+                else lambda: True
+            )
+            for task in tasks
+        }
         if not tasks:
             return True
         if cancel_after_seconds is None:
@@ -1171,24 +1179,9 @@ class ResponseRunner:
 
     async def _fail_approval_card_creation(self, approval_id: str, *, room_id: str, reason: str) -> None:
         """Fail a partially published approval set and terminalize every delivered card."""
+        del room_id
         continuation = await asyncio.to_thread(self._approval_continuations.get, approval_id)
         if continuation is None:
-            return
-        terminalized = await asyncio.gather(
-            *(
-                expire_suspended_tool_approval(room_id, call.card_event_id)
-                for call in continuation.calls
-                if call.card_event_id is not None and not call.decision_recorded
-            ),
-            return_exceptions=True,
-        )
-        incomplete = sum(result is not True for result in terminalized)
-        if incomplete:
-            self.deps.logger.warning(
-                "approval_card_creation_cleanup_incomplete",
-                approval_id=approval_id,
-                incomplete_cards=incomplete,
-            )
             return
         await self.fail_approval_continuation(continuation, reason)
 
@@ -1215,6 +1208,9 @@ class ResponseRunner:
         while not self._admission_gate.admit():
             if not await self.wait_for_admission_or_shutdown():
                 return
+        resume_task = asyncio.current_task()
+        assert resume_task is not None
+        self._approval_resume_tasks.add(resume_task)
         self._in_flight_response_count += 1
         claimant_id = f"{self.deps.agent_name}:{uuid4().hex}"
 
@@ -1324,6 +1320,7 @@ class ResponseRunner:
         finally:
             self._in_flight_response_count -= 1
             self._admission_gate.release()
+            self._approval_resume_tasks.discard(resume_task)
 
     def _approval_response_request(
         self,
@@ -1473,6 +1470,22 @@ class ResponseRunner:
         if current is None or current.state in {"completed", "failed"}:
             return
         if await self._reconcile_claimed_approval_delivery(current):
+            return
+        terminalized = await asyncio.gather(
+            *(
+                expire_suspended_tool_approval(current.room_id, call.card_event_id)
+                for call in current.calls
+                if call.card_event_id is not None and not call.decision_recorded
+            ),
+            return_exceptions=True,
+        )
+        incomplete = sum(result is not True for result in terminalized)
+        if incomplete:
+            self.deps.logger.warning(
+                "approval_continuation_card_settlement_incomplete",
+                approval_id=current.approval_id,
+                incomplete_cards=incomplete,
+            )
             return
         current = await self._adopt_approval_waiting_delivery(current)
         target = MessageTarget(
@@ -3639,6 +3652,7 @@ class ResponseRunner:
         attempt_run_id_collector: list[str],
         identity: ResponseIdentity,
         pipeline_timing: DispatchPipelineTiming | None = None,
+        visible_event_id_callback: Callable[[str], None] | None = None,
     ) -> StreamTransportOutcome:
         """Run one streaming AI request and send the streamed Matrix response."""
         compaction_lifecycle = self._build_compaction_lifecycle(
@@ -3653,6 +3667,8 @@ class ResponseRunner:
 
         def note_visible_response_event_id(response_event_id: str) -> None:
             turn_recorder.set_response_event_id(response_event_id)
+            if visible_event_id_callback is not None:
+                visible_event_id_callback(response_event_id)
 
         knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
             self.deps.agent_name,
@@ -3939,6 +3955,7 @@ class ResponseRunner:
                     run_metadata_content=run_metadata_content,
                     attempt_run_id_collector=attempt_run_ids,
                     pipeline_timing=request.pipeline_timing,
+                    visible_event_id_callback=on_delivery_started,
                 )
             finally:
                 await lifecycle.emit_session_started(session_started_watch)

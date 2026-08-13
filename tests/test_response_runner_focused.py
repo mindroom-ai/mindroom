@@ -1077,6 +1077,56 @@ async def test_resume_failure_remains_recoverable_until_visible_failure_edit(tmp
 
 
 @pytest.mark.asyncio
+async def test_shutdown_drain_owns_transport_started_approval_resume(tmp_path: Path) -> None:
+    """A bot must settle an active transport resume before closing its continuation store."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-shutdown-drain",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.APPROVED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    runner._approval_continuations.create(continuation)
+    started = asyncio.Event()
+
+    async def wait_for_shutdown(_self: object, **_kwargs: object) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    with patch.object(
+        ResponseLifecycleCoordinator,
+        "run_locked_target_operation",
+        new=wait_for_shutdown,
+    ):
+        resume = asyncio.create_task(runner.resume_approval_continuation(continuation))
+        await asyncio.wait_for(started.wait(), timeout=2)
+
+        assert runner.pending_inbox_response_count == 1
+        assert await runner.drain_inbox_responses(cancel_after_seconds=0.05) is False
+        await asyncio.gather(resume, return_exceptions=True)
+
+    assert runner.pending_inbox_response_count == 0
+
+
+@pytest.mark.asyncio
 async def test_resume_failure_logs_when_visible_terminal_edit_is_not_delivered(tmp_path: Path) -> None:
     """Operators must see when durable failure and the Matrix waiting message diverge."""
     logger = MagicMock()
@@ -1499,6 +1549,55 @@ async def test_response_runner_closes_approval_store_handle(tmp_path: Path) -> N
     await runner.close()
 
     close.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_expires_outstanding_cards_before_retiring_continuation(tmp_path: Path) -> None:
+    """No terminal continuation may leave an attached approval card clickable."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-terminal-card-cleanup",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at="2026-08-12T00:00:00+00:00",
+                card_event_id="$card-1",
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+    )
+    runner._approval_continuations.create(continuation)
+
+    async def expire_while_recoverable(_room_id: str, _card_event_id: str) -> bool:
+        persisted = runner._approval_continuations.get(continuation.approval_id)
+        assert persisted is not None
+        assert persisted.state == "pending"
+        return True
+
+    with (
+        patch(
+            "mindroom.response_runner.expire_suspended_tool_approval",
+            new=AsyncMock(side_effect=expire_while_recoverable),
+        ) as expire,
+        patch.object(runner, "_edit_continuation_response", new=AsyncMock(return_value=True)),
+    ):
+        await runner.fail_approval_continuation(continuation, "Continuation failed")
+
+    expire.assert_awaited_once_with(continuation.room_id, "$card-1")
+    failed = runner._approval_continuations.get(continuation.approval_id)
+    assert failed is not None
+    assert failed.state == "failed"
 
 
 @pytest.mark.asyncio
@@ -2181,7 +2280,7 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
 
 @pytest.mark.asyncio
 async def test_streaming_approval_pause_reaches_outer_lifecycle(tmp_path: Path) -> None:
-    """The agent streaming wrapper must not convert a native pause into an error response."""
+    """The agent streaming wrapper must preserve the visible event when it propagates a pause."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     pause = ResponsePausedForApproval(
         PausedAttempt(
@@ -2191,15 +2290,29 @@ async def test_streaming_approval_pause_reaches_outer_lifecycle(tmp_path: Path) 
         ),
     )
     finalize = AsyncMock()
+    visible_events: list[str] = []
+
+    async def pause_after_visible_event(*_args: object, **kwargs: object) -> None:
+        callback = cast("Callable[[str], None]", kwargs["visible_event_id_callback"])
+        callback("$stream")
+        raise pause
 
     with (
-        patch.object(coordinator, "generate_streaming_ai_response", new=AsyncMock(side_effect=pause)),
+        patch.object(
+            coordinator,
+            "generate_streaming_ai_response",
+            new=AsyncMock(side_effect=pause_after_visible_event),
+        ),
         patch.object(DeliveryGateway, "finalize_streamed_response", new=finalize),
         pytest.raises(ResponsePausedForApproval) as raised,
     ):
-        await coordinator._process_and_respond_streaming(_plain_request(_target()))
+        await coordinator._process_and_respond_streaming(
+            _plain_request(_target()),
+            on_delivery_started=visible_events.append,
+        )
 
     assert raised.value is pause
+    assert visible_events == ["$stream"]
     finalize.assert_not_awaited()
 
 

@@ -407,20 +407,6 @@ class ApprovalMatrixTransport:
         bot = entity_bot if entity_bot is not None and entity_bot.running else router_bot
         if bot is None or not bot.running:
             return False
-        terminalized = await asyncio.gather(
-            *(
-                expire_suspended_tool_approval(continuation.room_id, call.card_event_id)
-                for call in continuation.calls
-                if not call.decision_recorded and call.card_event_id is not None
-            ),
-            return_exceptions=True,
-        )
-        if any(result is not True for result in terminalized):
-            logger.warning(
-                "approval_continuation_card_settlement_incomplete",
-                approval_id=continuation.approval_id,
-            )
-            return False
         await bot.fail_approval_continuation(continuation, reason)
         refreshed = await asyncio.to_thread(self._continuations.get, continuation.approval_id)
         return refreshed is not None and refreshed.state == "failed"

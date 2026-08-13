@@ -490,49 +490,6 @@ async def test_running_owner_that_cannot_claim_is_polled_with_backoff(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_recovered_partial_card_set_remains_recoverable_until_card_is_terminal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A restart during card settlement must not retire continuation recovery ownership."""
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path,
-    )
-    continuation = _continuation()
-    continuation = replace(
-        continuation,
-        calls=(replace(continuation.calls[0], card_event_id="$approval"), continuation.calls[1]),
-    )
-    transport: ApprovalMatrixTransport
-
-    async def fail(owned: ApprovalContinuation, reason: str) -> None:
-        transport._continuations.fail(owned.approval_id, reason)
-
-    bot = SimpleNamespace(running=True, fail_approval_continuation=AsyncMock(side_effect=fail))
-    transport = ApprovalMatrixTransport(
-        runtime_paths=runtime_paths,
-        bot_provider=lambda _name: cast("Any", bot),
-        cards_provider=lambda: None,
-    )
-    transport._continuations.create(continuation)
-
-    monkeypatch.setattr(
-        "mindroom.approval_transport.expire_suspended_tool_approval",
-        AsyncMock(side_effect=RuntimeError("crash before terminal edit")),
-    )
-    settled = await transport._fail_recovered_continuation(continuation, "card set incomplete")
-
-    recoverable = transport._continuations.get(continuation.approval_id)
-    assert settled is False
-    assert recoverable is not None
-    assert recoverable.state == "pending"
-    bot.fail_approval_continuation.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_removed_owner_waits_for_router_before_retiring_ready_continuation(tmp_path: Path) -> None:
     """A temporarily absent router must not lose visible terminal settlement for a removed owner."""
     runtime_paths = RuntimePaths(
