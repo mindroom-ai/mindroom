@@ -30,11 +30,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.logging_config import get_logger
+from mindroom.membership_models import ReportedDeparture
 
 from .models import DepartureOutcome, DepartureSource
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Iterable
 
 logger = get_logger(__name__)
 
@@ -61,21 +62,39 @@ _OWED_REPORT_SYNC_RESPONSES = 2
 class MembershipView(Protocol):
     """One room's departure bookkeeping, and nothing else."""
 
-    async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+    async def fence_departure(
+        self,
+        room_id: str,
+        *,
+        source: DepartureSource,
+        report_observation_id: str | None = None,
+    ) -> DepartureOutcome:
         """Apply one observation of a departure, invalidating at most once per departure."""
-        ...
-
-    async def cleanup_fenced_departure(self, room_id: str, cleanup: Callable[[], None]) -> None:
-        """Clean external state only while one room remains durably departed."""
         ...
 
     async def note_membership_restarted(
         self,
         room_id: str,
         *,
-        cleanup: Callable[[], None] | None = None,
+        expected_membership_epoch: int | None = None,
     ) -> None:
         """Record a confirmed join, so the room's next departure fences again."""
+        ...
+
+    async def close_preceding_reported_departure(
+        self,
+        room_id: str,
+        join_event_id: str,
+    ) -> None:
+        """Close the reported departure immediately preceding one join."""
+        ...
+
+    async def close_reported_departure_run(
+        self,
+        room_id: str,
+        run_epoch: int,
+    ) -> None:
+        """Close one contiguous reported-departure run."""
         ...
 
     async def retire_owed_departure_reports(self, room_id: str) -> None:
@@ -92,7 +111,6 @@ class MembershipFence:
     """Advance a room's membership epoch exactly once per departure."""
 
     store: MembershipView
-    clear_departed_room: Callable[[str], None] = lambda _room_id: None
     # Rooms owing a sync report, and how many more sync responses that report
     # may still appear in. Recovered from the journal on the first sync
     # response, because a restart between a local departure and its report
@@ -105,36 +123,63 @@ class MembershipFence:
         outcome = await self.store.fence_departure(room_id, source=DepartureSource.LOCAL)
         self._log(room_id, outcome)
         self._track(room_id, outcome)
-        await self._clear_room(room_id, outcome)
 
-    async def fence_reported_departures(self, room_ids: Iterable[str]) -> None:
+    async def fence_reported_departures(
+        self,
+        departures: Iterable[ReportedDeparture],
+    ) -> None:
         """Fence departures a sync reported, absorbing the report local ones are owed.
 
-        One entry per departure, not per room. A room that was left, rejoined
-        and left again inside one sync interval is two departures, and only the
-        first of them is the report the local leave is owed; offered as a set
-        it would be one observation, absorbed, and the second departure would
-        never invalidate anything.
+        One entry per distinct departure-state observation, not per room.
+        Consecutive leave/ban observations alias one ended membership, while a
+        proven join between observations rearms the fence for the next one.
+        Matching observation ids make every alias idempotent across replayed
+        sync responses and process restarts. A proven later join rearms only
+        the epoch this report owns.
         """
-        reported = tuple(room_ids)
         await self._recover_owed_reports()
-        for room_id in reported:
-            outcome = await self.store.fence_departure(room_id, source=DepartureSource.REPORTED)
-            self._log(room_id, outcome)
-            self._track(room_id, outcome)
-            await self._clear_room(room_id, outcome)
+        for departure in departures:
+            await self._apply_reported_departure(departure)
         await self._expire_unarrived_reports()
+
+    async def observe_reported_transition(
+        self,
+        room_id: str,
+        observation_id: str,
+        rejoined: bool,
+    ) -> None:
+        """Apply one explicit self-membership transition before later timeline events."""
+        if rejoined:
+            await self.store.close_preceding_reported_departure(
+                room_id,
+                observation_id,
+            )
+            return
+        await self._recover_owed_reports()
+        await self._apply_reported_departure(
+            ReportedDeparture(room_id=room_id, observation_id=observation_id),
+        )
 
     async def note_membership_restarted(self, room_id: str) -> None:
         """Record a confirmed join, so this room's next departure fences again."""
-        await self.store.note_membership_restarted(room_id, cleanup=lambda: self.clear_departed_room(room_id))
+        await self.store.note_membership_restarted(room_id)
 
-    async def _clear_room(self, room_id: str, outcome: DepartureOutcome) -> None:
-        """Clear external state only for the departure that advanced the epoch."""
-        if outcome.fenced:
-            await self.store.cleanup_fenced_departure(
-                room_id,
-                lambda: self.clear_departed_room(room_id),
+    async def _apply_reported_departure(
+        self,
+        departure: ReportedDeparture,
+    ) -> None:
+        """Apply one reported departure without advancing the sync-response window."""
+        outcome = await self.store.fence_departure(
+            departure.room_id,
+            source=DepartureSource.REPORTED,
+            report_observation_id=departure.observation_id,
+        )
+        self._log(departure.room_id, outcome)
+        self._track(departure.room_id, outcome)
+        if departure.rejoined_after and outcome.reported_run_epoch is not None:
+            await self.store.close_reported_departure_run(
+                departure.room_id,
+                outcome.reported_run_epoch,
             )
 
     def _track(self, room_id: str, outcome: DepartureOutcome) -> None:

@@ -51,7 +51,14 @@ from mindroom.dispatch_source import (
     ScheduledHistoryBudget,
 )
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.event_journal import ConversationPage, EventClass, EventJournalStore, EventKind, VisibleMessage
+from mindroom.event_journal import (
+    ConversationPage,
+    EventClass,
+    EventJournalStore,
+    EventKind,
+    PrincipalStore,
+    VisibleMessage,
+)
 from mindroom.event_journal.store import TurnRecordStore
 from mindroom.event_journal_open import open_event_journal
 from mindroom.handled_turns import TurnRecord
@@ -512,6 +519,7 @@ def _build_harness(
             matrix_id=matrix_id,
             relations=make_relation_lookup(),
             pending_turns=make_pending_turn_view(),
+            interactive_questions=cast("PrincipalStore", AsyncMock()),
             resolver=resolver,
             normalizer=normalizer,
             command_executor=command_executor,
@@ -2700,7 +2708,7 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
         thread_id="$thread-root:localhost",
     )
 
-    await harness.controller.handle_interactive_selection(
+    await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
         user_id=_SENDER,
@@ -2747,7 +2755,7 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
     selection_event_id = "$selection:localhost"
 
     with pytest.raises(RuntimeError, match="no durable terminal outcome"):
-        await harness.controller.handle_interactive_selection(
+        await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
             user_id=_SENDER,
@@ -2760,7 +2768,7 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
     assert pending_turn.response_event_id == "$sent-1:localhost"
 
     harness.runner.response_event_id = "$sent-1:localhost"
-    await harness.controller.handle_interactive_selection(
+    await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
         user_id=_SENDER,
@@ -2801,7 +2809,7 @@ async def test_interactive_selection_persistence_failure_prevents_ack_and_genera
     monkeypatch.setattr(TurnRecordStore, "upsert", fail_pending_write)
 
     with pytest.raises(OSError, match="pending context write failed"):
-        await harness.controller.handle_interactive_selection(
+        await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
             user_id=_SENDER,
@@ -2810,47 +2818,6 @@ async def test_interactive_selection_persistence_failure_prevents_ack_and_genera
 
     assert harness.gateway.sent == []
     assert harness.runner.requests == []
-
-
-@pytest.mark.asyncio
-async def test_interactive_commit_failure_restores_selection_claim(
-    config: Config,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Commit persistence failure must restore interactive ownership for retry."""
-    harness = _build_harness(config, tmp_path)
-    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
-    selection = interactive.InteractiveSelection(
-        question_event_id="$question:localhost",
-        question_text="Which option should I use?",
-        selection_key="1",
-        selected_label="Option 1",
-        selected_value="Option 1",
-        thread_id="$thread-root:localhost",
-    )
-    restored: list[interactive.InteractiveSelection] = []
-
-    async def execute_selection(*_args: object, **_kwargs: object) -> None:
-        return None
-
-    def fail_commit(_selection: interactive.InteractiveSelection) -> None:
-        msg = "selection commit failed"
-        raise OSError(msg)
-
-    monkeypatch.setattr(harness.controller, "_execute_interactive_selection", execute_selection)
-    monkeypatch.setattr(interactive, "commit_selection", fail_commit)
-    monkeypatch.setattr(interactive, "restore_selection", restored.append)
-
-    with pytest.raises(OSError, match="selection commit failed"):
-        await harness.controller.handle_interactive_selection(
-            room,
-            selection=selection,
-            user_id=_SENDER,
-            source_event_id="$selection:localhost",
-        )
-
-    assert restored == [selection]
 
 
 @pytest.mark.asyncio
@@ -2883,7 +2850,7 @@ async def test_interactive_selection_claim_conflict_accepts_racing_terminal_turn
 
     monkeypatch.setattr(harness.turn_store, "record_pending_turn", lose_claim_race)
 
-    await harness.controller.handle_interactive_selection(
+    await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
         user_id=_SENDER,
@@ -2920,7 +2887,7 @@ async def test_interactive_selection_replacement_refusal_uses_checkpoint_replay(
     monkeypatch.setattr(harness.runner, "generate_response", refuse)
 
     with pytest.raises(ResponseAdmissionRefusedError):
-        await harness.controller.handle_interactive_selection(
+        await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
             user_id=_SENDER,
@@ -2967,7 +2934,7 @@ async def test_interactive_selection_redacted_after_ack_is_suppressed_under_lock
 
     monkeypatch.setattr(harness.gateway, "send_text", send_ack_then_redact)
 
-    await harness.controller.handle_interactive_selection(
+    await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
         user_id=_SENDER,
@@ -3031,7 +2998,7 @@ async def test_interactive_selection_rehydrates_attachment_context_from_thread(
         thread_id="$thread-root:localhost",
     )
 
-    await harness.controller.handle_interactive_selection(
+    await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
         user_id=_SENDER,
@@ -3076,7 +3043,7 @@ async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
         thread_id="$thread-root:localhost",
     )
 
-    await harness.controller.handle_interactive_selection(
+    await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
         user_id=_SENDER,
@@ -3137,7 +3104,7 @@ async def test_interactive_selection_failure_leaves_the_notice_to_the_outbox(
     )
 
     with pytest.raises(RuntimeError, match="has no durable terminal outcome"):
-        await harness.controller.handle_interactive_selection(
+        await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
             user_id=_SENDER,
@@ -3168,7 +3135,7 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
     )
 
     with pytest.raises(RuntimeError, match="no durable terminal outcome"):
-        await harness.controller.handle_interactive_selection(
+        await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
             user_id=_SENDER,
@@ -3200,7 +3167,7 @@ async def test_interactive_selection_interruption_registers_exact_source_before_
     selection_event_id = "$selection:localhost"
 
     with pytest.raises(asyncio.CancelledError, match="sync_restart"):
-        await harness.controller.handle_interactive_selection(
+        await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
             user_id=_SENDER,

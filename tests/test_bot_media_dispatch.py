@@ -520,7 +520,6 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             ),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             text_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, text_event))
             await asyncio.sleep(0)
@@ -590,7 +589,6 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             ),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             media_task = asyncio.create_task(bot._turn_controller.handle_media_event(room, image_event))
             await asyncio.sleep(0)
@@ -682,7 +680,6 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             ),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             sidecar_task = asyncio.create_task(bot._turn_controller.handle_media_event(room, sidecar_event))
             await asyncio.sleep(0)

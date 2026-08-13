@@ -17,7 +17,7 @@ from mindroom.history_recovery import (
     RoomHistoryRecovery,
 )
 
-from . import approvals, journal, outbox, reads, turn_records
+from . import approvals, interactive_questions, journal, outbox, reads, turn_records
 from .approvals import (  # noqa: TC001 - part of this module's runtime return types
     RecordedApprovalDecision,
     StoredApprovalCard,
@@ -26,10 +26,11 @@ from .models import DeliveryAcknowledgement
 from .projection import drop_refetched_message, install_refetched_revision, project
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from .backend import Backend, Transaction
+    from .interactive_questions import InteractiveQuestion, InteractiveSelection
     from .models import (
         AdmissionResult,
         ConversationCursor,
@@ -196,7 +197,13 @@ class PrincipalStore:
             lambda transaction: journal.current_membership_epoch(transaction, self._principal_id, room_id),
         )
 
-    async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+    async def fence_departure(
+        self,
+        room_id: str,
+        *,
+        source: DepartureSource,
+        report_observation_id: str | None = None,
+    ) -> DepartureOutcome:
         """Apply one observation of a departure, invalidating at most once per departure."""
         return await self._backend.write(
             lambda transaction: journal.fence_departure(
@@ -204,55 +211,88 @@ class PrincipalStore:
                 self._principal_id,
                 room_id,
                 source=source,
+                report_observation_id=report_observation_id,
             ),
         )
 
-    async def cleanup_fenced_departure(self, room_id: str, cleanup: Callable[[], None]) -> None:
-        """Clean external state only while one room remains durably departed."""
-        await self._backend.write(
-            lambda transaction: journal.cleanup_fenced_departure(
-                transaction,
-                self._principal_id,
-                room_id,
-                cleanup,
-            ),
-        )
-
-    async def run_if_turn_membership_current(
+    async def register_interactive_question_for_turn(
         self,
-        *,
         turn_id: str,
-        room_id: str,
-        operation: Callable[[], None],
+        question: InteractiveQuestion,
+        *,
         fallback_membership_epoch: int | None = None,
     ) -> bool:
-        """Run a side effect only while its admitted turn still owns the room membership."""
+        """Register a question only under the membership that admitted its turn."""
         return await self._backend.write(
-            lambda transaction: _run_if_turn_membership_current(
+            lambda transaction: _register_interactive_question_for_turn(
                 transaction,
                 self._principal_id,
                 turn_id=turn_id,
-                room_id=room_id,
-                operation=operation,
+                question=question,
                 fallback_membership_epoch=fallback_membership_epoch,
             ),
         )
 
-    async def run_if_membership_epoch(
+    async def register_interactive_question_for_epoch(
         self,
-        *,
-        room_id: str,
         expected_membership_epoch: int,
-        operation: Callable[[], None],
+        question: InteractiveQuestion,
     ) -> bool:
-        """Run a side effect only while one captured room membership remains current."""
+        """Register a direct Matrix question under one captured membership."""
         return await self._backend.write(
-            lambda transaction: _run_if_membership_epoch(
+            lambda transaction: interactive_questions.register_if_current(
                 transaction,
                 self._principal_id,
-                room_id=room_id,
                 expected_membership_epoch=expected_membership_epoch,
-                operation=operation,
+                question=question,
+            ),
+        )
+
+    async def forget_interactive_question(self, question_event_id: str) -> None:
+        """Forget one delivered question that no longer offers its options."""
+        await self._backend.write(
+            lambda transaction: interactive_questions.forget(
+                transaction,
+                self._principal_id,
+                question_event_id,
+            ),
+        )
+
+    async def claim_interactive_reaction(
+        self,
+        *,
+        source_event_id: str,
+        question_event_id: str,
+        selection_key: str,
+        creator_agent: str,
+    ) -> InteractiveSelection | None:
+        """Atomically claim one question with its durable reaction source."""
+        return await self._backend.write(
+            lambda transaction: interactive_questions.claim_reaction(
+                transaction,
+                self._principal_id,
+                source_event_id=source_event_id,
+                question_event_id=question_event_id,
+                selection_key=selection_key,
+                creator_agent=creator_agent,
+            ),
+        )
+
+    async def claim_interactive_text(
+        self,
+        *,
+        source_event_id: str,
+        selection_key: str,
+        creator_agent: str,
+    ) -> InteractiveSelection | None:
+        """Atomically claim the oldest eligible question for one text source."""
+        return await self._backend.write(
+            lambda transaction: interactive_questions.claim_text(
+                transaction,
+                self._principal_id,
+                source_event_id=source_event_id,
+                selection_key=selection_key,
+                creator_agent=creator_agent,
             ),
         )
 
@@ -260,15 +300,45 @@ class PrincipalStore:
         self,
         room_id: str,
         *,
-        cleanup: Callable[[], None] | None = None,
+        expected_membership_epoch: int | None = None,
     ) -> None:
-        """Rearm one room after any committed-departure cleanup succeeds."""
+        """Rearm one room after a confirmed join."""
         await self._backend.write(
-            lambda transaction: journal.note_membership_restarted_after(
+            lambda transaction: journal.note_membership_restarted(
                 transaction,
                 self._principal_id,
                 room_id,
-                cleanup if cleanup is not None else lambda: None,
+                expected_membership_epoch=expected_membership_epoch,
+            ),
+        )
+
+    async def close_preceding_reported_departure(
+        self,
+        room_id: str,
+        join_event_id: str,
+    ) -> None:
+        """Close the reported departure immediately preceding one join."""
+        await self._backend.write(
+            lambda transaction: journal.close_preceding_reported_departure(
+                transaction,
+                self._principal_id,
+                room_id,
+                join_event_id,
+            ),
+        )
+
+    async def close_reported_departure_run(
+        self,
+        room_id: str,
+        run_epoch: int,
+    ) -> None:
+        """Close one contiguous reported-departure run."""
+        await self._backend.write(
+            lambda transaction: journal.close_reported_departure_run(
+                transaction,
+                self._principal_id,
+                room_id,
+                run_epoch,
             ),
         )
 
@@ -822,54 +892,41 @@ def _turn_membership_is_current(
     return admitted == journal.current_membership_epoch(transaction, principal_id, room_id)
 
 
-def _run_if_membership_epoch(
-    transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
-    principal_id: str,
-    *,
-    room_id: str,
-    expected_membership_epoch: int,
-    operation: Callable[[], None],
-) -> bool:
-    """Claim one membership row and run a synchronous side effect if its epoch matches."""
-    if not reads.claim_membership_epoch(
-        transaction,
-        principal_id,
-        room_id=room_id,
-        expected_membership_epoch=expected_membership_epoch,
-    ):
-        return False
-    operation()
-    return True
-
-
-def _run_if_turn_membership_current(
-    transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
+def _register_interactive_question_for_turn(
+    transaction: Transaction,
     principal_id: str,
     *,
     turn_id: str,
-    room_id: str,
-    operation: Callable[[], None],
-    fallback_membership_epoch: int | None = None,
+    question: InteractiveQuestion,
+    fallback_membership_epoch: int | None,
 ) -> bool:
-    """Claim a turn's admitted membership before running one synchronous side effect."""
-    admitted = journal.admitted_membership_epoch(transaction, principal_id, turn_id)
+    """Register one question under the exact room membership that admitted its turn."""
+    admitted = transaction.fetchone(
+        """
+        SELECT room_id, membership_epoch
+        FROM journal_events
+        WHERE principal_id = ? AND event_id = ?
+        """,
+        (principal_id, turn_id),
+    )
     if admitted is None:
-        if fallback_membership_epoch is not None:
-            return _run_if_membership_epoch(
+        return (
+            False
+            if fallback_membership_epoch is None
+            else interactive_questions.register_if_current(
                 transaction,
                 principal_id,
-                room_id=room_id,
                 expected_membership_epoch=fallback_membership_epoch,
-                operation=operation,
+                question=question,
             )
-        operation()
-        return True
-    return _run_if_membership_epoch(
+        )
+    if admitted["room_id"] != question.room_id:
+        return False
+    return interactive_questions.register_if_current(
         transaction,
         principal_id,
-        room_id=room_id,
-        expected_membership_epoch=admitted,
-        operation=operation,
+        expected_membership_epoch=int(admitted["membership_epoch"]),
+        question=question,
     )
 
 

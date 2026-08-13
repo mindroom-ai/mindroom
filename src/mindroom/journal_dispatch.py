@@ -46,7 +46,7 @@ from mindroom.pending_event_worker import PendingEventWorker
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from mindroom.event_journal import DispatchView, EventClass
+    from mindroom.event_journal import DispatchView, EventClass, InteractiveSelection
     from mindroom.matrix.journal_ingress import TimelineMemberProvenance
 
 from mindroom.event_journal import JournalEvent
@@ -107,6 +107,7 @@ class JournalDispatcher:
     room_for_id: Callable[[str], nio.MatrixRoom]
     on_persist_failure: Callable[[], None] | None = None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
+    on_own_membership_transition: Callable[[str, str, bool], Awaitable[None]] | None = None
     # Replaying a turn needs the agent fleet up, so the orchestrator releases
     # turn-backed replay separately from the rest of startup. Until it does,
     # those events stay pending; everything else drains immediately.
@@ -138,6 +139,7 @@ class JournalDispatcher:
             room_lifecycle_enabled=self.room_lifecycle_admission_enabled,
             on_event_admitted=self._remember_live_event,
             on_persist_failure=self.on_persist_failure or (lambda: None),
+            on_own_membership_transition=self.on_own_membership_transition,
         )
 
     def _remember_live_event(self, room: nio.MatrixRoom, event: nio.Event) -> None:
@@ -434,6 +436,30 @@ class JournalDispatcher:
             # response could discard nothing and then be added back forever.
             self._deferred_reaction_ids.add(event.event_id)
         return True
+
+    async def claim_interactive_reaction(
+        self,
+        *,
+        question_event_id: str,
+        selection_key: str,
+        creator_agent: str,
+    ) -> InteractiveSelection | None:
+        """Atomically bind the running reaction to one journal-owned question."""
+        event = _RUNNING_EVENT.get()
+        if event is None or event.kind is not EventKind.REACTION:
+            msg = "An interactive reaction can only be claimed inside its journal callback"
+            raise RuntimeError(msg)
+        selection = await self.store.claim_interactive_reaction(
+            source_event_id=event.event_id,
+            question_event_id=question_event_id,
+            selection_key=selection_key,
+            creator_agent=creator_agent,
+        )
+        if selection is None:
+            return None
+        _RUNNING_EVENT.set(replace(event, semantic_consumer=SemanticConsumer.INTERACTIVE_REACTION))
+        self._deferred_reaction_ids.add(event.event_id)
+        return selection
 
     async def receipt_order(self) -> int:
         """Return the durable admission order of the running event."""

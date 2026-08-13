@@ -31,7 +31,7 @@ from mindroom.delivery_gateway import FinalizeStreamedResponseRequest, ResponseI
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.event_journal import EventClass, EventKind
+from mindroom.event_journal import EventClass, EventKind, InteractiveQuestion
 from mindroom.handled_turns import TurnRecord
 from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -82,6 +82,23 @@ if TYPE_CHECKING:
     from mindroom.event_journal import PrincipalStore
     from mindroom.event_journal.models import DepartureOutcome, DepartureSource
     from mindroom.final_delivery import FinalDeliveryOutcome
+
+
+async def _membership_accepts_question(store: PrincipalStore, room_id: str, epoch: int) -> bool:
+    """Probe active membership through guarded question registration."""
+    return await store.register_interactive_question_for_epoch(
+        epoch,
+        InteractiveQuestion(
+            question_event_id="$membership-probe",
+            room_id=room_id,
+            thread_id=None,
+            creator_agent="agent",
+            question_text="Probe",
+            options={"1": "one"},
+            option_labels={"1": "One"},
+        ),
+    )
+
 
 _STORE_GENERATION = "test-store-generation"
 
@@ -596,7 +613,6 @@ async def test_restart_loads_only_exact_unfinished_join_decrypt_fence(
         ),
         patch.object(restarted_bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(restarted_bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
         patch(
             "mindroom.bot_room_lifecycle.get_joined_rooms",
             AsyncMock(return_value=[room_id, trusted_room_id]),
@@ -739,9 +755,22 @@ def _register_counted_source_callbacks(bot: AgentBot, client: nio.AsyncClient) -
 def _timeline_response(
     transport: str,
     room_id: str,
-    event: nio.Event,
+    event: nio.Event | tuple[nio.Event, ...],
+    *,
+    final_membership: str = "join",
 ) -> nio.SyncResponse | nio.SlidingSyncResponse:
+    events = event if isinstance(event, tuple) else (event,)
     if transport == "classic":
+        room = {
+            "timeline": {
+                "events": [item.source for item in events],
+                "limited": False,
+                "prev_batch": "p0",
+            },
+            "state": {"events": []},
+            "ephemeral": {"events": []},
+            "account_data": {"events": []},
+        }
         response = nio.SyncResponse.from_dict(
             {
                 "next_batch": "s_after_failure",
@@ -749,19 +778,8 @@ def _timeline_response(
                 "device_lists": {"changed": [], "left": []},
                 "rooms": {
                     "invite": {},
-                    "leave": {},
-                    "join": {
-                        room_id: {
-                            "timeline": {
-                                "events": [event.source],
-                                "limited": False,
-                                "prev_batch": "p0",
-                            },
-                            "state": {"events": []},
-                            "ephemeral": {"events": []},
-                            "account_data": {"events": []},
-                        },
-                    },
+                    "leave": {room_id: room} if final_membership == "leave" else {},
+                    "join": {room_id: room} if final_membership == "join" else {},
                 },
                 "to_device": {"events": []},
                 "presence": {"events": []},
@@ -775,8 +793,8 @@ def _timeline_response(
             "pos": "s_after_failure",
             "rooms": {
                 room_id: {
-                    "membership": "join",
-                    "timeline": [event.source],
+                    "membership": final_membership,
+                    "timeline": [item.source for item in events],
                 },
             },
         },
@@ -795,6 +813,26 @@ def _room_member_event(event_id: str = "$member-join") -> nio.RoomMemberEvent:
             "origin_server_ts": 1,
             "content": {"membership": "join"},
             "unsigned": {"prev_content": {"membership": "leave"}},
+        },
+    )
+    assert isinstance(event, nio.RoomMemberEvent)
+    return event
+
+
+def _own_room_member_event(
+    event_id: str,
+    user_id: str,
+    membership: str,
+    timestamp: int,
+) -> nio.RoomMemberEvent:
+    event = nio.RoomMemberEvent.from_dict(
+        {
+            "type": "m.room.member",
+            "event_id": event_id,
+            "sender": user_id if membership == "join" else "@admin:localhost",
+            "state_key": user_id,
+            "origin_server_ts": timestamp,
+            "content": {"membership": membership},
         },
     )
     assert isinstance(event, nio.RoomMemberEvent)
@@ -912,7 +950,6 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
 
@@ -938,7 +975,6 @@ async def test_bot_start_gives_mindroom_sync_cursor_ownership(
         patch("mindroom.bot.login_agent_user", login),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
 
@@ -971,7 +1007,6 @@ async def test_bot_start_leaves_trusted_joined_room_unfenced_for_catch_up(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", get_joined_rooms),
     ):
         await bot.start()
@@ -1004,7 +1039,6 @@ async def test_bot_start_keeps_fences_when_joined_rooms_query_is_unavailable(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", get_joined_rooms),
     ):
         await bot.start()
@@ -1030,7 +1064,6 @@ async def test_bot_start_skips_joined_rooms_query_without_pending_join_fences(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", get_joined_rooms),
     ):
         await bot.start()
@@ -1059,7 +1092,6 @@ async def test_orchestrated_entity_start_defers_turn_recovery_to_coordinator(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
         await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
@@ -1091,7 +1123,6 @@ async def test_start_runs_pending_invite_recovery_after_callbacks_and_running(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
 
@@ -1127,7 +1158,6 @@ async def test_orchestrated_team_start_gates_turn_recovery_on_responder_fleet(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
         await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
@@ -1156,6 +1186,7 @@ async def test_authoritative_leave_fences_the_room_without_discarding_continuity
         store_generation=_STORE_GENERATION,
     )
     response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_leave"
     response.rooms = MagicMock(join={}, leave={"!left:localhost": MagicMock()})
 
     await bot._apply_own_room_membership_from_sync(response)
@@ -1182,14 +1213,22 @@ async def test_leave_fences_before_failing_call_reconciliation(
     """Call cleanup cannot suspend or fail before the departure is fenced."""
     bot = _agent_bot(tmp_path)
     response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_leave"
     response.rooms = MagicMock(join={}, leave={"!left:localhost": MagicMock()})
     operation_order: list[str] = []
 
     class OrderRecordingStore(FencedRoomRecorder):
         """Record that the fence ran before call cleanup."""
 
-        async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+        async def fence_departure(
+            self,
+            room_id: str,
+            *,
+            source: DepartureSource,
+            report_observation_id: str | None = None,
+        ) -> DepartureOutcome:
             """Note where this invalidation fell relative to call cleanup."""
+            del report_observation_id
             operation_order.append("fence")
             return await super().fence_departure(room_id, source=source)
 
@@ -1226,7 +1265,6 @@ async def test_bot_start_rejects_checkpoint_from_reset_store_generation(tmp_path
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
 
@@ -1253,7 +1291,6 @@ async def test_bot_start_clears_checkpoint_when_store_generation_is_unavailable(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
 
@@ -1281,7 +1318,6 @@ async def test_legacy_v2_sync_token_path_is_not_parsed(tmp_path: Path) -> None:
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
 
@@ -2275,6 +2311,152 @@ async def test_tokenless_dispatch_persistence_failure_defers_cursor_replay(
         )
 
     assert bot.client.next_batch == "s_unpersisted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["classic", "sliding"])
+async def test_leave_and_rejoin_apply_before_a_later_timeline_message_is_admitted(
+    tmp_path: Path,
+    transport: str,
+) -> None:
+    """A message after an explicit rejoin belongs to the new membership epoch."""
+    bot = _agent_bot(tmp_path)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    if transport == "classic":
+        client.next_batch = "s_before_rejoin"
+    room_id = "!room:localhost"
+    message = _text_event(f"$after-rejoin-{transport}", "hello again", 3)
+    response = _timeline_response(
+        transport,
+        room_id,
+        (
+            _own_room_member_event("$leave", bot.matrix_id.full_id, "leave", 1),
+            _own_room_member_event("$join", bot.matrix_id.full_id, "join", 2),
+            message,
+        ),
+    )
+    bot._journal_dispatcher.register(client)
+
+    try:
+        await client.receive_response(response)
+        assert await bot._journal_dispatcher.store.membership_epoch(room_id) == 1
+        if isinstance(response, nio.SyncResponse):
+            await bot._apply_own_room_membership_from_sync(response)
+        else:
+            await bot._apply_own_room_membership_from_sliding_sync(response)
+
+        store = bot._journal_dispatcher.store
+        assert await store.membership_epoch(room_id) == 1
+        assert await store.is_pending(message.event_id)
+        assert await _is_projected(store, room_id=room_id, event_id=message.event_id)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["classic", "sliding"])
+async def test_explicit_join_closes_a_preceding_truncated_leave_before_message_admission(
+    tmp_path: Path,
+    transport: str,
+) -> None:
+    """A sync-token departure still orders before a later explicit join."""
+    bot = _agent_bot(tmp_path)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    if transport == "classic":
+        client.next_batch = "s_before_truncated_leave"
+    room_id = "!room:localhost"
+    bot._journal_dispatcher.register(client)
+    left = _timeline_response(transport, room_id, (), final_membership="leave")
+    message = _text_event(f"$after-truncated-{transport}", "hello again", 2)
+    joined = _timeline_response(
+        transport,
+        room_id,
+        (
+            _own_room_member_event("$join-after-truncated", bot.matrix_id.full_id, "join", 1),
+            message,
+        ),
+    )
+
+    try:
+        if isinstance(left, nio.SyncResponse):
+            await bot._apply_own_room_membership_from_sync(left)
+        else:
+            await bot._apply_own_room_membership_from_sliding_sync(left)
+        assert not await _membership_accepts_question(bot._journal_dispatcher.store, room_id, 1)
+
+        await client.receive_response(joined)
+
+        store = bot._journal_dispatcher.store
+        assert await _membership_accepts_question(store, room_id, 1)
+        assert await store.is_pending(message.event_id)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["classic", "sliding"])
+async def test_delayed_old_join_does_not_rearm_a_newer_local_departure(
+    tmp_path: Path,
+    transport: str,
+) -> None:
+    """A historical join owns the preceding report, not the current epoch."""
+    bot = _agent_bot(tmp_path)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    if transport == "classic":
+        client.next_batch = "s_before_delayed_reports"
+    room_id = "!room:localhost"
+    await bot._membership_fence.fence_local_departure(room_id)
+    await bot._membership_fence.note_membership_restarted(room_id)
+    await bot._membership_fence.fence_local_departure(room_id)
+    response = _timeline_response(
+        transport,
+        room_id,
+        (
+            _own_room_member_event("$leave-1", bot.matrix_id.full_id, "leave", 1),
+            _own_room_member_event("$ban-1", bot.matrix_id.full_id, "ban", 2),
+            _own_room_member_event("$join-1", bot.matrix_id.full_id, "join", 3),
+            _own_room_member_event("$leave-2", bot.matrix_id.full_id, "leave", 4),
+        ),
+        final_membership="leave",
+    )
+    bot._journal_dispatcher.register(client)
+
+    try:
+        await client.receive_response(response)
+        if isinstance(response, nio.SyncResponse):
+            await bot._apply_own_room_membership_from_sync(response)
+        else:
+            await bot._apply_own_room_membership_from_sliding_sync(response)
+
+        store = bot._journal_dispatcher.store
+        assert await store.membership_epoch(room_id) == 2
+        assert not await _membership_accepts_question(store, room_id, 2)
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio

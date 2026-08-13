@@ -1071,26 +1071,48 @@ class FencedRoomRecorder:
 
     fenced_room_ids: list[str] = field(default_factory=list)
 
-    async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+    async def fence_departure(
+        self,
+        room_id: str,
+        *,
+        source: DepartureSource,
+        report_observation_id: str | None = None,
+    ) -> DepartureOutcome:
         """Record one invalidation and hand back the room's new epoch."""
-        del source
+        del report_observation_id
         self.fenced_room_ids.append(room_id)
-        return DepartureOutcome(DepartureObservation.FENCED, len(self.fenced_room_ids), 0)
-
-    async def cleanup_fenced_departure(self, room_id: str, cleanup: Callable[[], None]) -> None:
-        """Run cleanup for every departure this focused recorder accepted."""
-        if room_id in self.fenced_room_ids:
-            cleanup()
+        epoch = len(self.fenced_room_ids)
+        return DepartureOutcome(
+            DepartureObservation.FENCED,
+            epoch,
+            0,
+            reported_run_epoch=(epoch if source is DepartureSource.REPORTED else None),
+        )
 
     async def note_membership_restarted(
         self,
         room_id: str,
         *,
-        cleanup: Callable[[], None] | None = None,
+        expected_membership_epoch: int | None = None,
     ) -> None:
         """Accept a confirmed join without recording it."""
-        if cleanup is not None and room_id in self.fenced_room_ids:
-            cleanup()
+        del room_id, expected_membership_epoch
+
+    async def close_preceding_reported_departure(
+        self,
+        room_id: str,
+        join_event_id: str,
+    ) -> None:
+        """Accept a join after one reported departure."""
+        del room_id, join_event_id
+
+    async def close_reported_departure_run(
+        self,
+        room_id: str,
+        run_epoch: int,
+    ) -> None:
+        """Accept closure of one reported departure run."""
+        del room_id, run_epoch
 
     async def retire_owed_departure_reports(self, room_id: str) -> None:
         """Accept a retirement that can never happen here: nothing is ever owed."""

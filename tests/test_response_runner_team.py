@@ -595,8 +595,12 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
-            patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
-            patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock) as mock_add_buttons,
+            patch(
+                "mindroom.event_journal.store.PrincipalStore.register_interactive_question_for_turn",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_register,
+            patch("mindroom.interactive.add_reaction_buttons", new_callable=AsyncMock) as mock_add_buttons,
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
@@ -616,12 +620,13 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert _handled_response_event_id(resolution) == "$team"
-        mock_register.assert_called_once()
-        assert mock_register.call_args.args[0] == "$team"
-        assert mock_register.call_args.args[1] == "!test:localhost"
-        assert mock_register.call_args.args[2] is None
-        assert mock_register.call_args.args[4] == bot.agent_name
-        assert mock_register.call_args.args[4] != "team"
+        mock_register.assert_awaited_once()
+        question = mock_register.await_args.args[1]
+        assert question.question_event_id == "$team"
+        assert question.room_id == "!test:localhost"
+        assert question.thread_id is None
+        assert question.creator_agent == bot.agent_name
+        assert question.creator_agent != "team"
         mock_add_buttons.assert_awaited_once()
 
     @pytest.mark.asyncio

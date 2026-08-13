@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom import interactive
 from mindroom.authorization import is_authorized_sender as real_is_authorized_sender
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
@@ -1680,13 +1679,9 @@ async def test_deep_hook_dispatch_does_not_consume_interactive_answer_on_message
             },
         },
     )
-    interactive._active_questions.clear()
-    interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
-        room_id=room.room_id,
-        thread_id=None,
-        options={"1": "first"},
-        creator_agent=bot.agent_name,
-    )
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock()
+    replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
     bot._turn_controller._precheck_dispatch_event = AsyncMock(
         return_value=_PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
     )
@@ -1695,12 +1690,9 @@ async def test_deep_hook_dispatch_does_not_consume_interactive_answer_on_message
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
     with patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch:
-        try:
-            await bot._on_message(room, event)
-        finally:
-            assert "$question123" in interactive._active_questions
-            interactive._active_questions.clear()
+        await bot._on_message(room, event)
 
+    interactive_questions.claim_interactive_text.assert_not_awaited()
     mock_dispatch.assert_not_awaited()
 
 
@@ -1723,13 +1715,9 @@ async def test_first_hop_hook_dispatch_does_not_consume_interactive_answer_on_me
             },
         },
     )
-    interactive._active_questions.clear()
-    interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
-        room_id=room.room_id,
-        thread_id=None,
-        options={"1": "first"},
-        creator_agent=bot.agent_name,
-    )
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock()
+    replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
     bot._turn_controller._precheck_dispatch_event = AsyncMock(
         return_value=_PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
     )
@@ -1738,13 +1726,10 @@ async def test_first_hop_hook_dispatch_does_not_consume_interactive_answer_on_me
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
     with patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch:
-        try:
-            await bot._on_message(room, event)
-            await bot._coalescing_gate.drain_all()
-        finally:
-            assert "$question123" in interactive._active_questions
-            interactive._active_questions.clear()
+        await bot._on_message(room, event)
+        await bot._coalescing_gate.drain_all()
 
+    interactive_questions.claim_interactive_text.assert_not_awaited()
     mock_dispatch.assert_awaited_once()
 
 
@@ -1838,46 +1823,30 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
-    interactive._active_questions.clear()
-    interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
-        room_id=room.room_id,
-        thread_id=None,
-        options={"1": "first"},
-        creator_agent=bot.agent_name,
-    )
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock()
+    replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
+    with patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch:
+        assert isinstance(sidecar_event, nio.RoomMessageFile)
+        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(
+            room,
+            "@mindroom_router:localhost",
+        )
+        handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+            room,
+            _PrecheckedEvent(
+                event=sidecar_event,
+                requester_user_id="@mindroom_router:localhost",
+            ),
+            reservation_owner=reservation_owner,
+            coalescing_thread_id=None,
+        )
+        await reservation_owner.release()
+        await bot._coalescing_gate.drain_all()
 
-    try:
-        with (
-            patch.object(
-                interactive,
-                "handle_text_response",
-                new=AsyncMock(return_value=None),
-            ) as mock_handle_text_response,
-            patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
-        ):
-            assert isinstance(sidecar_event, nio.RoomMessageFile)
-            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(
-                room,
-                "@mindroom_router:localhost",
-            )
-            handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
-                room,
-                _PrecheckedEvent(
-                    event=sidecar_event,
-                    requester_user_id="@mindroom_router:localhost",
-                ),
-                reservation_owner=reservation_owner,
-                coalescing_thread_id=None,
-            )
-            await reservation_owner.release()
-            await bot._coalescing_gate.drain_all()
-
-        assert handled is _IngressAdmissionOutcome.ADMITTED
-        assert "$question123" in interactive._active_questions
-        mock_handle_text_response.assert_not_awaited()
-        mock_dispatch.assert_awaited_once()
-    finally:
-        interactive._active_questions.clear()
+    assert handled is _IngressAdmissionOutcome.ADMITTED
+    interactive_questions.claim_interactive_text.assert_not_awaited()
+    mock_dispatch.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1921,14 +1890,10 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
-    with (
-        patch.object(
-            interactive,
-            "handle_text_response",
-            new=AsyncMock(return_value=None),
-        ) as mock_handle_text_response,
-        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
-    ):
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock()
+    replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
+    with patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch:
         assert isinstance(sidecar_event, nio.RoomMessageFile)
         reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(
             room,
@@ -1946,7 +1911,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
         await reservation_owner.release()
 
     assert handled is _IngressAdmissionOutcome.CONSUMED
-    mock_handle_text_response.assert_not_awaited()
+    interactive_questions.claim_interactive_text.assert_not_awaited()
     mock_dispatch.assert_not_awaited()
 
 

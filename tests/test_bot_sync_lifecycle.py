@@ -51,7 +51,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             patch("mindroom.bot.login_agent_user", AsyncMock(return_value=start_client)),
             patch.object(bot, "_set_avatar_if_available", AsyncMock()),
             patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-            patch("mindroom.bot.interactive.init_persistence"),
             patch("mindroom.bot.emit", AsyncMock(side_effect=RuntimeError("hook boom"))),
             pytest.raises(RuntimeError, match="hook boom"),
         ):

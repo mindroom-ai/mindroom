@@ -46,9 +46,11 @@ from mindroom.matrix.sync_loop import (
     _sliding_sync_lists,
     _sliding_sync_room_subscriptions,
     own_membership_from_sliding_sync,
+    own_membership_from_sync,
 )
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.membership_models import ReportedDeparture
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import (
@@ -1754,7 +1756,16 @@ def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> Non
 
     assert membership.joined_room_ids == {"!joined:localhost", "!window:localhost"}
     assert membership.departed_room_ids == {"!kicked:localhost", "!banned:localhost"}
-    assert sorted(membership.departures) == ["!banned:localhost", "!kicked:localhost"]
+    assert membership.departures == (
+        ReportedDeparture(
+            room_id="!kicked:localhost",
+            observation_id="sliding:pos:!kicked:localhost",
+        ),
+        ReportedDeparture(
+            room_id="!banned:localhost",
+            observation_id="sliding:pos:!banned:localhost",
+        ),
+    )
 
 
 def test_sliding_own_membership_counts_a_rejoined_room_departing_twice() -> None:
@@ -1776,7 +1787,68 @@ def test_sliding_own_membership_counts_a_rejoined_room_departing_twice() -> None
 
     membership = own_membership_from_sliding_sync(response, self_user_id=user_id)
 
-    assert membership.departures == ("!churned:localhost", "!churned:localhost")
+    assert membership.departures == (
+        ReportedDeparture(room_id="!churned:localhost", observation_id="$leave", rejoined_after=True),
+        ReportedDeparture(room_id="!churned:localhost", observation_id="$kick"),
+    )
+
+
+def test_sliding_own_membership_does_not_invent_a_rejoin_between_departures() -> None:
+    """Two departure states without an intervening join end one membership."""
+    user_id = "@mindroom_code:localhost"
+    response = nio.SlidingSyncResponse(
+        "pos",
+        rooms={
+            "!departed:localhost": nio.SlidingSyncRoom(
+                membership="ban",
+                timeline=[
+                    _member_event("$leave", user_id=user_id, membership="leave", ts=1),
+                    _member_event("$ban", user_id=user_id, membership="ban", ts=2),
+                ],
+            ),
+        },
+    )
+
+    membership = own_membership_from_sliding_sync(response, self_user_id=user_id)
+
+    assert membership.departures == (
+        ReportedDeparture(room_id="!departed:localhost", observation_id="$leave"),
+        ReportedDeparture(room_id="!departed:localhost", observation_id="$ban"),
+    )
+
+
+def test_classic_own_membership_does_not_invent_a_rejoin_between_departures() -> None:
+    """Classic sync also avoids inferring a join between departed states."""
+    user_id = "@mindroom_code:localhost"
+    room_id = "!departed:localhost"
+    room_info = nio.RoomInfo(
+        timeline=nio.Timeline(
+            events=[
+                _member_event("$leave", user_id=user_id, membership="leave", ts=1),
+                _member_event("$ban", user_id=user_id, membership="ban", ts=2),
+            ],
+            limited=False,
+            prev_batch=None,
+        ),
+        state=[],
+        ephemeral=[],
+        account_data=[],
+    )
+    response = nio.SyncResponse(
+        next_batch="next",
+        rooms=nio.Rooms(invite={}, join={}, leave={room_id: room_info}),
+        device_key_count=nio.DeviceOneTimeKeyCount(curve25519=0, signed_curve25519=0),
+        device_list=nio.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+    )
+
+    membership = own_membership_from_sync(response, self_user_id=user_id)
+
+    assert membership.departures == (
+        ReportedDeparture(room_id=room_id, observation_id="$leave"),
+        ReportedDeparture(room_id=room_id, observation_id="$ban"),
+    )
 
 
 def _member_event(event_id: str, *, user_id: str, membership: str, ts: int) -> nio.Event:
@@ -1874,8 +1946,15 @@ async def test_sliding_sync_remote_departure_fences_and_purges(
     class BlockingStore(FencedRoomRecorder):
         """Hold the fence open so the tracked membership phase stays in flight."""
 
-        async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+        async def fence_departure(
+            self,
+            room_id: str,
+            *,
+            source: DepartureSource,
+            report_observation_id: str | None = None,
+        ) -> DepartureOutcome:
             """Record the fenced room, then wait to be released."""
+            del report_observation_id
             fenced_room_ids.append(room_id)
             fence_started.set()
             await allow_fence_finish.wait()
@@ -2097,11 +2176,15 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     bot.prepare_for_sync_shutdown = AsyncMock()
     bot._emit_agent_lifecycle_event = AsyncMock()
     bot._call_manager = None
+    bot._response_runner = MagicMock()
+    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=True)
+    bot._response_runner.wait_for_source_owned_inbox_responses = AsyncMock()
 
     await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
     bot._emit_agent_lifecycle_event.assert_awaited_once_with("agent:stopped", stop_reason="restart")
     bot.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    bot._response_runner.wait_for_source_owned_inbox_responses.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

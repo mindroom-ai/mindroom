@@ -576,6 +576,16 @@ class ResponseRunner:
         self._incomplete_inbox_responses_recoverable &= cancelled_responses_recoverable
         return False
 
+    async def wait_for_source_owned_inbox_responses(self) -> None:
+        """Wait for detached responses that still own durable journal sources."""
+        tasks = [
+            task
+            for task, ownership in self._inbox_response_tasks.items()
+            if not task.done() and ownership.source_event_ids
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     def _post_response_deps(
         self,
         request: ResponseRequest,

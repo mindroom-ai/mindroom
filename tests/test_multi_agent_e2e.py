@@ -355,7 +355,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         with (
             patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             # Only this agent in the thread
             thread_history = [
@@ -417,7 +416,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         with (
             patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             # Multiple agents in the thread
             thread_history = [
@@ -506,7 +504,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         with (
             patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_refresh_history,
             patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             thread_history = [
                 _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),

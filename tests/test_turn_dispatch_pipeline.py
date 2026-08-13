@@ -1882,7 +1882,6 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch.object(bot._conversation_resolver, "build_ingress_envelope", return_value=envelope),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
@@ -1977,7 +1976,6 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch.object(bot._conversation_resolver, "build_ingress_envelope", return_value=envelope),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",

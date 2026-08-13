@@ -892,11 +892,6 @@ class TestCommandHandling:
             )
 
             with (
-                patch(
-                    "mindroom.turn_controller.interactive.handle_text_response",
-                    new_callable=AsyncMock,
-                    return_value=None,
-                ),
                 patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
             ):
                 await bot._on_message(room, event)
@@ -1037,9 +1032,8 @@ class TestCommandHandling:
                 },
             )
 
-            with patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None):
-                await bot._on_message(room, event)
-                await drain_coalescing(bot)
+            await bot._on_message(room, event)
+            await drain_coalescing(bot)
 
             # Verify the agent didn't try to process the error message
             generate_response.assert_not_called()
@@ -1164,9 +1158,8 @@ class TestCommandHandling:
             },
         )
 
-        with patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None):
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
         # Verify finance agent did NOT process the message
         generate_response.assert_not_called()
@@ -1404,16 +1397,10 @@ class TestCommandHandling:
         )
 
         with (
-            patch(
-                "mindroom.turn_controller.interactive.handle_text_response",
-                new=AsyncMock(return_value=None),
-            ) as mock_interactive,
             patch("mindroom.response_runner.team_response") as mock_team,
         ):
             await bot._on_message(room, event)
             await drain_coalescing(bot)
-
-        mock_interactive.assert_not_awaited()
 
         # Verify news agent did NOT form a team or respond
         generate_response.assert_not_called()
@@ -1534,14 +1521,8 @@ class TestCommandHandling:
             },
         )
 
-        with patch(
-            "mindroom.turn_controller.interactive.handle_text_response",
-            new=AsyncMock(return_value=None),
-        ) as mock_interactive:
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
-
-        mock_interactive.assert_not_awaited()
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
         # Verify finance agent did NOT respond to router's error
         generate_response.assert_not_called()
@@ -1600,9 +1581,8 @@ class TestCommandHandling:
             },
         )
 
-        with patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None):
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
         # Verify the agent didn't try to process the message
         generate_response.assert_not_called()
@@ -1818,7 +1798,6 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
@@ -1906,7 +1885,6 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
@@ -2011,7 +1989,6 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
@@ -2095,7 +2072,6 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch(
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
                 new_callable=AsyncMock,
@@ -2164,7 +2140,6 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch(
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
                 new_callable=AsyncMock,
@@ -2249,7 +2224,6 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch(
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
                 new_callable=AsyncMock,
@@ -2326,7 +2300,6 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch(
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
                 new_callable=AsyncMock,

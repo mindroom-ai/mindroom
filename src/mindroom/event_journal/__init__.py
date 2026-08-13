@@ -12,6 +12,7 @@ from mindroom.history_recovery import (
     HistoryRecoveryState,
     RoomHistoryRecovery,
 )
+from mindroom.interactive_models import InteractiveQuestion, InteractiveSelection
 
 from .approvals import RecordedApprovalDecision, StoredApprovalCard
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
@@ -78,6 +79,8 @@ __all__ = [
     "HydrationPolicy",
     "HydrationView",
     "InboundEvent",
+    "InteractiveQuestion",
+    "InteractiveSelection",
     "JournalEvent",
     "MembershipFence",
     "MembershipView",

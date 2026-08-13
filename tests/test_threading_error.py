@@ -77,31 +77,25 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         # Initialize the bot (to set up components it needs)
 
-        # Mock interactive.handle_text_response to return None (not an interactive response)
-        # Mock response generation to capture the call and send a test response
+        # Mock response generation to capture the call and send a test response.
         generate_response = AsyncMock()
         install_generate_response_mock(bot, generate_response)
-        with patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)):
-            # Process the message
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
-            # Check that response generation was called
-            generate_response.assert_called_once()
-
-            # Now simulate the response being sent
-            target = bot._conversation_resolver.build_message_target(
-                room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
-                event_source=event.source,
-            )
-            await bot._delivery_gateway.send_text(
-                SendTextRequest(
-                    target=target,
-                    response_text="I can help you with that!",
-                ),
-            )
+        generate_response.assert_called_once()
+        target = bot._conversation_resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=None,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+        await bot._delivery_gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text="I can help you with that!",
+            ),
+        )
 
         # Check the final response content.
         assert bot.client.room_send.call_count == 1
@@ -151,10 +145,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         # Initialize response tracking
 
-        # Mock interactive.handle_text_response and make AI fast
+        # Make AI fast.
         resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)),
             patch("mindroom.response_runner.ai_response", AsyncMock(return_value="OK")),
             patch.object(
                 resolver,
@@ -601,32 +594,25 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         # Initialize response tracking
 
-        # Mock interactive.handle_text_response and generate_response
+        # Mock response generation.
         generate_response = AsyncMock()
         install_generate_response_mock(bot, generate_response)
-        with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)),
-        ):
-            # Process the message
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
-            # Check that response generation was called
-            generate_response.assert_called_once()
-
-            # Now simulate the response being sent
-            target = bot._conversation_resolver.build_message_target(
-                room_id=room.room_id,
-                thread_id="$thread_root:localhost",
-                reply_to_event_id=event.event_id,
-                event_source=event.source,
-            )
-            await bot._delivery_gateway.send_text(
-                SendTextRequest(
-                    target=target,
-                    response_text="I can help with that complex question!",
-                ),
-            )
+        generate_response.assert_called_once()
+        target = bot._conversation_resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id="$thread_root:localhost",
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+        await bot._delivery_gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text="I can help with that complex question!",
+            ),
+        )
 
         # Check the final response content.
         assert bot.client.room_send.call_count == 1
