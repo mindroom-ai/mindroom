@@ -6,7 +6,7 @@ PR: https://github.com/mindroom-ai/mindroom/pull/1807
 
 Remote branch: `fix/1796-native-approval-continuation`
 
-Expected handoff head: `9cfd05b2bc877c2ee957f5a54aef100bdcbede17`
+Reviewed implementation baseline before this handoff document: `9cfd05b2bc877c2ee957f5a54aef100bdcbede17`
 
 Expected base at handoff: `dae462e9574bdb099c614574b5b0b4dac75ccbc9`
 
@@ -14,6 +14,7 @@ Expected base at handoff: `dae462e9574bdb099c614574b5b0b4dac75ccbc9`
 git fetch origin
 git switch --track origin/fix/1796-native-approval-continuation
 git rev-parse HEAD
+test -f PR-1807-LEGACY-REMOVAL-HANDOFF.md
 ```
 
 If the branch already exists locally:
