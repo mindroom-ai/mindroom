@@ -1204,8 +1204,10 @@ class TestAgentBot(AgentBotTestBase):
             interactive._cleanup()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("registration_failure", [False, True])
     async def test_unstarted_interactive_cleanup_survives_caller_cancellation(
         self,
+        registration_failure: bool,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
@@ -1230,14 +1232,24 @@ class TestAgentBot(AgentBotTestBase):
         async def response() -> None:
             pytest.fail("Response factory must remain lazy before handoff cleanup")
 
+        tracker_patch = (
+            patch.object(
+                bot._response_runner,
+                "track_inbox_response",
+                side_effect=RuntimeError("simulated registration failure"),
+            )
+            if registration_failure
+            else patch.object(
+                bot._response_runner,
+                "track_inbox_response",
+                new=_cancelling_inbox_tracker(bot._response_runner),
+            )
+        )
+
         try:
             with (
                 patch.object(ResponseLifecycleReservation, "release", new=blocked_release),
-                patch.object(
-                    bot._response_runner,
-                    "track_inbox_response",
-                    new=_cancelling_inbox_tracker(bot._response_runner),
-                ),
+                tracker_patch,
             ):
                 start_task = asyncio.create_task(
                     bot._turn_controller.start_interactive_selection(

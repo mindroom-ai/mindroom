@@ -1306,8 +1306,7 @@ class TurnController:
             )
         except BaseException:
             owned_response.close()
-            await reservation.release()
-            on_failure()
+            await handoff._cleanup_unstarted()
             raise
         await handoff.finish(owned_task)
 
