@@ -148,7 +148,6 @@ class ReactionDispatcher:
         room: nio.MatrixRoom,
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
-        reservation_owner: PromptIngressReservationOwner,
     ) -> TurnDispatchOutcome | None:
         """Route an interactive choice only to its claimed question."""
         interactive_claimed = consumer is SemanticConsumer.INTERACTIVE_REACTION
@@ -172,9 +171,6 @@ class ReactionDispatcher:
                 interactive.restore_selection(selection)
                 raise
 
-        # The selection's response may wait behind this conversation's active
-        # turn, so release the sender's lane before response completion.
-        await reservation_owner.release()
         try:
             await self.deps.start_interactive_selection(
                 self.deps.handle_interactive_selection(
@@ -187,6 +183,8 @@ class ReactionDispatcher:
                 question_event_id=selection.question_event_id,
                 source_event_id=event.event_id,
                 thread_id=selection.thread_id,
+                user_id=event.sender,
+                selected_value=selection.selected_value,
             )
         except BaseException:
             interactive.restore_selection(selection)
@@ -198,7 +196,6 @@ class ReactionDispatcher:
         room: nio.MatrixRoom,
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
-        reservation_owner: PromptIngressReservationOwner,
     ) -> TurnDispatchOutcome | None:
         """Route one authorized reaction among the non-config consumers."""
         if await self._maybe_handle_approval_reaction(room, event, consumer):
@@ -212,7 +209,6 @@ class ReactionDispatcher:
             room,
             event,
             consumer,
-            reservation_owner,
         )
 
     async def _route_reaction(  # noqa: PLR0911 - explicit terminal outcome for each consumer branch
@@ -286,7 +282,6 @@ class ReactionDispatcher:
                     room,
                     event,
                     semantic_consumer,
-                    reservation_owner,
                 )
             ) is not None:
                 return outcome

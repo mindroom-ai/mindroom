@@ -1133,6 +1133,35 @@ class TurnController:
             replay_guard=replay_guard,
         )
 
+    def _interactive_selection_response_envelope(
+        self,
+        *,
+        target: MessageTarget,
+        user_id: str,
+        source_event_id: str,
+        selected_value: str,
+        attachment_ids: tuple[str, ...] = (),
+    ) -> MessageEnvelope:
+        """Build the canonical response envelope for one interactive selection."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        return MessageEnvelope(
+            source_event_id=source_event_id,
+            target=target,
+            body=f"The user selected: {selected_value}",
+            attachment_ids=attachment_ids,
+            mentioned_agents=(),
+            agent_name=self.deps.agent_name,
+            origin=classify_turn_origin(
+                transport_sender_id=user_id,
+                requester_id=user_id,
+                sender_entity_name=registry.current_entity_name_for_user_id(user_id),
+                requester_entity_name=registry.current_entity_name_for_user_id(user_id),
+                source_kind=MESSAGE_SOURCE_KIND,
+                original_sender=None,
+                trusted_user_relay=False,
+            ),
+        )
+
     async def start_interactive_selection(
         self,
         response: Coroutine[Any, Any, None],
@@ -1141,6 +1170,8 @@ class TurnController:
         question_event_id: str,
         source_event_id: str,
         thread_id: str | None,
+        user_id: str,
+        selected_value: str,
     ) -> None:
         """Transfer one selection response from journal dispatch to runner ownership."""
         response_target = MessageTarget.resolve(
@@ -1148,8 +1179,14 @@ class TurnController:
             thread_id=thread_id,
             reply_to_event_id=question_event_id,
         )
+        response_envelope = self._interactive_selection_response_envelope(
+            target=response_target,
+            user_id=user_id,
+            source_event_id=source_event_id,
+            selected_value=selected_value,
+        )
         try:
-            reservation = await self.deps.response_runner.reserve_response_lifecycle(response_target)
+            reservation = await self.deps.response_runner.reserve_response_lifecycle(response_envelope)
         except BaseException:
             response.close()
             raise
@@ -1157,6 +1194,7 @@ class TurnController:
         async def run_owned_response() -> None:
             try:
                 with response_lifecycle_reservation_context(reservation):
+                    await reservation.wait_until_acquired()
                     await response
                 # Terminal delivery normally settles the discovery alias in its
                 # outbox transaction. This idempotent fallback also handles an
@@ -1324,23 +1362,12 @@ class TurnController:
             raise self._interactive_selection_retry_error(source_event_id) from error
         selection_attachment_ids = tuple(selection_payload.attachment_ids or ())
         selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(selection_handled_turn)
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        response_envelope = MessageEnvelope(
-            source_event_id=source_event_id,
+        response_envelope = self._interactive_selection_response_envelope(
             target=response_target,
-            body=f"The user selected: {selection.selected_value}",
+            user_id=user_id,
+            source_event_id=source_event_id,
+            selected_value=selection.selected_value,
             attachment_ids=selection_attachment_ids,
-            mentioned_agents=(),
-            agent_name=self.deps.agent_name,
-            origin=classify_turn_origin(
-                transport_sender_id=user_id,
-                requester_id=user_id,
-                sender_entity_name=registry.current_entity_name_for_user_id(user_id),
-                requester_entity_name=registry.current_entity_name_for_user_id(user_id),
-                source_kind=MESSAGE_SOURCE_KIND,
-                original_sender=None,
-                trusted_user_relay=False,
-            ),
         )
 
         record_interrupted_turn, record_deferred_outcome, record_user_stop = self._build_response_settlement_callbacks(

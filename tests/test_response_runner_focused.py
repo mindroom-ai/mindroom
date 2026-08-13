@@ -1351,12 +1351,14 @@ async def test_response_lifecycle_reservation_is_not_its_own_queued_human_turn()
     """An early reservation must not signal the interactive response about itself."""
     coordinator = ResponseLifecycleCoordinator()
     envelope = _queued_envelope("$interactive")
-    reservation = await coordinator.reserve_response_lifecycle(envelope.target)
+    reservation = await coordinator.reserve_response_lifecycle(envelope)
     observed_pending: list[int] = []
+    observed_active_turns: list[int] = []
 
     async def locked_operation(_target: MessageTarget) -> str:
         queued_signal = coordinator._get_or_create_queued_signal(envelope.target)
         observed_pending.append(queued_signal.pending_human_messages)
+        observed_active_turns.append(queued_signal._active_response_turns)
         return "interactive"
 
     with response_lifecycle_reservation_context(reservation):
@@ -1369,6 +1371,8 @@ async def test_response_lifecycle_reservation_is_not_its_own_queued_human_turn()
 
     assert result == "interactive"
     assert observed_pending == [0]
+    assert observed_active_turns == [1]
+    assert not coordinator.has_active_response_for_target(envelope.target)
 
 
 @pytest.mark.asyncio
@@ -1379,7 +1383,6 @@ async def test_queued_lifecycle_reservation_preserves_notice_for_older_active_re
     second_envelope = _queued_envelope("$second")
     first_entered = asyncio.Event()
     release_first = asyncio.Event()
-    second_bookkeeping_started = asyncio.Event()
 
     async def first_operation(_target: MessageTarget) -> str:
         first_entered.set()
@@ -1395,20 +1398,11 @@ async def test_queued_lifecycle_reservation_preserves_notice_for_older_active_re
         ),
     )
     await first_entered.wait()
-    reservation = await coordinator.reserve_response_lifecycle(second_envelope.target)
-    begin_notice = coordinator._begin_response_turn_notice
+    reservation = await coordinator.reserve_response_lifecycle(second_envelope)
+    queued_signal = coordinator._get_or_create_queued_signal(second_envelope.target)
+    assert queued_signal.pending_human_message_event_ids == {"$second"}
 
-    def tracked_begin_notice(**kwargs: object) -> str | None:
-        result = begin_notice(**kwargs)  # type: ignore[arg-type]
-        response_envelope = kwargs["response_envelope"]
-        if response_envelope is second_envelope:
-            second_bookkeeping_started.set()
-        return result
-
-    with (
-        patch.object(coordinator, "_begin_response_turn_notice", side_effect=tracked_begin_notice),
-        response_lifecycle_reservation_context(reservation),
-    ):
+    with response_lifecycle_reservation_context(reservation):
         second = asyncio.create_task(
             coordinator.run_locked_response(
                 target=second_envelope.target,
@@ -1417,9 +1411,6 @@ async def test_queued_lifecycle_reservation_preserves_notice_for_older_active_re
                 locked_operation=lambda _target: asyncio.sleep(0, result="second"),
             ),
         )
-        await second_bookkeeping_started.wait()
-        queued_signal = coordinator._get_or_create_queued_signal(second_envelope.target)
-        assert queued_signal.pending_human_message_event_ids == {"$second"}
 
         release_first.set()
         assert await first == "first"
@@ -1433,10 +1424,15 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
     envelope = _queued_envelope("$interactive")
     lifecycle_lock = coordinator._response_lifecycle_lock(envelope.target)
     await lifecycle_lock.acquire()
-    reservation = await coordinator.reserve_response_lifecycle(envelope.target)
+    reservation = await coordinator.reserve_response_lifecycle(envelope)
+    queued_signal = coordinator._get_or_create_queued_signal(envelope.target)
+    assert queued_signal.pending_human_message_event_ids == {envelope.source_event_id}
+    assert queued_signal.has_active_response_turn()
 
     await reservation.release()
     await reservation.release()
+    assert queued_signal.pending_human_message_event_ids == set()
+    assert not queued_signal.has_active_response_turn()
     lifecycle_lock.release()
 
     assert (
@@ -1460,7 +1456,7 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
     other_coordinator = ResponseLifecycleCoordinator()
     envelope = _queued_envelope("$interactive")
     other_target = MessageTarget.resolve("!room:localhost", "$other-thread", "$other")
-    reservation = await coordinator.reserve_response_lifecycle(envelope.target)
+    reservation = await coordinator.reserve_response_lifecycle(envelope)
 
     try:
         with pytest.raises(ValueError, match="different coordinator"):

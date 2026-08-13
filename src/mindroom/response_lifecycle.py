@@ -42,11 +42,14 @@ class ResponseLifecycleReservation:
     _coordinator: ResponseLifecycleCoordinator
     _lifecycle_key: ResponseLifecycleKey
     _lifecycle_lock: asyncio.Lock
+    _queued_signal: _QueuedMessageState
+    _notice: str | None
     _ready: asyncio.Event = field(default_factory=asyncio.Event)
     _acquire_task: asyncio.Task[None] | None = None
     _release_task: asyncio.Task[None] | None = None
     _owns_lock: bool = False
     _consumed: bool = False
+    _response_turn_active: bool = True
 
     async def _acquire(self) -> None:
         if self._lifecycle_lock.locked():
@@ -79,16 +82,18 @@ class ResponseLifecycleReservation:
         self._consumed = True
         return self._lifecycle_lock
 
-    async def _wait_until_acquired(self) -> None:
+    async def wait_until_acquired(self) -> None:
         """Wait until the reservation owns its lifecycle lock."""
         if self._acquire_task is None:
             msg = "Response lifecycle reservation has not started"
             raise RuntimeError(msg)
         await self._acquire_task
 
-    def _owns_lifecycle_lock(self) -> bool:
-        """Return whether this reservation currently holds its canonical lock."""
-        return self._owns_lock
+    def _consume_notice(self) -> None:
+        if self._notice is None:
+            return
+        self._queued_signal.consume_waiting_human_message(self._notice)
+        self._notice = None
 
     async def _release(self) -> None:
         acquire_task = self._acquire_task
@@ -98,6 +103,10 @@ class ResponseLifecycleReservation:
         if self._owns_lock:
             self._owns_lock = False
             self._lifecycle_lock.release()
+        self._consume_notice()
+        if self._response_turn_active:
+            self._response_turn_active = False
+            self._queued_signal.finish_response_turn()
 
     async def release(self) -> None:
         """Release or cancel this reservation exactly once."""
@@ -275,12 +284,26 @@ class ResponseLifecycleCoordinator:
         self._response_lifecycle_locks[lock_key] = lock
         return lock
 
-    async def reserve_response_lifecycle(self, target: MessageTarget) -> ResponseLifecycleReservation:
+    async def reserve_response_lifecycle(
+        self,
+        response_envelope: MessageEnvelope,
+    ) -> ResponseLifecycleReservation:
         """Reserve FIFO admission on one canonical lifecycle before response preparation."""
+        target = response_envelope.target
+        lifecycle_lock = self._response_lifecycle_lock(target)
+        queued_signal = self._get_or_create_queued_signal(target)
         reservation = ResponseLifecycleReservation(
             _coordinator=self,
             _lifecycle_key=target.lifecycle_key,
-            _lifecycle_lock=self._response_lifecycle_lock(target),
+            _lifecycle_lock=lifecycle_lock,
+            _queued_signal=queued_signal,
+            _notice=self._begin_response_turn_notice(
+                lifecycle_lock=lifecycle_lock,
+                queued_signal=queued_signal,
+                response_envelope=response_envelope,
+                signal_queued_message=True,
+                lifecycle_lock_owned_by_response=False,
+            ),
         )
         try:
             await reservation._wait_until_reserved()
@@ -360,6 +383,72 @@ class ResponseLifecycleCoordinator:
             return
         queued_signal.consume_waiting_human_message(notice)
 
+    def _start_response_turn(
+        self,
+        *,
+        target: MessageTarget,
+        response_envelope: MessageEnvelope,
+        signal_queued_message: bool,
+        reservation: ResponseLifecycleReservation | None,
+    ) -> tuple[asyncio.Lock, _QueuedMessageState, str | None]:
+        if reservation is not None:
+            return reservation.consume(self, target), reservation._queued_signal, None
+        lifecycle_lock = self._response_lifecycle_lock(target)
+        queued_signal = self._get_or_create_queued_signal(target)
+        notice = self._begin_response_turn_notice(
+            lifecycle_lock=lifecycle_lock,
+            queued_signal=queued_signal,
+            response_envelope=response_envelope,
+            signal_queued_message=signal_queued_message,
+            lifecycle_lock_owned_by_response=False,
+        )
+        return lifecycle_lock, queued_signal, notice
+
+    @staticmethod
+    async def _acquire_response_turn_lock(
+        lifecycle_lock: asyncio.Lock,
+        reservation: ResponseLifecycleReservation | None,
+    ) -> None:
+        if reservation is not None:
+            await reservation.wait_until_acquired()
+            return
+        await lifecycle_lock.acquire()
+
+    def _consume_response_turn_notice(
+        self,
+        *,
+        reservation: ResponseLifecycleReservation | None,
+        notice: str | None,
+        queued_signal: _QueuedMessageState,
+    ) -> None:
+        if reservation is not None:
+            reservation._consume_notice()
+            return
+        self._consume_queued_human_notice(notice=notice, queued_signal=queued_signal)
+
+    @staticmethod
+    async def _release_response_turn_lock(
+        lifecycle_lock: asyncio.Lock,
+        reservation: ResponseLifecycleReservation | None,
+    ) -> None:
+        if reservation is not None:
+            await reservation.release()
+            return
+        lifecycle_lock.release()
+
+    async def _finish_response_turn(
+        self,
+        *,
+        reservation: ResponseLifecycleReservation | None,
+        notice: str | None,
+        queued_signal: _QueuedMessageState,
+    ) -> None:
+        if reservation is not None:
+            await reservation.release()
+            return
+        self._consume_queued_human_notice(notice=notice, queued_signal=queued_signal)
+        queued_signal.finish_response_turn()
+
     async def run_locked_response(
         self,
         *,
@@ -372,30 +461,23 @@ class ResponseLifecycleCoordinator:
         """Run one locked response operation with shared queued-message bookkeeping."""
         self._assert_target_matches_envelope(target, response_envelope)
         reservation = _current_response_lifecycle_reservation.get()
-        lifecycle_lock = (
-            reservation.consume(self, target) if reservation is not None else self._response_lifecycle_lock(target)
-        )
-        queued_signal = self._get_or_create_queued_signal(target)
-        notice = self._begin_response_turn_notice(
-            lifecycle_lock=lifecycle_lock,
-            queued_signal=queued_signal,
+        lifecycle_lock, queued_signal, notice = self._start_response_turn(
+            target=target,
             response_envelope=response_envelope,
             signal_queued_message=signal_queued_message,
-            lifecycle_lock_owned_by_response=(reservation._owns_lifecycle_lock() if reservation is not None else False),
+            reservation=reservation,
         )
         lock_acquired = False
         try:
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_wait_start")
-            if reservation is None:
-                await lifecycle_lock.acquire()
-            else:
-                await reservation._wait_until_acquired()
+            await self._acquire_response_turn_lock(lifecycle_lock, reservation)
             lock_acquired = True
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_acquired")
             try:
-                notice = self._consume_queued_human_notice(
+                self._consume_response_turn_notice(
+                    reservation=reservation,
                     notice=notice,
                     queued_signal=queued_signal,
                 )
@@ -406,18 +488,13 @@ class ResponseLifecycleCoordinator:
                         await finalize_queued_notice_response_turn_async(notice_context)
             finally:
                 if lock_acquired:
-                    if reservation is None:
-                        lifecycle_lock.release()
-                    else:
-                        await reservation.release()
+                    await self._release_response_turn_lock(lifecycle_lock, reservation)
         finally:
-            if reservation is not None:
-                await reservation.release()
-            self._consume_queued_human_notice(
+            await self._finish_response_turn(
+                reservation=reservation,
                 notice=notice,
                 queued_signal=queued_signal,
             )
-            queued_signal.finish_response_turn()
 
     async def run_locked_target_operation(
         self,

@@ -939,9 +939,12 @@ class ResponseRunner:
             response_envelope=response_envelope,
         )
 
-    async def reserve_response_lifecycle(self, target: MessageTarget) -> ResponseLifecycleReservation:
+    async def reserve_response_lifecycle(
+        self,
+        response_envelope: MessageEnvelope,
+    ) -> ResponseLifecycleReservation:
         """Reserve one canonical response lifecycle before detached preparation starts."""
-        return await self._lifecycle_coordinator.reserve_response_lifecycle(target)
+        return await self._lifecycle_coordinator.reserve_response_lifecycle(response_envelope)
 
     async def _run_in_tool_context(
         self,
