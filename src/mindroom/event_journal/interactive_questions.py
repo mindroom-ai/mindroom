@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -23,7 +22,6 @@ if TYPE_CHECKING:
 
     from .backend import Row, Transaction
     from .models import InboundEvent
-    from .projection import ProjectedEvent
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,15 +37,26 @@ def _consume_selection_revision(
     principal_id: str,
     source_event_id: str,
     stored: _StoredSelection,
-) -> None:
-    """Consume one active revision and discard competing snapshots of it."""
-    transaction.execute(
+) -> bool:
+    """Claim one immutable revision and discard competing snapshots of it."""
+    claimed = transaction.fetchone(
         """
-        DELETE FROM interactive_questions
+        UPDATE interactive_questions
+        SET consumed_by_source_event_id = COALESCE(consumed_by_source_event_id, ?)
         WHERE principal_id = ? AND question_event_id = ? AND revision_event_id = ?
+          AND (consumed_by_source_event_id IS NULL OR consumed_by_source_event_id = ?)
+        RETURNING consumed_by_source_event_id
         """,
-        (principal_id, stored.selection.question_event_id, stored.revision_event_id),
+        (
+            source_event_id,
+            principal_id,
+            stored.selection.question_event_id,
+            stored.revision_event_id,
+            source_event_id,
+        ),
     )
+    if claimed is None:
+        return False
     transaction.execute(
         """
         DELETE FROM interactive_selections
@@ -56,6 +65,7 @@ def _consume_selection_revision(
         """,
         (principal_id, stored.selection.question_event_id, stored.revision_event_id, source_event_id),
     )
+    return True
 
 
 def _prompt_json(prompt: InteractivePrompt) -> str:
@@ -104,7 +114,7 @@ def _visible_prompt_row(
     """Return the projection's currently visible revision for one target."""
     return transaction.fetchone(
         """
-        SELECT thread_id, sender, revision_event_id
+        SELECT sender, revision_event_id, membership_epoch
         FROM visible_messages
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
         """,
@@ -121,12 +131,8 @@ def _activate_projected_prompt(
     row: Row,
     prompt: InteractivePrompt,
 ) -> None:
-    """Make one authorized visible revision the active prompt."""
+    """Record one authorized immutable prompt revision."""
     if principal_id != f"{prompt.creator_agent}@{row['sender']}":
-        transaction.execute(
-            "DELETE FROM interactive_questions WHERE principal_id = ? AND question_event_id = ?",
-            (principal_id, question_event_id),
-        )
         return
     membership_epoch = _prompt_membership_epoch(
         transaction,
@@ -134,86 +140,58 @@ def _activate_projected_prompt(
         room_id=room_id,
         prompt=prompt,
     )
-    if membership_epoch is None or not reads.claim_membership_epoch(
-        transaction,
-        principal_id,
-        room_id=room_id,
-        expected_membership_epoch=membership_epoch,
-    ):
-        transaction.execute(
-            "DELETE FROM interactive_questions WHERE principal_id = ? AND question_event_id = ?",
-            (principal_id, question_event_id),
+    if (
+        membership_epoch is None
+        or int(row["membership_epoch"]) != membership_epoch
+        or not reads.claim_membership_epoch(
+            transaction,
+            principal_id,
+            room_id=room_id,
+            expected_membership_epoch=membership_epoch,
         )
+    ):
         return
     transaction.execute(
         """
         INSERT INTO interactive_questions (
-            principal_id, question_event_id, revision_event_id, room_id, thread_id,
-            question_json, membership_epoch, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (principal_id, question_event_id) DO UPDATE SET
-            revision_event_id = excluded.revision_event_id,
-            room_id = excluded.room_id,
-            thread_id = excluded.thread_id,
-            question_json = excluded.question_json,
-            membership_epoch = excluded.membership_epoch,
-            created_at_ns = excluded.created_at_ns
-        WHERE interactive_questions.revision_event_id != excluded.revision_event_id
+            principal_id, question_event_id, revision_event_id, room_id, question_json
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (principal_id, question_event_id, revision_event_id) DO NOTHING
         """,
         (
             principal_id,
             question_event_id,
             row["revision_event_id"],
             room_id,
-            row["thread_id"],
             _prompt_json(prompt),
-            membership_epoch,
-            time.time_ns(),
         ),
     )
 
 
-def reconcile_projected_prompt(
+def reconcile_visible_prompt(
     transaction: Transaction,
     principal_id: str,
-    projected: ProjectedEvent,
-    installed_content: Mapping[str, object] | None,
+    *,
+    room_id: str,
+    question_event_id: str,
+    content: Mapping[str, object],
 ) -> None:
-    """Reconcile one active prompt from the projection after admission."""
-    if projected.redacts_event_id is not None:
-        transaction.execute(
-            """
-            DELETE FROM interactive_questions
-            WHERE principal_id = ? AND (question_event_id = ? OR revision_event_id = ?)
-            """,
-            (principal_id, projected.redacts_event_id, projected.redacts_event_id),
-        )
-        return
-    if installed_content is None:
-        return
-    relation = projected.content.get("m.relates_to")
-    relation = cast("Mapping[str, object]", relation) if isinstance(relation, dict) else {}
-    replacement = relation.get("event_id") if relation.get("rel_type") == "m.replace" else None
-    question_event_id = replacement if isinstance(replacement, str) else projected.event_id
+    """Record the projection's current revision when it carries a prompt."""
     row = _visible_prompt_row(
         transaction,
         principal_id,
-        room_id=projected.room_id,
+        room_id=room_id,
         question_event_id=question_event_id,
     )
     if row is None or not principal_id.endswith(f"@{row['sender']}"):
         return
-    prompt = interactive_prompt_from_content(installed_content)
+    prompt = interactive_prompt_from_content(content)
     if prompt is None:
-        transaction.execute(
-            "DELETE FROM interactive_questions WHERE principal_id = ? AND question_event_id = ?",
-            (principal_id, question_event_id),
-        )
         return
     _activate_projected_prompt(
         transaction,
         principal_id,
-        room_id=projected.room_id,
+        room_id=room_id,
         question_event_id=question_event_id,
         row=row,
         prompt=prompt,
@@ -347,7 +325,12 @@ def _snapshot_reaction_candidate(  # noqa: PLR0911 - malformed or unrelated reac
     if source is None:
         return
     membership_epoch = int(source["membership_epoch"])
-    question_row = _question_row(transaction, principal_id, question_event_id)
+    question_row = _active_question_row(
+        transaction,
+        principal_id,
+        room_id=event.room_id,
+        question_event_id=question_event_id,
+    )
     if (
         question_row is None
         or question_row["room_id"] != event.room_id
@@ -393,17 +376,34 @@ def _snapshot_text_candidate(
         return
     question = transaction.fetchone(
         """
-        SELECT question_event_id
-        FROM interactive_questions
-        WHERE principal_id = ? AND room_id = ? AND thread_id = ? AND membership_epoch = ?
-        ORDER BY created_at_ns, question_event_id/*bytes*/
+        SELECT iq.question_event_id
+        FROM interactive_questions AS iq
+        JOIN visible_messages AS vm
+          ON vm.principal_id = iq.principal_id
+         AND vm.room_id = iq.room_id
+         AND vm.logical_event_id = iq.question_event_id
+         AND vm.revision_event_id = iq.revision_event_id
+        WHERE iq.principal_id = ? AND vm.room_id = ? AND vm.thread_id = ?
+          AND vm.membership_epoch = ? AND iq.consumed_by_source_event_id IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM redaction_tombstones AS tombstone
+              WHERE tombstone.principal_id = iq.principal_id
+                AND tombstone.room_id = iq.room_id
+                AND tombstone.redacted_event_id = iq.revision_event_id
+          )
+        ORDER BY vm.revision_ts, iq.question_event_id/*bytes*/
         LIMIT 1
         """,
         (principal_id, source["room_id"], source["thread_id"], source["membership_epoch"]),
     )
     if question is None:
         return
-    question_row = _question_row(transaction, principal_id, str(question["question_event_id"]))
+    question_row = _active_question_row(
+        transaction,
+        principal_id,
+        room_id=str(source["room_id"]),
+        question_event_id=str(question["question_event_id"]),
+    )
     if question_row is None or (selection := _selection_from_row(question_row, selection_key)) is None:
         return
     _snapshot_selection(
@@ -440,21 +440,49 @@ def _source_row(transaction: Transaction, principal_id: str, source_event_id: st
     )
 
 
-def _question_row(transaction: Transaction, principal_id: str, question_event_id: str) -> Row | None:
-    """Lock and return one question."""
+def _active_question_row(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    question_event_id: str,
+) -> Row | None:
+    """Lock the visible target and return its unconsumed prompt revision."""
+    visible = transaction.fetchone(
+        """
+        UPDATE visible_messages
+        SET revision_event_id = revision_event_id
+        WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
+        RETURNING room_id, thread_id, revision_event_id, revision_ts, membership_epoch
+        """,
+        (principal_id, room_id, question_event_id),
+    )
+    if visible is None:
+        return None
     return transaction.fetchone(
         """
-        UPDATE interactive_questions
-        SET question_json = question_json
-        WHERE principal_id = ? AND question_event_id = ?
-        RETURNING question_event_id, room_id, thread_id,
-                  revision_event_id, question_json, membership_epoch
+        SELECT iq.question_event_id, iq.revision_event_id, iq.question_json,
+               vm.room_id, vm.thread_id, vm.membership_epoch, vm.revision_ts
+        FROM interactive_questions AS iq
+        JOIN visible_messages AS vm
+          ON vm.principal_id = iq.principal_id
+         AND vm.room_id = iq.room_id
+         AND vm.logical_event_id = iq.question_event_id
+         AND vm.revision_event_id = iq.revision_event_id
+        WHERE iq.principal_id = ? AND iq.question_event_id = ?
+          AND iq.consumed_by_source_event_id IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM redaction_tombstones AS tombstone
+              WHERE tombstone.principal_id = iq.principal_id
+                AND tombstone.room_id = iq.room_id
+                AND tombstone.redacted_event_id = iq.revision_event_id
+          )
         """,
         (principal_id, question_event_id),
     )
 
 
-def claim_reaction(
+def claim_reaction(  # noqa: PLR0911 - every failed ownership predicate is terminal
     transaction: Transaction,
     principal_id: str,
     *,
@@ -502,6 +530,8 @@ def claim_reaction(
     selection = stored_selection.selection
     if selection.question_event_id != question_event_id or selection.selection_key != selection_key:
         return None
+    if not _consume_selection_revision(transaction, principal_id, source_event_id, stored_selection):
+        return None
     if source["semantic_consumer"] is None:
         transaction.execute(
             """
@@ -511,7 +541,6 @@ def claim_reaction(
             """,
             (SemanticConsumer.INTERACTIVE_REACTION.value, principal_id, source_event_id),
         )
-        _consume_selection_revision(transaction, principal_id, source_event_id, stored_selection)
     return selection
 
 
@@ -561,5 +590,6 @@ def claim_text(
     stored_selection = _stored_selection(transaction, principal_id, source_event_id)
     if stored_selection is None or stored_selection.selection.selection_key != selection_key:
         return None
-    _consume_selection_revision(transaction, principal_id, source_event_id, stored_selection)
+    if not _consume_selection_revision(transaction, principal_id, source_event_id, stored_selection):
+        return None
     return stored_selection.selection

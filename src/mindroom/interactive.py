@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_MAX_PROMPT_METADATA_BYTES = 8_000
+
 
 @dataclass(frozen=True, slots=True)
 class InteractiveMetadata:
@@ -45,12 +47,30 @@ class InteractiveMetadata:
         """Return copied metadata when both interactive registration parts exist."""
         if not option_map or not options_list:
             return None
-        return cls(
+        metadata = cls(
             question_text=question_text,
             option_map=dict(option_map),
             option_labels=dict(option_labels or {}),
             options_list=tuple(dict(item) for item in options_list),
         )
+        encoded = json.dumps(
+            {
+                "option_labels": metadata.option_labels,
+                "options": metadata.option_map,
+                "question_text": metadata.question_text,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        if len(encoded) > _MAX_PROMPT_METADATA_BYTES:
+            logger.warning(
+                "Interactive prompt metadata exceeds the Matrix event budget",
+                metadata_size_bytes=len(encoded),
+                max_size_bytes=_MAX_PROMPT_METADATA_BYTES,
+            )
+            return None
+        return metadata
 
     def options_as_list(self) -> list[dict[str, str]]:
         """Return a mutable copy for Matrix reaction-button registration."""

@@ -851,15 +851,8 @@ def _admit(
     projected: ProjectedEvent | None,
 ) -> AdmissionResult:
     """Admit one event and snapshot any interactive prompt its reaction saw."""
-    result, installed_content = journal.admit(transaction, principal_id, event, projected)
+    result = journal.admit(transaction, principal_id, event, projected)
     if result is AdmissionResult.ADMITTED:
-        if projected is not None:
-            interactive_questions.reconcile_projected_prompt(
-                transaction,
-                principal_id,
-                projected,
-                installed_content,
-            )
         interactive_questions.snapshot_source_candidate(transaction, principal_id, event)
     return result
 

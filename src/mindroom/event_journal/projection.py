@@ -170,8 +170,8 @@ def project(
     *,
     receipt_order: int,
     membership_epoch: int,
-) -> Mapping[str, object] | None:
-    """Fold one event and return the content installed as its visible revision."""
+) -> None:
+    """Fold one event and reconcile any prompt carried by its visible revision."""
     if event.redacts_event_id is not None:
         _project_redaction(
             transaction,
@@ -179,24 +179,55 @@ def project(
             event,
             receipt_order=receipt_order,
         )
-        return None
+        return
     if _is_tombstoned(transaction, principal_id, event.room_id, event.event_id):
-        return None
+        return
     replaces = replacement_target(event.content)
     if replaces is None:
-        return _project_original(
+        installed_content = _project_original(
             transaction,
             principal_id,
             event,
             receipt_order=receipt_order,
             membership_epoch=membership_epoch,
         )
-    return _project_edit(
+        question_event_id = event.event_id
+    else:
+        installed_content = _project_edit(
+            transaction,
+            principal_id,
+            event,
+            target_event_id=replaces,
+            receipt_order=receipt_order,
+        )
+        question_event_id = replaces
+    if installed_content is not None:
+        _reconcile_visible_prompt(
+            transaction,
+            principal_id,
+            room_id=event.room_id,
+            question_event_id=question_event_id,
+            content=installed_content,
+        )
+
+
+def _reconcile_visible_prompt(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    question_event_id: str,
+    content: Mapping[str, object],
+) -> None:
+    """Keep prompt projection inseparable from visible-message projection."""
+    from .interactive_questions import reconcile_visible_prompt  # noqa: PLC0415 - reads imports projection
+
+    reconcile_visible_prompt(
         transaction,
         principal_id,
-        event,
-        target_event_id=replaces,
-        receipt_order=receipt_order,
+        room_id=room_id,
+        question_event_id=question_event_id,
+        content=content,
     )
 
 
@@ -561,7 +592,16 @@ def install_refetched_revision(
             expected_membership_epoch,
         ),
     )
-    return row is not None
+    if row is None:
+        return False
+    _reconcile_visible_prompt(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        question_event_id=logical_event_id,
+        content=content,
+    )
+    return True
 
 
 def drop_refetched_message(

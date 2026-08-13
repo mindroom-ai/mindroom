@@ -40,8 +40,6 @@ from .projection import ProjectedEvent, project
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from .backend import Row, Transaction
     from .models import InboundEvent
 
@@ -776,7 +774,7 @@ def admit(
     principal_id: str,
     event: InboundEvent,
     projected: ProjectedEvent | None,
-) -> tuple[AdmissionResult, Mapping[str, object] | None]:
+) -> AdmissionResult:
     """Insert, deduplicate, and project one event in a single transaction.
 
     A context-only event is projected here and never replayed, so it keeps no
@@ -814,17 +812,16 @@ def admit(
         ),
     )
     if row is None:
-        return AdmissionResult.DUPLICATE, None
-    installed_content = None
+        return AdmissionResult.DUPLICATE
     if projected is not None:
-        installed_content = project(
+        project(
             transaction,
             principal_id,
             projected,
             receipt_order=int(row["receipt_order"]),
             membership_epoch=epoch,
         )
-    return AdmissionResult.ADMITTED, installed_content
+    return AdmissionResult.ADMITTED
 
 
 def admitted_thread_id(
@@ -1065,9 +1062,10 @@ def settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
     that this event already produced its one turn, and it has to outlive the
     work it authorized.
 
-    Settled is the whole fact. Why the work ended -- answered, or deliberately
-    not answered -- was recorded for a while and never once read back, and a
-    durable column nothing consults is a claim nothing keeps honest.
+    Settled is the whole source fact. Why ordinary work ended -- answered, or
+    deliberately not answered -- was recorded for a while and never once read
+    back. An interactive prompt revision is different: its consumed-by source
+    remains on that immutable revision so projection repair cannot revive it.
     """
     transaction.execute(
         """

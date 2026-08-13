@@ -561,14 +561,26 @@ async def _activate_interactive_question(
 
 
 async def _interactive_question_rows(store: EventJournalStore) -> list[dict[str, object]]:
-    """Return journal-owned questions as plain test evidence."""
+    """Return currently visible, unconsumed questions as plain test evidence."""
     rows = await store.backend.read(
         lambda transaction: transaction.fetchall(
             """
-            SELECT principal_id, question_event_id, room_id, thread_id,
-                   revision_event_id, question_json, membership_epoch
-            FROM interactive_questions
-            ORDER BY question_event_id
+            SELECT iq.principal_id, iq.question_event_id, iq.room_id, vm.thread_id,
+                   iq.revision_event_id, iq.question_json, vm.membership_epoch
+            FROM interactive_questions AS iq
+            JOIN visible_messages AS vm
+              ON vm.principal_id = iq.principal_id
+             AND vm.room_id = iq.room_id
+             AND vm.logical_event_id = iq.question_event_id
+             AND vm.revision_event_id = iq.revision_event_id
+            WHERE iq.consumed_by_source_event_id IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM redaction_tombstones AS tombstone
+                  WHERE tombstone.principal_id = iq.principal_id
+                    AND tombstone.room_id = iq.room_id
+                    AND tombstone.redacted_event_id = iq.revision_event_id
+              )
+            ORDER BY iq.question_event_id
             """,
         ),
     )
@@ -1809,6 +1821,171 @@ class TestProjectedInteractivePrompts:
         )
 
         assert await _interactive_question_rows(journal_store) == []
+
+    @pytest.mark.parametrize("installer", ["hydration", "recovery"])
+    async def test_history_install_activates_the_projected_prompt(
+        self,
+        alice: PrincipalStore,
+        installer: str,
+    ) -> None:
+        """Every projection entry point must install the same prompt revision."""
+        epoch = await alice.membership_epoch(ROOM)
+        prompt = message(
+            "$historical-question",
+            sender="alice",
+            thread_id="$thread",
+            content=interactive_prompt("Historical?", "yes", membership_epoch=epoch),
+        )[1]
+
+        if installer == "hydration":
+            assert await alice.install_hydrated_conversation(
+                room_id=ROOM,
+                thread_id="$thread",
+                events=(prompt,),
+                complete=True,
+                expected_membership_epoch=epoch,
+            )
+        else:
+            recovery = await alice.record_room_history_recovery(ROOM)
+            assert recovery is not None
+            assert await alice.install_room_history_recovery_chunk(
+                recovery,
+                events=(prompt,),
+                expected_membership_epoch=epoch,
+            )
+
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$historical-question", "1"),
+        )
+
+        selection = await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+            question_event_id="$historical-question",
+            selection_key="1",
+        )
+
+        assert selection is not None
+        assert (selection.question_text, selection.selected_value) == ("Historical?", "yes")
+
+    async def test_refetch_restores_an_unconsumed_visible_prompt(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Returning to an older visible prompt revision makes that revision active again."""
+        epoch = await alice.membership_epoch(ROOM)
+        original = interactive_prompt("Original?", "original", membership_epoch=epoch)
+        await admit(alice, "$target", sender="alice", content=original)
+        await admit(alice, "$plain", sender="alice", ts=2_000, content=edit("$target", "Plain"))
+        await admit(alice, "$redaction", ts=3_000, kind=EventKind.REDACTION, redacts="$plain")
+        request = (await refreshes(alice))[0]
+
+        assert await alice.install_refetched_revision(
+            request,
+            revision_event_id="$target",
+            revision_ts=1_000,
+            content=original,
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+        )
+
+        selection = await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+            question_event_id="$target",
+            selection_key="1",
+        )
+
+        assert selection is not None
+        assert selection.selected_value == "original"
+
+    async def test_refetch_cannot_resurrect_a_consumed_prompt_revision(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Consumption is durable even when projection repair shows the old revision again."""
+        epoch = await alice.membership_epoch(ROOM)
+        original = interactive_prompt("Original?", "original", membership_epoch=epoch)
+        await admit(alice, "$target", sender="alice", content=original)
+        await admit(
+            alice,
+            "$first-reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+        )
+        assert await alice.claim_interactive_reaction(
+            source_event_id="$first-reaction",
+            question_event_id="$target",
+            selection_key="1",
+        )
+        await alice.settle("$first-reaction")
+
+        await admit(alice, "$plain", sender="alice", ts=2_000, content=edit("$target", "Plain"))
+        await admit(alice, "$redaction", ts=3_000, kind=EventKind.REDACTION, redacts="$plain")
+        request = (await refreshes(alice))[0]
+        assert await alice.install_refetched_revision(
+            request,
+            revision_event_id="$target",
+            revision_ts=1_000,
+            content=original,
+        )
+        await admit(
+            alice,
+            "$second-reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+        )
+
+        assert (
+            await alice.claim_interactive_reaction(
+                source_event_id="$second-reaction",
+                question_event_id="$target",
+                selection_key="1",
+            )
+            is None
+        )
+
+    async def test_dropping_a_refetched_message_removes_its_prompt_from_discovery(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A sidecar message absent from the server cannot keep accepting answers."""
+        epoch = await alice.membership_epoch(ROOM)
+        content = interactive_prompt("Large?", "large", membership_epoch=epoch)
+        content["io.mindroom.long_text"] = {
+            "version": 2,
+            "encoding": "matrix_event_content_json",
+        }
+        content["url"] = "mxc://example.org/body"
+        await admit(alice, "$target", sender="alice", content=content)
+        request = (await refreshes(alice))[0]
+
+        assert await alice.drop_refetched_message(request)
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+        )
+
+        assert (
+            await alice.claim_interactive_reaction(
+                source_event_id="$reaction",
+                question_event_id="$target",
+                selection_key="1",
+            )
+            is None
+        )
 
 
 class TestInteractiveQuestionClaims:
