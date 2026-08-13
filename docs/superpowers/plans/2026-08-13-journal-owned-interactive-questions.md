@@ -461,4 +461,4 @@ Push `fix/pr-1825-followup` to `origin/fix/interactive-reaction-cancel-before-st
 
 - [x] **Step 4: Collapse the circular reaction-to-controller callback seam**
 
-- [ ] **Step 5: Run the complete affected suite, static checks, and exact PR #1807 integration**
+- [x] **Step 5: Run the complete affected suite, static checks, and exact PR #1807 integration**
