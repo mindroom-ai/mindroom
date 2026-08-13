@@ -37,9 +37,9 @@ from mindroom.hooks import (
 )
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.response_lifecycle import ResponseLifecycleReservation
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.room_thread_modes import set_room_thread_mode_override
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, _shutdown_approval_store
 from tests.approval_test_support import FakeApprovalCards
 from tests.bot_helpers import (
@@ -62,7 +62,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.matrix.users import AgentMatrixUser
@@ -179,31 +179,6 @@ def _claimed_test_selection(
         reply_to_event_id=selection.question_event_id,
     )
     return selection, target
-
-
-def _cancelling_inbox_tracker(runner: ResponseRunner) -> Callable[..., asyncio.Task[None]]:
-    """Return a tracker that cancels each response before its first task step."""
-    real_track = runner.track_inbox_response
-
-    def track_then_cancel(
-        owned_response: Coroutine[Any, Any, None],
-        *,
-        name: str,
-        recovery_proof_ready: Callable[[], bool],
-        on_failure: Callable[[], None] | None = None,
-        source_event_ids: tuple[str, ...] = (),
-    ) -> asyncio.Task[None]:
-        task = real_track(
-            owned_response,
-            name=name,
-            recovery_proof_ready=recovery_proof_ready,
-            on_failure=on_failure,
-            source_event_ids=source_event_ids,
-        )
-        task.cancel()
-        return task
-
-    return track_then_cancel
 
 
 def _install_reaction_recorder(bot: AgentBot) -> list[str]:
@@ -1085,6 +1060,108 @@ class TestAgentBot(AgentBotTestBase):
         prestart_cleanup.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_terminal_interactive_selection_preserves_task_cancellation(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Durable selection cleanup must not turn cancellation into success."""
+        interactive._cleanup()
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        source_is_terminal = AsyncMock(return_value=True)
+        controller = replace_turn_controller_deps(
+            bot,
+            dispatch_source_is_terminal=source_is_terminal,
+        )
+        selection, target = _claimed_test_selection(bot)
+        room = nio.MatrixRoom(target.room_id, bot.matrix_id.full_id)
+        commit_selection = MagicMock(wraps=interactive.commit_selection)
+        restore_selection = MagicMock()
+
+        with (
+            patch.object(
+                controller,
+                "_execute_interactive_selection",
+                new=AsyncMock(side_effect=asyncio.CancelledError("restart")),
+            ),
+            patch("mindroom.turn_controller.interactive.commit_selection", commit_selection),
+            patch("mindroom.turn_controller.interactive.restore_selection", restore_selection),
+            pytest.raises(asyncio.CancelledError, match="restart"),
+        ):
+            await controller.handle_interactive_selection(
+                room,
+                selection=selection,
+                user_id="@user:localhost",
+                source_event_id="$reaction",
+                response_target=target,
+            )
+
+        source_is_terminal.assert_awaited_once_with("$reaction")
+        commit_selection.assert_called_once_with(selection)
+        restore_selection.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_restart_stop_waits_for_live_interactive_claim_owner(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A replacement cannot start while the prior generation still owns a claim."""
+        interactive._cleanup()
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        selection, _target = _claimed_test_selection(bot)
+        response_started = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        finish_cleanup = asyncio.Event()
+
+        async def response_owner() -> None:
+            response_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleanup_started.set()
+                await finish_cleanup.wait()
+                interactive.restore_selection(selection)
+
+        response_task = bot._response_runner.track_inbox_response(
+            response_owner(),
+            name="test_interactive_claim_owner",
+            recovery_proof_ready=lambda: False,
+            source_event_ids=("$reaction",),
+        )
+        await response_started.wait()
+        response_task.cancel()
+        await cleanup_started.wait()
+        dispatcher_stop = AsyncMock()
+
+        try:
+            with (
+                patch.object(bot, "prepare_for_sync_shutdown", new=AsyncMock()),
+                patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
+                patch.object(bot._journal_dispatcher, "stop", new=dispatcher_stop),
+                patch.object(bot, "_own_journal", None),
+            ):
+                stop_task = asyncio.create_task(bot.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN))
+                await asyncio.sleep(0)
+
+                assert not stop_task.done()
+                dispatcher_stop.assert_not_awaited()
+                assert selection.question_event_id in interactive._claimed_questions
+
+                finish_cleanup.set()
+                await asyncio.wait_for(stop_task, timeout=1.0)
+
+            assert selection.question_event_id in interactive._active_questions
+            assert selection.question_event_id not in interactive._claimed_questions
+            dispatcher_stop.assert_awaited_once_with()
+        finally:
+            finish_cleanup.set()
+            await asyncio.gather(response_task, return_exceptions=True)
+            interactive._cleanup()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_stage", ["acquire", "queued_cancel"])
     async def test_interactive_prestart_failure_restores_claimed_selection(
         self,
@@ -1143,233 +1220,6 @@ class TestAgentBot(AgentBotTestBase):
         finally:
             if lock_owned_by_test:
                 lifecycle_lock.release()
-            await bot._response_runner.drain_inbox_responses()
-            interactive._cleanup()
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("cancel_immediately", [False, True])
-    async def test_unstarted_interactive_task_restores_claimed_selection(
-        self,
-        cancel_immediately: bool,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A task cancelled before its first response step must restore its claim."""
-        interactive._cleanup()
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        selection, target = _claimed_test_selection(bot)
-        response_entered = asyncio.Event()
-        restore_selection = MagicMock(side_effect=lambda: interactive.restore_selection(selection))
-
-        async def response() -> None:
-            response_entered.set()
-
-        try:
-            with (
-                patch.object(
-                    bot._response_runner,
-                    "track_inbox_response",
-                    new=_cancelling_inbox_tracker(bot._response_runner),
-                )
-                if cancel_immediately
-                else nullcontext()
-            ):
-                start = bot._turn_controller.start_interactive_selection(
-                    response,
-                    response_target=target,
-                    source_event_id="$reaction",
-                    user_id="@user:localhost",
-                    selected_value=selection.selected_value,
-                    on_failure=restore_selection,
-                )
-                if cancel_immediately:
-                    with pytest.raises(asyncio.CancelledError):
-                        await start
-                else:
-                    await start
-                    runner = unwrap_extracted_collaborator(bot._response_runner)
-                    response_task = next(iter(runner._inbox_response_tasks))
-                    response_task.cancel()
-                    await asyncio.gather(response_task, return_exceptions=True)
-            await asyncio.sleep(0)
-
-            assert not response_entered.is_set()
-            assert selection.question_event_id in interactive._active_questions
-            assert selection.question_event_id not in interactive._claimed_questions
-            assert not bot._response_runner.has_active_response_for_target(target)
-            restore_selection.assert_called_once_with()
-        finally:
-            await bot._response_runner.drain_inbox_responses()
-            interactive._cleanup()
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("registration_failure", [False, True])
-    @pytest.mark.parametrize("cleanup_failure", [False, True])
-    async def test_unstarted_interactive_cleanup_survives_caller_cancellation(
-        self,
-        cleanup_failure: bool,
-        registration_failure: bool,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Cancellation during outer cleanup must not strand its reservation or claim."""
-        interactive._cleanup()
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        selection, target = _claimed_test_selection(bot)
-        release_started = asyncio.Event()
-        allow_release = asyncio.Event()
-        reservations: list[ResponseLifecycleReservation] = []
-        cleanup_error = RuntimeError("simulated cleanup failure")
-
-        def restore() -> None:
-            interactive.restore_selection(selection)
-            if cleanup_failure:
-                raise cleanup_error
-
-        restore_selection = MagicMock(side_effect=restore)
-        real_release = ResponseLifecycleReservation.release
-        start_task: asyncio.Task[None] | None = None
-
-        async def blocked_release(reservation: ResponseLifecycleReservation) -> None:
-            reservations.append(reservation)
-            release_started.set()
-            await allow_release.wait()
-            await real_release(reservation)
-
-        async def response() -> None:
-            pytest.fail("Response factory must remain lazy before handoff cleanup")
-
-        tracker_patch = (
-            patch.object(
-                bot._response_runner,
-                "track_inbox_response",
-                side_effect=RuntimeError("simulated registration failure"),
-            )
-            if registration_failure
-            else patch.object(
-                bot._response_runner,
-                "track_inbox_response",
-                new=_cancelling_inbox_tracker(bot._response_runner),
-            )
-        )
-
-        try:
-            with (
-                patch.object(ResponseLifecycleReservation, "release", new=blocked_release),
-                tracker_patch,
-            ):
-                start_task = asyncio.create_task(
-                    bot._turn_controller.start_interactive_selection(
-                        response,
-                        response_target=target,
-                        source_event_id="$reaction",
-                        user_id="@user:localhost",
-                        selected_value=selection.selected_value,
-                        on_failure=restore_selection,
-                    ),
-                )
-                await asyncio.wait_for(release_started.wait(), timeout=1.0)
-                start_task.cancel()
-                allow_release.set()
-                await asyncio.gather(start_task, return_exceptions=True)
-
-            assert start_task.cancelled()
-            assert selection.question_event_id in interactive._active_questions
-            assert selection.question_event_id not in interactive._claimed_questions
-            assert not bot._response_runner.has_active_response_for_target(target)
-            restore_selection.assert_called_once_with()
-        finally:
-            allow_release.set()
-            if start_task is not None:
-                await asyncio.gather(start_task, return_exceptions=True)
-            for reservation in reservations:
-                await real_release(reservation)
-            interactive._cleanup()
-
-    @pytest.mark.asyncio
-    async def test_unstarted_interactive_cleanup_survives_repeated_cancellation(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Repeated cancellation while draining the response must restore its claim."""
-        interactive._cleanup()
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        selection, target = _claimed_test_selection(bot)
-        response_tracked = asyncio.Event()
-        response_cancel_started = asyncio.Event()
-        allow_response_exit = asyncio.Event()
-        restore_selection = MagicMock(side_effect=lambda: interactive.restore_selection(selection))
-        real_track = bot._response_runner.track_inbox_response
-        start_task: asyncio.Task[None] | None = None
-
-        def track_delayed_response(
-            owned_response: Coroutine[Any, Any, None],
-            *,
-            name: str,
-            recovery_proof_ready: Callable[[], bool],
-            on_failure: Callable[[], None] | None = None,
-            source_event_ids: tuple[str, ...] = (),
-        ) -> asyncio.Task[None]:
-            async def keep_response_unentered() -> None:
-                try:
-                    await asyncio.Event().wait()
-                finally:
-                    response_cancel_started.set()
-                    while not allow_response_exit.is_set():
-                        with suppress(asyncio.CancelledError):
-                            await allow_response_exit.wait()
-                    owned_response.close()
-
-            task = real_track(
-                keep_response_unentered(),
-                name=name,
-                recovery_proof_ready=recovery_proof_ready,
-                on_failure=on_failure,
-                source_event_ids=source_event_ids,
-            )
-            response_tracked.set()
-            return task
-
-        async def response() -> None:
-            pytest.fail("Response factory must remain lazy before handoff cleanup")
-
-        try:
-            with patch.object(
-                bot._response_runner,
-                "track_inbox_response",
-                new=track_delayed_response,
-            ):
-                start_task = asyncio.create_task(
-                    bot._turn_controller.start_interactive_selection(
-                        response,
-                        response_target=target,
-                        source_event_id="$reaction",
-                        user_id="@user:localhost",
-                        selected_value=selection.selected_value,
-                        on_failure=restore_selection,
-                    ),
-                )
-                await asyncio.wait_for(response_tracked.wait(), timeout=1.0)
-                start_task.cancel()
-                await asyncio.wait_for(response_cancel_started.wait(), timeout=1.0)
-                start_task.cancel()
-                await asyncio.sleep(0)
-                allow_response_exit.set()
-                await asyncio.gather(start_task, return_exceptions=True)
-
-            assert start_task.cancelled()
-            assert selection.question_event_id in interactive._active_questions
-            assert selection.question_event_id not in interactive._claimed_questions
-            assert not bot._response_runner.has_active_response_for_target(target)
-            restore_selection.assert_called_once_with()
-        finally:
-            allow_response_exit.set()
-            if start_task is not None:
-                await asyncio.gather(start_task, return_exceptions=True)
             await bot._response_runner.drain_inbox_responses()
             interactive._cleanup()
 

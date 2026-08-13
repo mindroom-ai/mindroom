@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -89,7 +89,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
-from mindroom.response_lifecycle import ResponseLifecycleReservation, response_lifecycle_reservation_context
+from mindroom.response_lifecycle import response_lifecycle_reservation_context
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
@@ -161,81 +161,6 @@ class _InteractiveSelectionDispatch:
     source_event_id: str
     user_id: str
     selected_value: str
-
-
-@dataclass(slots=True)
-class _InteractiveResponseHandoff:
-    """Keep detached cleanup active before response execution is released."""
-
-    reservation: ResponseLifecycleReservation
-    on_failure: Callable[[], None]
-    ownership_ready: asyncio.Event = field(default_factory=asyncio.Event)
-    handoff_released: asyncio.Event = field(default_factory=asyncio.Event)
-    ownership_entered: bool = False
-    _cleanup_task: asyncio.Task[None] | None = None
-
-    async def wait_for_release(self) -> None:
-        """Enter owned cleanup, then wait for the caller to finish handoff."""
-        self.ownership_entered = True
-        self.ownership_ready.set()
-        await self.handoff_released.wait()
-
-    async def _run_unstarted_cleanup(self) -> None:
-        try:
-            await self.reservation.release()
-        finally:
-            self.on_failure()
-
-    async def _cleanup_unstarted(self) -> None:
-        if self.ownership_entered:
-            return
-        if self._cleanup_task is None:
-            self._cleanup_task = asyncio.create_task(self._run_unstarted_cleanup())
-        cancellation_requested = False
-        try:
-            while not self._cleanup_task.done():
-                try:
-                    await asyncio.shield(self._cleanup_task)
-                except asyncio.CancelledError:
-                    cancellation_requested = True
-            self._cleanup_task.result()
-        except Exception as cleanup_error:
-            if cancellation_requested:
-                raise asyncio.CancelledError from cleanup_error
-            raise
-        if cancellation_requested:
-            raise asyncio.CancelledError
-
-    async def _cancel_task(self, task: asyncio.Task[None]) -> None:
-        task.cancel()
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
-        await self._cleanup_unstarted()
-
-    async def finish(self, task: asyncio.Task[None]) -> None:
-        """Wait for cleanup ownership, or surface a task that never entered it."""
-        task.add_done_callback(lambda _task: self.ownership_ready.set())
-        try:
-            await self.ownership_ready.wait()
-        except BaseException:
-            await self._cancel_task(task)
-            raise
-        if task.done():
-            task_cancelled = task.cancelled()
-            error = None if task_cancelled else task.exception()
-            await self._cleanup_unstarted()
-            if task_cancelled:
-                raise asyncio.CancelledError
-            if error is not None:
-                raise error
-            msg = "Interactive response task finished before handoff release"
-            raise RuntimeError(msg)
-        self.handoff_released.set()
 
 
 def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
@@ -1275,12 +1200,9 @@ class TurnController:
             on_failure()
             raise
 
-        handoff = _InteractiveResponseHandoff(reservation, on_failure)
-
         async def run_owned_response() -> None:
             response_claim_transferred = False
             try:
-                await handoff.wait_for_release()
                 with response_lifecycle_reservation_context(reservation):
                     await reservation.wait_until_acquired()
                     response = response_factory()
@@ -1299,7 +1221,7 @@ class TurnController:
 
         owned_response = run_owned_response()
         try:
-            owned_task = self.deps.response_runner.track_inbox_response(
+            self.deps.response_runner.track_inbox_response(
                 owned_response,
                 name=f"interactive_selection_response:{source_event_id}",
                 recovery_proof_ready=lambda: (
@@ -1311,9 +1233,11 @@ class TurnController:
             )
         except BaseException:
             owned_response.close()
-            await handoff._cleanup_unstarted()
+            await reservation.release()
+            on_failure()
             raise
-        await handoff.finish(owned_task)
+        # Ownership registration is synchronous, and the task cannot execute
+        # until this callback yields after reporting its deferred handoff.
 
     async def enqueue_interactive_selection(
         self,
@@ -1424,7 +1348,7 @@ class TurnController:
                 response_target=target,
             )
             interactive.commit_selection(selection)
-        except BaseException:
+        except BaseException as error:
             try:
                 source_is_terminal = await self.deps.dispatch_source_is_terminal(source_event_id)
             except BaseException:
@@ -1432,6 +1356,8 @@ class TurnController:
                 raise
             if source_is_terminal:
                 interactive.commit_selection(selection)
+                if isinstance(error, asyncio.CancelledError):
+                    raise
                 return
             interactive.restore_selection(selection)
             raise

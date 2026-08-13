@@ -2097,11 +2097,16 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     bot.prepare_for_sync_shutdown = AsyncMock()
     bot._emit_agent_lifecycle_event = AsyncMock()
     bot._call_manager = None
+    bot._response_runner = MagicMock()
+    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=True)
 
     await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
     bot._emit_agent_lifecycle_event.assert_awaited_once_with("agent:stopped", stop_reason="restart")
     bot.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    bot._response_runner.drain_inbox_responses.assert_awaited_once_with(
+        shutdown_intent=SYNC_RESTART_SHUTDOWN,
+    )
 
 
 @pytest.mark.asyncio

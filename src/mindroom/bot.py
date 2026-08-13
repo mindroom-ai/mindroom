@@ -1846,6 +1846,8 @@ class AgentBot:
         current_joined_room_ids = (
             membership.joined_room_ids - membership.left_room_ids - self._local_departures_awaiting_sync
         )
+        for room_id in current_joined_room_ids:
+            await self._membership_fence.note_membership_restarted(room_id)
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_sync_room_membership(
@@ -2044,6 +2046,11 @@ class AgentBot:
             await call_manager.shutdown()
 
         await self.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
+        if shutdown_intent.stop_reason == "restart":
+            # A same-process replacement shares interactive claim ownership
+            # with this generation. It cannot safely replay while an old
+            # detached response can still restore or commit that claim.
+            await self._response_runner.drain_inbox_responses(shutdown_intent=shutdown_intent)
 
         if self.agent_name == ROUTER_AGENT_NAME:
             cleared_queued_tasks = clear_deferred_overdue_tasks()

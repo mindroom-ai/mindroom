@@ -308,8 +308,19 @@ def restore_selection(selection: InteractiveSelection) -> None:
         if event_id not in _claimed_questions:
             return
         if _persistence_file is not None and _persistence_lock_file is not None:
-            with advisory_file_lock(_persistence_lock_file, exclusive=False):
-                persisted_questions = _load_persisted_questions()
+            try:
+                with advisory_file_lock(_persistence_lock_file, exclusive=False):
+                    persisted_questions = _load_persisted_questions()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to refresh persisted interactive questions while restoring a selection; "
+                    "continuing with the claimed question",
+                    path=str(_persistence_file),
+                    error=str(exc),
+                )
+                _active_questions[event_id] = _copy_question(question)
+                _claimed_questions.pop(event_id, None)
+                return
             _claimed_questions.pop(event_id, None)
             _dirty_question_ids.discard(event_id)
             _deleted_question_ids.discard(event_id)
@@ -370,7 +381,7 @@ def _persist_local_changes_locked(*, rebuild_on_read_error: bool) -> None:
         except Exception as exc:
             if not rebuild_on_read_error:
                 raise
-            persisted_questions = dict(_active_questions)
+            persisted_questions = {**_active_questions, **_claimed_questions}
             logger.warning(
                 "Failed to read persisted interactive questions before save; rebuilding file from in-memory questions",
                 path=str(_persistence_file),

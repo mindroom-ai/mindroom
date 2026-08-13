@@ -744,10 +744,12 @@ def pending_thread_events_after(
     derived from content for every kind alike -- ``inbound_event`` calls
     ``thread_root`` regardless of kind -- so a reaction, an approval, or an
     ``m.room.encrypted`` event this bot could not decrypt can all sit pending
-    in a thread under the requester's own sender. None of them will produce a
-    response, so counting one as a newer unanswered turn drops the older
-    message and answers neither. Only a message or a media event can become
-    the turn that legitimately supersedes another.
+    in a thread under the requester's own sender. An interactive reaction can
+    produce a response, but only as a continuation of its selected question;
+    it is not a newer conversation turn that supersedes older ingress.
+    Counting one as such can drop the older message without replacing it.
+    Only a message or a media event can become the turn that legitimately
+    supersedes another.
 
     Strictly newer. Two events stamped in the same millisecond are not ordered
     by their timestamps, and treating either as proof that the other is stale

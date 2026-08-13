@@ -1506,6 +1506,85 @@ Just let me know your preference!"""
         assert set(interactive._active_questions) == {"$current"}
 
     @pytest.mark.asyncio
+    async def test_restore_falls_back_to_claim_when_persisted_read_fails(
+        self,
+        mock_client: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """A transient read failure must leave the selected question retryable."""
+        interactive.init_persistence(tmp_path)
+        interactive.register_interactive_question(
+            "$question",
+            "!room:localhost",
+            None,
+            {"✅": "yes"},
+            "test_agent",
+        )
+        event = MagicMock(spec=nio.ReactionEvent)
+        event.sender = "@user:localhost"
+        event.reacts_to = "$question"
+        event.key = "✅"
+        selection = await interactive.handle_reaction(
+            mock_client,
+            event,
+            "test_agent",
+            self.config,
+            runtime_paths_for(self.config),
+        )
+        assert selection is not None
+
+        with patch(
+            "mindroom.interactive._load_persisted_questions",
+            side_effect=OSError("disk unavailable"),
+        ):
+            interactive.restore_selection(selection)
+
+        assert "$question" in interactive._active_questions
+        assert "$question" not in interactive._claimed_questions
+
+    @pytest.mark.asyncio
+    async def test_corrupt_file_rebuild_preserves_claimed_question(
+        self,
+        mock_client: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """Rebuilding corrupt persistence must retain every in-flight claim."""
+        interactive.init_persistence(tmp_path)
+        persistence_file = tmp_path / "tracking" / "interactive_questions.json"
+        interactive.register_interactive_question(
+            "$claimed",
+            "!room:localhost",
+            None,
+            {"✅": "yes"},
+            "test_agent",
+        )
+        event = MagicMock(spec=nio.ReactionEvent)
+        event.sender = "@user:localhost"
+        event.reacts_to = "$claimed"
+        event.key = "✅"
+        selection = await interactive.handle_reaction(
+            mock_client,
+            event,
+            "test_agent",
+            self.config,
+            runtime_paths_for(self.config),
+        )
+        assert selection is not None
+
+        persistence_file.write_text("{not valid json")
+        interactive.register_interactive_question(
+            "$new",
+            "!room:localhost",
+            None,
+            {"❌": "no"},
+            "test_agent",
+        )
+        interactive.restore_selection(selection)
+
+        assert set(interactive._active_questions) == {"$claimed", "$new"}
+        assert set(json.loads(persistence_file.read_text())) == {"$claimed", "$new"}
+
+    @pytest.mark.asyncio
     async def test_failed_commit_keeps_claim_recoverable(
         self,
         mock_client: AsyncMock,

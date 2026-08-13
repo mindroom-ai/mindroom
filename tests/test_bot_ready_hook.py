@@ -27,6 +27,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.matrix import journal_ingress
+from mindroom.matrix.sync_loop import OwnRoomMembership
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -558,6 +559,32 @@ async def test_replaying_one_sync_response_fences_its_departures_once(
     await bot._apply_own_room_membership_from_sync(response)
 
     assert await bot._journal_principal().membership_epoch(room_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_replayed_departure_cannot_leave_a_confirmed_join_fenced(tmp_path: Path) -> None:
+    """A duplicated old leave report cannot disable a room confirmed joined."""
+    bot = _agent_bot(tmp_path)
+    room_id = "!rejoined:localhost"
+    membership = OwnRoomMembership(
+        joined_room_ids=frozenset({room_id}),
+        left_room_ids=frozenset(),
+        departures=(room_id,),
+    )
+    await bot._membership_fence.fence_local_departure(room_id)
+    await bot._membership_fence.note_membership_restarted(room_id)
+
+    await bot._apply_own_room_membership(membership)
+    await bot._apply_own_room_membership(membership)
+
+    current_epoch = await bot._journal_principal().membership_epoch(room_id)
+    registered: list[str] = []
+    assert await bot._journal_principal().run_if_membership_epoch(
+        room_id=room_id,
+        expected_membership_epoch=current_epoch,
+        operation=lambda: registered.append(room_id),
+    )
+    assert registered == [room_id]
 
 
 @pytest.mark.asyncio
