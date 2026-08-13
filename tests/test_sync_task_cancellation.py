@@ -46,6 +46,7 @@ from mindroom.matrix.sync_loop import (
     _sliding_sync_lists,
     _sliding_sync_room_subscriptions,
     own_membership_from_sliding_sync,
+    own_membership_from_sync,
 )
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
@@ -1784,6 +1785,62 @@ def test_sliding_own_membership_counts_a_rejoined_room_departing_twice() -> None
     assert membership.departures == ("!churned:localhost", "!churned:localhost")
     assert membership.departure_observation_ids == ("$leave", "$kick")
     assert membership.departure_rejoined_after == (True, False)
+
+
+def test_sliding_own_membership_does_not_invent_a_rejoin_between_departures() -> None:
+    """Two departure states without an intervening join end one membership."""
+    user_id = "@mindroom_code:localhost"
+    response = nio.SlidingSyncResponse(
+        "pos",
+        rooms={
+            "!departed:localhost": nio.SlidingSyncRoom(
+                membership="ban",
+                timeline=[
+                    _member_event("$leave", user_id=user_id, membership="leave", ts=1),
+                    _member_event("$ban", user_id=user_id, membership="ban", ts=2),
+                ],
+            ),
+        },
+    )
+
+    membership = own_membership_from_sliding_sync(response, self_user_id=user_id)
+
+    assert membership.departures == ("!departed:localhost", "!departed:localhost")
+    assert membership.departure_observation_ids == ("$leave", "$ban")
+    assert membership.departure_rejoined_after == (False, False)
+
+
+def test_classic_own_membership_does_not_invent_a_rejoin_between_departures() -> None:
+    """Classic sync also avoids inferring a join between departed states."""
+    user_id = "@mindroom_code:localhost"
+    room_id = "!departed:localhost"
+    room_info = nio.RoomInfo(
+        timeline=nio.Timeline(
+            events=[
+                _member_event("$leave", user_id=user_id, membership="leave", ts=1),
+                _member_event("$ban", user_id=user_id, membership="ban", ts=2),
+            ],
+            limited=False,
+            prev_batch=None,
+        ),
+        state=[],
+        ephemeral=[],
+        account_data=[],
+    )
+    response = nio.SyncResponse(
+        next_batch="next",
+        rooms=nio.Rooms(invite={}, join={}, leave={room_id: room_info}),
+        device_key_count=nio.DeviceOneTimeKeyCount(curve25519=0, signed_curve25519=0),
+        device_list=nio.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+    )
+
+    membership = own_membership_from_sync(response, self_user_id=user_id)
+
+    assert membership.departures == (room_id, room_id)
+    assert membership.departure_observation_ids == ("$leave", "$ban")
+    assert membership.departure_rejoined_after == (False, False)
 
 
 def _member_event(event_id: str, *, user_id: str, membership: str, ts: int) -> nio.Event:

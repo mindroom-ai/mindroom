@@ -132,9 +132,9 @@ _TABLES = (
         principal_id TEXT NOT NULL,
         observation_id {ordered_text} NOT NULL,
         room_id TEXT NOT NULL,
-        -- The epoch advanced by this reported departure, retained so a replay
-        -- can retry a failed cleanup/rearm without touching a newer fence.
-        fenced_epoch BIGINT,
+        -- The exact epoch this observation may rearm, retained so a replay can
+        -- retry failed cleanup without touching a newer departure fence.
+        rearm_epoch BIGINT,
         PRIMARY KEY (principal_id, observation_id)
     )
     """,

@@ -108,7 +108,7 @@ class DepartureOutcome:
     observation: DepartureObservation
     membership_epoch: int
     owed_reports: int
-    reported_fence_epoch: int | None = None
+    reported_rearm_epoch: int | None = None
 
     @property
     def fenced(self) -> bool:

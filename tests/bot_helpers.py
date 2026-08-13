@@ -1086,7 +1086,7 @@ class FencedRoomRecorder:
             DepartureObservation.FENCED,
             epoch,
             0,
-            reported_fence_epoch=(epoch if source is DepartureSource.REPORTED else None),
+            reported_rearm_epoch=(epoch if source is DepartureSource.REPORTED else None),
         )
 
     async def cleanup_fenced_departure(self, room_id: str, cleanup: Callable[[], None]) -> None:

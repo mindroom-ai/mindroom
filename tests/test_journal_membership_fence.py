@@ -383,6 +383,79 @@ async def test_two_reported_departures_with_rejoins_advance_twice(
     assert accepted == [ROOM]
 
 
+async def test_local_echo_followed_by_rejoin_and_departure_fences_the_second_leave(
+    store: RecordingStore,
+    principal: PrincipalStore,
+) -> None:
+    """An owed echo cannot hide a later departure in the same sync timeline."""
+    membership = MembershipFence(store=store)
+    await membership.fence_local_departure(ROOM)
+
+    await membership.fence_reported_departures(
+        [ROOM, ROOM],
+        observation_ids=["$local-leave", "$later-leave"],
+        rejoined_after=[True, False],
+    )
+
+    assert store.advanced == [ROOM, ROOM]
+    assert await principal.membership_epoch(ROOM) == 2
+    assert not await principal.run_if_membership_epoch(
+        room_id=ROOM,
+        expected_membership_epoch=2,
+        operation=lambda: None,
+    )
+
+
+async def test_consecutive_departure_states_then_join_rearm_one_membership(
+    store: RecordingStore,
+    principal: PrincipalStore,
+) -> None:
+    """Leave and ban aliases before one join invalidate one membership once."""
+    membership = MembershipFence(store=store)
+
+    await membership.fence_reported_departures(
+        [ROOM, ROOM],
+        observation_ids=["$leave", "$ban"],
+        rejoined_after=[False, True],
+    )
+
+    assert store.advanced == [ROOM]
+    assert await principal.membership_epoch(ROOM) == 1
+    assert await principal.run_if_membership_epoch(
+        room_id=ROOM,
+        expected_membership_epoch=1,
+        operation=lambda: None,
+    )
+
+
+async def test_replayed_departure_alias_cannot_fence_the_rejoined_membership(
+    store: RecordingStore,
+    principal: PrincipalStore,
+) -> None:
+    """Each leave-state event remains a durable alias for one departure run."""
+    membership = MembershipFence(store=store)
+    await membership.fence_reported_departures(
+        [ROOM, ROOM],
+        observation_ids=["$leave", "$ban"],
+        rejoined_after=[False, True],
+    )
+
+    restarted = MembershipFence(store=store)
+    await restarted.fence_reported_departures(
+        [ROOM],
+        observation_ids=["$ban"],
+        rejoined_after=[True],
+    )
+
+    assert store.advanced == [ROOM]
+    assert await principal.membership_epoch(ROOM) == 1
+    assert await principal.run_if_membership_epoch(
+        room_id=ROOM,
+        expected_membership_epoch=1,
+        operation=lambda: None,
+    )
+
+
 async def test_ordinary_join_does_not_clear_live_interactive_state(
     store: RecordingStore,
 ) -> None:

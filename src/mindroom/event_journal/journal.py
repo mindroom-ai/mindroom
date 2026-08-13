@@ -372,7 +372,7 @@ def fence_departure(
     if source is DepartureSource.REPORTED and report_observation_id is not None:
         claimed_report = transaction.fetchone(
             """
-            INSERT INTO reported_departures (principal_id, observation_id, room_id, fenced_epoch)
+            INSERT INTO reported_departures (principal_id, observation_id, room_id, rearm_epoch)
             VALUES (?, ?, ?, NULL)
             ON CONFLICT (principal_id, observation_id) DO NOTHING
             RETURNING observation_id
@@ -382,7 +382,7 @@ def fence_departure(
         if claimed_report is None:
             repeated_report = transaction.fetchone(
                 """
-                SELECT fenced_epoch FROM reported_departures
+                SELECT rearm_epoch FROM reported_departures
                 WHERE principal_id = ? AND observation_id = ?
                 """,
                 (principal_id, report_observation_id),
@@ -393,8 +393,8 @@ def fence_departure(
                 observation=DepartureObservation.REPEATED_REPORT,
                 membership_epoch=state.membership_epoch,
                 owed_reports=state.owed_reports,
-                reported_fence_epoch=(
-                    None if repeated_report["fenced_epoch"] is None else int(repeated_report["fenced_epoch"])
+                reported_rearm_epoch=(
+                    None if repeated_report["rearm_epoch"] is None else int(repeated_report["rearm_epoch"])
                 ),
             )
     state = _membership_state(transaction, principal_id, room_id)
@@ -412,18 +412,37 @@ def fence_departure(
             departure_fenced=state.departure_fenced,
             owed_reports=owed_reports,
         )
+        reported_rearm_epoch = state.membership_epoch if owed_reports == 0 else None
+        if report_observation_id is not None and reported_rearm_epoch is not None:
+            transaction.execute(
+                """
+                UPDATE reported_departures SET rearm_epoch = ?
+                WHERE principal_id = ? AND observation_id = ?
+                """,
+                (reported_rearm_epoch, principal_id, report_observation_id),
+            )
         return DepartureOutcome(
             observation=DepartureObservation.OWED_REPORT_CONSUMED,
             membership_epoch=state.membership_epoch,
             owed_reports=owed_reports,
+            reported_rearm_epoch=reported_rearm_epoch,
         )
     if state.departure_fenced:
         # Whoever saw this departure first already fenced it, and nothing has
         # put the bot back in the room, so there is no second departure here.
+        if source is DepartureSource.REPORTED and report_observation_id is not None:
+            transaction.execute(
+                """
+                UPDATE reported_departures SET rearm_epoch = ?
+                WHERE principal_id = ? AND observation_id = ?
+                """,
+                (state.membership_epoch, principal_id, report_observation_id),
+            )
         return DepartureOutcome(
             observation=DepartureObservation.ALREADY_FENCED,
             membership_epoch=state.membership_epoch,
             owed_reports=state.owed_reports,
+            reported_rearm_epoch=(state.membership_epoch if source is DepartureSource.REPORTED else None),
         )
     membership_epoch = _advance_membership_epoch(transaction, principal_id, room_id)
     owed_reports = state.owed_reports + 1 if source is DepartureSource.LOCAL else state.owed_reports
@@ -438,7 +457,7 @@ def fence_departure(
     if source is DepartureSource.REPORTED and report_observation_id is not None:
         transaction.execute(
             """
-            UPDATE reported_departures SET fenced_epoch = ?
+            UPDATE reported_departures SET rearm_epoch = ?
             WHERE principal_id = ? AND observation_id = ?
             """,
             (membership_epoch, principal_id, report_observation_id),
@@ -447,7 +466,7 @@ def fence_departure(
         observation=DepartureObservation.FENCED,
         membership_epoch=membership_epoch,
         owed_reports=owed_reports,
-        reported_fence_epoch=(membership_epoch if source is DepartureSource.REPORTED else None),
+        reported_rearm_epoch=(membership_epoch if source is DepartureSource.REPORTED else None),
     )
 
 
@@ -455,8 +474,6 @@ def _note_membership_restarted(
     transaction: Transaction,
     principal_id: str,
     room_id: str,
-    *,
-    expected_membership_epoch: int | None = None,
 ) -> None:
     """Record that the bot is in a room again, so its next departure fences.
 
@@ -465,18 +482,9 @@ def _note_membership_restarted(
     membership, and letting it fence the new one is exactly the deletion of a
     freshly hydrated conversation this whole mechanism exists to prevent.
     """
-    if expected_membership_epoch is None:
-        transaction.execute(
-            "UPDATE room_membership SET departure_fenced = 0 WHERE principal_id = ? AND room_id = ?",
-            (principal_id, room_id),
-        )
-        return
     transaction.execute(
-        """
-        UPDATE room_membership SET departure_fenced = 0
-        WHERE principal_id = ? AND room_id = ? AND membership_epoch = ?
-        """,
-        (principal_id, room_id, expected_membership_epoch),
+        "UPDATE room_membership SET departure_fenced = 0 WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
     )
 
 
@@ -493,19 +501,16 @@ def note_membership_restarted_after(
     Without an expected epoch, clearing an unfenced flag is a harmless no-op.
     With one, both cleanup and rearming apply only to that exact membership.
     """
-    cleanup_fenced_departure(
+    claimed_fence = cleanup_fenced_departure(
         transaction,
         principal_id,
         room_id,
         cleanup,
         expected_membership_epoch=expected_membership_epoch,
     )
-    _note_membership_restarted(
-        transaction,
-        principal_id,
-        room_id,
-        expected_membership_epoch=expected_membership_epoch,
-    )
+    if expected_membership_epoch is not None and not claimed_fence:
+        return
+    _note_membership_restarted(transaction, principal_id, room_id)
 
 
 def cleanup_fenced_departure(
@@ -515,7 +520,7 @@ def cleanup_fenced_departure(
     cleanup: Callable[[], None],
     *,
     expected_membership_epoch: int | None = None,
-) -> None:
+) -> bool:
     """Clean external state only while this room is still durably departed."""
     if _claim_departure_fence(
         transaction,
@@ -524,6 +529,8 @@ def cleanup_fenced_departure(
         expected_membership_epoch=expected_membership_epoch,
     ):
         cleanup()
+        return True
+    return False
 
 
 def retire_owed_departure_reports(transaction: Transaction, principal_id: str, room_id: str) -> None:

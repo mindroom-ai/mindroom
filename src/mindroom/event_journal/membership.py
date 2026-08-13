@@ -152,11 +152,11 @@ class MembershipFence:
             )
             self._log(room_id, outcome)
             self._track(room_id, outcome)
-            if rejoined and outcome.reported_fence_epoch is not None:
+            if rejoined and outcome.reported_rearm_epoch is not None:
                 await self.store.note_membership_restarted(
                     room_id,
                     cleanup=partial(self.clear_departed_room, room_id),
-                    expected_membership_epoch=outcome.reported_fence_epoch,
+                    expected_membership_epoch=outcome.reported_rearm_epoch,
                 )
             else:
                 await self._clear_room(room_id, outcome)

@@ -102,7 +102,11 @@ def own_membership_from_sync(response: nio.SyncResponse, *, self_user_id: str) -
     departure_observation_ids: list[str] = []
     departure_rejoined_after: list[bool] = []
     for room_id, room_info in (*response.rooms.join.items(), *response.rooms.leave.items()):
-        observed = _own_departure_event_ids(room_info.timeline.events, self_user_id)
+        observed, observed_rejoins = _own_departures_in(
+            room_info.timeline.events,
+            self_user_id,
+            final_membership_is_joined=room_id not in left_room_ids,
+        )
         # A room in the leave section departed whether or not the timeline it
         # arrived with is long enough to show the transition.
         count = max(len(observed), 1 if room_id in left_room_ids else 0)
@@ -111,9 +115,7 @@ def own_membership_from_sync(response: nio.SyncResponse, *, self_user_id: str) -
             departure_observation_ids.extend(
                 observed or (_sync_departure_observation_id("classic", response.next_batch, room_id),),
             )
-        departure_rejoined_after.extend(
-            _rejoins_after_departures(count, final_membership_is_joined=room_id not in left_room_ids),
-        )
+        departure_rejoined_after.extend(observed_rejoins or (False,) * count)
     return OwnRoomMembership(
         joined_room_ids=frozenset(response.rooms.join),
         left_room_ids=left_room_ids,
@@ -139,7 +141,13 @@ def own_membership_from_sliding_sync(
     departure_observation_ids: list[str] = []
     departure_rejoined_after: list[bool] = []
     for room_id, room in response.rooms.items():
-        observed = _own_departure_event_ids(room.timeline, self_user_id)
+        is_invite = room.membership == "invite" or (room.membership is None and bool(room.stripped_state))
+        final_membership_is_joined = room.membership not in _DEPARTED_MEMBERSHIPS and not is_invite
+        observed, observed_rejoins = _own_departures_in(
+            room.timeline,
+            self_user_id,
+            final_membership_is_joined=final_membership_is_joined,
+        )
         if room.membership in _DEPARTED_MEMBERSHIPS:
             left_room_ids.add(room_id)
             count = max(len(observed), 1)
@@ -147,16 +155,13 @@ def own_membership_from_sliding_sync(
             departure_observation_ids.extend(
                 observed or (_sync_departure_observation_id("sliding", response.pos, room_id),),
             )
-            departure_rejoined_after.extend(_rejoins_after_departures(count, final_membership_is_joined=False))
+            departure_rejoined_after.extend(observed_rejoins or (False,))
             continue
-        is_invite = room.membership == "invite" or (room.membership is None and bool(room.stripped_state))
         if not is_invite:
             joined_room_ids.add(room_id)
         departures.extend([room_id] * len(observed))
         departure_observation_ids.extend(observed)
-        departure_rejoined_after.extend(
-            _rejoins_after_departures(len(observed), final_membership_is_joined=not is_invite),
-        )
+        departure_rejoined_after.extend(observed_rejoins)
     return OwnRoomMembership(
         joined_room_ids=frozenset(joined_room_ids),
         left_room_ids=frozenset(left_room_ids),
@@ -171,28 +176,36 @@ def _sync_departure_observation_id(sync_kind: str, token: str, room_id: str) -> 
     return f"{sync_kind}:{token}:{room_id}"
 
 
-def _rejoins_after_departures(count: int, *, final_membership_is_joined: bool) -> tuple[bool, ...]:
-    """Return which sequential departures are followed by another membership."""
-    if count == 0:
-        return ()
-    return (True,) * (count - 1) + (final_membership_is_joined,)
-
-
-def _own_departure_event_ids(events: Iterable[object], self_user_id: str) -> tuple[str, ...]:
-    """Return the distinct departures of this account one timeline shows.
+def _own_departures_in(
+    events: Iterable[object],
+    self_user_id: str,
+    *,
+    final_membership_is_joined: bool,
+) -> tuple[tuple[str, ...], tuple[bool, ...]]:
+    """Return distinct departures and the joins that follow each one.
 
     Identity matters as well as count: one timeline can carry two departures,
-    while a replay can carry the same departure again after a rejoin.
+    while a replay can carry the same departure again after a rejoin. Only an
+    ordered join event proves a new membership between two departures; the
+    room section's final state can prove a rejoin only after the last one.
     """
-    return tuple(
-        dict.fromkeys(
-            event.event_id
-            for event in events
-            if isinstance(event, nio.RoomMemberEvent)
-            and event.state_key == self_user_id
-            and event.membership in _DEPARTED_MEMBERSHIPS
-        ),
-    )
+    departure_event_ids: list[str] = []
+    rejoined_after: list[bool] = []
+    seen_departures: set[str] = set()
+    for event in events:
+        if not isinstance(event, nio.RoomMemberEvent) or event.state_key != self_user_id:
+            continue
+        if event.membership in _DEPARTED_MEMBERSHIPS:
+            if event.event_id in seen_departures:
+                continue
+            seen_departures.add(event.event_id)
+            departure_event_ids.append(event.event_id)
+            rejoined_after.append(False)
+        elif event.membership == "join" and rejoined_after:
+            rejoined_after[-1] = True
+    if rejoined_after and final_membership_is_joined:
+        rejoined_after[-1] = True
+    return tuple(departure_event_ids), tuple(rejoined_after)
 
 
 async def run_matrix_sync_forever(
