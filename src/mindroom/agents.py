@@ -1285,12 +1285,12 @@ def apply_tool_approval_capability(
     toolkit.functions = {
         name: function
         for name, function in toolkit.functions.items()
-        if not tool_may_require_approval(config, function.name)
+        if function.requires_confirmation is not True and not tool_may_require_approval(config, function.name)
     }
     toolkit.async_functions = {
         name: function
         for name, function in toolkit.async_functions.items()
-        if not tool_may_require_approval(config, function.name)
+        if function.requires_confirmation is not True and not tool_may_require_approval(config, function.name)
     }
     return toolkit if toolkit.functions or toolkit.async_functions else None
 

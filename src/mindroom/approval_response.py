@@ -120,6 +120,7 @@ class ApprovalResponseCoordinator:
                 dict(tool.tool_args or {}),
                 invoking_agent,
             )
+            requires_approval = requires_approval or tool.requires_confirmation is True
             decisions[tool_call_id] = (
                 None
                 if requires_approval and approver_id is not None
@@ -161,8 +162,9 @@ class ApprovalResponseCoordinator:
     ) -> None:
         """Publish every human-gated card already linked by durable identity."""
         config = self.config()
+        calls_by_id = {call.tool_call_id: call for call in plan.calls}
         for index, (tool, tool_call_id, tool_name, invoking_agent) in enumerate(plan.tools):
-            decision, timeout_seconds = plan.decisions[tool_call_id]
+            decision, _timeout_seconds = plan.decisions[tool_call_id]
             if decision is not None:
                 continue
             sent = await send_suspended_tool_approval(
@@ -180,7 +182,7 @@ class ApprovalResponseCoordinator:
                 continuation_id=continuation.approval_id,
                 continuation_generation=continuation.generation,
                 tool_call_id=tool_call_id,
-                timeout_seconds=timeout_seconds,
+                expires_at_ns=calls_by_id[tool_call_id].expires_at_ns,
             )
             if sent is None:
                 raise RuntimeError(failure_reason)

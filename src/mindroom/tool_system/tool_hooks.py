@@ -27,7 +27,6 @@ from mindroom.hooks import (
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
-from mindroom.sync_bridge_state import sync_tool_bridge_blocked_loop
 from mindroom.timing import elapsed_ms_since, emit_timing_event
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -304,7 +303,7 @@ def _run_coroutine_from_sync(coroutine: _ToolHookResult) -> _ToolHookResult:
 def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> _ToolHookResult:
     """Run a deferred async hook result for Agno's synchronous execute() chain."""
     try:
-        running_loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(_await_result(deferred.awaitable))
 
@@ -318,10 +317,9 @@ def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> _T
         except BaseException as exc:
             error_box.append(exc)
 
-    with sync_tool_bridge_blocked_loop(running_loop):
-        thread = threading.Thread(target=runner, name="mindroom-tool-hook-sync-bridge")
-        thread.start()
-        thread.join()
+    thread = threading.Thread(target=runner, name="mindroom-tool-hook-sync-bridge")
+    thread.start()
+    thread.join()
     if error_box:
         raise error_box[0]
     return result_box[0]

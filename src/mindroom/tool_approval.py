@@ -53,11 +53,9 @@ __all__ = [
     "evaluate_tool_approval",
     "expire_continuation_approval_cards",
     "expire_orphaned_approval_cards_on_startup",
-    "expire_suspended_tool_approval",
     "handle_matrix_approval_action",
     "initialize_approval_runtime",
     "is_process_active_approval_card",
-    "is_process_approval_card",
     "resolve_tool_approval_approver",
     "send_suspended_tool_approval",
     "shutdown_approval_runtime",
@@ -229,7 +227,7 @@ async def send_suspended_tool_approval(
     continuation_id: str,
     continuation_generation: int,
     tool_call_id: str,
-    timeout_seconds: float,
+    expires_at_ns: int,
 ) -> SentApprovalEvent | None:
     """Send a durable card for a paused Agno run without retaining a waiter."""
     manager = approval_manager.get_approval_store()
@@ -246,22 +244,10 @@ async def send_suspended_tool_approval(
         room_id=call.room_id,
         requester_id=call.requester_id,
         approver_user_id=approver,
-        timeout_seconds=timeout_seconds,
+        expires_at_ns=expires_at_ns,
         agent_name=call.agent_name,
         thread_id=call.thread_id,
     )
-
-
-def is_process_approval_card(card_event_id: str) -> bool:
-    """Return whether the current process has seen one approval card id."""
-    manager = approval_manager.get_approval_store()
-    return manager is not None and manager.knows_in_memory_approval_card(card_event_id)
-
-
-def is_process_active_approval_card(card_event_id: str) -> bool:
-    """Return whether one approval card is being settled in this process."""
-    manager = approval_manager.get_approval_store()
-    return manager is not None and manager.has_active_in_memory_approval_card(card_event_id)
 
 
 async def handle_matrix_approval_action(
@@ -284,6 +270,12 @@ async def handle_matrix_approval_action(
         reason=sanitized_reason,
         before_consume=before_consume,
     )
+
+
+def is_process_active_approval_card(card_event_id: str) -> bool:
+    """Return whether one approval card is being settled in this process."""
+    manager = approval_manager.get_approval_store()
+    return manager is not None and manager.has_active_in_memory_approval_card(card_event_id)
 
 
 def initialize_approval_runtime(
@@ -312,19 +304,6 @@ def initialize_approval_runtime(
     )
 
 
-async def expire_suspended_tool_approval(room_id: str, card_event_id: str) -> bool:
-    """Expire one durable continuation card by its Matrix event."""
-    manager = approval_manager.get_approval_store()
-    return (
-        False
-        if manager is None
-        else await manager.expire_detached_card(
-            room_id=room_id,
-            card_event_id=card_event_id,
-        )
-    )
-
-
 async def expire_continuation_approval_cards(continuation_id: str) -> bool:
     """Expire every unresolved Matrix card for one continuation."""
     manager = approval_manager.get_approval_store()
@@ -341,11 +320,6 @@ async def expire_orphaned_approval_cards_on_startup() -> ApprovalStartupSweep:
 
 async def shutdown_approval_runtime(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
     """Stop approval transport work, drop runtime state, and clear script state."""
-    await _shutdown_approval_store(reason=reason)
-
-
-async def _shutdown_approval_store(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
-    """Stop approval transport work, drop the manager, and clear script state."""
     try:
         await approval_manager.shutdown_approval_manager(reason=reason)
     finally:

@@ -51,9 +51,9 @@ from mindroom.matrix.message_builder import build_message_content
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
     ToolApprovalScriptError,
-    _shutdown_approval_store,
     evaluate_tool_approval,
     resolve_tool_approval_approver,
+    shutdown_approval_runtime,
     tool_may_require_approval,
 )
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
@@ -99,9 +99,9 @@ def _recording_scan(
 
 @pytest.fixture(autouse=True)
 def reset_approval_store() -> Generator[None, None, None]:
-    asyncio.run(_shutdown_approval_store())
+    asyncio.run(shutdown_approval_runtime())
     yield
-    asyncio.run(_shutdown_approval_store())
+    asyncio.run(shutdown_approval_runtime())
 
 
 def _config(tmp_path: Path) -> Config:
@@ -660,10 +660,41 @@ async def test_detached_transport_refusal_forgets_the_unsent_card_row(tmp_path: 
             thread_id="$thread",
             requester_id="@user:localhost",
             approver_user_id="@user:localhost",
-            timeout_seconds=30,
+            expires_at_ns=int((datetime.now(UTC) + timedelta(seconds=30)).timestamp() * 1_000_000_000),
         )
 
     assert cards.rows == {}
+
+
+@pytest.mark.asyncio
+async def test_detached_card_uses_the_continuations_absolute_deadline(tmp_path: Path) -> None:
+    """Publication delay must not advertise permission after durable authorization expires."""
+    cards = FakeApprovalCards()
+    expires_at = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+    )
+
+    await store.create_detached_approval(
+        approval_id="approval-deadline",
+        continuation_id="continuation-deadline",
+        continuation_generation=0,
+        tool_call_id="call-deadline",
+        tool_name="dangerous",
+        arguments={},
+        room_id="!room:localhost",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        expires_at_ns=int(expires_at.timestamp() * 1_000_000_000),
+    )
+
+    stored = next(iter(cards.rows.values()))
+    assert stored.card["content"]["expires_at"] == expires_at.isoformat()
 
 
 @pytest.mark.asyncio
@@ -760,7 +791,7 @@ async def test_detached_action_waits_for_durable_card_binding(tmp_path: Path) ->
             thread_id="$thread",
             requester_id="@user:localhost",
             approver_user_id="@user:localhost",
-            timeout_seconds=30,
+            expires_at_ns=int((datetime.now(UTC) + timedelta(seconds=30)).timestamp() * 1_000_000_000),
         ),
     )
     publication.add_done_callback(lambda _future: timeline.append("published"))
@@ -853,7 +884,6 @@ async def test_approval_transport_returns_event_after_successful_send_without_se
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
-    orchestrator._capture_runtime_loop()
 
     client = MagicMock()
     client.user_id = None
@@ -868,7 +898,7 @@ async def test_approval_transport_returns_event_after_successful_send_without_se
     orchestrator.agent_bots = {"router": bot}
     orchestrator._approval_transport.cache_approval_event_now = AsyncMock()
 
-    sent = await orchestrator._approval_transport.send_approval_event_now(
+    sent = await orchestrator._approval_transport.send_approval_event(
         "!room:localhost",
         None,
         {
@@ -895,7 +925,6 @@ def _approval_transport_orchestrator(tmp_path: Path) -> tuple[_MultiAgentOrchest
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
-    orchestrator._capture_runtime_loop()
 
     client = MagicMock()
     client.user_id = "@mindroom_router:localhost"
@@ -925,7 +954,7 @@ async def test_approval_transport_keeps_small_full_arguments_inline(tmp_path: Pa
         "full_arguments": {"content": "x" * 2_000},
         "status": "pending",
     }
-    sent = await orchestrator._approval_transport.send_approval_event_now("!room:localhost", None, content, "txn-1")
+    sent = await orchestrator._approval_transport.send_approval_event("!room:localhost", None, content, "txn-1")
 
     assert sent is not None
     assert sent.sent_content == content
@@ -938,7 +967,7 @@ async def test_approval_transport_offloads_oversized_full_arguments_to_sidecar(t
     client.upload = AsyncMock(return_value=(nio.UploadResponse("mxc://localhost/full-args"), None))
 
     full_arguments = {"content": "word " * 20_000}
-    sent = await orchestrator._approval_transport.send_approval_event_now(
+    sent = await orchestrator._approval_transport.send_approval_event(
         "!room:localhost",
         None,
         {
@@ -983,7 +1012,7 @@ async def test_approval_transport_offloads_encrypted_full_arguments_to_file_side
     upload_sidecar = AsyncMock(return_value=(mxc_uri, file_info))
     monkeypatch.setattr("mindroom.approval_transport.upload_json_sidecar", upload_sidecar)
 
-    sent = await orchestrator._approval_transport.send_approval_event_now(
+    sent = await orchestrator._approval_transport.send_approval_event(
         "!room:localhost",
         None,
         {
@@ -1046,7 +1075,7 @@ async def test_approval_transport_marks_card_non_approvable_when_sidecar_upload_
     orchestrator, client = _approval_transport_orchestrator(tmp_path)
     client.upload = AsyncMock(return_value=(nio.UploadError("boom"), None))
 
-    sent = await orchestrator._approval_transport.send_approval_event_now(
+    sent = await orchestrator._approval_transport.send_approval_event(
         "!room:localhost",
         None,
         {
@@ -1073,7 +1102,6 @@ async def test_approval_notice_replies_to_room_mode_card(tmp_path: Path) -> None
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
-    orchestrator._capture_runtime_loop()
 
     client = MagicMock()
     client.user_id = "@mindroom_router:localhost"
@@ -1105,7 +1133,6 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
-    orchestrator._capture_runtime_loop()
     sent_contents: list[dict[str, Any]] = []
 
     async def room_send(
@@ -1144,7 +1171,7 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
     orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
     orchestrator._approval_transport.cache_approval_event_now = AsyncMock()
 
-    sent = await orchestrator._approval_transport.send_approval_event_now(
+    sent = await orchestrator._approval_transport.send_approval_event(
         "!room:localhost",
         "$thread",
         {
@@ -1156,7 +1183,7 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
         },
         "txn-1",
     )
-    edited = await orchestrator._approval_transport.edit_approval_event_now(
+    edited = await orchestrator._approval_transport.edit_approval_event(
         "!room:localhost",
         "$approval",
         {
@@ -1190,7 +1217,6 @@ async def test_approval_transport_refuses_encrypted_room_without_e2ee(
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
-    orchestrator._capture_runtime_loop()
     monkeypatch.setattr("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False)
 
     room = nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost", encrypted=True)
@@ -1206,7 +1232,7 @@ async def test_approval_transport_refuses_encrypted_room_without_e2ee(
     )
     orchestrator.agent_bots = {"router": router_bot}
 
-    sent = await orchestrator._approval_transport.send_approval_event_now(
+    sent = await orchestrator._approval_transport.send_approval_event(
         "!room:localhost",
         None,
         {
@@ -1217,7 +1243,7 @@ async def test_approval_transport_refuses_encrypted_room_without_e2ee(
         },
         "txn-1",
     )
-    edited = await orchestrator._approval_transport.edit_approval_event_now(
+    edited = await orchestrator._approval_transport.edit_approval_event(
         "!room:localhost",
         "$approval",
         {
@@ -1234,7 +1260,7 @@ async def test_approval_transport_refuses_encrypted_room_without_e2ee(
 
 
 @pytest.mark.asyncio
-async def test_shutdown_approval_store_clears_script_cache_when_manager_shutdown_fails(
+async def test_shutdown_approval_runtime_clears_script_cache_when_manager_shutdown_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     approval_module._SCRIPT_CACHE[("approval.py", 1)] = MagicMock()
@@ -1249,7 +1275,7 @@ async def test_shutdown_approval_store_clears_script_cache_when_manager_shutdown
 
     try:
         with pytest.raises(RuntimeError, match="shutdown failed"):
-            await _shutdown_approval_store()
+            await shutdown_approval_runtime()
     finally:
         monkeypatch.setattr(approval_module.approval_manager, "shutdown_approval_manager", original_shutdown)
 

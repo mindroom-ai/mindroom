@@ -410,6 +410,30 @@ def expire_cards_for_departed_continuations(
         )
 
 
+def fail_continuations_for_departed_card_owner(
+    transaction: Transaction,
+    card_principal_id: str,
+    *,
+    room_id: str,
+    reason: str,
+) -> None:
+    """Wake responder-owned pauses before their departed transport's cards disappear."""
+    transaction.execute(
+        """
+        UPDATE approval_continuations
+        SET state = 'failing', failure_reason = ?, runtime_generation = NULL
+        WHERE state IN ('waiting', 'ready')
+          AND EXISTS (
+              SELECT 1 FROM approval_cards AS cards
+              WHERE cards.principal_id = ? AND cards.room_id = ?
+                AND cards.continuation_id = approval_continuations.approval_id
+                AND cards.resolution_json IS NULL
+          )
+        """,
+        (reason, card_principal_id, room_id),
+    )
+
+
 def claim(
     transaction: Transaction,
     principal_id: str,

@@ -366,10 +366,6 @@ class _MultiAgentOrchestrator:
         self._runtime_shutdown_event = shutdown_event
         return shutdown_event
 
-    def _capture_runtime_loop(self) -> None:
-        """Remember the runtime loop that owns Matrix client I/O."""
-        self._approval_transport.capture_runtime_loop()
-
     async def send_approval_notice(
         self,
         *,
@@ -1003,7 +999,6 @@ class _MultiAgentOrchestrator:
 
     async def initialize(self) -> None:
         """Initialize all managed bots from configuration."""
-        self._capture_runtime_loop()
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 

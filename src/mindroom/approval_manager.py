@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import Future, InvalidStateError
 from contextlib import contextmanager, suppress
@@ -66,7 +65,6 @@ _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request wa
 _DETACHED_REQUEST_REASON = "Original tool request is no longer active."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
-_MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
 _DETACHED_RETRY_INITIAL_SECONDS = 0.25
 _DETACHED_RETRY_MAX_SECONDS = 30.0
 _DETACHED_EXPIRY_SWEEP_SECONDS = 60.0
@@ -99,28 +97,6 @@ class ToolApprovalTransportError(RuntimeError):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
-
-
-class _BoundedCardEventIds:
-    def __init__(self, max_size: int) -> None:
-        self._max_size = max_size
-        self._ids: OrderedDict[str, None] = OrderedDict()
-
-    def add(self, card_event_id: str) -> None:
-        if card_event_id in self._ids:
-            return
-        self._ids[card_event_id] = None
-        while len(self._ids) > self._max_size:
-            self._ids.popitem(last=False)
-
-    def discard(self, card_event_id: str) -> None:
-        self._ids.pop(card_event_id, None)
-
-    def __contains__(self, card_event_id: object) -> bool:
-        return card_event_id in self._ids
-
-    def __len__(self) -> int:
-        return len(self._ids)
 
 
 def _utcnow() -> datetime:
@@ -378,7 +354,6 @@ class _ApprovalManager:
         self._continuation_ready = continuation_ready
         self._live_lock = threading.RLock()
         self._resolving_card_event_ids: set[str] = set()
-        self._resolved_card_event_ids = _BoundedCardEventIds(_MAX_REMEMBERED_TERMINAL_CARD_IDS)
         self._active_approval_sends: set[_ActiveApprovalSend] = set()
         self._post_cancel_cleanup_tasks: set[_PostCancelCleanupTask] = set()
         # Recovery that outlived the request that started it, held so it is
@@ -400,7 +375,7 @@ class _ApprovalManager:
         room_id: str,
         requester_id: str,
         approver_user_id: str,
-        timeout_seconds: float,
+        expires_at_ns: int,
         agent_name: str | None = None,
         thread_id: str | None = None,
     ) -> SentApprovalEvent | None:
@@ -408,7 +383,7 @@ class _ApprovalManager:
         if self._send_event is None or self._current_shutdown_reason() is not None:
             return None
         requested_at = _utcnow()
-        expires_at = requested_at + timedelta(seconds=max(timeout_seconds, 0.0))
+        expires_at = datetime.fromtimestamp(expires_at_ns / 1_000_000_000, tz=UTC)
         event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
         full_arguments = (
             await asyncio.to_thread(_build_full_event_arguments, arguments) if arguments_truncated else None
@@ -887,11 +862,7 @@ class _ApprovalManager:
         if not self._claim_matrix_cleanup(pending.card_event_id):
             return False
         with self._claimed_resolution(pending.card_event_id):
-            delivered = await self._deliver_resolution(pending, stored.resolution or {}, stored.transaction_id)
-            if delivered:
-                with self._live_lock:
-                    self._resolved_card_event_ids.add(pending.card_event_id)
-            return delivered
+            return await self._deliver_resolution(pending, stored.resolution or {}, stored.transaction_id)
 
     async def handle_card_response(
         self,
@@ -904,7 +875,7 @@ class _ApprovalManager:
         before_consume: Callable[[], Awaitable[None]] | None = None,
     ) -> ApprovalActionResult:
         """Resolve one approval action anchored to a Matrix approval-card event id."""
-        if self.knows_in_memory_approval_card(card_event_id):
+        if self.has_active_in_memory_approval_card(card_event_id):
             if before_consume is not None:
                 await before_consume()
             return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
@@ -994,15 +965,13 @@ class _ApprovalManager:
             return None
         if before_consume is not None:
             await before_consume()
-        with self._live_lock:
-            self._resolved_card_event_ids.add(card_event_id)
         if stored is not None:
             self._detached_expiry_wakeup.set()
         return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
 
     async def expire_detached_card(self, *, room_id: str, card_event_id: str) -> bool:  # noqa: PLR0911
         """Expire one continuation card, redelivering any recorded terminal decision."""
-        if self.knows_in_memory_approval_card(card_event_id):
+        if self.has_active_in_memory_approval_card(card_event_id):
             return True
         if self._cards is None:
             return False
@@ -1123,9 +1092,6 @@ class _ApprovalManager:
                 resolved_by=resolved_by,
             )
             delivered = outcome is _ResolutionOutcome.DELIVERED
-            with self._live_lock:
-                if delivered:
-                    self._resolved_card_event_ids.add(pending.card_event_id)
             return ApprovalActionResult(
                 consumed=True,
                 resolved=delivered,
@@ -1889,7 +1855,7 @@ class _ApprovalManager:
 
     def _claim_matrix_cleanup(self, card_event_id: str) -> bool:
         with self._live_lock:
-            if card_event_id in self._resolving_card_event_ids or card_event_id in self._resolved_card_event_ids:
+            if card_event_id in self._resolving_card_event_ids:
                 return False
             self._resolving_card_event_ids.add(card_event_id)
             return True
@@ -1901,11 +1867,6 @@ class _ApprovalManager:
         finally:
             with self._live_lock:
                 self._resolving_card_event_ids.discard(card_event_id)
-
-    def knows_in_memory_approval_card(self, card_event_id: str) -> bool:
-        """Return whether this process has seen one approval card id."""
-        with self._live_lock:
-            return card_event_id in self._resolving_card_event_ids or card_event_id in self._resolved_card_event_ids
 
     def has_active_in_memory_approval_card(self, card_event_id: str) -> bool:
         """Return whether an approval card can still consume in-process actions."""

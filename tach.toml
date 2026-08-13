@@ -584,7 +584,6 @@ depends_on = [
     "mindroom.matrix.message_builder",
     "mindroom.matrix.room_history_reads",
     "mindroom.response_delivery",
-    "mindroom.sync_bridge_state",
     "mindroom.tool_approval",
 ]
 visibility = ["mindroom.orchestrator"]
@@ -2095,15 +2094,6 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.sync_bridge_state"
-depends_on = []
-visibility = [
-    "mindroom.approval_transport",
-    "mindroom.orchestrator",
-    "mindroom.tool_system.tool_hooks",
-]
-
-[[modules]]
 path = "mindroom.matrix.client"
 depends_on = [
     "mindroom.matrix.room_history_reads",
@@ -3246,7 +3236,6 @@ path = "mindroom.tool_system.tool_hooks"
 depends_on = [
     "mindroom.hooks",
     "mindroom.llm_request_logging",
-    "mindroom.sync_bridge_state",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_calls",
     "mindroom.tool_system.worker_routing",
@@ -4591,7 +4580,6 @@ from = ["mindroom.approval_transport"]
 expose = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "ApprovalActionResult",
-    "ApprovalDecision",
     "MatrixApprovalAction",
     "SentApprovalEvent",
     "ToolApprovalCall",
@@ -4600,25 +4588,15 @@ expose = [
     "evaluate_tool_approval",
     "expire_continuation_approval_cards",
     "expire_orphaned_approval_cards_on_startup",
-    "expire_suspended_tool_approval",
     "handle_matrix_approval_action",
     "initialize_approval_runtime",
     "is_process_active_approval_card",
-    "is_process_approval_card",
     "resolve_tool_approval_approver",
     "send_suspended_tool_approval",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
-    "tool_requires_approval_for_openai_compat",
 ]
 from = ["mindroom.tool_approval"]
-
-[[interfaces]]
-expose = [
-    "is_loop_blocked_by_sync_tool_bridge",
-    "sync_tool_bridge_blocked_loop",
-]
-from = ["mindroom.sync_bridge_state"]
 
 [[interfaces]]
 expose = [

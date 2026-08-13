@@ -1287,6 +1287,30 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_default(tmp_path: Path) -> None:
+    """An authored Agno confirmation still requires the requester when MindRoom has no gating rule."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    assert runner.deps.runtime.config.tool_approval.default == "auto_approve"
+    tool = ToolExecution(
+        tool_call_id="call-native",
+        tool_name="native_confirmation",
+        tool_args={},
+        requires_confirmation=True,
+    )
+
+    with patch(
+        "mindroom.approval_response.resolve_tool_approval_approver",
+        return_value="@user:localhost",
+    ):
+        plan = await runner._approval_responses.plan_pause(
+            ((tool, "call-native", "native_confirmation", "general"),),
+            requester_id="@user:localhost",
+        )
+
+    assert plan.calls[0].decision is None
+
+
+@pytest.mark.asyncio
 async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_path: Path) -> None:
     """An attempted FINAL is recovered and completed without invoking Agno twice."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)

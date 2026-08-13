@@ -294,9 +294,11 @@ def _advance_membership_epoch(
     # rows with no reader and no other remover, still answering writes keyed on
     # the card's event rather than on the epoch. Dropped, they simply stop
     # existing at the same moment they stopped meaning anything.
-    transaction.execute(
-        "DELETE FROM approval_cards WHERE principal_id = ? AND room_id = ?",
-        (principal_id, room_id),
+    approvals.fail_continuations_for_departed_card_owner(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        reason="Approval transport left the room.",
     )
     # Approval cards are authored by the router principal, while the paused
     # run belongs to the responding entity principal. Preserve the router's
@@ -306,6 +308,10 @@ def _advance_membership_epoch(
         principal_id,
         room_id=room_id,
         reason="Requesting agent left the room.",
+    )
+    transaction.execute(
+        "DELETE FROM approval_cards WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
     )
     # A paused run owns exactly the source rows this fence is about to settle.
     # Delete the aggregate first so no durable continuation survives with no

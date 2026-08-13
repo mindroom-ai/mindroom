@@ -11,8 +11,6 @@ from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
 from mindroom.tool_approval import (
     MatrixApprovalAction,
     handle_matrix_approval_action,
-    is_process_active_approval_card,
-    is_process_approval_card,
 )
 
 if TYPE_CHECKING:
@@ -130,8 +128,6 @@ async def maybe_handle_tool_approval_reply(
     relates_to = content.get("m.relates_to") if isinstance(content, dict) else None
     if event_info.is_thread and isinstance(relates_to, dict) and relates_to.get("is_falling_back") is True:
         return False
-    if is_process_approval_card(reply_to_event_id) and not is_process_active_approval_card(reply_to_event_id):
-        return True
     return await handle_tool_approval_action(
         room=room,
         sender_id=event.sender,

@@ -38,7 +38,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.room_thread_modes import set_room_thread_mode_override
-from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, _shutdown_approval_store
+from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, shutdown_approval_runtime
 from tests.approval_test_support import FakeApprovalCards
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -1423,7 +1423,7 @@ class TestAgentBot(AgentBotTestBase):
             assert cards.lookups == [("!test:localhost", "$ordinary-message")]
             assert store is get_approval_store()
         finally:
-            await _shutdown_approval_store()
+            await shutdown_approval_runtime()
 
     @pytest.mark.asyncio
     async def test_reply_to_detached_pending_approval_is_consumed_and_expires_card(
@@ -1468,7 +1468,7 @@ class TestAgentBot(AgentBotTestBase):
             assert replacement["status"] == "expired"
             assert replacement["resolution_reason"] == "Original tool request is no longer active."
         finally:
-            await _shutdown_approval_store()
+            await shutdown_approval_runtime()
 
     @pytest.mark.asyncio
     async def test_thread_fallback_to_detached_approval_remains_conversation_input(
@@ -1518,7 +1518,7 @@ class TestAgentBot(AgentBotTestBase):
             assert cards.lookups == []
             editor.assert_not_awaited()
         finally:
-            await _shutdown_approval_store()
+            await shutdown_approval_runtime()
 
     @pytest.mark.asyncio
     async def test_plain_thread_reply_with_approval_store_does_not_require_room_alias(
@@ -1555,7 +1555,7 @@ class TestAgentBot(AgentBotTestBase):
             assert handle_text_event.await_args.args == (room, event)
             assert isinstance(handle_text_event.await_args.kwargs["receipt_time"], float)
         finally:
-            await _shutdown_approval_store()
+            await shutdown_approval_runtime()
 
     @pytest.mark.asyncio
     async def test_interrupted_approval_reply_replay_cannot_become_ai_input(

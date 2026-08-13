@@ -94,6 +94,16 @@ class CompletedApprovalRun:
     metadata_content: dict[str, Any]
 
 
+def _has_unsupported_approval_requirement(requirement: RunRequirement) -> bool:
+    """Return whether MindRoom cannot safely resolve this paused requirement."""
+    return (
+        requirement.needs_user_input
+        or requirement.needs_user_feedback
+        or requirement.needs_external_execution
+        or (not requirement.is_resolved() and not requirement.needs_confirmation)
+    )
+
+
 def apply_exact_approval_decisions(
     requirements: Sequence[RunRequirement],
     *,
@@ -101,6 +111,9 @@ def apply_exact_approval_decisions(
     denial_reasons: Mapping[str, str | None],
 ) -> list[RunRequirement]:
     """Apply decisions only when they exactly identify one persisted call each."""
+    if any(_has_unsupported_approval_requirement(requirement) for requirement in requirements):
+        msg = "Paused run contains an unsupported non-confirmation requirement"
+        raise RuntimeError(msg)
     pending = [requirement for requirement in requirements if requirement.needs_confirmation]
     call_ids: list[str] = []
     for requirement in pending:
@@ -398,6 +411,9 @@ def _paused_attempt(
     run_id: str | None,
 ) -> PausedAttempt | None:
     """Build one restartable pause from Agno's common pause fields."""
+    if any(_has_unsupported_approval_requirement(requirement) for requirement in requirements):
+        msg = "Paused run contains an unsupported non-confirmation requirement"
+        raise RuntimeError(msg)
     pending_requirement_candidates = tuple(
         requirement for requirement in requirements if requirement.needs_confirmation
     )

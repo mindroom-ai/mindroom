@@ -42,8 +42,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.session_ids import create_session_id
-from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
-from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -1394,35 +1392,6 @@ def _request_network_access_bridge(config: Config, runtime_paths: RuntimePaths) 
     )
     assert bridge is not None
     return bridge
-
-
-@pytest.mark.asyncio
-async def test_deferred_sync_bridge_marks_runtime_loop_before_worker_start(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The sync bridge deadlock guard must be active before the worker can run."""
-    runtime_loop = asyncio.get_running_loop()
-    worker_started = threading.Event()
-    marker_observed: list[bool] = []
-    original_start = threading.Thread.start
-
-    def start_and_wait_for_worker(self: threading.Thread) -> None:
-        original_start(self)
-        if self.name == "mindroom-tool-hook-sync-bridge":
-            assert worker_started.wait(timeout=1)
-
-    monkeypatch.setattr(tool_hooks.threading.Thread, "start", start_and_wait_for_worker)
-
-    async def awaitable_result() -> str:
-        marker_observed.append(is_loop_blocked_by_sync_tool_bridge(runtime_loop))
-        worker_started.set()
-        return "done"
-
-    deferred = tool_hooks._run_coroutine_from_sync(awaitable_result())
-    result = tool_hooks._resolve_deferred_sync_result(deferred)
-
-    assert result == "done"
-    assert marker_observed == [True]
 
 
 @pytest.mark.asyncio

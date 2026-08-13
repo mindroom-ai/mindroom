@@ -4222,6 +4222,28 @@ class TestApprovalContinuations:
         assert stored.resolution["status"] == "expired"
         assert stored.resolution["resolution_reason"] == "Requesting agent left the room."
 
+    async def test_router_departure_wakes_the_responder_continuation_to_fail_closed(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """Deleting router-owned cards must not leave their responder-owned pause hidden forever."""
+        router = journal_store.principal("router@shared")
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await self.remember_card(router)
+
+        await router.fence_departure(ROOM, source=DepartureSource.REPORTED)
+
+        continuation = await alice.approval_continuation("approval-1")
+        assert continuation is not None
+        assert continuation.state == "failing"
+        assert continuation.failure_reason == "Approval transport left the room."
+        assert [event.event_id for event in await alice.pending(runtime_generation="replacement-runtime")] == [
+            "$source-1",
+        ]
+        assert await router.pending_approval_cards(room_id=ROOM) == ()
+
 
 class TestConcurrency:
     """Concurrent conversations must not produce lock failures."""

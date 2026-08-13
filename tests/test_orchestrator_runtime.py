@@ -68,7 +68,7 @@ from mindroom.runtime_state import (
     set_runtime_ready,
 )
 from mindroom.startup_errors import PermanentStartupError
-from mindroom.tool_approval import _shutdown_approval_store
+from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import agent_state_root_path
@@ -3139,7 +3139,7 @@ class TestMultiAgentOrchestrator:
             assert get_approval_store() is store
             assert store._cards is router_cards
         finally:
-            await _shutdown_approval_store()
+            await shutdown_approval_runtime()
 
     @pytest.mark.asyncio
     async def test_update_config_uses_custom_config_path(self, tmp_path: Path) -> None:

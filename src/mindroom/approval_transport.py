@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol
 
 import nio
 
@@ -24,7 +24,6 @@ from mindroom.matrix.room_history_reads import (
     find_response_event_ids_via_room_messages,
 )
 from mindroom.response_delivery import ResponseDelivery
-from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     SentApprovalEvent,
@@ -35,7 +34,7 @@ from mindroom.tool_approval import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable
+    from collections.abc import Callable, Iterable
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import (
@@ -48,7 +47,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_TApprovalTransportResult = TypeVar("_TApprovalTransportResult")
 _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS = 1.0
 _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
 _STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION = 10
@@ -134,7 +132,6 @@ class ApprovalMatrixTransport:
     journal_provider: Callable[[], EventJournalStore] | None = None
     entity_configured: Callable[[str], bool] | None = None
     entity_permanently_unavailable: Callable[[str], bool] | None = None
-    _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_done: bool = field(default=False, init=False, repr=False)
@@ -146,16 +143,6 @@ class ApprovalMatrixTransport:
         repr=False,
     )
     _startup_cleanup_attempts: int = field(default=0, init=False, repr=False)
-
-    def capture_runtime_loop(self) -> None:
-        """Remember the runtime loop that owns Matrix client I/O."""
-        runtime_loop = asyncio.get_running_loop()
-        if self._runtime_loop is None:
-            self._runtime_loop = runtime_loop
-            return
-        if self._runtime_loop is not runtime_loop:
-            msg = "MindRoom runtime loop is already bound to a different event loop."
-            raise RuntimeError(msg)
 
     def bind_approval_runtime(self) -> None:
         """Bind approval manager hooks to the current Matrix transport."""
@@ -361,32 +348,6 @@ class ApprovalMatrixTransport:
                 break
         return complete
 
-    async def _run_on_runtime_loop(
-        self,
-        coroutine_factory: Callable[[], Coroutine[Any, Any, _TApprovalTransportResult]],
-    ) -> _TApprovalTransportResult:
-        """Run one coroutine on the runtime loop that owns Matrix client I/O."""
-        runtime_loop = self._runtime_loop
-        if runtime_loop is None or runtime_loop.is_closed():
-            msg = "Approval runtime loop is not available."
-            raise RuntimeError(msg)
-        current_loop = asyncio.get_running_loop()
-        if current_loop is runtime_loop:
-            return await coroutine_factory()
-        if is_loop_blocked_by_sync_tool_bridge(runtime_loop):
-            msg = (
-                "Cannot perform Matrix approval transport while synchronous FunctionCall.execute() "
-                "is blocking the MindRoom runtime loop; use FunctionCall.aexecute() or run execute() "
-                "outside the runtime event loop."
-            )
-            raise ToolApprovalTransportError(msg)
-        future = asyncio.run_coroutine_threadsafe(coroutine_factory(), runtime_loop)
-        try:
-            return await asyncio.wrap_future(future)
-        except asyncio.CancelledError:
-            future.cancel()
-            raise
-
     async def _approval_thread_relation(
         self,
         room_id: str,
@@ -413,18 +374,6 @@ class ApprovalMatrixTransport:
         transaction_id: str,
     ) -> SentApprovalEvent | None:
         """Send one custom approval event into the active Matrix thread."""
-        return await self._run_on_runtime_loop(
-            lambda: self.send_approval_event_now(room_id, thread_id, content, transaction_id),
-        )
-
-    async def send_approval_event_now(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        content: dict[str, Any],
-        transaction_id: str,
-    ) -> SentApprovalEvent | None:
-        """Send one idempotent approval event on the runtime loop."""
         bot = self.bot_provider(ROUTER_AGENT_NAME)
         if bot is None or not bot.running or bot.client is None:
             return None
@@ -466,17 +415,6 @@ class ApprovalMatrixTransport:
         approval_id: str,
     ) -> str | None:
         """Find the Matrix event one unacknowledged card became."""
-        return await self._run_on_runtime_loop(
-            lambda: self.locate_approval_card_now(room_id, card_sender, approval_id),
-        )
-
-    async def locate_approval_card_now(
-        self,
-        room_id: str,
-        card_sender: str,
-        approval_id: str,
-    ) -> str | None:
-        """Read the room for one approval card on the runtime loop."""
         bot = self.transport_bot(room_id)
         if bot is None or bot.client is None:
             msg = f"Router approval transport cannot read {room_id} to locate a card"
@@ -495,9 +433,29 @@ class ApprovalMatrixTransport:
         new_content: dict[str, Any],
     ) -> bool:
         """Edit one previously sent approval event."""
-        return await self._run_on_runtime_loop(
-            lambda: self.edit_approval_event_now(room_id, event_id, new_content),
+        bot = self.transport_bot(room_id)
+        if bot is None or bot.client is None:
+            return False
+        if not can_send_to_encrypted_room(bot.client, room_id, operation="edit_approval_event"):
+            return False
+        replacement = {key: value for key, value in new_content.items() if key != "thread_id"}
+        response = await send_room_event_result(
+            bot.client,
+            room_id,
+            "io.mindroom.tool_approval",
+            build_matrix_edit_content(event_id, replacement),
+            operation="edit_approval_event",
         )
+        if isinstance(response, nio.RoomSendResponse):
+            return True
+        logger.warning(
+            "Failed to edit approval Matrix event",
+            room_id=room_id,
+            event_id=event_id,
+            agent_name=bot.agent_name,
+            response=str(response),
+        )
+        return False
 
     def _bot_has_approval_room(self, bot: _ApprovalTransportBot, room_id: str) -> bool:
         """Return whether one bot can safely post into an approval room."""
@@ -530,37 +488,6 @@ class ApprovalMatrixTransport:
         """Return rooms currently served by router approval transport."""
         bot = self.bot_provider(ROUTER_AGENT_NAME)
         return set() if bot is None or bot.client is None else set(bot.approval_room_ids)
-
-    async def edit_approval_event_now(
-        self,
-        room_id: str,
-        event_id: str,
-        new_content: dict[str, Any],
-    ) -> bool:
-        """Edit one previously sent approval event on the runtime loop."""
-        bot = self.transport_bot(room_id)
-        if bot is None or bot.client is None:
-            return False
-        if not can_send_to_encrypted_room(bot.client, room_id, operation="edit_approval_event"):
-            return False
-        replacement = {key: value for key, value in new_content.items() if key != "thread_id"}
-        response = await send_room_event_result(
-            bot.client,
-            room_id,
-            "io.mindroom.tool_approval",
-            build_matrix_edit_content(event_id, replacement),
-            operation="edit_approval_event",
-        )
-        if isinstance(response, nio.RoomSendResponse):
-            return True
-        logger.warning(
-            "Failed to edit approval Matrix event",
-            room_id=room_id,
-            event_id=event_id,
-            agent_name=bot.agent_name,
-            response=str(response),
-        )
-        return False
 
     async def send_notice(
         self,

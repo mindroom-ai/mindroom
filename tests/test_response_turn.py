@@ -313,6 +313,76 @@ def test_paused_attempt_rejects_duplicate_requirement_call_ids() -> None:
         )
 
 
+def test_paused_attempt_rejects_mixed_unresolved_hitl_requirements() -> None:
+    """MindRoom must not show an approval card when the same run also needs unsupported user input."""
+    confirmation = RunRequirement(
+        ToolExecution(
+            tool_call_id="confirm-call",
+            tool_name="dangerous",
+            requires_confirmation=True,
+        ),
+    )
+    user_input = RunRequirement(
+        ToolExecution(
+            tool_call_id="input-call",
+            tool_name="needs_input",
+            requires_user_input=True,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported non-confirmation"):
+        response_turn_module._paused_attempt(
+            tools=(),
+            requirements=(confirmation, user_input),
+            session_id="session-1",
+            run_id="run-1",
+        )
+
+
+def test_exact_approval_decisions_reject_mixed_unresolved_hitl_requirements() -> None:
+    """A persisted mixed pause must fail closed instead of executing a tool with missing input."""
+    confirmation = RunRequirement(
+        ToolExecution(
+            tool_call_id="confirm-call",
+            tool_name="dangerous",
+            requires_confirmation=True,
+        ),
+    )
+    user_input = RunRequirement(
+        ToolExecution(
+            tool_call_id="input-call",
+            tool_name="needs_input",
+            requires_user_input=True,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported non-confirmation"):
+        response_turn_module.apply_exact_approval_decisions(
+            (confirmation, user_input),
+            decisions={"confirm-call": True},
+            denial_reasons={"confirm-call": None},
+        )
+
+
+def test_exact_approval_decisions_reject_one_call_with_confirmation_and_input() -> None:
+    """Confirmation must not execute a call that still needs a separate input answer."""
+    mixed = RunRequirement(
+        ToolExecution(
+            tool_call_id="mixed-call",
+            tool_name="dangerous_with_input",
+            requires_confirmation=True,
+            requires_user_input=True,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported non-confirmation"):
+        response_turn_module.apply_exact_approval_decisions(
+            (mixed,),
+            decisions={"mixed-call": True},
+            denial_reasons={"mixed-call": None},
+        )
+
+
 @pytest.mark.asyncio
 async def test_streaming_paused_attempt_escapes_without_recording_terminal_interruption() -> None:
     """Streaming must release the response lifecycle at the same persisted pause boundary."""
