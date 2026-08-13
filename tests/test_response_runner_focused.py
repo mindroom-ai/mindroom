@@ -1638,6 +1638,8 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     continue_run = MagicMock(wraps=agent.acontinue_run)
     knowledge = MagicMock()
+    refresh_scheduler = MagicMock()
+    runner.deps.runtime.orchestrator = SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler)
 
     with (
         patch.object(
@@ -1664,6 +1666,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     assert bool(executed) is approved
     resolve_knowledge.assert_called_once_with("general", execution_identity=identity)
     assert create_agent.call_args.kwargs["knowledge"] is knowledge
+    assert create_agent.call_args.kwargs["refresh_scheduler"] is refresh_scheduler
     continued_requirement = continue_run.call_args.kwargs["requirements"][0]
     assert continued_requirement.tool_execution.confirmed is approved
     assert continued_requirement.tool_execution.confirmation_note == (None if approved else reason)

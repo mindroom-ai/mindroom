@@ -144,6 +144,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import OutboxView
     from mindroom.history.types import HistoryScope
     from mindroom.knowledge import KnowledgeAccessSupport
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.identity import MatrixID
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
@@ -558,7 +559,13 @@ class ResponseRunner:
             client=self._client,
             tool_runtime=self.deps.tool_runtime,
             knowledge_access=self.deps.knowledge_access,
+            refresh_scheduler=self._knowledge_refresh_scheduler,
         )
+
+    def _knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler | None:
+        """Return the current orchestrator scheduler when this runner is managed."""
+        orchestrator = self.deps.runtime.orchestrator
+        return orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
 
     def _approval_runtime_generation(self) -> str:
         """Return the orchestrator generation that owns live continuation work."""
@@ -1325,7 +1332,6 @@ class ResponseRunner:
         decisions = {call.tool_call_id: call.decision is ContinuationDecision.APPROVED for call in continuation.calls}
         denial_reasons = {call.tool_call_id: call.reason for call in continuation.calls}
         if continuation.entity_kind == "team":
-            orchestrator = self.deps.runtime.orchestrator
 
             async def continue_team() -> CompletedApprovalRun | PausedAttempt:
                 return await continue_paused_team_run(
@@ -1349,7 +1355,7 @@ class ResponseRunner:
                     else continuation.runtime_model_name,
                     decisions=decisions,
                     denial_reasons=denial_reasons,
-                    refresh_scheduler=(orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None),
+                    refresh_scheduler=self._knowledge_refresh_scheduler(),
                     history_scope=continuation.history_scope,
                     tool_trace_collector=tool_trace_collector,
                 )
@@ -3229,11 +3235,7 @@ class ResponseRunner:
                 run_metadata_collector=run_metadata_content,
                 execution_identity=runtime.tool_dispatch.execution_identity,
                 compaction_lifecycle=compaction_lifecycle,
-                refresh_scheduler=(
-                    self.deps.runtime.orchestrator.knowledge_refresh_scheduler
-                    if self.deps.runtime.orchestrator is not None
-                    else None
-                ),
+                refresh_scheduler=self._knowledge_refresh_scheduler(),
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
                 supports_native_tool_approval=True,
@@ -3325,11 +3327,7 @@ class ResponseRunner:
             run_metadata_collector=run_metadata_content,
             execution_identity=runtime.tool_dispatch.execution_identity,
             compaction_lifecycle=compaction_lifecycle,
-            refresh_scheduler=(
-                self.deps.runtime.orchestrator.knowledge_refresh_scheduler
-                if self.deps.runtime.orchestrator is not None
-                else None
-            ),
+            refresh_scheduler=self._knowledge_refresh_scheduler(),
             turn_recorder=turn_recorder,
             pipeline_timing=pipeline_timing,
             supports_native_tool_approval=True,

@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge import KnowledgeAccessSupport
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolDispatchContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -42,6 +43,7 @@ class AgentApprovalExecution:
     client: Callable[[], nio.AsyncClient]
     tool_runtime: ToolRuntimeSupport
     knowledge_access: KnowledgeAccessSupport
+    refresh_scheduler: Callable[[], KnowledgeRefreshScheduler | None]
 
     async def continue_run(  # noqa: C901
         self,
@@ -71,6 +73,7 @@ class AgentApprovalExecution:
             session_id=continuation.session_id,
             active_model_name=continuation.runtime_model_name,
             knowledge=knowledge,
+            refresh_scheduler=self.refresh_scheduler(),
             dynamic_tool_continuation=True,
             supports_native_tool_approval=True,
         )
