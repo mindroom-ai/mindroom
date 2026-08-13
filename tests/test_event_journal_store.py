@@ -43,6 +43,8 @@ from mindroom.event_journal import (
     EventKind,
     HistoryRecoveryOutcome,
     InboundEvent,
+    InteractiveQuestion,
+    InteractiveSelection,
     ProjectedEvent,
     SemanticConsumer,
     TerminalTurnWrite,
@@ -463,6 +465,47 @@ async def refreshes(
     """Return the refetch debts one conversation read reports, the way production learns them."""
     page = await store.read_conversation(room_id=ROOM, thread_id=thread_id, limit=limit)
     return page.refresh_pending
+
+
+def _interactive_question(
+    question_event_id: str,
+    *,
+    room_id: str = ROOM,
+    thread_id: str | None = "$thread",
+) -> InteractiveQuestion:
+    """Return one literal journal-owned question fixture."""
+    return InteractiveQuestion(
+        question_event_id=question_event_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        creator_agent="agent",
+        question_text="Choose",
+        options={"1": "one", "👍": "one"},
+        option_labels={"1": "One", "👍": "One"},
+    )
+
+
+async def _interactive_question_rows(store: EventJournalStore) -> list[dict[str, object]]:
+    """Return journal-owned questions as plain test evidence."""
+    rows = await store.backend.read(
+        lambda transaction: transaction.fetchall(
+            """
+            SELECT principal_id, question_event_id, room_id, thread_id, creator_agent,
+                   question_json, membership_epoch, claimed_source_event_id
+            FROM interactive_questions
+            ORDER BY question_event_id
+            """,
+        ),
+    )
+    return [dict(row) for row in rows]
+
+
+async def _membership_accepts_question(store: PrincipalStore, epoch: int) -> bool:
+    """Probe active membership through the real guarded registration capability."""
+    return await store.register_interactive_question_for_epoch(
+        epoch,
+        _interactive_question("$membership-probe"),
+    )
 
 
 class TestPrincipalIsolation:
@@ -1421,6 +1464,364 @@ class TestLatestVisibleEvent:
         assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") is None
 
 
+class TestInteractiveQuestionRegistration:
+    """Question registration shares the membership row's transaction boundary."""
+
+    async def test_interactive_question_registration_is_durable_and_idempotent(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A replay keeps the exact question payload users originally saw."""
+        await admit(alice, "$turn")
+        question = _interactive_question("$question")
+
+        assert await alice.register_interactive_question_for_turn("$turn", question)
+        assert await alice.register_interactive_question_for_turn("$turn", question)
+
+        assert await _interactive_question_rows(journal_store) == [
+            {
+                "principal_id": "agent@alice",
+                "question_event_id": "$question",
+                "room_id": ROOM,
+                "thread_id": "$thread",
+                "creator_agent": "agent",
+                "question_json": json.dumps(
+                    {
+                        "option_labels": {"1": "One", "👍": "One"},
+                        "options": {"1": "one", "👍": "one"},
+                        "question_text": "Choose",
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                "membership_epoch": 0,
+                "claimed_source_event_id": None,
+            },
+        ]
+
+    async def test_stale_and_fenced_memberships_cannot_register_questions(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Registration cannot repopulate questions after the authorizing membership ends."""
+        await admit(alice, "$old-turn")
+        old_epoch = await alice.membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+
+        assert not await alice.register_interactive_question_for_turn(
+            "$old-turn",
+            _interactive_question("$fenced-turn"),
+        )
+        assert not await alice.register_interactive_question_for_epoch(
+            old_epoch,
+            _interactive_question("$fenced-epoch"),
+        )
+
+        await alice.note_membership_restarted(ROOM)
+
+        assert not await alice.register_interactive_question_for_turn(
+            "$old-turn",
+            _interactive_question("$stale-turn"),
+        )
+        assert not await alice.register_interactive_question_for_epoch(
+            old_epoch,
+            _interactive_question("$stale-epoch"),
+        )
+        assert await _interactive_question_rows(journal_store) == []
+
+    async def test_forget_interactive_question_removes_only_the_target(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Editing one message cannot remove another active question."""
+        await admit(alice, "$turn")
+        for event_id in ("$first", "$second"):
+            assert await alice.register_interactive_question_for_turn(
+                "$turn",
+                _interactive_question(event_id),
+            )
+
+        await alice.forget_interactive_question("$first")
+
+        rows = await _interactive_question_rows(journal_store)
+        assert [row["question_event_id"] for row in rows] == ["$second"]
+
+
+class TestInteractiveQuestionClaims:
+    """A journal source and its question become one replayable owner."""
+
+    async def test_interactive_reaction_claim_is_atomic_and_replayable(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Replaying one reaction returns the same selection instead of losing its claim."""
+        await admit(alice, "$turn")
+        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$question"))
+        await admit(alice, "$reaction", kind=EventKind.REACTION)
+        expected = InteractiveSelection(
+            question_event_id="$question",
+            question_text="Choose",
+            selection_key="👍",
+            selected_label="One",
+            selected_value="one",
+            thread_id="$thread",
+        )
+
+        assert (
+            await alice.claim_interactive_reaction(
+                source_event_id="$reaction",
+                question_event_id="$question",
+                selection_key="👍",
+                creator_agent="agent",
+            )
+            == expected
+        )
+        assert (
+            await alice.claim_interactive_reaction(
+                source_event_id="$reaction",
+                question_event_id="$question",
+                selection_key="👍",
+                creator_agent="agent",
+            )
+            == expected
+        )
+
+        reaction = await alice.load_event("$reaction")
+        assert reaction is not None
+        assert reaction.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
+        rows = await _interactive_question_rows(journal_store)
+        assert rows[0]["claimed_source_event_id"] == "$reaction"
+
+    async def test_another_reaction_cannot_steal_an_interactive_claim(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A losing reaction keeps no semantic claim that would hide other routing."""
+        await admit(alice, "$turn")
+        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$question"))
+        await admit(alice, "$winner", kind=EventKind.REACTION)
+        await admit(alice, "$loser", kind=EventKind.REACTION)
+        assert await alice.claim_interactive_reaction(
+            source_event_id="$winner",
+            question_event_id="$question",
+            selection_key="1",
+            creator_agent="agent",
+        )
+
+        assert (
+            await alice.claim_interactive_reaction(
+                source_event_id="$loser",
+                question_event_id="$question",
+                selection_key="1",
+                creator_agent="agent",
+            )
+            is None
+        )
+
+        loser = await alice.load_event("$loser")
+        assert loser is not None
+        assert loser.semantic_consumer is None
+        rows = await _interactive_question_rows(journal_store)
+        assert rows[0]["claimed_source_event_id"] == "$winner"
+
+    async def test_invalid_reaction_claims_leave_both_records_unchanged(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Wrong options and agents cannot partially claim the source or question."""
+        await admit(alice, "$turn")
+        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$question"))
+        await admit(alice, "$reaction", kind=EventKind.REACTION)
+
+        assert (
+            await alice.claim_interactive_reaction(
+                source_event_id="$reaction",
+                question_event_id="$question",
+                selection_key="missing",
+                creator_agent="agent",
+            )
+            is None
+        )
+        assert (
+            await alice.claim_interactive_reaction(
+                source_event_id="$reaction",
+                question_event_id="$question",
+                selection_key="1",
+                creator_agent="other-agent",
+            )
+            is None
+        )
+
+        reaction = await alice.load_event("$reaction")
+        assert reaction is not None
+        assert reaction.semantic_consumer is None
+        rows = await _interactive_question_rows(journal_store)
+        assert rows[0]["claimed_source_event_id"] is None
+
+    async def test_interactive_text_claim_chooses_the_oldest_question_and_replays_it(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Database order replaces process-dictionary insertion order deterministically."""
+        await admit(alice, "$turn")
+        for event_id in ("$first", "$second"):
+            assert await alice.register_interactive_question_for_turn("$turn", _interactive_question(event_id))
+        await admit(alice, "$answer", thread_id="$thread")
+        expected = InteractiveSelection(
+            question_event_id="$first",
+            question_text="Choose",
+            selection_key="1",
+            selected_label="One",
+            selected_value="one",
+            thread_id="$thread",
+        )
+
+        assert (
+            await alice.claim_interactive_text(
+                source_event_id="$answer",
+                selection_key="1",
+                creator_agent="agent",
+            )
+            == expected
+        )
+        assert (
+            await alice.claim_interactive_text(
+                source_event_id="$answer",
+                selection_key="1",
+                creator_agent="agent",
+            )
+            == expected
+        )
+
+        rows = await _interactive_question_rows(journal_store)
+        assert [row["claimed_source_event_id"] for row in rows] == ["$answer", None]
+
+    async def test_room_level_text_claim_matches_a_room_level_question(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """SQL NULL thread identity must preserve room-level numeric answers."""
+        await admit(alice, "$turn")
+        assert await alice.register_interactive_question_for_turn(
+            "$turn",
+            _interactive_question("$question", thread_id=None),
+        )
+        await admit(alice, "$answer")
+
+        selection = await alice.claim_interactive_text(
+            source_event_id="$answer",
+            selection_key="1",
+            creator_agent="agent",
+        )
+
+        assert selection is not None
+        assert selection.question_event_id == "$question"
+        assert selection.thread_id is None
+
+    async def test_concurrent_text_answers_cannot_both_claim_one_question(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The journal chooses one source owner when two numeric answers race."""
+        await admit(alice, "$turn")
+        assert await alice.register_interactive_question_for_turn(
+            "$turn",
+            _interactive_question("$question"),
+        )
+        await admit(alice, "$first-answer", thread_id="$thread")
+        await admit(alice, "$second-answer", thread_id="$thread")
+
+        claims = await asyncio.gather(
+            alice.claim_interactive_text(
+                source_event_id="$first-answer",
+                selection_key="1",
+                creator_agent="agent",
+            ),
+            alice.claim_interactive_text(
+                source_event_id="$second-answer",
+                selection_key="1",
+                creator_agent="agent",
+            ),
+        )
+
+        assert sum(selection is not None for selection in claims) == 1
+
+
+class TestInteractiveQuestionConsumption:
+    """Terminal sources and membership changes retire their owned questions."""
+
+    async def test_settling_a_claimed_source_consumes_only_its_question(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Question consumption commits with the source's terminal journal fact."""
+        await admit(alice, "$turn")
+        for event_id in ("$claimed", "$active"):
+            assert await alice.register_interactive_question_for_turn("$turn", _interactive_question(event_id))
+        await admit(alice, "$reaction", kind=EventKind.REACTION)
+        assert await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+            question_event_id="$claimed",
+            selection_key="1",
+            creator_agent="agent",
+        )
+
+        await alice.settle_many(("$reaction",))
+
+        rows = await _interactive_question_rows(journal_store)
+        assert [row["question_event_id"] for row in rows] == ["$active"]
+
+    async def test_settling_an_unrelated_source_keeps_active_questions(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Only the source that owns a claim can consume its question."""
+        await admit(alice, "$turn")
+        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$question"))
+        await admit(alice, "$other")
+
+        await alice.settle("$other")
+
+        rows = await _interactive_question_rows(journal_store)
+        assert [row["question_event_id"] for row in rows] == ["$question"]
+
+    async def test_departure_drops_active_and_claimed_questions_for_the_room(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """The membership fence and its derived-question deletion are one transaction."""
+        await admit(alice, "$turn")
+        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$active"))
+        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$claimed"))
+        assert await alice.register_interactive_question_for_epoch(
+            0,
+            _interactive_question("$other-room", room_id=OTHER_ROOM),
+        )
+        await admit(alice, "$reaction", kind=EventKind.REACTION)
+        assert await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+            question_event_id="$claimed",
+            selection_key="1",
+            creator_agent="agent",
+        )
+
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+
+        rows = await _interactive_question_rows(journal_store)
+        assert [row["question_event_id"] for row in rows] == ["$other-room"]
+
+
 class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
     """A turn that outlived its membership must not answer into the next one.
 
@@ -1581,74 +1982,6 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
 
         assert not await alice.turn_membership_is_current(turn_id="$turn", room_id=ROOM)
 
-    async def test_stale_turn_cannot_register_after_rejoin(self, alice: PrincipalStore) -> None:
-        """A post-delivery side effect must retain the membership that authorized its turn."""
-        await admit(alice, "$turn")
-        registered: list[str] = []
-
-        assert await alice.run_if_turn_membership_current(
-            turn_id="$turn",
-            room_id=ROOM,
-            operation=lambda: registered.append("current"),
-        )
-
-        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
-        await alice.note_membership_restarted(ROOM)
-
-        assert not await alice.run_if_turn_membership_current(
-            turn_id="$turn",
-            room_id=ROOM,
-            fallback_membership_epoch=await alice.membership_epoch(ROOM),
-            operation=lambda: registered.append("stale"),
-        )
-        assert registered == ["current"]
-
-    async def test_stale_epoch_cannot_register_after_rejoin(self, alice: PrincipalStore) -> None:
-        """Direct Matrix tools retain the target-room epoch captured before transport."""
-        expected_epoch = await alice.membership_epoch(ROOM)
-        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
-        await alice.note_membership_restarted(ROOM)
-        registered: list[str] = []
-
-        accepted = await alice.run_if_membership_epoch(
-            room_id=ROOM,
-            expected_membership_epoch=expected_epoch,
-            operation=lambda: registered.append("stale"),
-        )
-
-        assert not accepted
-        assert not await alice.run_if_turn_membership_current(
-            turn_id="$synthetic-turn",
-            room_id=ROOM,
-            fallback_membership_epoch=expected_epoch,
-            operation=lambda: registered.append("stale synthetic"),
-        )
-        assert registered == []
-
-    async def test_current_epoch_cannot_register_until_membership_restarts(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A departed room's advanced epoch is not an active membership."""
-        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
-        fenced_epoch = await alice.membership_epoch(ROOM)
-        registered: list[str] = []
-
-        assert not await alice.run_if_membership_epoch(
-            room_id=ROOM,
-            expected_membership_epoch=fenced_epoch,
-            operation=lambda: registered.append("departed"),
-        )
-
-        await alice.note_membership_restarted(ROOM)
-
-        assert await alice.run_if_membership_epoch(
-            room_id=ROOM,
-            expected_membership_epoch=fenced_epoch,
-            operation=lambda: registered.append("rejoined"),
-        )
-        assert registered == ["rejoined"]
-
     async def test_one_rooms_fence_does_not_silence_another_room(self, alice: PrincipalStore) -> None:
         """Leaving one room says nothing about a turn running in a different one."""
         await admit(alice, "$turn")
@@ -1776,32 +2109,19 @@ class TestMembershipEpoch:
             event_class=EventClass.CONTEXT_ONLY,
         )
         await alice.admit(join, None)
-        cleanups: list[str] = []
-
         await alice.close_preceding_reported_departure(
             ROOM,
             join.event_id,
-            lambda: cleanups.append("joined"),
         )
-        assert await alice.run_if_membership_epoch(
-            room_id=ROOM,
-            expected_membership_epoch=1,
-            operation=lambda: None,
-        )
+        assert await _membership_accepts_question(alice, 1)
 
         await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
         await alice.close_preceding_reported_departure(
             ROOM,
             join.event_id,
-            lambda: cleanups.append("stale"),
         )
 
-        assert cleanups == ["joined"]
-        assert not await alice.run_if_membership_epoch(
-            room_id=ROOM,
-            expected_membership_epoch=2,
-            operation=lambda: None,
-        )
+        assert not await _membership_accepts_question(alice, 2)
 
     async def test_an_old_join_cannot_rearm_a_newer_local_departure(
         self,
@@ -1825,7 +2145,7 @@ class TestMembershipEpoch:
                     report_observation_id=event_id,
                 )
             else:
-                await alice.close_preceding_reported_departure(ROOM, event_id, lambda: None)
+                await alice.close_preceding_reported_departure(ROOM, event_id)
 
         await alice.fence_departure(
             ROOM,
@@ -1838,11 +2158,7 @@ class TestMembershipEpoch:
             report_observation_id="$leave-2",
         )
 
-        assert not await alice.run_if_membership_epoch(
-            room_id=ROOM,
-            expected_membership_epoch=2,
-            operation=lambda: None,
-        )
+        assert not await _membership_accepts_question(alice, 2)
 
     async def test_a_join_closes_a_preceding_truncated_departure_report(
         self,
@@ -1861,13 +2177,9 @@ class TestMembershipEpoch:
         )
         await alice.admit(join, None)
 
-        await alice.close_preceding_reported_departure(ROOM, join.event_id, lambda: None)
+        await alice.close_preceding_reported_departure(ROOM, join.event_id)
 
-        assert await alice.run_if_membership_epoch(
-            room_id=ROOM,
-            expected_membership_epoch=1,
-            operation=lambda: None,
-        )
+        assert await _membership_accepts_question(alice, 1)
 
     async def test_hydration_is_recorded_per_membership(self, alice: PrincipalStore) -> None:
         """Hydration is recorded per membership."""
@@ -2659,58 +2971,6 @@ def _watch_until_queued_or_finished(
             time.sleep(_QUEUE_POLL_SECONDS)
 
 
-class TestDepartureCleanupAndRejoinAreCrossProcessOrdered:
-    """Departure cleanup and rejoin share one PostgreSQL membership-row lock."""
-
-    async def test_rejoin_waits_for_departure_cleanup_claim(
-        self,
-        rival_stores: RivalStores,
-    ) -> None:
-        """A second store cannot rearm a room while old-state cleanup owns it."""
-        principal_id = "agent@alice"
-        first = rival_stores.first.principal(principal_id)
-        second = rival_stores.second.principal(principal_id)
-        await first.fence_departure(ROOM, source=DepartureSource.REPORTED)
-        cleanup_claimed = threading.Event()
-        release_cleanup = threading.Event()
-        operation_order: list[str] = []
-
-        def pause_after_claim() -> None:
-            cleanup_claimed.set()
-            assert release_cleanup.wait(_WORKER_WAIT_SECONDS), "the departure cleanup was never released"
-
-        cleaning = EventJournalStore(
-            backend=_PausingBackend(
-                rival_stores.first.backend,
-                pause_after_claim,
-                statement_matches=lambda sql: "UPDATE room_membership SET departure_fenced" in sql,
-            ),
-        ).principal(principal_id)
-        cleanup = asyncio.create_task(
-            cleaning.cleanup_fenced_departure(ROOM, lambda: operation_order.append("departure cleanup")),
-        )
-        try:
-            await asyncio.to_thread(cleanup_claimed.wait, _WORKER_WAIT_SECONDS)
-            assert cleanup_claimed.is_set(), "the departure cleanup never claimed the membership row"
-            rejoin = asyncio.create_task(
-                second.note_membership_restarted(ROOM, cleanup=lambda: operation_order.append("rejoin cleanup")),
-            )
-            await _await_queued_racers(
-                rival_stores.database_url,
-                application_name=rival_stores.racer_application_name,
-                expected=1,
-            )
-            assert not rejoin.done()
-
-            release_cleanup.set()
-            await asyncio.gather(cleanup, rejoin)
-        finally:
-            release_cleanup.set()
-            await asyncio.gather(cleanup, return_exceptions=True)
-
-        assert operation_order == ["departure cleanup", "rejoin cleanup"]
-
-
 class TestInteractiveRegistrationAndDepartureAreCrossProcessOrdered:
     """Question registration and departure share one PostgreSQL membership-row lock."""
 
@@ -2725,7 +2985,6 @@ class TestInteractiveRegistrationAndDepartureAreCrossProcessOrdered:
         await admit(first, "$turn")
         registration_claimed = threading.Event()
         release_registration = threading.Event()
-        operation_order: list[str] = []
 
         def pause_after_claim() -> None:
             registration_claimed.set()
@@ -2739,24 +2998,16 @@ class TestInteractiveRegistrationAndDepartureAreCrossProcessOrdered:
             ),
         ).principal(principal_id)
         registration = asyncio.create_task(
-            registering.run_if_turn_membership_current(
-                turn_id="$turn",
-                room_id=ROOM,
-                operation=lambda: operation_order.append("registration"),
+            registering.register_interactive_question_for_turn(
+                "$turn",
+                _interactive_question("$question"),
             ),
         )
         try:
             await asyncio.to_thread(registration_claimed.wait, _WORKER_WAIT_SECONDS)
             assert registration_claimed.is_set(), "the registration never claimed the membership row"
 
-            async def fence_and_cleanup() -> None:
-                await second.fence_departure(ROOM, source=DepartureSource.REPORTED)
-                await second.cleanup_fenced_departure(
-                    ROOM,
-                    lambda: operation_order.append("departure cleanup"),
-                )
-
-            departure = asyncio.create_task(fence_and_cleanup())
+            departure = asyncio.create_task(second.fence_departure(ROOM, source=DepartureSource.REPORTED))
             await _await_queued_racers(
                 rival_stores.database_url,
                 application_name=rival_stores.racer_application_name,
@@ -2771,7 +3022,7 @@ class TestInteractiveRegistrationAndDepartureAreCrossProcessOrdered:
             await asyncio.gather(registration, return_exceptions=True)
 
         assert accepted
-        assert operation_order == ["registration", "departure cleanup"]
+        assert await _interactive_question_rows(rival_stores.first) == []
 
 
 class TestAFenceCannotBeSteppedOverByAConcurrentWalk:

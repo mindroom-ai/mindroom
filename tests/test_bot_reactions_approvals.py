@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from contextlib import nullcontext, suppress
+from contextlib import AbstractContextManager, nullcontext, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -27,7 +27,12 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.event_journal import DepartureSource, EventClass, EventKind, SemanticConsumer
+from mindroom.event_journal import (
+    EventClass,
+    EventKind,
+    InteractiveQuestion,
+    SemanticConsumer,
+)
 from mindroom.handled_turns import TurnRecord, with_user_stop
 from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
@@ -156,29 +161,33 @@ def _claimed_test_selection(
     *,
     room_id: str = "!test:localhost",
 ) -> tuple[interactive.InteractiveSelection, MessageTarget]:
-    """Create one claimed interactive selection and its canonical target."""
-    question = interactive._InteractiveQuestion(
-        room_id=room_id,
-        thread_id="$thread-a",
-        options={"👍": "Selected"},
-        creator_agent=bot.agent_name,
-    )
+    """Create one interactive selection and its canonical target."""
     selection = interactive.InteractiveSelection(
         question_event_id="$question",
         question_text="Choose one",
         selection_key="👍",
         selected_label="Selected",
         selected_value="Selected",
-        thread_id=question.thread_id,
-        claimed_question=question,
+        thread_id="$thread-a",
     )
-    interactive._claimed_questions[selection.question_event_id] = question
     target = bot._conversation_resolver.build_message_target(
         room_id=room_id,
         thread_id=selection.thread_id,
         reply_to_event_id=selection.question_event_id,
     )
     return selection, target
+
+
+def _mock_interactive_claim(
+    bot: AgentBot,
+    selection: interactive.InteractiveSelection | None,
+) -> AbstractContextManager[AsyncMock]:
+    """Replace one bot's journal-owned interactive claim boundary."""
+    return patch.object(
+        unwrap_extracted_collaborator(bot._journal_dispatcher),
+        "claim_interactive_reaction",
+        new=AsyncMock(return_value=selection),
+    )
 
 
 def _install_reaction_recorder(bot: AgentBot) -> list[str]:
@@ -295,7 +304,7 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
 
-        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
+        with _mock_interactive_claim(bot, None):
             await _dispatch_reaction(bot, room, event)
 
         assert seen == [("👍", "$question", "$thread-root")]
@@ -322,20 +331,16 @@ class TestAgentBot(AgentBotTestBase):
         room.canonical_alias = None
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         replace_reaction_dispatcher_deps(bot, handle_interactive_selection=AsyncMock())
+        selection = interactive.InteractiveSelection(
+            question_event_id="$question",
+            question_text="Choose one",
+            selection_key="1",
+            selected_label="Selected",
+            selected_value="Selected",
+            thread_id=None,
+        )
 
-        with patch(
-            "mindroom.bot.interactive.handle_reaction",
-            new=AsyncMock(
-                return_value=interactive.InteractiveSelection(
-                    question_event_id="$question",
-                    question_text="Choose one",
-                    selection_key="1",
-                    selected_label="Selected",
-                    selected_value="Selected",
-                    thread_id=None,
-                ),
-            ),
-        ):
+        with _mock_interactive_claim(bot, selection):
             await _dispatch_reaction(bot, room, event)
 
         await bot._response_runner.drain_inbox_responses()
@@ -370,10 +375,7 @@ class TestAgentBot(AgentBotTestBase):
                 "semantic_consumer",
                 new=MagicMock(return_value=SemanticConsumer.INTERACTIVE_REACTION),
             ),
-            patch(
-                "mindroom.bot.interactive.handle_reaction",
-                new=AsyncMock(return_value=None),
-            ) as interactive_handler,
+            _mock_interactive_claim(bot, None) as interactive_handler,
         ):
             await _dispatch_reaction(bot, room, event)
 
@@ -424,18 +426,16 @@ class TestAgentBot(AgentBotTestBase):
         resolve_pending.assert_awaited_once_with(bot.client, room.room_id, event, enabled=True)
 
     @pytest.mark.asyncio
-    async def test_interactive_reaction_failure_restores_question_for_durable_retry(
+    async def test_interactive_reaction_failure_replays_the_same_durable_claim(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A failed selection handoff must leave its question answerable on exact retry."""
-        interactive._cleanup()
+        """A failed detached response leaves its source and question paired for retry."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-        room = MagicMock()
-        room.room_id = "!test:localhost"
+        room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         event.source = {
             "content": {
@@ -446,148 +446,43 @@ class TestAgentBot(AgentBotTestBase):
                 },
             },
         }
-        interactive._active_questions["$question"] = interactive._InteractiveQuestion(
-            room_id=room.room_id,
-            thread_id=None,
-            options={"👍": "approve"},
-            creator_agent=bot.agent_name,
+        store = bot._journal_store.principal(bot._journal_principal_id)
+        assert await store.register_interactive_question_for_epoch(
+            await store.membership_epoch(room.room_id),
+            InteractiveQuestion(
+                question_event_id="$question",
+                room_id=room.room_id,
+                thread_id=None,
+                creator_agent=bot.agent_name,
+                question_text="Choose one",
+                options={"👍": "approve"},
+                option_labels={"👍": "Approve"},
+            ),
         )
 
-        try:
-            execute = AsyncMock(side_effect=(OSError("pending write failed"), None))
-            with patch.object(bot._turn_controller, "_execute_interactive_selection", new=execute):
-                await _dispatch_reaction(bot, room, event)
-
-                await bot._response_runner.drain_inbox_responses()
-                assert "$question" in interactive._active_questions
-                assert event.event_id in await bot._journal_dispatcher.unsettled_event_ids()
-                assert not bot._journal_dispatcher.callbacks.source_has_live_owner(event.event_id)
-                target = MessageTarget.resolve(room.room_id, None, "$question")
-                assert not bot._response_runner.has_active_response_for_target(target)
-
-                await bot._journal_dispatcher.drain_once()
-                await bot._response_runner.drain_inbox_responses()
-
-            assert "$question" not in interactive._active_questions
-            assert event.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
-            assert execute.await_count == 2
-        finally:
-            interactive._cleanup()
-
-    @pytest.mark.asyncio
-    async def test_departure_consumes_question_restored_after_selection_failure(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A departure retires retry state whose reaction it makes terminal."""
-        interactive._cleanup()
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-        room = MagicMock(room_id="!test:localhost")
-        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
-        event.source = {
-            "content": {
-                "m.relates_to": {
-                    "rel_type": "m.annotation",
-                    "event_id": "$question",
-                    "key": "👍",
-                },
-            },
-        }
-        interactive.register_interactive_question(
-            "$question",
-            room.room_id,
-            None,
-            {"👍": "approve"},
-            bot.agent_name,
-        )
-
-        try:
-            with patch.object(
-                bot._turn_controller,
-                "_execute_interactive_selection",
-                new=AsyncMock(side_effect=OSError("pending write failed")),
-            ):
-                await _dispatch_reaction(bot, room, event)
-                await bot._response_runner.drain_inbox_responses()
-
-            assert "$question" in interactive._active_questions
-            assert event.event_id in await bot._journal_dispatcher.unsettled_event_ids()
-
-            await bot._membership_fence.fence_local_departure(room.room_id)
-
-            assert "$question" not in interactive._active_questions
-            assert event.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
-            interactive._cleanup()
-            interactive.init_persistence(tmp_path)
-            assert "$question" not in interactive._active_questions
-        finally:
+        execute = AsyncMock(side_effect=(OSError("pending write failed"), None))
+        with patch.object(bot._turn_controller, "_execute_interactive_selection", new=execute):
+            await _dispatch_reaction(bot, room, event)
             await bot._response_runner.drain_inbox_responses()
-            interactive._cleanup()
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("failure_stage", ["reserve", "track"])
-    async def test_interactive_reaction_start_failure_restores_claimed_selection(
-        self,
-        failure_stage: str,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A failed reservation or task registration must restore the claimed question."""
-        interactive._cleanup()
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-        room = MagicMock(room_id="!test:localhost")
-        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
-        event.source = {
-            "content": {
-                "m.relates_to": {
-                    "rel_type": "m.annotation",
-                    "event_id": "$question",
-                    "key": "👍",
-                },
-            },
-        }
-        interactive._active_questions["$question"] = interactive._InteractiveQuestion(
-            room_id=room.room_id,
-            thread_id="$thread-a",
-            options={"👍": "approve"},
-            creator_agent=bot.agent_name,
-        )
-        error = RuntimeError(f"{failure_stage} failed")
-        reservation_patch = (
-            patch.object(bot._response_runner, "reserve_response_lifecycle", new=AsyncMock(side_effect=error))
-            if failure_stage == "reserve"
-            else patch.object(bot._response_runner, "track_inbox_response", side_effect=error)
-        )
-
-        try:
-            with reservation_patch:
-                await _dispatch_reaction(bot, room, event)
-
-            assert "$question" in interactive._active_questions
             assert event.event_id in await bot._journal_dispatcher.unsettled_event_ids()
-            assert not bot._journal_dispatcher.callbacks.source_has_live_owner(event.event_id)
-            target = MessageTarget.resolve(room.room_id, "$thread-a", "$question")
-            assert not bot._response_runner.has_active_response_for_target(target)
-        finally:
-            interactive._cleanup()
+
+            await bot._journal_dispatcher.drain_once()
+            await bot._response_runner.drain_inbox_responses()
+
+        assert event.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
+        assert execute.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_departure_winning_interactive_claim_race_discards_selection(
+    async def test_departure_consumes_a_failed_interactive_claim(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A selection from an ended membership cannot start or remain active."""
-        interactive._cleanup()
+        """A departure retires both the claimed source and its journal-owned question."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-        room = MagicMock(room_id="!test:localhost")
+        room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         event.source = {
             "content": {
@@ -598,92 +493,38 @@ class TestAgentBot(AgentBotTestBase):
                 },
             },
         }
-        interactive._active_questions["$question"] = interactive._InteractiveQuestion(
-            room_id=room.room_id,
-            thread_id=None,
-            options={"👍": "approve"},
-            creator_agent=bot.agent_name,
+        store = bot._journal_store.principal(bot._journal_principal_id)
+        assert await store.register_interactive_question_for_epoch(
+            await store.membership_epoch(room.room_id),
+            InteractiveQuestion(
+                question_event_id="$question",
+                room_id=room.room_id,
+                thread_id=None,
+                creator_agent=bot.agent_name,
+                question_text="Choose one",
+                options={"👍": "approve"},
+                option_labels={"👍": "Approve"},
+            ),
         )
-        execute = AsyncMock()
-        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=execute)
-        dispatcher = unwrap_extracted_collaborator(bot._journal_dispatcher)
-        original_claim = dispatcher.claim_semantic_consumer
 
-        async def claim_after_departure(consumer: SemanticConsumer) -> bool:
-            await bot._journal_principal().fence_departure(room.room_id, source=DepartureSource.LOCAL)
-            return await original_claim(consumer)
+        with patch.object(
+            bot._turn_controller,
+            "_execute_interactive_selection",
+            new=AsyncMock(side_effect=OSError("pending write failed")),
+        ):
+            await _dispatch_reaction(bot, room, event)
+            await bot._response_runner.drain_inbox_responses()
 
-        try:
-            with patch.object(dispatcher, "claim_semantic_consumer", side_effect=claim_after_departure):
-                await _dispatch_reaction(bot, room, event)
+        await bot._membership_fence.fence_local_departure(room.room_id)
 
-            assert "$question" not in interactive._active_questions
-            execute.assert_not_awaited()
-            assert event.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
-        finally:
-            interactive._cleanup()
-
-    @pytest.mark.asyncio
-    async def test_departure_while_claimed_selection_waits_discards_selection(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A fence makes a claimed selection terminal while it waits for its response lock."""
-        interactive._cleanup()
-        config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
-        question = _message_event("$question")
-        await bot._journal_dispatcher.admit_out_of_band(
-            room,
-            question,
-            EventKind.MESSAGE,
-            EventClass.CONTEXT_ONLY,
+        assert event.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
+        rows = await bot._journal_store.backend.read(
+            lambda transaction: transaction.fetchall(
+                "SELECT question_event_id FROM interactive_questions WHERE principal_id = ?",
+                (bot._journal_principal_id,),
+            ),
         )
-        interactive.register_interactive_question(
-            question.event_id,
-            room.room_id,
-            None,
-            {"👍": "Selected"},
-            bot.agent_name,
-        )
-        reaction = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
-        target = MessageTarget.resolve(room.room_id, None, question.event_id)
-        lifecycle_lock = unwrap_extracted_collaborator(
-            bot._response_runner,
-        )._lifecycle_coordinator._response_lifecycle_lock(target)
-        await lifecycle_lock.acquire()
-
-        try:
-            await asyncio.wait_for(_dispatch_reaction(bot, room, reaction), timeout=1.0)
-            stored_reaction = await bot._journal_principal().load_event(reaction.event_id)
-            assert stored_reaction is not None
-            assert stored_reaction.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
-            assert question.event_id in interactive._claimed_questions
-
-            await bot._membership_fence.fence_local_departure(room.room_id)
-            assert reaction.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
-
-            # Model a process exit before the detached response gets the lock.
-            # The departure itself must already have consumed the persisted
-            # question because its reaction is now terminal and cannot replay.
-            interactive._cleanup()
-            interactive.init_persistence(tmp_path)
-            assert question.event_id not in interactive._active_questions
-
-            lifecycle_lock.release()
-            await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
-            await asyncio.wait_for(bot._response_runner.drain_inbox_responses(), timeout=1.0)
-
-            assert question.event_id not in interactive._active_questions
-            assert question.event_id not in interactive._claimed_questions
-        finally:
-            if lifecycle_lock.locked():
-                lifecycle_lock.release()
-            await asyncio.wait_for(bot._response_runner.drain_inbox_responses(), timeout=1.0)
-            interactive._cleanup()
+        assert rows == ()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_selection_reserves_prompt_order(
@@ -715,7 +556,7 @@ class TestAgentBot(AgentBotTestBase):
             assert bot._coalescing_gate.lanes.unsettled_slots()
 
         replace_reaction_dispatcher_deps(bot, handle_interactive_selection=handle_selection)
-        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)):
+        with _mock_interactive_claim(bot, selection):
             await _dispatch_reaction(bot, room, event)
 
         await asyncio.wait_for(selection_started.wait(), timeout=0.5)
@@ -759,7 +600,7 @@ class TestAgentBot(AgentBotTestBase):
             reserve_prompt_ingress_order=MagicMock(return_value=reservation_owner),
             enqueue_interactive_selection=blocked_enqueue,
         )
-        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)):
+        with _mock_interactive_claim(bot, selection):
             dispatch = asyncio.create_task(_dispatch_reaction(bot, room, event))
             await startup_observed.wait()
             assert release_count_during_startup == 0
@@ -828,7 +669,7 @@ class TestAgentBot(AgentBotTestBase):
 
         try:
             await asyncio.wait_for(message_dispatch_started.wait(), timeout=1.0)
-            with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)):
+            with _mock_interactive_claim(bot, selection):
                 await _dispatch_reaction(bot, room, reaction)
             release_message_dispatch.set()
             await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
@@ -879,7 +720,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot._journal_dispatcher.start()
         try:
-            with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)):
+            with _mock_interactive_claim(bot, selection):
                 await bot._journal_dispatcher.admit_out_of_band(
                     room,
                     reaction,
@@ -947,7 +788,7 @@ class TestAgentBot(AgentBotTestBase):
         try:
             with (
                 patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
-                patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
+                _mock_interactive_claim(bot, selection),
             ):
                 older = asyncio.create_task(
                     bot._response_runner.generate_response(
@@ -996,7 +837,6 @@ class TestAgentBot(AgentBotTestBase):
             source_event_id="$reaction",
             user_id="@user:localhost",
             selected_value="Selected",
-            on_failure=lambda: None,
         )
         await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
         assert bot._response_runner.has_active_response_for_target(target)
@@ -1036,7 +876,6 @@ class TestAgentBot(AgentBotTestBase):
             retry_dispatch_sources=retry_dispatch_sources,
         )
         response_completed = asyncio.Event()
-        prestart_cleanup = MagicMock()
 
         async def response() -> None:
             response_completed.set()
@@ -1052,13 +891,11 @@ class TestAgentBot(AgentBotTestBase):
             source_event_id="$reaction",
             user_id="@user:localhost",
             selected_value="Selected",
-            on_failure=prestart_cleanup,
         )
         await bot._response_runner.drain_inbox_responses()
 
         assert response_completed.is_set()
         settle_dispatch_sources.assert_awaited_once_with(("$reaction",))
-        prestart_cleanup.assert_not_called()
         # The failed settlement must hand the exact journal source back for retry.
         retry_dispatch_sources.assert_called_once_with(("$reaction",))
 
@@ -1069,7 +906,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Durable selection cleanup must not turn cancellation into success."""
-        interactive._cleanup()
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         source_is_terminal = AsyncMock(return_value=True)
@@ -1079,8 +915,6 @@ class TestAgentBot(AgentBotTestBase):
         )
         selection, target = _claimed_test_selection(bot)
         room = nio.MatrixRoom(target.room_id, bot.matrix_id.full_id)
-        commit_selection = MagicMock(wraps=interactive.commit_selection)
-        restore_selection = MagicMock()
 
         with (
             patch.object(
@@ -1088,8 +922,6 @@ class TestAgentBot(AgentBotTestBase):
                 "_execute_interactive_selection",
                 new=AsyncMock(side_effect=asyncio.CancelledError("restart")),
             ),
-            patch("mindroom.turn_controller.interactive.commit_selection", commit_selection),
-            patch("mindroom.turn_controller.interactive.restore_selection", restore_selection),
             pytest.raises(asyncio.CancelledError, match="restart"),
         ):
             await controller.handle_interactive_selection(
@@ -1101,8 +933,6 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         source_is_terminal.assert_awaited_once_with("$reaction")
-        commit_selection.assert_called_once_with(selection)
-        restore_selection.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_terminal_interactive_selection_survives_repeated_cancellation(
@@ -1111,7 +941,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Terminal reconciliation finishes before a second cancellation propagates."""
-        interactive._cleanup()
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         execution_started = asyncio.Event()
@@ -1130,14 +959,8 @@ class TestAgentBot(AgentBotTestBase):
         controller = replace_turn_controller_deps(bot, dispatch_source_is_terminal=source_is_terminal)
         selection, target = _claimed_test_selection(bot)
         room = nio.MatrixRoom(target.room_id, bot.matrix_id.full_id)
-        commit_selection = MagicMock(wraps=interactive.commit_selection)
-        restore_selection = MagicMock()
 
-        with (
-            patch.object(controller, "_execute_interactive_selection", new=execute_selection),
-            patch("mindroom.turn_controller.interactive.commit_selection", commit_selection),
-            patch("mindroom.turn_controller.interactive.restore_selection", restore_selection),
-        ):
+        with patch.object(controller, "_execute_interactive_selection", new=execute_selection):
             response = asyncio.create_task(
                 controller.handle_interactive_selection(
                     room,
@@ -1158,20 +981,15 @@ class TestAgentBot(AgentBotTestBase):
             with pytest.raises(asyncio.CancelledError):
                 await response
 
-        commit_selection.assert_called_once_with(selection)
-        restore_selection.assert_not_called()
-
     @pytest.mark.asyncio
     async def test_restart_stop_waits_for_live_interactive_claim_owner(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A replacement cannot start while the prior generation still owns a claim."""
-        interactive._cleanup()
+        """A replacement cannot start while the prior generation still owns a source."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        selection, _target = _claimed_test_selection(bot)
         response_started = asyncio.Event()
         cleanup_started = asyncio.Event()
         finish_cleanup = asyncio.Event()
@@ -1184,7 +1002,6 @@ class TestAgentBot(AgentBotTestBase):
             except asyncio.CancelledError:
                 cleanup_started.set()
                 await finish_cleanup.wait()
-                interactive.restore_selection(selection)
 
         async def ordinary_response() -> None:
             ordinary_response_started.set()
@@ -1219,19 +1036,16 @@ class TestAgentBot(AgentBotTestBase):
 
                 assert not stop_task.done()
                 dispatcher_stop.assert_awaited_once_with()
-                assert selection.question_event_id in interactive._claimed_questions
 
                 finish_cleanup.set()
                 await asyncio.wait_for(stop_task, timeout=1.0)
 
-            assert selection.question_event_id in interactive._active_questions
-            assert selection.question_event_id not in interactive._claimed_questions
+            assert response_task.done()
             assert not ordinary_response_task.done()
         finally:
             finish_cleanup.set()
             ordinary_response_task.cancel()
             await asyncio.gather(response_task, ordinary_response_task, return_exceptions=True)
-            interactive._cleanup()
 
     @pytest.mark.asyncio
     async def test_restart_stop_waits_for_source_owner_registered_during_dispatcher_stop(
@@ -1286,17 +1100,21 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_stage", ["acquire", "queued_cancel"])
-    async def test_interactive_prestart_failure_restores_claimed_selection(
+    async def test_interactive_prestart_failure_retries_durable_source(
         self,
         failure_stage: str,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Outer response ownership must restore a claim before preparation starts."""
-        interactive._cleanup()
+        """Outer response ownership returns its journal source before preparation starts."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         selection, target = _claimed_test_selection(bot)
+        retry_dispatch_sources = MagicMock()
+        controller = replace_turn_controller_deps(
+            bot,
+            retry_dispatch_sources=retry_dispatch_sources,
+        )
         response_entered = asyncio.Event()
 
         async def response() -> None:
@@ -1320,13 +1138,12 @@ class TestAgentBot(AgentBotTestBase):
 
         try:
             with acquire_patch:
-                await bot._turn_controller.start_interactive_selection(
+                await controller.start_interactive_selection(
                     response,
                     response_target=target,
                     source_event_id="$reaction",
                     user_id="@user:localhost",
                     selected_value=selection.selected_value,
-                    on_failure=lambda: interactive.restore_selection(selection),
                 )
                 if failure_stage == "queued_cancel":
                     assert await bot._response_runner.drain_inbox_responses(cancel_after_seconds=0.01) is False
@@ -1334,8 +1151,7 @@ class TestAgentBot(AgentBotTestBase):
                     await bot._response_runner.drain_inbox_responses()
 
             assert not response_entered.is_set()
-            assert selection.question_event_id in interactive._active_questions
-            assert selection.question_event_id not in interactive._claimed_questions
+            retry_dispatch_sources.assert_called_with(("$reaction",))
             if lock_owned_by_test:
                 lifecycle_lock.release()
                 lock_owned_by_test = False
@@ -1344,7 +1160,6 @@ class TestAgentBot(AgentBotTestBase):
             if lock_owned_by_test:
                 lifecycle_lock.release()
             await bot._response_runner.drain_inbox_responses()
-            interactive._cleanup()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_reserves_same_thread_lifecycle_before_preparation(
@@ -1414,7 +1229,7 @@ class TestAgentBot(AgentBotTestBase):
         newer_task: asyncio.Task[str | None] | None = None
         try:
             with (
-                patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
+                _mock_interactive_claim(bot, selection),
                 patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
@@ -1492,7 +1307,7 @@ class TestAgentBot(AgentBotTestBase):
         bot._visible_responses.deliver_recoverable_text = AsyncMock(return_value="$ack")
         try:
             with (
-                patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
+                _mock_interactive_claim(bot, selection),
                 patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
@@ -1538,7 +1353,7 @@ class TestAgentBot(AgentBotTestBase):
         replace_reaction_dispatcher_deps(bot, handle_interactive_selection=AsyncMock())
         with (
             patch("mindroom.reaction_dispatch.handle_tool_approval_action", side_effect=delayed_approval),
-            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
+            _mock_interactive_claim(bot, selection),
         ):
             reaction_task = asyncio.create_task(_dispatch_reaction(bot, room, event))
             await asyncio.wait_for(approval_started.wait(), timeout=0.5)
@@ -1579,7 +1394,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.turn_policy.is_sender_allowed_for_agent_reply", return_value=False),
             patch("mindroom.reaction_dispatch.handle_tool_approval_action", approval_handler),
-            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock()) as interactive_handler,
+            _mock_interactive_claim(bot, None) as interactive_handler,
         ):
             await _dispatch_reaction(bot, room, event)
 
@@ -2757,7 +2572,7 @@ class TestAgentBot(AgentBotTestBase):
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("👍", "$interactive-reaction")
         selection = interactive.InteractiveSelection(
-            question_event_id="$question",
+            question_event_id="$response",
             question_text="Choose",
             selection_key="👍",
             selected_label="Chosen",
@@ -2769,17 +2584,27 @@ class TestAgentBot(AgentBotTestBase):
             bot,
             handle_interactive_selection=AsyncMock(side_effect=failure),
         )
+        store = bot._journal_store.principal(bot._journal_principal_id)
+        assert await store.register_interactive_question_for_epoch(
+            await store.membership_epoch(room.room_id),
+            InteractiveQuestion(
+                question_event_id=selection.question_event_id,
+                room_id=room.room_id,
+                thread_id=selection.thread_id,
+                creator_agent=bot.agent_name,
+                question_text=selection.question_text,
+                options={selection.selection_key: selection.selected_value},
+                option_labels={selection.selection_key: selection.selected_label},
+            ),
+        )
 
-        with (
-            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
-        ):
-            await bot._journal_dispatcher.admit_out_of_band(
-                room,
-                event,
-                EventKind.REACTION,
-                EventClass.ACTIONABLE,
-            )
-            await bot._journal_dispatcher.drain_once()
+        await bot._journal_dispatcher.admit_out_of_band(
+            room,
+            event,
+            EventKind.REACTION,
+            EventClass.ACTIONABLE,
+        )
+        await bot._journal_dispatcher.drain_once()
         await _cancel_dispatch_retry(bot)
         assert (await bot._journal_dispatcher.store.pending())[
             0
@@ -2788,13 +2613,10 @@ class TestAgentBot(AgentBotTestBase):
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
-        with patch(
-            "mindroom.bot.interactive.handle_reaction",
-            new=AsyncMock(return_value=None),
-        ) as interactive_handler:
-            await restarted._journal_dispatcher.drain_once()
+        replace_reaction_dispatcher_deps(restarted, handle_interactive_selection=AsyncMock())
+        await restarted._journal_dispatcher.drain_once()
+        await restarted._response_runner.drain_inbox_responses()
 
-        interactive_handler.assert_awaited_once()
         assert unexpected_hooks == []
         assert await restarted._journal_dispatcher.store.pending() == ()
 
@@ -2820,7 +2642,7 @@ class TestAgentBot(AgentBotTestBase):
             raise asyncio.CancelledError(message)
 
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_then_crash])])
-        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
+        with _mock_interactive_claim(bot, None):
             await bot._journal_dispatcher.admit_out_of_band(
                 room,
                 event,
@@ -2842,10 +2664,7 @@ class TestAgentBot(AgentBotTestBase):
             emissions.append(ctx.event_id)
 
         restarted.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_replay])])
-        with patch(
-            "mindroom.bot.interactive.handle_reaction",
-            new=AsyncMock(return_value=None),
-        ) as interactive_handler:
+        with _mock_interactive_claim(restarted, None) as interactive_handler:
             await restarted._journal_dispatcher.drain_once()
 
         assert emissions == [event.event_id, event.event_id]
@@ -2946,7 +2765,7 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         install_relation_lookup(bot, threads={"$thread-reply": "$thread-root"})
-        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
+        with _mock_interactive_claim(bot, None):
             await _dispatch_reaction(bot, room, event)
 
         assert seen == [("$plain-reply", "$thread-root")]
@@ -2983,7 +2802,7 @@ class TestAgentBot(AgentBotTestBase):
                 "resolve_related_event_thread_id_dispatch_snapshot_best_effort",
                 resolve_related_event_thread_id,
             ),
-            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)),
+            _mock_interactive_claim(bot, None),
         ):
             await _dispatch_reaction(bot, room, event)
 
@@ -3073,9 +2892,7 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
 
-        with (
-            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)),
-        ):
+        with _mock_interactive_claim(bot, None):
             await _dispatch_reaction(bot, room, event)
 
         assert seen == [("$plain-reply-2", "$thread-root")]

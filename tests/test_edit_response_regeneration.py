@@ -3883,23 +3883,27 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
     reaction_event.reacts_to = "$question:example.com"
     reaction_event.key = "1️⃣"
 
-    # Mock interactive.handle_reaction to return a result
-    with (
-        patch("mindroom.bot.interactive.handle_reaction", new_callable=AsyncMock) as mock_handle_reaction,
-        patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock) as mock_send_text,
-        patch.object(bot._response_runner, "generate_response", new_callable=AsyncMock) as mock_generate_response,
-        patch.object(bot._conversation_resolver, "fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
-    ):
-        # Setup mocks
-        mock_handle_reaction.return_value = interactive.InteractiveSelection(
+    claim_interactive = AsyncMock(
+        return_value=interactive.InteractiveSelection(
             question_event_id="$question:example.com",
             question_text="Choose one",
             selection_key="1️⃣",
             selected_label="Option 1",
             selected_value="Option 1",
             thread_id="thread_id",
-        )
+        ),
+    )
+    with (
+        patch.object(
+            unwrap_extracted_collaborator(bot._journal_dispatcher),
+            "claim_interactive_reaction",
+            new=claim_interactive,
+        ),
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock) as mock_send_text,
+        patch.object(bot._response_runner, "generate_response", new_callable=AsyncMock) as mock_generate_response,
+        patch.object(bot._conversation_resolver, "fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
+    ):
         mock_send_text.return_value = "$ack_event:example.com"
         mock_generate_response.return_value = _delivery_resolution("$response_event:example.com")
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
@@ -3913,7 +3917,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         assert _response_event_id(bot, "$question:example.com") == "$response_event:example.com"
 
         # Verify the methods were called with correct parameters
-        mock_handle_reaction.assert_called_once()
+        claim_interactive.assert_awaited_once()
         mock_send_text.assert_called_once()
         mock_generate_response.assert_called_once()
 
@@ -3985,21 +3989,27 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
     reaction_event.reacts_to = "$question:example.com"
     reaction_event.key = "1️⃣"
 
-    with (
-        patch("mindroom.bot.interactive.handle_reaction", new_callable=AsyncMock) as mock_handle_reaction,
-        patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock) as mock_send_text,
-        patch.object(bot._response_runner, "generate_response", new_callable=AsyncMock) as mock_generate_response,
-        patch.object(bot._conversation_resolver, "fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
-    ):
-        mock_handle_reaction.return_value = interactive.InteractiveSelection(
+    claim_interactive = AsyncMock(
+        return_value=interactive.InteractiveSelection(
             question_event_id="$question:example.com",
             question_text="Choose one",
             selection_key="1️⃣",
             selected_label="Option 1",
             selected_value="Option 1",
             thread_id="thread_id",
-        )
+        ),
+    )
+    with (
+        patch.object(
+            unwrap_extracted_collaborator(bot._journal_dispatcher),
+            "claim_interactive_reaction",
+            new=claim_interactive,
+        ),
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock) as mock_send_text,
+        patch.object(bot._response_runner, "generate_response", new_callable=AsyncMock) as mock_generate_response,
+        patch.object(bot._conversation_resolver, "fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
+    ):
         mock_send_text.return_value = "$ack_event:example.com"
         mock_generate_response.return_value = _delivery_resolution(None)
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
@@ -4080,22 +4090,22 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
         "origin_server_ts": 1000000,
         "type": "m.room.message",
     }
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock(
+        return_value=interactive.InteractiveSelection(
+            question_event_id="$question:example.com",
+            question_text="Choose one",
+            selection_key="1",
+            selected_label="Option 1",
+            selected_value="Option 1",
+            thread_id="$thread:example.com",
+        ),
+    )
+    replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
 
     with (
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         patch.object(bot._turn_policy, "can_reply_to_sender", return_value=True),
-        patch(
-            "mindroom.turn_controller.interactive.handle_text_response",
-            new_callable=AsyncMock,
-            return_value=interactive.InteractiveSelection(
-                question_event_id="$question:example.com",
-                question_text="Choose one",
-                selection_key="1",
-                selected_label="Option 1",
-                selected_value="Option 1",
-                thread_id="$thread:example.com",
-            ),
-        ) as mock_handle_text_response,
         patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock, return_value="$ack:example.com"),
         patch.object(
             bot._response_runner,
@@ -4113,7 +4123,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
     ):
         await bot._on_message(room, message_event)
 
-    mock_handle_text_response.assert_awaited_once()
+    interactive_questions.claim_interactive_text.assert_awaited_once()
     mock_dispatch_text.assert_not_awaited()
     request = mock_generate_response.await_args.args[0]
     assert request.reply_to_event_id == "$question:example.com"
@@ -4183,13 +4193,15 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
     )
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
-    interactive._active_questions.clear()
-    interactive.register_interactive_question(
-        event_id="$question:example.com",
-        room_id=room.room_id,
-        thread_id=None,
-        option_map={"1️⃣": "Option 1", "1": "Option 1"},
-        agent_name="test_agent",
+    claim_interactive = AsyncMock(
+        return_value=interactive.InteractiveSelection(
+            question_event_id="$question:example.com",
+            question_text="Choose one",
+            selection_key="1️⃣",
+            selected_label="Option 1",
+            selected_value="Option 1",
+            thread_id=None,
+        ),
     )
 
     disallowed_reaction = nio.ReactionEvent.from_dict(
@@ -4232,6 +4244,11 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
 
     with (
         patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(
+            unwrap_extracted_collaborator(bot._journal_dispatcher),
+            "claim_interactive_reaction",
+            new=claim_interactive,
+        ),
         patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock) as mock_send_text,
         patch.object(bot._response_runner, "generate_response", new_callable=AsyncMock) as mock_generate_response,
     ):
@@ -4239,14 +4256,14 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
         mock_generate_response.return_value = _delivery_resolution("$response_event:example.com")
 
         await dispatch_reaction_durably(bot, room, disallowed_reaction)
+        claim_interactive.assert_not_awaited()
         mock_send_text.assert_not_called()
         mock_generate_response.assert_not_called()
 
         await dispatch_reaction_durably(bot, room, allowed_reaction)
         await bot._response_runner.drain_inbox_responses()
 
-    interactive._active_questions.clear()
-
+    claim_interactive.assert_awaited_once()
     mock_send_text.assert_called_once()
     mock_generate_response.assert_called_once()
 

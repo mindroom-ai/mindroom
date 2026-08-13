@@ -85,7 +85,7 @@ from mindroom.tool_approval import is_process_active_approval_card
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
-from . import constants, interactive
+from . import constants
 from .agents import create_agent, show_tool_calls_for_agent
 from .authorization import is_authorized_sender
 from .background_tasks import create_background_task, wait_for_background_tasks
@@ -573,10 +573,6 @@ class AgentBot:
         )
         self._membership_fence = MembershipFence(
             store=self._journal_store.principal(self._journal_principal_id),
-            clear_departed_room=lambda room_id: interactive.clear_interactive_questions_for_room(
-                room_id,
-                self.agent_name,
-            ),
         )
         self._relations = RelationLookup(
             store=self._journal_store.principal(self._journal_principal_id),
@@ -807,6 +803,7 @@ class AgentBot:
                 matrix_id=runtime_matrix_id,
                 relations=self._relations,
                 pending_turns=self._journal_store.principal(self._journal_principal_id),
+                interactive_questions=self._journal_store.principal(self._journal_principal_id),
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
                 command_executor=self._command_turn_executor,
@@ -1911,7 +1908,6 @@ class AgentBot:
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await self._turn_store.warm()
-            await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
 

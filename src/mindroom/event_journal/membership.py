@@ -27,7 +27,6 @@ sync resumes at -- which is exactly the right window again.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from functools import partial
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.logging_config import get_logger
@@ -35,7 +34,7 @@ from mindroom.logging_config import get_logger
 from .models import DepartureOutcome, DepartureSource
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Iterable
 
 logger = get_logger(__name__)
 
@@ -72,15 +71,10 @@ class MembershipView(Protocol):
         """Apply one observation of a departure, invalidating at most once per departure."""
         ...
 
-    async def cleanup_fenced_departure(self, room_id: str, cleanup: Callable[[], None]) -> None:
-        """Clean external state only while one room remains durably departed."""
-        ...
-
     async def note_membership_restarted(
         self,
         room_id: str,
         *,
-        cleanup: Callable[[], None] | None = None,
         expected_membership_epoch: int | None = None,
     ) -> None:
         """Record a confirmed join, so the room's next departure fences again."""
@@ -90,7 +84,6 @@ class MembershipView(Protocol):
         self,
         room_id: str,
         join_event_id: str,
-        cleanup: Callable[[], None],
     ) -> None:
         """Close the reported departure immediately preceding one join."""
         ...
@@ -99,7 +92,6 @@ class MembershipView(Protocol):
         self,
         room_id: str,
         run_epoch: int,
-        cleanup: Callable[[], None],
     ) -> None:
         """Close one contiguous reported-departure run."""
         ...
@@ -118,7 +110,6 @@ class MembershipFence:
     """Advance a room's membership epoch exactly once per departure."""
 
     store: MembershipView
-    clear_departed_room: Callable[[str], None] = lambda _room_id: None
     # Rooms owing a sync report, and how many more sync responses that report
     # may still appear in. Recovered from the journal on the first sync
     # response, because a restart between a local departure and its report
@@ -131,7 +122,6 @@ class MembershipFence:
         outcome = await self.store.fence_departure(room_id, source=DepartureSource.LOCAL)
         self._log(room_id, outcome)
         self._track(room_id, outcome)
-        await self._clear_room(room_id, outcome)
 
     async def fence_reported_departures(
         self,
@@ -176,7 +166,6 @@ class MembershipFence:
             await self.store.close_preceding_reported_departure(
                 room_id,
                 observation_id,
-                lambda: self.clear_departed_room(room_id),
             )
             return
         await self._recover_owed_reports()
@@ -184,15 +173,7 @@ class MembershipFence:
 
     async def note_membership_restarted(self, room_id: str) -> None:
         """Record a confirmed join, so this room's next departure fences again."""
-        await self.store.note_membership_restarted(room_id, cleanup=lambda: self.clear_departed_room(room_id))
-
-    async def _clear_room(self, room_id: str, outcome: DepartureOutcome) -> None:
-        """Clear external state only for the departure that advanced the epoch."""
-        if outcome.fenced:
-            await self.store.cleanup_fenced_departure(
-                room_id,
-                lambda: self.clear_departed_room(room_id),
-            )
+        await self.store.note_membership_restarted(room_id)
 
     async def _apply_reported_departure(
         self,
@@ -212,10 +193,7 @@ class MembershipFence:
             await self.store.close_reported_departure_run(
                 room_id,
                 outcome.reported_run_epoch,
-                partial(self.clear_departed_room, room_id),
             )
-        else:
-            await self._clear_room(room_id, outcome)
 
     def _track(self, room_id: str, outcome: DepartureOutcome) -> None:
         """Start, keep, or drop the window an owed report may still arrive in."""

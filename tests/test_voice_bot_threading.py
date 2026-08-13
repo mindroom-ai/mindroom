@@ -1006,7 +1006,6 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
                 "mindroom.turn_controller.dispatch_text_message",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
             ),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         ):
             reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:example.com")
@@ -1118,7 +1117,6 @@ async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late
                 "mindroom.turn_controller.dispatch_text_message",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
             ),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         ):
             voice_task = asyncio.create_task(bot._on_media_message(room, voice_event))
@@ -1216,7 +1214,6 @@ async def test_voice_first_text_second_waits_for_slow_thread_resolution(
                 "mindroom.turn_controller.dispatch_text_message",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
             ),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         ):
             voice_task = asyncio.create_task(bot._on_media_message(room, voice_event))
@@ -1323,7 +1320,6 @@ async def test_root_voice_and_root_text_share_room_scope_while_stt_pending(
                 "mindroom.turn_controller.dispatch_text_message",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
             ),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         ):
             voice_task = asyncio.create_task(bot._on_media_message(room, voice_event))
@@ -1448,7 +1444,6 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
             new=AsyncMock(return_value="$thread_root"),
         ),
         patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
-        patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
     ):
         reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:example.com")
         await bot._turn_controller._dispatch_prepared_text_like_ingress(
@@ -1487,7 +1482,6 @@ async def test_forged_visible_voice_echo_marker_still_dispatches(mock_home_bot: 
             new=AsyncMock(return_value="$thread_root"),
         ),
         patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
-        patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
     ):
         reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:example.com")
         await bot._turn_controller._dispatch_prepared_text_like_ingress(

@@ -423,10 +423,10 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
 
 
 @pytest.mark.asyncio
-async def test_on_message_passes_resolved_thread_id_to_interactive_text_response(
+async def test_on_message_claims_interactive_text_by_durable_source_event(
     tmp_path: Path,
 ) -> None:
-    """Plain numeric replies should use the canonical coalescing thread id for interactive matching."""
+    """Plain numeric replies should claim against their admitted source event."""
     config = bind_runtime_paths(
         Config(agents={"general": AgentConfig(display_name="General")}),
         test_runtime_paths(tmp_path),
@@ -476,12 +476,15 @@ async def test_on_message_passes_resolved_thread_id_to_interactive_text_response
         "room_id": "!test:localhost",
     }
 
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock(return_value=None)
     wrap_extracted_collaborators(bot, "_delivery_gateway", "_turn_policy")
     replace_turn_controller_deps(
         bot,
         resolver=bot._conversation_resolver,
         delivery_gateway=bot._delivery_gateway,
         turn_policy=bot._turn_policy,
+        interactive_questions=interactive_questions,
     )
 
     with (
@@ -493,26 +496,24 @@ async def test_on_message_passes_resolved_thread_id_to_interactive_text_response
             new_callable=AsyncMock,
             return_value="$thread-root:localhost",
         ),
-        patch(
-            "mindroom.turn_controller.interactive.handle_text_response",
-            new_callable=AsyncMock,
-            return_value=None,
-        ) as mock_handle_text_response,
         patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
     ):
         await bot._on_message(room, message_event)
         await _wait_for(lambda: mock_dispatch_text.await_count == 1)
 
-    mock_handle_text_response.assert_awaited_once()
-    assert mock_handle_text_response.await_args.kwargs["resolved_thread_id"] == "$thread-root:localhost"
+    interactive_questions.claim_interactive_text.assert_awaited_once_with(
+        source_event_id="$selection:localhost",
+        selection_key="1",
+        creator_agent="general",
+    )
     mock_dispatch_text.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_sidecar_preview_passes_resolved_thread_id_to_interactive_text_response(
+async def test_sidecar_preview_claims_interactive_text_by_durable_source_event(
     tmp_path: Path,
 ) -> None:
-    """Sidecar previews should use the same interactive matching thread id as text messages."""
+    """Sidecar previews should claim against their admitted source event."""
     config = bind_runtime_paths(
         Config(agents={"general": AgentConfig(display_name="General")}),
         test_runtime_paths(tmp_path),
@@ -589,12 +590,15 @@ async def test_sidecar_preview_passes_resolved_thread_id_to_interactive_text_res
         server_timestamp=1000000,
     )
 
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock(return_value=None)
     wrap_extracted_collaborators(bot, "_turn_policy", "_inbound_turn_normalizer")
     replace_turn_controller_deps(
         bot,
         resolver=bot._conversation_resolver,
         turn_policy=bot._turn_policy,
         normalizer=bot._inbound_turn_normalizer,
+        interactive_questions=interactive_questions,
     )
 
     with (
@@ -612,11 +616,6 @@ async def test_sidecar_preview_passes_resolved_thread_id_to_interactive_text_res
             new_callable=AsyncMock,
             return_value=prepared_event,
         ),
-        patch(
-            "mindroom.turn_controller.interactive.handle_text_response",
-            new_callable=AsyncMock,
-            return_value=None,
-        ) as mock_handle_text_response,
         patch.object(
             bot._turn_controller,
             "_enqueue_prepared_text_for_dispatch",
@@ -625,7 +624,10 @@ async def test_sidecar_preview_passes_resolved_thread_id_to_interactive_text_res
     ):
         await bot._turn_controller._handle_media_message_inner(room, sidecar_event)
 
-    mock_handle_text_response.assert_awaited_once()
-    assert mock_handle_text_response.await_args.kwargs["resolved_thread_id"] == "$thread-root:localhost"
+    interactive_questions.claim_interactive_text.assert_awaited_once_with(
+        source_event_id=prepared_event.event_id,
+        selection_key="1",
+        creator_agent="general",
+    )
     mock_enqueue.assert_awaited_once()
     assert mock_enqueue.await_args.kwargs["prepared_event"] is prepared_event

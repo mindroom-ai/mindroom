@@ -148,6 +148,23 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS interactive_questions (
+        principal_id TEXT NOT NULL,
+        question_event_id {ordered_text} NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        creator_agent TEXT NOT NULL,
+        question_json TEXT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        claimed_source_event_id {ordered_text},
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, question_event_id),
+        UNIQUE (principal_id, claimed_source_event_id),
+        FOREIGN KEY (principal_id, claimed_source_event_id)
+            REFERENCES journal_events (principal_id, event_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS conversation_hydration (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
@@ -284,6 +301,13 @@ _INDEXES = (
     CREATE INDEX IF NOT EXISTS reported_departures_open
     ON reported_departures (principal_id, room_id, report_order)
     WHERE run_closed = 0
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS interactive_questions_active
+    ON interactive_questions (
+        principal_id, room_id, thread_id, creator_agent, created_at_ns, question_event_id/*bytes*/
+    )
+    WHERE claimed_source_event_id IS NULL
     """,
     """
     CREATE INDEX IF NOT EXISTS journal_events_pending

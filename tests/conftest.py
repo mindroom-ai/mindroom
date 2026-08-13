@@ -1608,18 +1608,14 @@ def make_conversation_reader_mock() -> ConversationReader:
 
 
 def make_membership_stub() -> PrincipalStore:
-    """Return a membership view that treats every epoch as current and runs side effects."""
-
-    async def run_operation(*, operation: Callable[[], None], **_kwargs: object) -> bool:
-        operation()
-        return True
-
+    """Return a membership view that accepts interactive question updates."""
     return cast(
         "PrincipalStore",
         SimpleNamespace(
             membership_epoch=AsyncMock(return_value=0),
-            run_if_turn_membership_current=run_operation,
-            run_if_membership_epoch=run_operation,
+            register_interactive_question_for_turn=AsyncMock(return_value=True),
+            register_interactive_question_for_epoch=AsyncMock(return_value=True),
+            forget_interactive_question=AsyncMock(),
         ),
     )
 

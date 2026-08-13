@@ -1567,7 +1567,6 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
                 "mindroom.turn_controller.dispatch_text_message",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
             ),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             second_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, second))
             await asyncio.wait_for(second_lookup_started.wait(), timeout=0.5)
@@ -1658,7 +1657,6 @@ async def test_later_slow_thread_lookup_active_follow_up_lands_as_own_turn(tmp_p
                 "mindroom.turn_controller.dispatch_text_message",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
             ),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             first_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, first))
             await asyncio.wait_for(first_task, timeout=0.5)
@@ -7214,7 +7212,6 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         )
 
     with (
-        patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         patch.object(
             bot._conversation_resolver,
             "extract_dispatch_context",
@@ -7384,7 +7381,6 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
             "prepare_file_sidecar_text_event",
             new=AsyncMock(return_value=hydrated),
         ),
-        patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         patch(
             "mindroom.turn_controller.dispatch_text_message",
             new=AsyncMock(side_effect=RuntimeError("dispatch failed")),

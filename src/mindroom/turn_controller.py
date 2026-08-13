@@ -132,7 +132,7 @@ if TYPE_CHECKING:
     from mindroom.command_turn_executor import CommandTurnExecutor
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.event_journal import PendingTurnView
+    from mindroom.event_journal import PendingTurnView, PrincipalStore
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
@@ -157,7 +157,6 @@ class _InteractiveSelectionDispatch:
 
     response_factory: Callable[[], Awaitable[None]]
     start_response: Callable[..., Awaitable[None]]
-    restore_selection: Callable[[], None]
     response_target: MessageTarget
     source_event_id: str
     user_id: str
@@ -330,6 +329,7 @@ class TurnControllerDeps:
     matrix_id: MatrixID
     relations: RelationLookup
     pending_turns: PendingTurnView
+    interactive_questions: PrincipalStore
     resolver: ConversationResolver
     normalizer: InboundTurnNormalizer
     command_executor: CommandTurnExecutor
@@ -714,7 +714,6 @@ class TurnController:
             reply_to_event_id=prepared_event.event_id,
             event_source=prepared_event.source,
         )
-        canonical_thread_id = target.resolved_thread_id
         original_sender = self.deps.ingress.trusted_human_original_sender_for_event(prepared_event)
         content = prepared_event.source.get("content") if isinstance(prepared_event.source, dict) else None
         prepared_source_kind = (
@@ -738,13 +737,12 @@ class TurnController:
             envelope=envelope,
         ):
             return _IngressAdmissionOutcome.CONSUMED
-        if envelope.origin.may_answer_interactive_prompt:
-            selection = await interactive.handle_text_response(
-                self._client(),
-                room,
-                prepared_event,
-                self.deps.agent_name,
-                resolved_thread_id=canonical_thread_id,
+        message_text = prepared_event.body.strip()
+        if envelope.origin.may_answer_interactive_prompt and message_text.isdigit() and len(message_text) == 1:
+            selection = await self.deps.interactive_questions.claim_interactive_text(
+                source_event_id=prepared_event.event_id,
+                selection_key=message_text,
+                creator_agent=self.deps.agent_name,
             )
             if selection is not None:
                 # A consumed interactive answer never enters the gate, and its
@@ -1186,7 +1184,6 @@ class TurnController:
         source_event_id: str,
         user_id: str,
         selected_value: str,
-        on_failure: Callable[[], None],
     ) -> None:
         """Transfer one selection response from journal dispatch to runner ownership."""
         response_envelope = self._interactive_selection_response_envelope(
@@ -1198,7 +1195,7 @@ class TurnController:
         try:
             reservation = await self.deps.response_runner.reserve_response_lifecycle(response_envelope)
         except BaseException:
-            on_failure()
+            self.deps.retry_dispatch_sources((source_event_id,))
             raise
 
         async def run_owned_response() -> None:
@@ -1215,7 +1212,7 @@ class TurnController:
                 await self.deps.settle_dispatch_sources((source_event_id,))
             except BaseException:
                 if not response_claim_transferred:
-                    on_failure()
+                    self.deps.retry_dispatch_sources((source_event_id,))
                 raise
             finally:
                 await reservation.release()
@@ -1235,7 +1232,7 @@ class TurnController:
         except BaseException:
             owned_response.close()
             await reservation.release()
-            on_failure()
+            self.deps.retry_dispatch_sources((source_event_id,))
             raise
         # Ownership registration is synchronous, and the task cannot execute
         # until this callback yields after reporting its deferred handoff.
@@ -1267,9 +1264,6 @@ class TurnController:
         """Queue a selection handoff as a FIFO barrier behind earlier ingress."""
         response_target = self._interactive_selection_target(room.room_id, selection)
 
-        def restore_selection() -> None:
-            interactive.restore_selection(selection)
-
         dispatch = _InteractiveSelectionDispatch(
             response_factory=lambda: handle_interactive_selection(
                 room,
@@ -1279,7 +1273,6 @@ class TurnController:
                 response_target=response_target,
             ),
             start_response=start_interactive_selection,
-            restore_selection=restore_selection,
             response_target=response_target,
             source_event_id=source_event_id,
             user_id=user_id,
@@ -1300,7 +1293,7 @@ class TurnController:
                 PendingDispatchMetadata(
                     kind=_INTERACTIVE_SELECTION_METADATA_KIND,
                     payload=dispatch,
-                    close=restore_selection,
+                    close=lambda: None,
                     target_key=response_target.lifecycle_key,
                 ),
             ),
@@ -1332,7 +1325,6 @@ class TurnController:
             source_event_id=dispatch.source_event_id,
             user_id=dispatch.user_id,
             selected_value=dispatch.selected_value,
-            on_failure=dispatch.restore_selection,
         )
         item.finish_once(lambda: None)
         return True
@@ -1356,22 +1348,14 @@ class TurnController:
                 source_event_id=source_event_id,
                 response_target=target,
             )
-            interactive.commit_selection(selection)
         except BaseException as error:
 
-            async def reconcile_selection() -> bool:
-                try:
-                    source_is_terminal = await self.deps.dispatch_source_is_terminal(source_event_id)
-                except BaseException:
-                    interactive.restore_selection(selection)
-                    raise
-                if source_is_terminal:
-                    interactive.commit_selection(selection)
-                else:
-                    interactive.restore_selection(selection)
-                return source_is_terminal
+            async def source_is_terminal_after_cancellation() -> bool:
+                return await self.deps.dispatch_source_is_terminal(source_event_id)
 
-            source_is_terminal = await run_coroutine_until_complete(reconcile_selection())
+            source_is_terminal = await run_coroutine_until_complete(
+                source_is_terminal_after_cancellation(),
+            )
             if source_is_terminal:
                 if isinstance(error, asyncio.CancelledError):
                     raise

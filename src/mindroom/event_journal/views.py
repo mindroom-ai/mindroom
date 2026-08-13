@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     )
 
     from .approvals import RecordedApprovalDecision, StoredApprovalCard
+    from .interactive_questions import InteractiveSelection
     from .models import (
         AdmissionResult,
         ConversationCursor,
@@ -110,6 +111,17 @@ class DispatchView(ReplayView, AdmissionView, Protocol):
         consumer: SemanticConsumer,
     ) -> SemanticConsumer | None:
         """Record the sole consumer, or retire a stale interactive reaction."""
+        ...
+
+    async def claim_interactive_reaction(
+        self,
+        *,
+        source_event_id: str,
+        question_event_id: str,
+        selection_key: str,
+        creator_agent: str,
+    ) -> InteractiveSelection | None:
+        """Atomically claim one question with its durable reaction source."""
         ...
 
 

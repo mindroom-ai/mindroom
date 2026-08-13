@@ -49,7 +49,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
 
@@ -900,45 +900,34 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
         _room_send_response("$reaction-test"),
     ]
     membership = MagicMock()
+    membership.register_interactive_question_for_turn = AsyncMock(return_value=True)
+    support = PostResponseEffectsSupport(
+        runtime=SimpleNamespace(client=client, config=config),
+        logger=get_logger("tests.post_response"),
+        runtime_paths=runtime_paths_for(config),
+        delivery_gateway=Mock(),
+        conversation_reader=make_conversation_reader_mock(),
+        membership=membership,
+    )
+    await apply_post_response_effects(
+        final_outcome,
+        ResponseOutcome(interactive_target=target),
+        support.build_deps(
+            room_id=target.room_id,
+            interactive_agent_name="code",
+            membership_turn_id="$source",
+        ),
+    )
 
-    def register_if_current(*, operation: Callable[[], None], **_kwargs: object) -> bool:
-        operation()
-        return True
-
-    membership.run_if_turn_membership_current = AsyncMock(side_effect=register_if_current)
-    interactive._cleanup()
-    try:
-        support = PostResponseEffectsSupport(
-            runtime=SimpleNamespace(client=client, config=config),
-            logger=get_logger("tests.post_response"),
-            runtime_paths=runtime_paths_for(config),
-            delivery_gateway=Mock(),
-            conversation_reader=make_conversation_reader_mock(),
-            membership=membership,
-        )
-        await apply_post_response_effects(
-            final_outcome,
-            ResponseOutcome(interactive_target=target),
-            support.build_deps(
-                room_id=target.room_id,
-                interactive_agent_name="code",
-                membership_turn_id="$source",
-            ),
-        )
-
-        registered = interactive._active_questions["$displayed-root"]
-        assert registered.thread_id == "$thread-root"
-        assert registered.options == final_outcome.option_map
-        reaction_targets = [
-            call.kwargs["content"]["m.relates_to"]["event_id"] for call in client.room_send.await_args_list
-        ]
-        reaction_keys = [call.kwargs["content"]["m.relates_to"]["key"] for call in client.room_send.await_args_list]
-        assert reaction_targets == ["$displayed-root", "$displayed-root", "$displayed-root"]
-        assert "$obsolete-edit" not in reaction_targets
-        assert reaction_keys == ["✅", "❌", "🧪"]
-        membership.run_if_turn_membership_current.assert_awaited_once()
-    finally:
-        interactive._cleanup()
+    membership.register_interactive_question_for_turn.assert_awaited_once()
+    registered = membership.register_interactive_question_for_turn.await_args.args[1]
+    assert registered.thread_id == "$thread-root"
+    assert registered.options == final_outcome.option_map
+    reaction_targets = [call.kwargs["content"]["m.relates_to"]["event_id"] for call in client.room_send.await_args_list]
+    reaction_keys = [call.kwargs["content"]["m.relates_to"]["key"] for call in client.room_send.await_args_list]
+    assert reaction_targets == ["$displayed-root", "$displayed-root", "$displayed-root"]
+    assert "$obsolete-edit" not in reaction_targets
+    assert reaction_keys == ["✅", "❌", "🧪"]
 
 
 @pytest.mark.asyncio
@@ -947,7 +936,7 @@ async def test_stale_response_skips_interactive_registration_and_buttons(tmp_pat
     config = _config(tmp_path)
     client = make_matrix_client_mock()
     membership = MagicMock()
-    membership.run_if_turn_membership_current = AsyncMock(return_value=False)
+    membership.register_interactive_question_for_turn = AsyncMock(return_value=False)
     target = MessageTarget.resolve("!room:localhost", None, "$source")
     formatted = interactive.parse_and_format_interactive(
         """Choose one.
@@ -975,22 +964,18 @@ async def test_stale_response_skips_interactive_registration_and_buttons(tmp_pat
         membership=membership,
     )
 
-    interactive._cleanup()
-    try:
-        await apply_post_response_effects(
-            outcome,
-            ResponseOutcome(interactive_target=target),
-            support.build_deps(
-                room_id=target.room_id,
-                interactive_agent_name="code",
-                membership_turn_id="$source",
-            ),
-        )
+    await apply_post_response_effects(
+        outcome,
+        ResponseOutcome(interactive_target=target),
+        support.build_deps(
+            room_id=target.room_id,
+            interactive_agent_name="code",
+            membership_turn_id="$source",
+        ),
+    )
 
-        assert "$question" not in interactive._active_questions
-        client.room_send.assert_not_awaited()
-    finally:
-        interactive._cleanup()
+    membership.register_interactive_question_for_turn.assert_awaited_once()
+    client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

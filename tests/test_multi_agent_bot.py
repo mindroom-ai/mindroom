@@ -186,12 +186,10 @@ class TestAgentBot(AgentBotTestBase):
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
-    @patch("mindroom.bot.interactive.init_persistence")
     @patch("mindroom.config.main.load_config")
     async def test_agent_bot_start(
         self,
         mock_load_config: MagicMock,
-        mock_init_persistence: MagicMock,
         mock_ensure_user: AsyncMock,
         mock_login: AsyncMock,
         mock_agent_user: AgentMatrixUser,
@@ -220,7 +218,6 @@ class TestAgentBot(AgentBotTestBase):
         # The bot calls ensure_setup which calls ensure_user_account
         # and then login with whatever user account was ensured
         assert mock_login.called
-        mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
         # Every timeline event, including an undecryptable one, is admitted
         # through one durable callback. Only invites and membership events,
         # which are not admitted from the timeline, register their own.
@@ -271,10 +268,8 @@ class TestAgentBot(AgentBotTestBase):
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
-    @patch("mindroom.bot.interactive.init_persistence")
     async def test_agent_bot_start_rebuilds_identity_bound_runtime_after_login_user_id_change(
         self,
-        mock_init_persistence: MagicMock,
         mock_ensure_user: AsyncMock,
         mock_login: AsyncMock,
         tmp_path: Path,
@@ -328,7 +323,6 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._response_runner.deps.matrix_full_id == actual_user_id
         assert bot._turn_policy.deps.matrix_id.full_id == actual_user_id
         assert bot._turn_controller.deps.matrix_id.full_id == actual_user_id
-        mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
         assert mock_client.add_event_callback.call_count == 2
         mock_client.add_event_admission_callback.assert_called_once()
 

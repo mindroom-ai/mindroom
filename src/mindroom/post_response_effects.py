@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom import interactive
 from mindroom.background_tasks import create_background_task
+from mindroom.interactive_models import InteractiveQuestion
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_summary import maybe_generate_thread_summary
@@ -120,16 +121,15 @@ class PostResponseEffectsSupport:
         membership_turn_id: str,
     ) -> None:
         """Persist one interactive response and add its reaction buttons."""
-        registered = await self.membership.run_if_turn_membership_current(
-            turn_id=membership_turn_id,
-            room_id=room_id,
-            operation=lambda: interactive.register_interactive_question(
-                event_id,
-                room_id,
-                target.resolved_thread_id,
-                interactive_metadata.option_map,
-                agent_name,
+        registered = await self.membership.register_interactive_question_for_turn(
+            membership_turn_id,
+            InteractiveQuestion(
+                question_event_id=event_id,
+                room_id=room_id,
+                thread_id=target.resolved_thread_id,
+                creator_agent=agent_name,
                 question_text=interactive_metadata.question_text,
+                options=interactive_metadata.option_map,
                 option_labels=interactive_metadata.option_labels,
             ),
         )

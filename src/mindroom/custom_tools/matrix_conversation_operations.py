@@ -20,11 +20,10 @@ from mindroom.entity_resolution import is_human_requester_id
 from mindroom.interactive import (
     InteractiveMetadata,
     add_reaction_buttons,
-    clear_interactive_question,
     parse_and_format_interactive,
-    register_interactive_question,
     should_create_interactive_question,
 )
+from mindroom.interactive_models import InteractiveQuestion
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result, send_room_event_result
 from mindroom.matrix.client_visible_messages import (
@@ -145,36 +144,32 @@ class MatrixMessageOperations:
         expected_membership_epoch: int | None,
     ) -> None:
         """Register a direct Matrix question only for the membership that sent it."""
-
-        def register() -> None:
-            register_interactive_question(
-                event_id,
-                room_id,
-                thread_id,
-                metadata.option_map,
-                context.agent_name,
-                question_text=metadata.question_text,
-                option_labels=metadata.option_labels,
-            )
-
         membership = context.membership
         if membership is None:
-            register()
-        elif context.membership_turn_id is not None and room_id == context.room_id:
-            if not await membership.run_if_turn_membership_current(
-                turn_id=context.membership_turn_id,
-                room_id=room_id,
-                fallback_membership_epoch=expected_membership_epoch,
-                operation=register,
-            ):
-                return
-        elif expected_membership_epoch is None:
-            register()
-        elif not await membership.run_if_membership_epoch(
+            return
+        question = InteractiveQuestion(
+            question_event_id=event_id,
             room_id=room_id,
-            expected_membership_epoch=expected_membership_epoch,
-            operation=register,
-        ):
+            thread_id=thread_id,
+            creator_agent=context.agent_name,
+            question_text=metadata.question_text,
+            options=metadata.option_map,
+            option_labels=metadata.option_labels,
+        )
+        if context.membership_turn_id is not None and room_id == context.room_id:
+            registered = await membership.register_interactive_question_for_turn(
+                context.membership_turn_id,
+                question,
+                fallback_membership_epoch=expected_membership_epoch,
+            )
+        elif expected_membership_epoch is None:
+            return
+        else:
+            registered = await membership.register_interactive_question_for_epoch(
+                expected_membership_epoch,
+                question,
+            )
+        if not registered:
             return
         await add_reaction_buttons(
             context.client,
@@ -683,7 +678,6 @@ class MatrixMessageOperations:
         if new_text is None:
             return self._result("error", action="edit", message="message is required for edit.")
 
-        clear_interactive_question(target)
         interactive_response = parse_and_format_interactive(new_text, extract_mapping=True)
         expected_membership_epoch = (
             await context.membership.membership_epoch(room_id)
@@ -715,6 +709,8 @@ class MatrixMessageOperations:
                 target=target,
                 message="Failed to edit message in Matrix.",
             )
+        if context.membership is not None:
+            await context.membership.forget_interactive_question(target)
         if interactive_response.interactive_metadata is not None:
             await self._register_interactive(
                 context,

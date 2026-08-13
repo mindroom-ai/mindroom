@@ -225,7 +225,6 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
             "execute_if_owned",
             new=AsyncMock(return_value=True),
         ) as mock_handle,
-        patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
     ):
         bot.client = MagicMock()
@@ -270,7 +269,6 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
             "execute_if_owned",
             new=AsyncMock(return_value=True),
         ) as mock_handle,
-        patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
     ):
         bot.client = MagicMock()
@@ -344,11 +342,6 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
 
     with (
         patch(
-            "mindroom.turn_controller.interactive.handle_text_response",
-            new_callable=AsyncMock,
-            return_value=None,
-        ) as mock_interactive,
-        patch(
             "mindroom.commands.handler.schedule_task",
             new_callable=AsyncMock,
             return_value=("task123", "scheduled"),
@@ -358,7 +351,6 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
         await bot._on_media_message(room, event)
         await bot._coalescing_gate.drain_all()
 
-    mock_interactive.assert_awaited_once()
     assert mock_schedule.await_args.kwargs["scheduled_by"] == "@alice:example.com"
 
 
@@ -425,11 +417,6 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
 
     with (
         patch(
-            "mindroom.turn_controller.interactive.handle_text_response",
-            new_callable=AsyncMock,
-            return_value=None,
-        ) as mock_interactive,
-        patch(
             "mindroom.commands.handler.schedule_task",
             new_callable=AsyncMock,
             return_value=("task123", "scheduled"),
@@ -439,7 +426,6 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
         await bot._on_media_message(room, event)
         await bot._coalescing_gate.drain_all()
 
-    mock_interactive.assert_awaited_once()
     assert (
         mock_schedule.await_args.kwargs["full_text"] == "tomorrow at 9am @mindroom_home:localhost turn off the lights"
     )
@@ -516,16 +502,9 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
         },
     )
 
-    with patch(
-        "mindroom.turn_controller.interactive.handle_text_response",
-        new_callable=AsyncMock,
-        return_value=None,
-    ) as mock_interactive:
-        assert isinstance(event, nio.RoomMessageFile)
-        await bot._on_media_message(room, event)
-        await bot._coalescing_gate.drain_all()
-
-    mock_interactive.assert_awaited_once()
+    assert isinstance(event, nio.RoomMessageFile)
+    await bot._on_media_message(room, event)
+    await bot._coalescing_gate.drain_all()
     send_response.assert_awaited_once()
     assert send_response.await_args.kwargs["response_text"] == ("❌ Unknown command. Try !help for available commands.")
 
@@ -575,11 +554,6 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
     )
 
     with (
-        patch(
-            "mindroom.turn_controller.interactive.handle_text_response",
-            new_callable=AsyncMock,
-            return_value=None,
-        ) as mock_interactive,
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=False),
         patch("mindroom.commands.handler.schedule_task", new_callable=AsyncMock) as mock_schedule,
     ):
@@ -587,7 +561,6 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
         await bot._on_media_message(room, event)
 
     bot.client.download.assert_not_awaited()
-    mock_interactive.assert_not_awaited()
     mock_schedule.assert_not_awaited()
     turn_store.record_turn.assert_called_once_with(
         TurnRecord.create([event.event_id]),

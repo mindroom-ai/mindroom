@@ -1089,44 +1089,30 @@ class FencedRoomRecorder:
             reported_run_epoch=(epoch if source is DepartureSource.REPORTED else None),
         )
 
-    async def cleanup_fenced_departure(self, room_id: str, cleanup: Callable[[], None]) -> None:
-        """Run cleanup for every departure this focused recorder accepted."""
-        if room_id in self.fenced_room_ids:
-            cleanup()
-
     async def note_membership_restarted(
         self,
         room_id: str,
         *,
-        cleanup: Callable[[], None] | None = None,
         expected_membership_epoch: int | None = None,
     ) -> None:
         """Accept a confirmed join without recording it."""
-        del expected_membership_epoch
-        if cleanup is not None and room_id in self.fenced_room_ids:
-            cleanup()
+        del room_id, expected_membership_epoch
 
     async def close_preceding_reported_departure(
         self,
         room_id: str,
         join_event_id: str,
-        cleanup: Callable[[], None],
     ) -> None:
         """Accept a join after one reported departure."""
-        del join_event_id
-        if room_id in self.fenced_room_ids:
-            cleanup()
+        del room_id, join_event_id
 
     async def close_reported_departure_run(
         self,
         room_id: str,
         run_epoch: int,
-        cleanup: Callable[[], None],
     ) -> None:
         """Accept closure of one reported departure run."""
-        del run_epoch
-        if room_id in self.fenced_room_ids:
-            cleanup()
+        del room_id, run_epoch
 
     async def retire_owed_departure_reports(self, room_id: str) -> None:
         """Accept a retirement that can never happen here: nothing is ever owed."""

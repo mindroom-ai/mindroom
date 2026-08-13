@@ -40,8 +40,6 @@ from .projection import ProjectedEvent, project
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from .backend import Row, Transaction
     from .models import InboundEvent
 
@@ -247,6 +245,7 @@ def _advance_membership_epoch(
         "unresolved_edits",
         "redaction_tombstones",
         "room_history_recovery",
+        "interactive_questions",
     ):
         transaction.execute(
             f"DELETE FROM {table} WHERE principal_id = ? AND room_id = ?",  # noqa: S608 - a fixed table list
@@ -560,27 +559,24 @@ def _note_membership_restarted(
     _close_open_reported_departure_runs(transaction, principal_id, room_id)
 
 
-def note_membership_restarted_after(
+def note_membership_restarted(
     transaction: Transaction,
     principal_id: str,
     room_id: str,
-    cleanup: Callable[[], None],
     *,
     expected_membership_epoch: int | None = None,
 ) -> None:
-    """Clear external departure state before atomically rearming one room.
+    """Atomically rearm one confirmed membership.
 
     Without an expected epoch, clearing an unfenced flag is a harmless no-op.
-    With one, both cleanup and rearming apply only to that exact membership.
+    With one, rearming applies only to that exact membership.
     """
-    claimed_fence = cleanup_fenced_departure(
+    if expected_membership_epoch is not None and not _claim_departure_fence(
         transaction,
         principal_id,
         room_id,
-        cleanup,
         expected_membership_epoch=expected_membership_epoch,
-    )
-    if expected_membership_epoch is not None and not claimed_fence:
+    ):
         return
     _note_membership_restarted(transaction, principal_id, room_id)
 
@@ -590,7 +586,6 @@ def close_preceding_reported_departure(
     principal_id: str,
     room_id: str,
     join_event_id: str,
-    cleanup: Callable[[], None],
 ) -> None:
     """Close only the reported departure immediately preceding one join."""
     report = transaction.fetchone(
@@ -616,7 +611,6 @@ def close_preceding_reported_departure(
         principal_id,
         room_id,
         int(report["run_epoch"]),
-        cleanup,
     )
 
 
@@ -625,7 +619,6 @@ def close_reported_departure_run(
     principal_id: str,
     room_id: str,
     run_epoch: int,
-    cleanup: Callable[[], None],
 ) -> None:
     """Close one alias run, rearming only if it is still the current fence."""
     state = _lock_membership_state(transaction, principal_id, room_id)
@@ -640,7 +633,6 @@ def close_reported_departure_run(
     if open_run is None:
         return
     if state.departure_fenced and state.membership_epoch == run_epoch:
-        cleanup()
         transaction.execute(
             """
             UPDATE room_membership SET departure_fenced = 0
@@ -655,26 +647,6 @@ def close_reported_departure_run(
         """,
         (principal_id, room_id, run_epoch),
     )
-
-
-def cleanup_fenced_departure(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    cleanup: Callable[[], None],
-    *,
-    expected_membership_epoch: int | None = None,
-) -> bool:
-    """Clean external state only while this room is still durably departed."""
-    if _claim_departure_fence(
-        transaction,
-        principal_id,
-        room_id,
-        expected_membership_epoch=expected_membership_epoch,
-    ):
-        cleanup()
-        return True
-    return False
 
 
 def retire_owed_departure_reports(transaction: Transaction, principal_id: str, room_id: str) -> None:
@@ -1090,6 +1062,10 @@ def settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
         WHERE principal_id = ? AND event_id = ? AND state = 'pending'
         """,
         (SETTLED_STATE, principal_id, event_id),
+    )
+    transaction.execute(
+        "DELETE FROM interactive_questions WHERE principal_id = ? AND claimed_source_event_id = ?",
+        (principal_id, event_id),
     )
 
 

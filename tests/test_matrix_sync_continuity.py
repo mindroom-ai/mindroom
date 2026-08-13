@@ -31,7 +31,7 @@ from mindroom.delivery_gateway import FinalizeStreamedResponseRequest, ResponseI
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.event_journal import EventClass, EventKind
+from mindroom.event_journal import EventClass, EventKind, InteractiveQuestion
 from mindroom.handled_turns import TurnRecord
 from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -82,6 +82,23 @@ if TYPE_CHECKING:
     from mindroom.event_journal import PrincipalStore
     from mindroom.event_journal.models import DepartureOutcome, DepartureSource
     from mindroom.final_delivery import FinalDeliveryOutcome
+
+
+async def _membership_accepts_question(store: PrincipalStore, room_id: str, epoch: int) -> bool:
+    """Probe active membership through guarded question registration."""
+    return await store.register_interactive_question_for_epoch(
+        epoch,
+        InteractiveQuestion(
+            question_event_id="$membership-probe",
+            room_id=room_id,
+            thread_id=None,
+            creator_agent="agent",
+            question_text="Probe",
+            options={"1": "one"},
+            option_labels={"1": "One"},
+        ),
+    )
+
 
 _STORE_GENERATION = "test-store-generation"
 
@@ -596,7 +613,6 @@ async def test_restart_loads_only_exact_unfinished_join_decrypt_fence(
         ),
         patch.object(restarted_bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(restarted_bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
         patch(
             "mindroom.bot_room_lifecycle.get_joined_rooms",
             AsyncMock(return_value=[room_id, trusted_room_id]),
@@ -934,7 +950,6 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
 
@@ -960,7 +975,6 @@ async def test_bot_start_gives_mindroom_sync_cursor_ownership(
         patch("mindroom.bot.login_agent_user", login),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
 
@@ -993,7 +1007,6 @@ async def test_bot_start_leaves_trusted_joined_room_unfenced_for_catch_up(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", get_joined_rooms),
     ):
         await bot.start()
@@ -1026,7 +1039,6 @@ async def test_bot_start_keeps_fences_when_joined_rooms_query_is_unavailable(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", get_joined_rooms),
     ):
         await bot.start()
@@ -1052,7 +1064,6 @@ async def test_bot_start_skips_joined_rooms_query_without_pending_join_fences(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", get_joined_rooms),
     ):
         await bot.start()
@@ -1081,7 +1092,6 @@ async def test_orchestrated_entity_start_defers_turn_recovery_to_coordinator(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
         await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
@@ -1113,7 +1123,6 @@ async def test_start_runs_pending_invite_recovery_after_callbacks_and_running(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
 
@@ -1149,7 +1158,6 @@ async def test_orchestrated_team_start_gates_turn_recovery_on_responder_fleet(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
         await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
@@ -1257,7 +1265,6 @@ async def test_bot_start_rejects_checkpoint_from_reset_store_generation(tmp_path
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
 
@@ -1284,7 +1291,6 @@ async def test_bot_start_clears_checkpoint_when_store_generation_is_unavailable(
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
 
@@ -1312,7 +1318,6 @@ async def test_legacy_v2_sync_token_path_is_not_parsed(tmp_path: Path) -> None:
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
 
@@ -2393,20 +2398,12 @@ async def test_explicit_join_closes_a_preceding_truncated_leave_before_message_a
             await bot._apply_own_room_membership_from_sync(left)
         else:
             await bot._apply_own_room_membership_from_sliding_sync(left)
-        assert not await bot._journal_dispatcher.store.run_if_membership_epoch(
-            room_id=room_id,
-            expected_membership_epoch=1,
-            operation=lambda: None,
-        )
+        assert not await _membership_accepts_question(bot._journal_dispatcher.store, room_id, 1)
 
         await client.receive_response(joined)
 
         store = bot._journal_dispatcher.store
-        assert await store.run_if_membership_epoch(
-            room_id=room_id,
-            expected_membership_epoch=1,
-            operation=lambda: None,
-        )
+        assert await _membership_accepts_question(store, room_id, 1)
         assert await store.is_pending(message.event_id)
     finally:
         await client.close()
@@ -2457,11 +2454,7 @@ async def test_delayed_old_join_does_not_rearm_a_newer_local_departure(
 
         store = bot._journal_dispatcher.store
         assert await store.membership_epoch(room_id) == 2
-        assert not await store.run_if_membership_epoch(
-            room_id=room_id,
-            expected_membership_epoch=2,
-            operation=lambda: None,
-        )
+        assert not await _membership_accepts_question(store, room_id, 2)
     finally:
         await client.close()
 

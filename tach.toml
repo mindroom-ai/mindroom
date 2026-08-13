@@ -109,7 +109,11 @@ visibility = [
 
 [[modules]]
 path = "mindroom.event_journal"
-depends_on = ["mindroom.logging_config", "mindroom.matrix.sidecar_content"]
+depends_on = [
+    "mindroom.interactive_models",
+    "mindroom.logging_config",
+    "mindroom.matrix.sidecar_content",
+]
 visibility = [
     "mindroom.bot",
     "mindroom.delivery_gateway",
@@ -130,6 +134,16 @@ visibility = [
     "mindroom.turn_controller",
     "mindroom.visible_response_reconciliation",
     "mindroom.orchestrator",
+]
+
+[[modules]]
+path = "mindroom.interactive_models"
+depends_on = []
+visibility = [
+    "mindroom.custom_tools.matrix_conversation_operations",
+    "mindroom.event_journal",
+    "mindroom.interactive",
+    "mindroom.post_response_effects",
 ]
 
 [[modules]]
@@ -1106,6 +1120,7 @@ depends_on = [
     "mindroom.custom_tools.attachments",
     "mindroom.entity_resolution",
     "mindroom.interactive",
+    "mindroom.interactive_models",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_visible_messages",
@@ -3312,6 +3327,7 @@ depends_on = [
 path = "mindroom.post_response_effects"
 depends_on = [
     "mindroom.delivery_gateway",
+    "mindroom.interactive_models",
     "mindroom.matrix.conversation_reads",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",

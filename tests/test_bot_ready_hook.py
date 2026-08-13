@@ -17,7 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import SOURCE_KIND_KEY
-from mindroom.event_journal import EventClass, EventKind
+from mindroom.event_journal import EventClass, EventKind, InteractiveQuestion
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -612,14 +612,10 @@ async def test_replayed_departure_cannot_leave_a_confirmed_join_fenced(tmp_path:
     await bot._membership_fence.fence_local_departure(room_id)
     await bot._membership_fence.note_membership_restarted(room_id)
     epoch_after_rejoin = await bot._journal_principal().membership_epoch(room_id)
-    cleanup = MagicMock()
-    bot._membership_fence.clear_departed_room = cleanup
-
     await bot._apply_own_room_membership_from_sync(response)
     await bot._apply_own_room_membership_from_sync(response)
 
     assert await bot._journal_principal().membership_epoch(room_id) == epoch_after_rejoin
-    cleanup.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -676,13 +672,18 @@ async def test_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(
 
     principal = bot._journal_principal()
     assert await principal.membership_epoch(room_id) == 1
-    registered: list[str] = []
-    assert await principal.run_if_membership_epoch(
-        room_id=room_id,
-        expected_membership_epoch=1,
-        operation=lambda: registered.append(room_id),
+    assert await principal.register_interactive_question_for_epoch(
+        1,
+        InteractiveQuestion(
+            question_event_id="$membership-probe",
+            room_id=room_id,
+            thread_id=None,
+            creator_agent=bot.agent_name,
+            question_text="Probe",
+            options={"1": "one"},
+            option_labels={"1": "One"},
+        ),
     )
-    assert registered == [room_id]
 
 
 @pytest.mark.asyncio
