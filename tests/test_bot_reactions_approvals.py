@@ -437,6 +437,55 @@ class TestAgentBot(AgentBotTestBase):
             interactive._cleanup()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_stage", ["reserve", "track"])
+    async def test_interactive_reaction_start_failure_restores_claimed_selection(
+        self,
+        failure_stage: str,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A failed reservation or task registration must restore the claimed question."""
+        interactive._cleanup()
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        room = MagicMock(room_id="!test:localhost")
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.source = {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$question",
+                    "key": "👍",
+                },
+            },
+        }
+        interactive._active_questions["$question"] = interactive._InteractiveQuestion(
+            room_id=room.room_id,
+            thread_id="$thread-a",
+            options={"👍": "approve"},
+            creator_agent=bot.agent_name,
+        )
+        error = RuntimeError(f"{failure_stage} failed")
+        reservation_patch = (
+            patch.object(bot._response_runner, "reserve_response_lifecycle", new=AsyncMock(side_effect=error))
+            if failure_stage == "reserve"
+            else patch.object(bot._response_runner, "track_inbox_response", side_effect=error)
+        )
+
+        try:
+            with reservation_patch:
+                await _dispatch_reaction(bot, room, event)
+
+            assert "$question" in interactive._active_questions
+            assert event.event_id in await bot._journal_dispatcher.unsettled_event_ids()
+            assert not bot._journal_dispatcher.callbacks.source_has_live_owner(event.event_id)
+            target = MessageTarget.resolve(room.room_id, "$thread-a", "$question")
+            assert not bot._response_runner.has_active_response_for_target(target)
+        finally:
+            interactive._cleanup()
+
+    @pytest.mark.asyncio
     async def test_interactive_reaction_selection_reserves_prompt_order(
         self,
         mock_agent_user: AgentMatrixUser,

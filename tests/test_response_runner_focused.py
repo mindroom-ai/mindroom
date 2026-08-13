@@ -1372,6 +1372,61 @@ async def test_response_lifecycle_reservation_is_not_its_own_queued_human_turn()
 
 
 @pytest.mark.asyncio
+async def test_queued_lifecycle_reservation_preserves_notice_for_older_active_response() -> None:
+    """A reserved human response queued behind an older turn still signals that turn."""
+    coordinator = ResponseLifecycleCoordinator()
+    first_envelope = _queued_envelope("$first")
+    second_envelope = _queued_envelope("$second")
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_bookkeeping_started = asyncio.Event()
+
+    async def first_operation(_target: MessageTarget) -> str:
+        first_entered.set()
+        await release_first.wait()
+        return "first"
+
+    first = asyncio.create_task(
+        coordinator.run_locked_response(
+            target=first_envelope.target,
+            response_envelope=first_envelope,
+            pipeline_timing=None,
+            locked_operation=first_operation,
+        ),
+    )
+    await first_entered.wait()
+    reservation = await coordinator.reserve_response_lifecycle(second_envelope.target)
+    begin_notice = coordinator._begin_response_turn_notice
+
+    def tracked_begin_notice(**kwargs: object) -> str | None:
+        result = begin_notice(**kwargs)  # type: ignore[arg-type]
+        response_envelope = kwargs["response_envelope"]
+        if response_envelope is second_envelope:
+            second_bookkeeping_started.set()
+        return result
+
+    with (
+        patch.object(coordinator, "_begin_response_turn_notice", side_effect=tracked_begin_notice),
+        response_lifecycle_reservation_context(reservation),
+    ):
+        second = asyncio.create_task(
+            coordinator.run_locked_response(
+                target=second_envelope.target,
+                response_envelope=second_envelope,
+                pipeline_timing=None,
+                locked_operation=lambda _target: asyncio.sleep(0, result="second"),
+            ),
+        )
+        await second_bookkeeping_started.wait()
+        queued_signal = coordinator._get_or_create_queued_signal(second_envelope.target)
+        assert queued_signal.pending_human_message_event_ids == {"$second"}
+
+        release_first.set()
+        assert await first == "first"
+        assert await second == "second"
+
+
+@pytest.mark.asyncio
 async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_lock() -> None:
     """Cancelling a queued reservation removes it without stealing the released lock."""
     coordinator = ResponseLifecycleCoordinator()

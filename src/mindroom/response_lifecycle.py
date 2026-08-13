@@ -86,6 +86,10 @@ class ResponseLifecycleReservation:
             raise RuntimeError(msg)
         await self._acquire_task
 
+    def _owns_lifecycle_lock(self) -> bool:
+        """Return whether this reservation currently holds its canonical lock."""
+        return self._owns_lock
+
     async def _release(self) -> None:
         acquire_task = self._acquire_task
         if acquire_task is not None and not acquire_task.done():
@@ -333,11 +337,12 @@ class ResponseLifecycleCoordinator:
         queued_signal: _QueuedMessageState,
         response_envelope: MessageEnvelope,
         signal_queued_message: bool,
+        lifecycle_lock_owned_by_response: bool,
     ) -> str | None:
         existing_turn = queued_signal.begin_response_turn()
         if not signal_queued_message:
             return None
-        if not (existing_turn or lifecycle_lock.locked()):
+        if not (existing_turn or (lifecycle_lock.locked() and not lifecycle_lock_owned_by_response)):
             return None
         if not self._should_signal_queued_message(response_envelope):
             return None
@@ -375,7 +380,8 @@ class ResponseLifecycleCoordinator:
             lifecycle_lock=lifecycle_lock,
             queued_signal=queued_signal,
             response_envelope=response_envelope,
-            signal_queued_message=signal_queued_message and reservation is None,
+            signal_queued_message=signal_queued_message,
+            lifecycle_lock_owned_by_response=(reservation._owns_lifecycle_lock() if reservation is not None else False),
         )
         lock_acquired = False
         try:

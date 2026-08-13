@@ -175,18 +175,22 @@ class ReactionDispatcher:
         # The selection's response may wait behind this conversation's active
         # turn, so release the sender's lane before response completion.
         await reservation_owner.release()
-        await self.deps.start_interactive_selection(
-            self.deps.handle_interactive_selection(
-                room,
-                selection=selection,
-                user_id=event.sender,
+        try:
+            await self.deps.start_interactive_selection(
+                self.deps.handle_interactive_selection(
+                    room,
+                    selection=selection,
+                    user_id=event.sender,
+                    source_event_id=event.event_id,
+                ),
+                room_id=room.room_id,
+                question_event_id=selection.question_event_id,
                 source_event_id=event.event_id,
-            ),
-            room_id=room.room_id,
-            question_event_id=selection.question_event_id,
-            source_event_id=event.event_id,
-            thread_id=selection.thread_id,
-        )
+                thread_id=selection.thread_id,
+            )
+        except BaseException:
+            interactive.restore_selection(selection)
+            raise
         return TurnDispatchOutcome.DEFERRED
 
     async def _maybe_handle_nonconfig_reaction(
