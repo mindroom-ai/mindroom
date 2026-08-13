@@ -26,7 +26,14 @@ from mindroom.constants import (
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-from mindroom.event_journal import InteractiveQuestion
+from mindroom.event_journal import (
+    EventClass,
+    EventJournalStore,
+    EventKind,
+    InboundEvent,
+    InteractiveQuestion,
+    InteractiveSelection,
+)
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client import DeliveredMatrixEvent, RoomThreadsPageError
 from mindroom.matrix.client_delivery import build_edit_event_content
@@ -114,7 +121,7 @@ def _make_context(
         membership.membership_epoch = AsyncMock(return_value=0)
         membership.register_interactive_question_for_turn = AsyncMock(return_value=True)
         membership.register_interactive_question_for_epoch = AsyncMock(return_value=True)
-        membership.forget_interactive_question = AsyncMock(return_value=True)
+        membership.forget_interactive_question = AsyncMock()
     return ToolRuntimeContext(
         agent_name="general",
         target=MessageTarget(
@@ -662,7 +669,7 @@ async def test_matrix_message_does_not_register_interactive_state_after_membersh
     membership.membership_epoch = AsyncMock(side_effect=membership_epoch)
     membership.register_interactive_question_for_turn = AsyncMock(side_effect=reject_turn_registration)
     membership.register_interactive_question_for_epoch = AsyncMock(side_effect=reject_epoch_registration)
-    membership.forget_interactive_question = AsyncMock(return_value=True)
+    membership.forget_interactive_question = AsyncMock()
     ctx = _make_context(
         thread_id="$ctx-thread:localhost",
         membership=membership,
@@ -1555,13 +1562,57 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_edit_does_not_replace_a_source_owned_question() -> None:
-    """An edit cannot register a replacement while a pending source owns the question."""
-    membership = MagicMock()
-    membership.membership_epoch = AsyncMock(return_value=0)
-    membership.forget_interactive_question = AsyncMock(return_value=False)
-    membership.register_interactive_question_for_epoch = AsyncMock(return_value=True)
-    ctx = _make_context(membership=membership)
+async def test_matrix_message_edit_replaces_a_question_without_losing_its_source_selection(
+    journal_store: EventJournalStore,
+) -> None:
+    """A settled old source leaves the edited replacement available for a new answer."""
+    principal = journal_store.principal("general@mindroom")
+    ctx = _make_context(membership=principal)
+
+    async def admit(event_id: str, kind: EventKind) -> None:
+        await principal.admit(
+            InboundEvent(
+                event_id=event_id,
+                room_id=ctx.room_id,
+                thread_id=ctx.thread_id,
+                kind=kind,
+                event_class=EventClass.ACTIONABLE,
+                sender=ctx.requester_id,
+                origin_server_ts=1_000,
+                source={"event_id": event_id, "content": {"body": event_id}},
+            ),
+        )
+
+    await admit("$turn", EventKind.MESSAGE)
+    original_question = InteractiveQuestion(
+        question_event_id="$target",
+        room_id=ctx.room_id,
+        thread_id=ctx.thread_id,
+        creator_agent=ctx.agent_name,
+        question_text="Original question?",
+        options={"1": "original"},
+        option_labels={"1": "Original"},
+    )
+    assert await principal.register_interactive_question_for_turn("$turn", original_question)
+    await admit("$reaction", EventKind.REACTION)
+    original = InteractiveSelection(
+        question_event_id="$target",
+        question_text="Original question?",
+        selection_key="1",
+        selected_label="Original",
+        selected_value="original",
+        thread_id=ctx.thread_id,
+    )
+    assert (
+        await principal.claim_interactive_reaction(
+            source_event_id="$reaction",
+            question_event_id="$target",
+            selection_key="1",
+            creator_agent=ctx.agent_name,
+        )
+        == original
+    )
+
     replacement = """```interactive json
 {"question": "Replacement?", "options": [{"label": "New", "value": "new"}]}
 ```"""
@@ -1570,19 +1621,32 @@ async def test_matrix_message_edit_does_not_replace_a_source_owned_question() ->
             "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
         ),
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
-            new_callable=AsyncMock,
-        ) as add_reactions,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
             await MatrixMessageTools().matrix_message(action="edit", message=replacement, target="$target"),
         )
 
+    assert (
+        await principal.claim_interactive_reaction(
+            source_event_id="$reaction",
+            question_event_id="$target",
+            selection_key="1",
+            creator_agent=ctx.agent_name,
+        )
+        == original
+    )
+    await principal.settle("$reaction")
+    await admit("$replacement-reaction", EventKind.REACTION)
+    selected_replacement = await principal.claim_interactive_reaction(
+        source_event_id="$replacement-reaction",
+        question_event_id="$target",
+        selection_key="1",
+        creator_agent=ctx.agent_name,
+    )
     assert payload["status"] == "ok"
-    membership.register_interactive_question_for_epoch.assert_not_awaited()
-    add_reactions.assert_not_awaited()
+    assert selected_replacement is not None
+    assert (selected_replacement.question_text, selected_replacement.selected_value) == ("Replacement?", "new")
 
 
 @pytest.mark.asyncio

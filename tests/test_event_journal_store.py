@@ -491,9 +491,23 @@ async def _interactive_question_rows(store: EventJournalStore) -> list[dict[str,
         lambda transaction: transaction.fetchall(
             """
             SELECT principal_id, question_event_id, room_id, thread_id, creator_agent,
-                   question_json, membership_epoch, claimed_source_event_id
+                   question_json, membership_epoch
             FROM interactive_questions
             ORDER BY question_event_id
+            """,
+        ),
+    )
+    return [dict(row) for row in rows]
+
+
+async def _interactive_selection_rows(store: EventJournalStore) -> list[dict[str, object]]:
+    """Return source-owned selections as plain test evidence."""
+    rows = await store.backend.read(
+        lambda transaction: transaction.fetchall(
+            """
+            SELECT principal_id, source_event_id, selection_json
+            FROM interactive_selections
+            ORDER BY source_event_id
             """,
         ),
     )
@@ -1497,7 +1511,6 @@ class TestInteractiveQuestionRegistration:
                     sort_keys=True,
                 ),
                 "membership_epoch": 0,
-                "claimed_source_event_id": None,
             },
         ]
 
@@ -1545,24 +1558,24 @@ class TestInteractiveQuestionRegistration:
                 _interactive_question(event_id),
             )
 
-        assert await alice.forget_interactive_question("$first")
+        await alice.forget_interactive_question("$first")
 
         rows = await _interactive_question_rows(journal_store)
         assert [row["question_event_id"] for row in rows] == ["$second"]
 
 
 class TestInteractiveQuestionClaims:
-    """A journal source and its question become one replayable owner."""
+    """A journal source owns an immutable replayable selection."""
 
-    async def test_edit_cleanup_cannot_forget_a_source_owned_question(
+    async def test_a_replacement_question_does_not_overwrite_its_source_owned_selection(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """An edit cannot erase the selection a pending source must replay."""
+        """A visible replacement and the older source selection have independent owners."""
         await admit(alice, "$turn")
         assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$question"))
         await admit(alice, "$reaction", kind=EventKind.REACTION)
-        expected = InteractiveSelection(
+        original = InteractiveSelection(
             question_event_id="$question",
             question_text="Choose",
             selection_key="1",
@@ -1577,18 +1590,47 @@ class TestInteractiveQuestionClaims:
                 selection_key="1",
                 creator_agent="agent",
             )
-            == expected
+            == original
         )
 
-        forgotten = await alice.forget_interactive_question("$question")
-        replayed = await alice.claim_interactive_reaction(
-            source_event_id="$reaction",
+        await alice.forget_interactive_question("$question")
+        replacement = InteractiveQuestion(
             question_event_id="$question",
-            selection_key="1",
+            room_id=ROOM,
+            thread_id="$thread",
+            creator_agent="agent",
+            question_text="Choose again",
+            options={"2": "two"},
+            option_labels={"2": "Two"},
+        )
+        assert await alice.register_interactive_question_for_turn("$turn", replacement)
+        assert (
+            await alice.claim_interactive_reaction(
+                source_event_id="$reaction",
+                question_event_id="$question",
+                selection_key="1",
+                creator_agent="agent",
+            )
+            == original
+        )
+
+        await alice.settle("$reaction")
+        await admit(alice, "$replacement-reaction", kind=EventKind.REACTION)
+        selected_replacement = await alice.claim_interactive_reaction(
+            source_event_id="$replacement-reaction",
+            question_event_id="$question",
+            selection_key="2",
             creator_agent="agent",
         )
 
-        assert (forgotten, replayed) == (False, expected)
+        assert selected_replacement == InteractiveSelection(
+            question_event_id="$question",
+            question_text="Choose again",
+            selection_key="2",
+            selected_label="Two",
+            selected_value="two",
+            thread_id="$thread",
+        )
 
     async def test_interactive_reaction_claim_is_atomic_and_replayable(
         self,
@@ -1630,8 +1672,9 @@ class TestInteractiveQuestionClaims:
         reaction = await alice.load_event("$reaction")
         assert reaction is not None
         assert reaction.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
-        rows = await _interactive_question_rows(journal_store)
-        assert rows[0]["claimed_source_event_id"] == "$reaction"
+        assert await _interactive_question_rows(journal_store) == []
+        rows = await _interactive_selection_rows(journal_store)
+        assert [row["source_event_id"] for row in rows] == ["$reaction"]
 
     async def test_another_reaction_cannot_steal_an_interactive_claim(
         self,
@@ -1663,8 +1706,9 @@ class TestInteractiveQuestionClaims:
         loser = await alice.load_event("$loser")
         assert loser is not None
         assert loser.semantic_consumer is None
-        rows = await _interactive_question_rows(journal_store)
-        assert rows[0]["claimed_source_event_id"] == "$winner"
+        assert await _interactive_question_rows(journal_store) == []
+        rows = await _interactive_selection_rows(journal_store)
+        assert [row["source_event_id"] for row in rows] == ["$winner"]
 
     async def test_invalid_reaction_claims_leave_both_records_unchanged(
         self,
@@ -1699,7 +1743,8 @@ class TestInteractiveQuestionClaims:
         assert reaction is not None
         assert reaction.semantic_consumer is None
         rows = await _interactive_question_rows(journal_store)
-        assert rows[0]["claimed_source_event_id"] is None
+        assert [row["question_event_id"] for row in rows] == ["$question"]
+        assert await _interactive_selection_rows(journal_store) == []
 
     async def test_interactive_text_claim_chooses_the_oldest_question_and_replays_it(
         self,
@@ -1738,7 +1783,9 @@ class TestInteractiveQuestionClaims:
         )
 
         rows = await _interactive_question_rows(journal_store)
-        assert [row["claimed_source_event_id"] for row in rows] == ["$answer", None]
+        assert [row["question_event_id"] for row in rows] == ["$second"]
+        selection_rows = await _interactive_selection_rows(journal_store)
+        assert [row["source_event_id"] for row in selection_rows] == ["$answer"]
 
     async def test_room_level_text_claim_matches_a_room_level_question(
         self,
@@ -1792,14 +1839,14 @@ class TestInteractiveQuestionClaims:
 
 
 class TestInteractiveQuestionConsumption:
-    """Terminal sources and membership changes retire their owned questions."""
+    """Terminal sources and membership changes retire derived interactive state."""
 
     async def test_settling_a_claimed_source_consumes_only_its_question(
         self,
         alice: PrincipalStore,
         journal_store: EventJournalStore,
     ) -> None:
-        """Question consumption commits with the source's terminal journal fact."""
+        """Selection consumption commits with the source's terminal journal fact."""
         await admit(alice, "$turn")
         for event_id in ("$claimed", "$active"):
             assert await alice.register_interactive_question_for_turn("$turn", _interactive_question(event_id))
@@ -1815,6 +1862,7 @@ class TestInteractiveQuestionConsumption:
 
         rows = await _interactive_question_rows(journal_store)
         assert [row["question_event_id"] for row in rows] == ["$active"]
+        assert await _interactive_selection_rows(journal_store) == []
 
     async def test_settling_an_unrelated_source_keeps_active_questions(
         self,
@@ -1831,7 +1879,7 @@ class TestInteractiveQuestionConsumption:
         rows = await _interactive_question_rows(journal_store)
         assert [row["question_event_id"] for row in rows] == ["$question"]
 
-    async def test_departure_drops_active_and_claimed_questions_for_the_room(
+    async def test_departure_drops_active_questions_and_owned_selections_for_the_room(
         self,
         alice: PrincipalStore,
         journal_store: EventJournalStore,
@@ -1856,6 +1904,7 @@ class TestInteractiveQuestionConsumption:
 
         rows = await _interactive_question_rows(journal_store)
         assert [row["question_event_id"] for row in rows] == ["$other-room"]
+        assert await _interactive_selection_rows(journal_store) == []
 
 
 class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:

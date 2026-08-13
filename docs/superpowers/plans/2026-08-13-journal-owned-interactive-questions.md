@@ -89,8 +89,8 @@ Expected: FAIL because the table, dataclasses, and store methods do not exist.
 
 - [ ] **Step 3: Implement the narrow schema and registration module**
 
-Create the table from the approved design with a unique `(principal_id, claimed_source_event_id)` constraint.
-Add an index on `(principal_id, room_id, thread_id, creator_agent, created_at_ns, question_event_id)` limited to unclaimed rows where the backend supports the shared predicate.
+Create the active-question and source-selection tables from the approved design.
+Add an index on `(principal_id, room_id, thread_id, creator_agent, created_at_ns, question_event_id)` for deterministic active-question lookup.
 Serialize only `question_text`, `options`, and `option_labels` into deterministic JSON.
 Use `reads.claim_membership_epoch` before inserting so epoch matching, fenced rejection, and the insert share one transaction.
 Use `ON CONFLICT (principal_id, question_event_id) DO NOTHING` so replay never rewrites the question users saw.
@@ -154,8 +154,8 @@ Expected: FAIL because claim methods do not exist.
 
 Lock the source and question rows with portable no-op `UPDATE ... RETURNING` statements before validating them.
 Require a pending source, current unfenced membership, matching room and membership epoch, matching creator agent, and an available option.
-Set `semantic_consumer` and `claimed_source_event_id` only after all facts are locked and validated.
-For text selection, first return a row already bound to the same source, otherwise claim the oldest matching active row by `created_at_ns` and byte-ordered event ID.
+Set `semantic_consumer`, insert the immutable source-owned selection, and delete the active question only after all facts are locked and validated.
+For text selection, first return a selection already owned by the same source, otherwise claim the oldest matching active row by `created_at_ns` and byte-ordered event ID.
 
 - [ ] **Step 4: Run the claim tests and verify GREEN**
 
@@ -179,14 +179,14 @@ Run: `git add src/mindroom/event_journal tests/test_event_journal_store.py && gi
 
 - Produce: `interactive_questions.consume_for_sources(transaction, principal_id, source_event_ids) -> None`.
 - Produce: `interactive_questions.delete_for_room(transaction, principal_id, room_id) -> None`.
-- Modify: `journal.settle_many` to consume claimed questions before terminalizing sources.
+- Modify: `journal.settle_many` to consume source-owned selections while terminalizing sources.
 - Modify: `_advance_membership_epoch` to delete room questions before settling stale work.
 
 - [ ] **Step 1: Write failing transaction-boundary tests**
 
 Register and claim a question, call the real `settle_many` path, and assert both the source and question are terminal in the committed state.
-Raise after `consume_for_sources` inside a backend write and assert rollback preserves both the pending source and claimed question.
-Fence a room and assert active and claimed questions from that room disappear while another room and another principal survive.
+Raise after selection consumption inside a backend write and assert rollback preserves both the pending source and stored selection.
+Fence a room and assert active questions and stale source selections from that room disappear while another room and another principal survive.
 Raise during the fence transaction and assert its question row survives rollback.
 
 - [ ] **Step 2: Run the boundary tests and verify RED**
@@ -232,7 +232,7 @@ Run: `git add src/mindroom/event_journal tests/test_event_journal_store.py tests
 - [ ] **Step 1: Write failing runtime-boundary tests**
 
 Add a real-store reaction test that registers a question, dispatches a reaction, and observes a deferred selection without touching interactive module globals.
-Add a replay test that recreates the bot-facing collaborators over the same database and receives the same claimed selection.
+Add a replay test that recreates the bot-facing collaborators over the same database and receives the same stored selection.
 Add post-response and direct-tool tests that verify buttons are added only after the journal registration succeeds.
 Add a text-response test that claims through the admitted message source and returns the literal oldest selection.
 

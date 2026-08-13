@@ -329,6 +329,17 @@ def _advance_membership_epoch(
             SemanticConsumer.INTERACTIVE_REACTION.value,
         ),
     )
+    transaction.execute(
+        """
+        DELETE FROM interactive_selections
+        WHERE principal_id = ? AND source_event_id IN (
+            SELECT event_id
+            FROM journal_events
+            WHERE principal_id = ? AND room_id = ? AND state = ?
+        )
+        """,
+        (principal_id, principal_id, room_id, SETTLED_STATE),
+    )
     return epoch
 
 
@@ -1064,7 +1075,7 @@ def settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
         (SETTLED_STATE, principal_id, event_id),
     )
     transaction.execute(
-        "DELETE FROM interactive_questions WHERE principal_id = ? AND claimed_source_event_id = ?",
+        "DELETE FROM interactive_selections WHERE principal_id = ? AND source_event_id = ?",
         (principal_id, event_id),
     )
 

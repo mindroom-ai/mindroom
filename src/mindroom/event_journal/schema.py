@@ -156,11 +156,17 @@ _TABLES = (
         creator_agent TEXT NOT NULL,
         question_json TEXT NOT NULL,
         membership_epoch BIGINT NOT NULL,
-        claimed_source_event_id {ordered_text},
         created_at_ns BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, question_event_id),
-        UNIQUE (principal_id, claimed_source_event_id),
-        FOREIGN KEY (principal_id, claimed_source_event_id)
+        PRIMARY KEY (principal_id, question_event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS interactive_selections (
+        principal_id TEXT NOT NULL,
+        source_event_id {ordered_text} NOT NULL,
+        selection_json TEXT NOT NULL,
+        PRIMARY KEY (principal_id, source_event_id),
+        FOREIGN KEY (principal_id, source_event_id)
             REFERENCES journal_events (principal_id, event_id)
     )
     """,
@@ -307,7 +313,6 @@ _INDEXES = (
     ON interactive_questions (
         principal_id, room_id, thread_id, creator_agent, created_at_ns, question_event_id/*bytes*/
     )
-    WHERE claimed_source_event_id IS NULL
     """,
     """
     CREATE INDEX IF NOT EXISTS journal_events_pending

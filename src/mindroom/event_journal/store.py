@@ -248,9 +248,9 @@ class PrincipalStore:
             ),
         )
 
-    async def forget_interactive_question(self, question_event_id: str) -> bool:
-        """Forget an absent or unclaimed question; refuse one a source owns."""
-        return await self._backend.write(
+    async def forget_interactive_question(self, question_event_id: str) -> None:
+        """Forget one delivered question that no longer offers its options."""
+        await self._backend.write(
             lambda transaction: interactive_questions.forget(
                 transaction,
                 self._principal_id,
@@ -266,7 +266,7 @@ class PrincipalStore:
         selection_key: str,
         creator_agent: str,
     ) -> InteractiveSelection | None:
-        """Atomically claim one question with its durable reaction source."""
+        """Atomically transfer one question selection to its reaction source."""
         return await self._backend.write(
             lambda transaction: interactive_questions.claim_reaction(
                 transaction,
@@ -285,7 +285,7 @@ class PrincipalStore:
         selection_key: str,
         creator_agent: str,
     ) -> InteractiveSelection | None:
-        """Atomically claim the oldest eligible question for one text source."""
+        """Atomically transfer the oldest eligible selection to one text source."""
         return await self._backend.write(
             lambda transaction: interactive_questions.claim_text(
                 transaction,

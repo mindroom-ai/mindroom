@@ -49,6 +49,73 @@ def _selection_from_row(row: Row, selection_key: str) -> InteractiveSelection | 
     )
 
 
+def _selection_json(selection: InteractiveSelection) -> str:
+    """Serialize the immutable selection owned by one pending source."""
+    return json.dumps(
+        {
+            "question_event_id": selection.question_event_id,
+            "question_text": selection.question_text,
+            "selected_label": selection.selected_label,
+            "selected_value": selection.selected_value,
+            "selection_key": selection.selection_key,
+            "thread_id": selection.thread_id,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _stored_selection(
+    transaction: Transaction,
+    principal_id: str,
+    source_event_id: str,
+) -> InteractiveSelection | None:
+    """Return the immutable selection already owned by one source."""
+    row = transaction.fetchone(
+        """
+        SELECT selection_json
+        FROM interactive_selections
+        WHERE principal_id = ? AND source_event_id = ?
+        """,
+        (principal_id, source_event_id),
+    )
+    if row is None:
+        return None
+    payload = cast("dict[str, object]", json.loads(str(row["selection_json"])))
+    return InteractiveSelection(
+        question_event_id=str(payload["question_event_id"]),
+        question_text=str(payload["question_text"]),
+        selection_key=str(payload["selection_key"]),
+        selected_label=str(payload["selected_label"]),
+        selected_value=str(payload["selected_value"]),
+        thread_id=cast("str | None", payload["thread_id"]),
+    )
+
+
+def _store_selection(
+    transaction: Transaction,
+    principal_id: str,
+    source_event_id: str,
+    selection: InteractiveSelection,
+) -> None:
+    """Transfer one active question into its source-owned selection."""
+    transaction.execute(
+        """
+        INSERT INTO interactive_selections (principal_id, source_event_id, selection_json)
+        VALUES (?, ?, ?)
+        """,
+        (principal_id, source_event_id, _selection_json(selection)),
+    )
+    transaction.execute(
+        """
+        DELETE FROM interactive_questions
+        WHERE principal_id = ? AND question_event_id = ?
+        """,
+        (principal_id, selection.question_event_id),
+    )
+
+
 def _source_row(transaction: Transaction, principal_id: str, source_event_id: str) -> Row | None:
     """Lock and return one still-pending source event."""
     return transaction.fetchone(
@@ -67,33 +134,16 @@ def _question_row(transaction: Transaction, principal_id: str, question_event_id
     return transaction.fetchone(
         """
         UPDATE interactive_questions
-        SET claimed_source_event_id = claimed_source_event_id
+        SET question_json = question_json
         WHERE principal_id = ? AND question_event_id = ?
         RETURNING question_event_id, room_id, thread_id, creator_agent,
-                  question_json, membership_epoch, claimed_source_event_id
+                  question_json, membership_epoch
         """,
         (principal_id, question_event_id),
     )
 
 
-def _bind_question_to_source(
-    transaction: Transaction,
-    principal_id: str,
-    question_event_id: str,
-    source_event_id: str,
-) -> None:
-    """Bind one locked question to its durable selecting source."""
-    transaction.execute(
-        """
-        UPDATE interactive_questions
-        SET claimed_source_event_id = ?
-        WHERE principal_id = ? AND question_event_id = ?
-        """,
-        (source_event_id, principal_id, question_event_id),
-    )
-
-
-def claim_reaction(
+def claim_reaction(  # noqa: PLR0911 - each failed ownership predicate is terminal
     transaction: Transaction,
     principal_id: str,
     *,
@@ -102,32 +152,23 @@ def claim_reaction(
     selection_key: str,
     creator_agent: str,
 ) -> InteractiveSelection | None:
-    """Atomically bind one reaction source to one valid question selection."""
+    """Atomically transfer one valid question selection to its reaction source."""
     candidate = transaction.fetchone(
         """
-        SELECT source.room_id AS source_room_id, source.kind AS source_kind,
-               source.membership_epoch AS source_membership_epoch,
-               source.semantic_consumer AS source_consumer,
-               question.room_id AS question_room_id,
-               question.membership_epoch AS question_membership_epoch
-        FROM journal_events AS source
-        JOIN interactive_questions AS question
-          ON question.principal_id = source.principal_id
-        WHERE source.principal_id = ? AND source.event_id = ?
-          AND question.question_event_id = ? AND source.state = ?
+        SELECT room_id, kind, membership_epoch, semantic_consumer
+        FROM journal_events
+        WHERE principal_id = ? AND event_id = ? AND state = ?
         """,
-        (principal_id, source_event_id, question_event_id, PENDING_STATE),
+        (principal_id, source_event_id, PENDING_STATE),
     )
     if (
         candidate is None
-        or candidate["source_room_id"] != candidate["question_room_id"]
-        or int(candidate["source_membership_epoch"]) != int(candidate["question_membership_epoch"])
-        or EventKind(candidate["source_kind"]) is not EventKind.REACTION
-        or candidate["source_consumer"] not in (None, SemanticConsumer.INTERACTIVE_REACTION.value)
+        or EventKind(candidate["kind"]) is not EventKind.REACTION
+        or candidate["semantic_consumer"] not in (None, SemanticConsumer.INTERACTIVE_REACTION.value)
     ):
         return None
-    room_id = str(candidate["question_room_id"])
-    membership_epoch = int(candidate["question_membership_epoch"])
+    room_id = str(candidate["room_id"])
+    membership_epoch = int(candidate["membership_epoch"])
     if not reads.claim_membership_epoch(
         transaction,
         principal_id,
@@ -145,13 +186,22 @@ def claim_reaction(
         or source["semantic_consumer"] not in (None, SemanticConsumer.INTERACTIVE_REACTION.value)
     ):
         return None
+    stored_selection = _stored_selection(transaction, principal_id, source_event_id)
+    if stored_selection is not None:
+        return (
+            stored_selection
+            if stored_selection.question_event_id == question_event_id
+            and stored_selection.selection_key == selection_key
+            else None
+        )
+    if source["semantic_consumer"] is not None:
+        return None
     question_row = _question_row(transaction, principal_id, question_event_id)
     if (
         question_row is None
         or question_row["room_id"] != room_id
         or int(question_row["membership_epoch"]) != membership_epoch
         or question_row["creator_agent"] != creator_agent
-        or question_row["claimed_source_event_id"] not in (None, source_event_id)
     ):
         return None
     selection = _selection_from_row(question_row, selection_key)
@@ -166,7 +216,7 @@ def claim_reaction(
         """,
         (SemanticConsumer.INTERACTIVE_REACTION.value, principal_id, source_event_id),
     )
-    _bind_question_to_source(transaction, principal_id, question_event_id, source_event_id)
+    _store_selection(transaction, principal_id, source_event_id, selection)
     return selection
 
 
@@ -214,28 +264,21 @@ def claim_text(  # noqa: PLR0911 - each failed ownership predicate is terminal
         or source["semantic_consumer"] is not None
     ):
         return None
+    stored_selection = _stored_selection(transaction, principal_id, source_event_id)
+    if stored_selection is not None:
+        return stored_selection if stored_selection.selection_key == selection_key else None
 
     candidate_question = transaction.fetchone(
         """
         SELECT question_event_id
         FROM interactive_questions
-        WHERE principal_id = ? AND claimed_source_event_id = ?
+        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+          AND creator_agent = ? AND membership_epoch = ?
+        ORDER BY created_at_ns, question_event_id/*bytes*/
+        LIMIT 1
         """,
-        (principal_id, source_event_id),
+        (principal_id, room_id, stored_thread_id, creator_agent, membership_epoch),
     )
-    if candidate_question is None:
-        candidate_question = transaction.fetchone(
-            """
-            SELECT question_event_id
-            FROM interactive_questions
-            WHERE principal_id = ? AND room_id = ? AND thread_id = ?
-              AND creator_agent = ? AND membership_epoch = ?
-              AND claimed_source_event_id IS NULL
-            ORDER BY created_at_ns, question_event_id/*bytes*/
-            LIMIT 1
-            """,
-            (principal_id, room_id, stored_thread_id, creator_agent, membership_epoch),
-        )
     if candidate_question is None:
         return None
     question_row = _question_row(transaction, principal_id, str(candidate_question["question_event_id"]))
@@ -245,18 +288,12 @@ def claim_text(  # noqa: PLR0911 - each failed ownership predicate is terminal
         or decode_thread_id(str(question_row["thread_id"])) != thread_id
         or int(question_row["membership_epoch"]) != membership_epoch
         or question_row["creator_agent"] != creator_agent
-        or question_row["claimed_source_event_id"] not in (None, source_event_id)
     ):
         return None
     selection = _selection_from_row(question_row, selection_key)
     if selection is None:
         return None
-    _bind_question_to_source(
-        transaction,
-        principal_id,
-        str(question_row["question_event_id"]),
-        source_event_id,
-    )
+    _store_selection(transaction, principal_id, source_event_id, selection)
     return selection
 
 
@@ -280,8 +317,8 @@ def register_if_current(
         """
         INSERT INTO interactive_questions (
             principal_id, question_event_id, room_id, thread_id, creator_agent,
-            question_json, membership_epoch, claimed_source_event_id, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+            question_json, membership_epoch, created_at_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, question_event_id) DO NOTHING
         """,
         (
@@ -318,25 +355,9 @@ def register_if_current(
     return True
 
 
-def forget(transaction: Transaction, principal_id: str, question_event_id: str) -> bool:
-    """Forget an absent or unclaimed question, preserving a source owner."""
-    deleted = transaction.fetchone(
-        """
-        DELETE FROM interactive_questions
-        WHERE principal_id = ? AND question_event_id = ?
-          AND claimed_source_event_id IS NULL
-        RETURNING question_event_id
-        """,
+def forget(transaction: Transaction, principal_id: str, question_event_id: str) -> None:
+    """Forget one active question whose Matrix message no longer offers it."""
+    transaction.execute(
+        "DELETE FROM interactive_questions WHERE principal_id = ? AND question_event_id = ?",
         (principal_id, question_event_id),
     )
-    if deleted is not None:
-        return True
-    claimed = transaction.fetchone(
-        """
-        SELECT 1 AS present
-        FROM interactive_questions
-        WHERE principal_id = ? AND question_event_id = ?
-        """,
-        (principal_id, question_event_id),
-    )
-    return claimed is None

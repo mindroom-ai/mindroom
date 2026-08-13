@@ -44,7 +44,7 @@ The event journal owns every durable fact about an interactive question.
 
 ## Data Model
 
-Add one `interactive_questions` table to the event-journal schema.
+Add separate active-question and source-selection tables to the event-journal schema.
 
 ```sql
 CREATE TABLE IF NOT EXISTS interactive_questions (
@@ -55,18 +55,25 @@ CREATE TABLE IF NOT EXISTS interactive_questions (
     creator_agent TEXT NOT NULL,
     question_json TEXT NOT NULL,
     membership_epoch BIGINT NOT NULL,
-    claimed_source_event_id TEXT,
     created_at_ns BIGINT NOT NULL,
-    PRIMARY KEY (principal_id, question_event_id),
-    UNIQUE (principal_id, claimed_source_event_id)
+    PRIMARY KEY (principal_id, question_event_id)
+)
+
+CREATE TABLE IF NOT EXISTS interactive_selections (
+    principal_id TEXT NOT NULL,
+    source_event_id TEXT NOT NULL,
+    selection_json TEXT NOT NULL,
+    PRIMARY KEY (principal_id, source_event_id),
+    FOREIGN KEY (principal_id, source_event_id)
+        REFERENCES journal_events (principal_id, event_id)
 )
 ```
 
 `question_json` stores the question text, option values, and option labels as one immutable payload.
-A row with `claimed_source_event_id IS NULL` is active and available to a new selection.
-A row claimed by a source remains replayable only by that same source.
-Deleting the row is the sole representation of terminal consumption or membership invalidation.
-The unique source constraint makes one source unable to claim multiple questions.
+Every `interactive_questions` row is active and available to a new selection.
+Claiming transfers an immutable selection snapshot into `interactive_selections` and deletes the active row in the same transaction.
+The source primary key makes one source unable to own multiple selections.
+An edited Matrix event may then register a replacement active question at the same event ID without overwriting the pending source's selection.
 Numeric text selection orders eligible questions by `created_at_ns` and then `question_event_id` so selection remains deterministic across processes.
 
 ## Registration
@@ -81,36 +88,35 @@ Production code no longer accepts a synchronous callback that writes a different
 
 ## Selection Claim
 
-Reaction selection uses one store transaction that reads the pending reaction source, reads the target question, validates the option, and claims both durable records.
-If the reaction has no semantic consumer, the transaction records `INTERACTIVE_REACTION` and binds the question to the reaction event ID.
-If the reaction already has `INTERACTIVE_REACTION` and the question is bound to the same event ID, the transaction returns the same selection for replay.
-If another source owns the question, the transaction returns no selection and does not steal the claim.
+Reaction selection uses one store transaction that reads the pending reaction source, reads the target active question, validates the option, records `INTERACTIVE_REACTION`, stores the source-owned selection, and deletes the active question.
+If the reaction already owns a stored selection, the transaction returns the same selection for replay.
+If another source consumed the active question first, the transaction returns no selection.
 If the source is terminal, stale, from another room, or from an old membership, the transaction returns no selection.
 Authorization and managed-agent sender checks remain outside the store because they are runtime policy rather than durable state.
 
 Numeric text selection uses the admitted message event ID as the durable source owner.
 The store selects the oldest eligible active question in the same room, thread, agent, and current membership.
-A replay of the same message returns its existing claimed question.
+A replay of the same message returns its stored source-owned selection.
 
 ## Failure and Replay
 
 There is no `restore_selection` operation.
-Before terminal truth, the question remains durably bound to a pending journal source.
+Before terminal truth, the immutable selection remains durably bound to a pending journal source.
 When execution fails or is cancelled, normal journal retry releases the deferred source and replay retrieves the same selection.
 An enqueue or task-start failure therefore requires no question mutation.
 The process may die at any point without leaving a process-local claim that hides durable work.
 
 ## Terminal Consumption
 
-`journal.settle_many` deletes every interactive question whose `claimed_source_event_id` is among the sources being settled.
+`journal.settle_many` deletes every stored selection whose source is being settled.
 FINAL outbox enqueue already calls source settlement in the same writer transaction, so the answer handoff and question consumption become one commit.
 Explicit intentionally-ignored settlement uses the same primitive and therefore converges on the same state.
-A replay cannot observe a terminal reaction alongside an active question because both state changes share the transaction.
+A replay cannot observe a terminal reaction alongside its stored selection because both state changes share the transaction.
 `TurnController` no longer probes terminal source state to choose between commit and restore.
 
 ## Membership Invalidation
 
-`_advance_membership_epoch` deletes all interactive questions for the departed principal and room in its existing transaction.
+`_advance_membership_epoch` deletes all active questions for the departed principal and room and removes selections owned by the stale sources it settles.
 The same transaction advances the membership epoch, removes derived conversation state, and settles stale turn-backed sources.
 `MembershipFence` no longer carries `clear_departed_room`.
 The store no longer exposes cleanup callbacks, cleanup-on-rejoin, or an external cleanup retry transaction.
@@ -129,7 +135,7 @@ Durable runtime leases are rejected because they would require generation checks
 ## PR #1807 Compatibility
 
 PR #1807 and this design use the same event journal as the durable workflow boundary but own disjoint records.
-Approval continuations remain in their existing continuation tables, while interactive questions use `interactive_questions`.
+Approval continuations remain in their existing continuation tables, while interactive questions and selections use their two focused journal tables.
 Membership invalidation deletes both kinds of membership-scoped state inside `_advance_membership_epoch` without coupling their modules.
 PR #1807's runtime-generation filtering applies only to approval-owned sources, while an interactive source remains replayable through its question claim and the existing runtime quiescence barrier.
 The overlapping schema, journal, store, response runner, turn controller, pending worker, and test files will require mechanical rebase conflict resolution.
@@ -155,21 +161,22 @@ After implementation, a merge-tree and focused combined test run against PR #180
 Journal-store tests cover registration guards, exclusive claims, same-source replay, deterministic text selection, settlement consumption, and membership deletion on SQLite and PostgreSQL.
 Reaction-dispatch tests use the real store boundary and prove that semantic-consumer claim and question claim cannot split.
 Turn-controller tests prove that failures leave the durable selection replayable without a restore callback.
-Restart tests prove that a replacement process can reload and replay a claimed question without process-global state.
-Membership tests prove that departure fencing removes questions in the same transaction and that a rolled-back fence preserves them.
+Restart tests prove that a replacement process can reload and replay a stored selection without process-global state.
+Membership tests prove that departure fencing removes active questions and stale source selections in the same transaction and that a rolled-back fence preserves them.
 Existing parsing and Matrix-button tests remain in `test_interactive.py` without persistence fixtures.
 Tests that exist only to exercise JSON corruption, advisory locks, dirty overlays, or cross-process dictionary reconciliation are deleted with that implementation.
 
 ## Acceptance Criteria
 
 - No production reference to `interactive_questions.json` or its lock file remains.
-- No process-global active or claimed question dictionary remains.
+- No process-global active-question or source-selection dictionary remains.
 - No production `commit_selection` or `restore_selection` function remains.
 - No membership transaction invokes an external question-cleanup callback.
 - No public membership boundary represents one reported departure with parallel tuples.
 - Claiming a reaction and its question is one transaction.
-- Settling a selected source and consuming its question is one transaction.
-- Fencing a departure and removing its questions is one transaction.
+- Claiming transfers the selected payload away from the active question row so a later edit can register a replacement independently.
+- Settling a selected source and consuming its stored selection is one transaction.
+- Fencing a departure and removing its active questions and stale selections is one transaction.
 - Same-source replay returns the same selection before terminal settlement.
 - The focused SQLite and PostgreSQL suites pass.
 - The complete non-Matrix test suite, static checks, dependency checks, and formatting checks pass before push.
