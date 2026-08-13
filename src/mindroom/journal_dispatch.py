@@ -444,7 +444,7 @@ class JournalDispatcher:
         selection_key: str,
         creator_agent: str,
     ) -> InteractiveSelection | None:
-        """Atomically bind the running reaction to one journal-owned question."""
+        """Atomically transfer one journal-owned selection to the running reaction."""
         event = _RUNNING_EVENT.get()
         if event is None or event.kind is not EventKind.REACTION:
             msg = "An interactive reaction can only be claimed inside its journal callback"

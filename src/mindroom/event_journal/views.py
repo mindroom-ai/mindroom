@@ -121,7 +121,7 @@ class DispatchView(ReplayView, AdmissionView, Protocol):
         selection_key: str,
         creator_agent: str,
     ) -> InteractiveSelection | None:
-        """Atomically claim one question with its durable reaction source."""
+        """Atomically transfer one validated selection to its reaction source."""
         ...
 
 

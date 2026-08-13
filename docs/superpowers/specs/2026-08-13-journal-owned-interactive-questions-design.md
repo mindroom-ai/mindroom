@@ -17,8 +17,8 @@ The resulting implementation is heavily tested but has the wrong atomic boundary
 
 - Keep interactive reaction responses detached from the room journal lane.
 - Preserve reaction and numeric text selection behavior.
-- Make a question claim replayable by the same durable source after failure or restart.
-- Consume a question atomically with terminal settlement of the source that selected it.
+- Make a stored selection replayable by the same durable source after failure or restart.
+- Consume a stored selection atomically with terminal settlement of its source.
 - Remove departed-room questions atomically with the membership fence.
 - Remove the JSON question database, process-global claim ownership, and restore/commit reconciliation.
 - Retain only lifecycle machinery that prevents two live runtimes from executing the same source concurrently.
@@ -109,7 +109,7 @@ The process may die at any point without leaving a process-local claim that hide
 ## Terminal Consumption
 
 `journal.settle_many` deletes every stored selection whose source is being settled.
-FINAL outbox enqueue already calls source settlement in the same writer transaction, so the answer handoff and question consumption become one commit.
+FINAL outbox enqueue already calls source settlement in the same writer transaction, so the answer handoff and selection consumption become one commit.
 Explicit intentionally-ignored settlement uses the same primitive and therefore converges on the same state.
 A replay cannot observe a terminal reaction alongside its stored selection because both state changes share the transaction.
 `TurnController` no longer probes terminal source state to choose between commit and restore.
@@ -137,7 +137,7 @@ Durable runtime leases are rejected because they would require generation checks
 PR #1807 and this design use the same event journal as the durable workflow boundary but own disjoint records.
 Approval continuations remain in their existing continuation tables, while interactive questions and selections use their two focused journal tables.
 Membership invalidation deletes both kinds of membership-scoped state inside `_advance_membership_epoch` without coupling their modules.
-PR #1807's runtime-generation filtering applies only to approval-owned sources, while an interactive source remains replayable through its question claim and the existing runtime quiescence barrier.
+PR #1807's runtime-generation filtering applies only to approval-owned sources, while an interactive source remains replayable through its stored selection and the existing runtime quiescence barrier.
 The overlapping schema, journal, store, response runner, turn controller, pending worker, and test files will require mechanical rebase conflict resolution.
 After implementation, a merge-tree and focused combined test run against PR #1807's exact pushed head are required to verify semantic compatibility.
 
@@ -148,7 +148,7 @@ After implementation, a merge-tree and focused combined test run against PR #180
 - Create `src/mindroom/membership_models.py` for the leaf reported-departure record shared by sync parsing and journal fencing.
 - Modify `src/mindroom/event_journal/schema.py` for the table and lookup indexes.
 - Modify `src/mindroom/event_journal/store.py` and `views.py` for typed async APIs.
-- Modify `src/mindroom/event_journal/journal.py` so settlement and membership invalidation delete question rows transactionally.
+- Modify `src/mindroom/event_journal/journal.py` so settlement consumes source-owned selections and membership invalidation deletes active questions transactionally.
 - Reduce `src/mindroom/interactive.py` to parsing, formatting, prompt construction, policy helpers, and button I/O.
 - Modify `src/mindroom/reaction_dispatch.py` to claim a selection through the journal.
 - Modify `src/mindroom/turn_controller.py` to execute durable selections without commit or restore callbacks.
@@ -159,7 +159,7 @@ After implementation, a merge-tree and focused combined test run against PR #180
 ## Testing Strategy
 
 Journal-store tests cover registration guards, exclusive claims, same-source replay, deterministic text selection, settlement consumption, and membership deletion on SQLite and PostgreSQL.
-Reaction-dispatch tests use the real store boundary and prove that semantic-consumer claim and question claim cannot split.
+Reaction-dispatch tests use the real store boundary and prove that semantic-consumer claim and selection transfer cannot split.
 Turn-controller tests prove that failures leave the durable selection replayable without a restore callback.
 Restart tests prove that a replacement process can reload and replay a stored selection without process-global state.
 Membership tests prove that departure fencing removes active questions and stale source selections in the same transaction and that a rolled-back fence preserves them.

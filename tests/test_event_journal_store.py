@@ -1841,7 +1841,7 @@ class TestInteractiveQuestionClaims:
 class TestInteractiveQuestionConsumption:
     """Terminal sources and membership changes retire derived interactive state."""
 
-    async def test_settling_a_claimed_source_consumes_only_its_question(
+    async def test_settling_a_selected_source_consumes_only_its_selection(
         self,
         alice: PrincipalStore,
         journal_store: EventJournalStore,
@@ -1869,7 +1869,7 @@ class TestInteractiveQuestionConsumption:
         alice: PrincipalStore,
         journal_store: EventJournalStore,
     ) -> None:
-        """Only the source that owns a claim can consume its question."""
+        """Settling an unrelated source leaves active questions unchanged."""
         await admit(alice, "$turn")
         assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$question"))
         await admit(alice, "$other")

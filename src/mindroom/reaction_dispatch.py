@@ -149,7 +149,7 @@ class ReactionDispatcher:
         reservation_owner: PromptIngressReservationOwner,
         requester_user_id: str,
     ) -> TurnDispatchOutcome | None:
-        """Route an interactive choice only to its claimed question."""
+        """Route an interactive choice only through its source-owned selection."""
         interactive_claimed = consumer is SemanticConsumer.INTERACTIVE_REACTION
         if consumer is not None and not interactive_claimed:
             return None

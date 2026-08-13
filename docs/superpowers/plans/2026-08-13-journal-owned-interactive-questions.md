@@ -29,7 +29,7 @@ The event journal transfers a validated selection from the active question to it
 - `src/mindroom/event_journal/schema.py` owns the `interactive_questions` and `interactive_selections` tables plus the active-question lookup index.
 - `src/mindroom/event_journal/store.py` exposes typed async `PrincipalStore` methods and composes turn membership proof with registration.
 - `src/mindroom/event_journal/views.py` exposes only the methods required by typed runtime collaborators.
-- `src/mindroom/event_journal/journal.py` composes question consumption with source settlement and question deletion with membership invalidation.
+- `src/mindroom/event_journal/journal.py` composes selection consumption with source settlement and active-question deletion with membership invalidation.
 - `src/mindroom/interactive.py` retains parsing, prompt building, sender policy, and Matrix button I/O only.
 - `src/mindroom/reaction_dispatch.py` asks the journal for one durable reaction selection.
 - `src/mindroom/turn_controller.py` asks the journal for text selections and executes durable selections without restore or commit callbacks.
@@ -182,7 +182,7 @@ Run: `git add src/mindroom/event_journal tests/test_event_journal_store.py && gi
 
 - [ ] **Step 1: Write failing transaction-boundary tests**
 
-Register and claim a question, call the real `settle_many` path, and assert both the source and question are terminal in the committed state.
+Register and select a question, call the real `settle_many` path, and assert the source is terminal and its stored selection is absent in the committed state.
 Raise after selection consumption inside a backend write and assert rollback preserves both the pending source and stored selection.
 Fence a room and assert active questions and stale source selections from that room disappear while another room and another principal survive.
 Raise during the fence transaction and assert its question row survives rollback.

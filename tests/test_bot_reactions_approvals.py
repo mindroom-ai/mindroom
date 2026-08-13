@@ -432,7 +432,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A failed detached response leaves its source and question paired for retry."""
+        """A failed detached response leaves its source-owned selection replayable."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -479,7 +479,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A departure retires both the claimed source and its journal-owned question."""
+        """A departure retires both the pending source and its stored selection."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
