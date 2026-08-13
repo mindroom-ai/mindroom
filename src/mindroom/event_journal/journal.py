@@ -987,19 +987,15 @@ def _pending_rows(
     cursor_params: tuple[object, ...] = () if after_receipt_order is None else (after_receipt_order,)
     kind_clause = "" if kind is None else " AND kind = ?"
     kind_params: tuple[object, ...] = () if kind is None else (kind.value,)
-    continuation_joins = ""
-    continuation_clause = ""
-    continuation_params: tuple[object, ...] = ()
-    if runtime_generation is not None:
-        continuation_joins = """
+    continuation_joins = """
         LEFT JOIN approval_continuation_sources AS approval_sources
           ON approval_sources.principal_id = events.principal_id
          AND approval_sources.event_id = events.event_id
         LEFT JOIN approval_continuations AS continuations
-          ON continuations.principal_id = approval_sources.principal_id
+         ON continuations.principal_id = approval_sources.principal_id
          AND continuations.approval_id = approval_sources.approval_id
-        """
-        continuation_clause = """
+    """
+    continuation_clause = """
           AND (
             approval_sources.approval_id IS NULL
             OR (
@@ -1027,8 +1023,8 @@ def _pending_rows(
               )
             )
           )
-        """
-        continuation_params = (runtime_generation, runtime_generation)
+    """
+    continuation_params = (runtime_generation, runtime_generation)
     return transaction.fetchall(
         f"""
         SELECT {_EVENT_JOURNAL_COLUMNS} FROM journal_events AS events

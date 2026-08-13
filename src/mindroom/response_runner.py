@@ -1994,6 +1994,57 @@ class ResponseRunner:
         )
         return not await self.deps.approval_store.is_pending(source_event_id)
 
+    async def handoff_approval_source(self, source_event_id: str) -> bool | None:
+        """Transfer one durable continuation out of the journal lane and into response ownership."""
+        continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
+        if continuation is None:
+            return None
+
+        async def resume_owned_source() -> None:
+            await self.resume_approval_source(source_event_id)
+
+        resume = resume_owned_source()
+        try:
+            self.track_inbox_response(
+                resume,
+                name=f"approval_resume:{continuation.approval_id}:{continuation.generation}",
+                recovery_proof_ready=lambda: True,
+                source_event_ids=continuation.source_event_ids,
+            )
+        except BaseException:
+            resume.close()
+            raise
+        return False
+
+    async def recover_approval_final(self, approval_id: str) -> bool:
+        """Finalize one frozen successful FINAL under its original bot principal."""
+        continuation = await self.deps.approval_store.approval_continuation(approval_id)
+        if continuation is None:
+            return True
+        target = MessageTarget(
+            room_id=continuation.room_id,
+            source_thread_id=continuation.thread_id,
+            resolved_thread_id=continuation.thread_id,
+            reply_to_event_id=continuation.source_event_ids[0],
+            session_id=continuation.session_id,
+        )
+        request = self._approval_response_request(continuation, target=target)
+
+        async def recover(_target: MessageTarget) -> bool:
+            owns_final, event_id = await self._recover_frozen_approval_final(
+                continuation,
+                target=target,
+            )
+            return owns_final and event_id is not None
+
+        return await self._lifecycle_coordinator.run_locked_response(
+            target=target,
+            response_envelope=request.response_envelope,
+            pipeline_timing=None,
+            locked_operation=recover,
+            signal_queued_message=False,
+        )
+
     async def _recover_nonready_approval(
         self,
         owned: ApprovalContinuation,

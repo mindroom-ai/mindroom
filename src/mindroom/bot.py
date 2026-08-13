@@ -670,7 +670,7 @@ class AgentBot:
                 on_room_lifecycle=self._on_room_member,
                 on_redaction=self._on_redaction,
                 on_decryption_failure=self._on_decryption_failure,
-                on_approval_continuation=lambda event_id: self._response_runner.resume_approval_source(event_id),
+                on_approval_continuation=lambda event_id: self._response_runner.handoff_approval_source(event_id),
                 source_has_live_owner=lambda event_id: (
                     self._coalescing_gate.has_pending_source_event(event_id)
                     or self._response_runner.has_live_inbox_response(event_id)
@@ -1964,6 +1964,42 @@ class AgentBot:
                 except Exception:
                     self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
             raise
+
+    async def open_approval_recovery_client(self) -> None:
+        """Open only the original Matrix sender needed to recover a frozen FINAL."""
+        if self.client is not None:
+            return
+        client = await login_agent_user(
+            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
+            self.agent_user,
+            runtime_paths=self.runtime_paths,
+            sync_storage=MatrixSyncStorage(store_tokens=False, persist_recovery=False),
+        )
+        self.client = client
+        self._sending_device_id = client.device_id or None
+        try:
+            self._runtime_view.mark_runtime_started()
+            await self._turn_store.warm()
+            await client.sync(timeout=0, full_state=True)
+        except BaseException:
+            self.client = None
+            self._sending_device_id = None
+            await client.close()
+            raise
+
+    async def recover_approval_final(self, approval_id: str) -> bool:
+        """Recover one frozen approval answer through the normal final lifecycle."""
+        return await self._response_runner.recover_approval_final(approval_id)
+
+    async def close_approval_recovery_client(self) -> None:
+        """Close a recovery-only Matrix client without starting normal bot services."""
+        client = self.client
+        if client is not None:
+            await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
+        self.client = None
+        self._sending_device_id = None
+        if client is not None:
+            await client.close()
 
     async def recover_pending_turn_journal_events(self) -> None:
         """Release fleet-dependent turn replay after the responder startup pass."""

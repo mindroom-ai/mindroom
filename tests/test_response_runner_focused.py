@@ -16,10 +16,11 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from agno.agent import Agent as AgnoAgent
+from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
+from agno.run.base import RunContext, RunStatus
 from agno.run.requirement import RunRequirement
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
@@ -1413,9 +1414,16 @@ async def test_agent_continuation_executes_real_agno_confirmation(
 ) -> None:
     """Exercise the real persisted Agno pause and continuation spine without mocking it."""
     executed: list[list[str]] = []
+    observed_metadata: list[dict[str, object] | None] = []
+    original_metadata = {
+        "room_id": "!room:localhost",
+        "thread_id": "$thread",
+        "correlation_id": "approval-metadata",
+    }
 
-    def run_shell_command(args: list[str]) -> str:
+    def run_shell_command(args: list[str], run_context: RunContext) -> str:
         executed.append(args)
+        observed_metadata.append(run_context.metadata)
         return "ok"
 
     agent = AgnoAgent(
@@ -1437,7 +1445,13 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         ],
         db=SqliteDb(db_file=str(tmp_path / "agent-continuation.db"), session_table="sessions"),
     )
-    paused = await agent.arun("exercise the tool", session_id="session-1", user_id="@user:localhost", stream=False)
+    paused = await agent.arun(
+        "exercise the tool",
+        session_id="session-1",
+        user_id="@user:localhost",
+        metadata=original_metadata,
+        stream=False,
+    )
     requirement = (paused.requirements or [])[0]
     assert requirement.tool_execution is not None
     tool_call_id = requirement.tool_execution.tool_call_id
@@ -1482,6 +1496,8 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         patch.object(agent, "acontinue_run", new=continue_run),
         patch("mindroom.approval_execution.typing_indicator", _noop_typing),
         patch("mindroom.approval_execution.close_agent_runtime_state_dbs"),
+        patch("mindroom.approval_execution.ai_runtime.install_queued_message_notice_hook") as install_notice,
+        patch("mindroom.approval_execution.ai_runtime.register_queued_notice_storage") as register_notice,
     ):
         result = await runner._approval_execution.continue_run(
             continuation,
@@ -1495,12 +1511,24 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     assert isinstance(result, CompletedApprovalRun)
     assert "io.mindroom.ai_run" in result.metadata_content
     assert bool(executed) is approved
+    assert observed_metadata == ([original_metadata] if approved else [])
     resolve_knowledge.assert_called_once_with("general", execution_identity=identity)
     assert create_agent.call_args.kwargs["knowledge"] is knowledge
     assert create_agent.call_args.kwargs["refresh_scheduler"] is refresh_scheduler
     continued_requirement = continue_run.call_args.kwargs["requirements"][0]
+    assert continue_run.call_args.kwargs["metadata"] == original_metadata
+    assert continue_run.call_args.kwargs["metadata"] is not paused.metadata
     assert continued_requirement.tool_execution.confirmed is approved
     assert continued_requirement.tool_execution.confirmation_note == (None if approved else reason)
+    install_notice.assert_called_once_with(
+        agent.model,
+        notice_text=runner.deps.runtime.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
+    )
+    register_notice.assert_called_once()
+    assert register_notice.call_args.kwargs["session_id"] == "session-1"
+    assert register_notice.call_args.kwargs["session_type"] is SessionType.AGENT
+    assert register_notice.call_args.kwargs["entity_name"] == "general"
+    assert callable(register_notice.call_args.kwargs["storage_factory"])
 
 
 @pytest.mark.parametrize(

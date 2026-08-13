@@ -3,17 +3,21 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from agno.agent import Agent as AgnoAgent
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
+from agno.team import Team as AgnoTeam
+from agno.tools.function import Function
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
@@ -36,6 +40,7 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
 )
+from mindroom.synthetic_model import SyntheticModel
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -177,6 +182,107 @@ def test_seen_event_ids_match_model_history_visibility(is_team: bool) -> None:
     assert read_scope_seen_event_ids(session, scope) == {"completed-event", "preserved-event", "running-event"}
     assert seen_event_ids_for_runs(runs) == {"completed-event", "running-event"}
     assert [run.run_id for run in scope_visible_runs(session, scope)] == ["completed", "running"]
+
+
+@pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
+@pytest.mark.asyncio
+async def test_paused_run_preserves_prompt_roles_until_continuation_completes(
+    tmp_path: Path,
+    is_team: bool,
+) -> None:
+    """A fresh Agno runtime must see the persisted system prompt only while continuing a pause."""
+    config, runtime_paths = _make_config(tmp_path)
+    executed: list[list[str]] = []
+
+    def run_shell_command(args: list[str]) -> str:
+        executed.append(args)
+        return "ok"
+
+    def runtime(storage: object) -> tuple[AgnoAgent | AgnoTeam, SyntheticModel]:
+        model = SyntheticModel(
+            id="synthetic",
+            seed=1,
+            min_response_chars=20,
+            max_response_chars=20,
+            chars_per_second=0,
+            tool_call_probability=1,
+        )
+        shared = {
+            "id": "test_agent",
+            "model": model,
+            "tools": [
+                Function(
+                    name="run_shell_command",
+                    entrypoint=run_shell_command,
+                    requires_confirmation=True,
+                ),
+            ],
+            "db": storage,
+            "system_message": "SYSTEM SENTINEL",
+        }
+        entity: AgnoAgent | AgnoTeam = AgnoTeam(members=[], **shared) if is_team else AgnoAgent(**shared)
+        return entity, model
+
+    first_storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    first, _first_model = runtime(first_storage)
+    paused = await first.arun(
+        "exercise the tool",
+        session_id="session-1",
+        user_id="@user:localhost",
+        stream=False,
+    )
+    assert paused.status is RunStatus.paused
+    assert paused.run_id is not None
+    first_storage.close()
+
+    resumed_storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    resumed, resumed_model = runtime(resumed_storage)
+    try:
+        session = await resumed.aget_session(
+            session_id="session-1",
+            user_id="@user:localhost",
+        )
+        persisted = session.get_run(paused.run_id)
+        assert persisted is not None
+        assert persisted.status == RunStatus.paused
+        assert [message.role for message in persisted.messages or ()][:2] == ["system", "user"]
+        requirements = deepcopy(persisted.requirements or [])
+        assert len(requirements) == 1
+        requirements[0].confirm()
+
+        with patch.object(resumed_model, "ainvoke", wraps=resumed_model.ainvoke) as invoke:
+            if isinstance(resumed, AgnoTeam):
+                completed = await resumed.acontinue_run(
+                    run_response=persisted,
+                    requirements=requirements,
+                    session_id="session-1",
+                    user_id="@user:localhost",
+                    stream=False,
+                )
+            else:
+                completed = await resumed.acontinue_run(
+                    run_id=paused.run_id,
+                    requirements=requirements,
+                    session_id="session-1",
+                    user_id="@user:localhost",
+                    stream=False,
+                )
+
+        assert isinstance(completed, (RunOutput, TeamRunOutput))
+        assert completed.status is RunStatus.completed
+        continued_messages = invoke.call_args.kwargs["messages"]
+        assert any(message.role == "system" and message.content == "SYSTEM SENTINEL" for message in continued_messages)
+        assert len(executed) == 1
+
+        completed_session = await resumed.aget_session(
+            session_id="session-1",
+            user_id="@user:localhost",
+        )
+        completed_run = completed_session.get_run(paused.run_id)
+        assert completed_run is not None
+        assert all(message.role not in {"system", "developer"} for message in completed_run.messages or ())
+    finally:
+        resumed_storage.close()
 
 
 def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:

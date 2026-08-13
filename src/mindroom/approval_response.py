@@ -46,8 +46,7 @@ if TYPE_CHECKING:
 class _ApprovalPausePlan:
     """One paused generation normalized for persistence and card publication."""
 
-    tools: tuple[tuple[ToolExecution, str, str, str], ...]
-    decisions: dict[str, tuple[ContinuationDecision | None, float]]
+    tools: tuple[ToolExecution, ...]
     calls: tuple[ApprovalCall, ...]
     waiting_text: str
 
@@ -155,10 +154,9 @@ class ApprovalResponseCoordinator:
             for _tool, tool_call_id, tool_name, invoking_agent in identified
         )
         return _ApprovalPausePlan(
-            tools=identified,
-            decisions=decisions,
+            tools=tuple(tool for tool, _tool_call_id, _tool_name, _invoking_agent in identified),
             calls=calls,
-            waiting_text="Waiting for approval: " + ", ".join(f"`{name}`" for _tool, _id, name, _owner in identified),
+            waiting_text="Waiting for approval: " + ", ".join(f"`{call.tool_name}`" for call in calls),
         )
 
     async def _publish_cards(
@@ -171,18 +169,16 @@ class ApprovalResponseCoordinator:
     ) -> None:
         """Publish every human-gated card already linked by durable identity."""
         config = self.config()
-        calls_by_id = {call.tool_call_id: call for call in plan.calls}
-        for index, (tool, tool_call_id, tool_name, invoking_agent) in enumerate(plan.tools):
-            decision, _timeout_seconds = plan.decisions[tool_call_id]
-            if decision is not None:
+        for index, (tool, call) in enumerate(zip(plan.tools, plan.calls, strict=True)):
+            if call.decision is not None:
                 continue
             sent = await send_suspended_tool_approval(
                 ToolApprovalCall(
                     config=config,
                     runtime_paths=self.runtime_paths,
-                    tool_name=tool_name,
+                    tool_name=call.tool_name,
                     arguments=dict(tool.tool_args or {}),
-                    agent_name=invoking_agent,
+                    agent_name=call.invoking_agent,
                     room_id=target.room_id,
                     thread_id=target.resolved_thread_id,
                     requester_id=continuation.requester_id,
@@ -190,8 +186,8 @@ class ApprovalResponseCoordinator:
                 approval_id=f"{continuation.approval_id}-{continuation.generation}-{index}",
                 continuation_id=continuation.approval_id,
                 continuation_generation=continuation.generation,
-                tool_call_id=tool_call_id,
-                expires_at_ns=calls_by_id[tool_call_id].expires_at_ns,
+                tool_call_id=call.tool_call_id,
+                expires_at_ns=call.expires_at_ns,
             )
             if sent is None:
                 raise RuntimeError(failure_reason)

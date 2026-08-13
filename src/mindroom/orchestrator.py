@@ -56,6 +56,7 @@ from mindroom.matrix.users import (
     AgentMatrixUser,
     ManagedAccountProvisioningRequest,
     create_agent_user,
+    load_agent_user,
     preflight_managed_account_provisioning,
 )
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
@@ -64,7 +65,7 @@ from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.response_admission import ResponseAdmissionGate
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN, ORDERLY_SHUTDOWN
 from mindroom.runtime_state import (
     clear_api_server_address,
     reset_runtime_state,
@@ -125,7 +126,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.event_journal import ApprovalView
+    from mindroom.event_journal import ApprovalContinuation, ApprovalView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
 
     from .constants import RuntimePaths
@@ -298,6 +299,7 @@ class _MultiAgentOrchestrator:
                 self.config is not None and (name in self.config.agents or name in self.config.teams)
             ),
             entity_permanently_unavailable=lambda name: name in self._permanently_failed_entities,
+            recover_unavailable_final=self._recover_unavailable_final,
         )
         self._startup_maintenance = StartupMaintenanceController(
             recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (
@@ -381,6 +383,54 @@ class _MultiAgentOrchestrator:
             thread_id=thread_id,
             reason=reason,
         )
+
+    async def _recover_unavailable_final(
+        self,
+        principal_id: str,
+        continuation: ApprovalContinuation,
+    ) -> bool:
+        """Finalize frozen success as its original Matrix principal, without model startup."""
+        bot = self.agent_bots.get(continuation.entity_name)
+        if bot is not None and bot.approval_store.principal_id != principal_id:
+            bot = None
+        if bot is None:
+            agent_user = load_agent_user(continuation.entity_name, self.runtime_paths)
+            if agent_user is None:
+                logger.error(
+                    "approval_original_principal_account_missing",
+                    approval_id=continuation.approval_id,
+                    entity_name=continuation.entity_name,
+                    principal_id=principal_id,
+                )
+                return False
+            bot = AgentBot(
+                agent_user,
+                self.storage_path,
+                self._require_config(),
+                self.runtime_paths,
+                config_path=self.config_path,
+                journal_store=self._shared_journal_store(),
+            )
+            bot.orchestrator = self
+            bot.hook_registry = self.hook_registry
+            self._bind_response_admission_gate(bot)
+            if bot.approval_store.principal_id != principal_id:
+                logger.error(
+                    "approval_original_principal_identity_mismatch",
+                    approval_id=continuation.approval_id,
+                    expected_principal_id=principal_id,
+                    actual_principal_id=bot.approval_store.principal_id,
+                )
+                return False
+
+        opened_recovery_client = bot.client is None
+        try:
+            if opened_recovery_client:
+                await bot.open_approval_recovery_client()
+            return await bot.recover_approval_final(continuation.approval_id)
+        finally:
+            if opened_recovery_client:
+                await bot.close_approval_recovery_client()
 
     def _bind_response_admission_gate(self, bot: AgentBot | TeamBot) -> None:
         """Share the orchestrator-owned response admission gate with one managed bot."""
@@ -1356,6 +1406,16 @@ class _MultiAgentOrchestrator:
             await self._cancel_bot_start_task(entity_name)
             await cancel_sync_task(entity_name, self._sync_tasks)
 
+            bot = self.agent_bots.get(entity_name)
+            if bot is not None:
+                await bot.prepare_for_sync_shutdown(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
+
+        # A frozen successful FINAL must be recovered while the original
+        # sender and its lifecycle collaborators still exist. Router fallback
+        # may settle only continuations that never acquired FINAL ownership.
+        await self._approval_transport.reconcile_unavailable_entities(removed_entities)
+
+        for entity_name in removed_entities:
             bot = self.agent_bots.pop(entity_name, None)
             if bot is not None:
                 await bot.cleanup()
@@ -1428,7 +1488,7 @@ class _MultiAgentOrchestrator:
 
         await self._remove_deleted_entities(plan.removed_entities)
         await self._approval_transport.reconcile_unavailable_entities(
-            plan.removed_entities | set(start_results.permanently_failed_entities),
+            set(start_results.permanently_failed_entities),
         )
         self._schedule_ready_turn_dispatch_recovery()
         return changed_entities, start_results.retryable_entities, start_results.permanently_failed_entities

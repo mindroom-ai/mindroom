@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent as AgnoAgent
+from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
 from agno.models.response import ToolExecution
@@ -20,7 +21,7 @@ from agno.run.agent import RunContentEvent as AgentRunContentEvent
 from agno.run.agent import RunOutput
 from agno.run.agent import ToolCallCompletedEvent as AgentToolCallCompletedEvent
 from agno.run.agent import ToolCallStartedEvent as AgentToolCallStartedEvent
-from agno.run.base import RunStatus
+from agno.run.base import RunContext, RunStatus
 from agno.run.requirement import RunRequirement
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunCompletedEvent as TeamRunCompletedEvent
@@ -377,9 +378,16 @@ async def test_team_continuation_executes_real_agno_confirmation(
 ) -> None:
     """Exercise the real persisted Agno team pause and continuation spine."""
     executed: list[list[str]] = []
+    observed_metadata: list[dict[str, object] | None] = []
+    original_metadata = {
+        "room_id": "!room:localhost",
+        "thread_id": "$thread",
+        "correlation_id": "team-approval-metadata",
+    }
 
-    def run_shell_command(args: list[str]) -> str:
+    def run_shell_command(args: list[str], run_context: RunContext) -> str:
         executed.append(args)
+        observed_metadata.append(run_context.metadata)
         return "ok"
 
     team = AgnoTeam(
@@ -403,7 +411,13 @@ async def test_team_continuation_executes_real_agno_confirmation(
         ],
         db=SqliteDb(db_file=str(tmp_path / "team-continuation.db"), session_table="sessions"),
     )
-    paused = await team.arun("exercise the tool", session_id="session-1", user_id="@user:localhost", stream=False)
+    paused = await team.arun(
+        "exercise the tool",
+        session_id="session-1",
+        user_id="@user:localhost",
+        metadata=original_metadata,
+        stream=False,
+    )
     continue_run = MagicMock(wraps=team.acontinue_run)
     requirement = (paused.requirements or [])[0]
     assert requirement.tool_execution is not None
@@ -428,16 +442,19 @@ async def test_team_continuation_executes_real_agno_confirmation(
         session_id="session-1",
     )
     persisted_scope = HistoryScope(kind="team", scope_id="ad_hoc_original_scope")
+    storage_factory = MagicMock()
+    scope_context = SimpleNamespace(storage=None, storage_factory=storage_factory)
 
     with (
         patch("mindroom.teams.materialize_exact_team_members", return_value=members),
         patch(
             "mindroom.teams.open_bound_scope_session_context",
-            return_value=nullcontext(SimpleNamespace(storage=None)),
+            return_value=nullcontext(scope_context),
         ) as open_scope,
         patch("mindroom.teams.build_materialized_team_instance", return_value=team),
         patch.object(team, "acontinue_run", new=continue_run),
         patch("mindroom.teams.close_team_runtime_state_dbs"),
+        patch("mindroom.teams.ai_runtime.register_queued_notice_storage") as register_notice,
     ):
         result = await continue_paused_team_run(
             member_names=(),
@@ -459,11 +476,20 @@ async def test_team_continuation_executes_real_agno_confirmation(
     assert isinstance(result, CompletedApprovalRun)
     assert AI_RUN_METADATA_KEY in result.metadata_content
     assert bool(executed) is approved
+    assert observed_metadata == ([original_metadata] if approved else [])
     continued_requirement = continue_run.call_args.kwargs["requirements"][0]
+    assert continue_run.call_args.kwargs["metadata"] == original_metadata
+    assert continue_run.call_args.kwargs["metadata"] is not paused.metadata
     assert continued_requirement.tool_execution is not None
     assert continued_requirement.tool_execution.confirmed is approved
     assert continued_requirement.tool_execution.confirmation_note == (None if approved else reason)
     assert open_scope.call_args.kwargs["scope"] == persisted_scope
+    register_notice.assert_called_once_with(
+        storage_factory=storage_factory,
+        session_id="session-1",
+        session_type=SessionType.TEAM,
+        entity_name="research",
+    )
 
 
 @pytest.mark.parametrize(
@@ -532,7 +558,7 @@ async def test_team_continuation_rejects_non_exact_persisted_call_ids(
         patch("mindroom.teams.materialize_exact_team_members", return_value=members),
         patch(
             "mindroom.teams.open_bound_scope_session_context",
-            return_value=nullcontext(SimpleNamespace(storage=None)),
+            return_value=nullcontext(SimpleNamespace(storage=None, storage_factory=None)),
         ),
         patch("mindroom.teams.build_materialized_team_instance", return_value=team),
         patch("mindroom.teams.close_team_runtime_state_dbs"),

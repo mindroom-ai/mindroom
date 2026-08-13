@@ -13,6 +13,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.agent import Agent as AgnoAgent
+from agno.db.sqlite import SqliteDb
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
+from agno.tools.function import Function
 
 from mindroom import interactive
 from mindroom.approval_manager import (
@@ -27,9 +32,12 @@ from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import (
+    ApprovalContinuation,
     EventClass,
     EventKind,
+    InboundEvent,
     InteractiveQuestion,
+    ProjectedEvent,
     SemanticConsumer,
 )
 from mindroom.handled_turns import TurnRecord, with_user_stop
@@ -41,10 +49,17 @@ from mindroom.hooks import (
 )
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.response_runner import ResponseRequest, ResponseRunner, _DeliveryProgress
+from mindroom.response_turn import paused_attempt_from_response
 from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
-from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, shutdown_approval_runtime
+from mindroom.synthetic_model import SyntheticModel
+from mindroom.tool_approval import (
+    POLICY_CONFIRMATION_APPROVAL_TYPE,
+    ApprovalActionResult,
+    MatrixApprovalAction,
+    shutdown_approval_runtime,
+)
 from tests.approval_test_support import FakeApprovalCards
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -243,6 +258,31 @@ def _direct_response_request(target: MessageTarget, prompt: str, source_event_id
 
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+
+    @pytest.mark.asyncio
+    async def test_recovery_client_waits_for_post_effects_before_close(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Original-principal recovery must not close Matrix under queued post-effects."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        order: list[str] = []
+        client = MagicMock()
+        client.close = AsyncMock(side_effect=lambda: order.append("close"))
+        bot.client = client
+
+        async def wait_for_effects(*_args: object, **_kwargs: object) -> bool:
+            order.append("effects")
+            return True
+
+        with patch("mindroom.bot.wait_for_background_tasks", side_effect=wait_for_effects) as wait:
+            await bot.close_approval_recovery_client()
+
+        assert order == ["effects", "close"]
+        wait.assert_awaited_once_with(timeout=5.0, owner=bot._runtime_view)
+        assert bot.client is None
 
     @pytest.mark.asyncio
     async def test_reaction_hooks_run_after_built_in_handlers_decline(
@@ -1031,6 +1071,207 @@ class TestAgentBot(AgentBotTestBase):
             finish_cleanup.set()
             ordinary_response_task.cancel()
             await asyncio.gather(response_task, ordinary_response_task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_approval_resume_handoff_releases_lane_and_tracks_every_source(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A resumed Agno run belongs to the response runtime, not the room journal lane."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        store = bot.approval_store
+        for ordinal, event_id in enumerate(("$source", "$coalesced"), start=1):
+            await store.admit(
+                InboundEvent(
+                    event_id=event_id,
+                    room_id="!test:localhost",
+                    thread_id="$thread",
+                    kind=EventKind.MESSAGE,
+                    event_class=EventClass.ACTIONABLE,
+                    sender="@user:localhost",
+                    origin_server_ts=ordinal,
+                    source={"event_id": event_id, "content": {"body": "run it"}},
+                ),
+                ProjectedEvent(
+                    event_id=event_id,
+                    room_id="!test:localhost",
+                    thread_id="$thread",
+                    sender="@user:localhost",
+                    origin_server_ts=ordinal,
+                    content={"body": "run it"},
+                    replaces_event_id=None,
+                    redacts_event_id=None,
+                ),
+            )
+        continuation = ApprovalContinuation(
+            approval_id="approval-handoff",
+            run_id="run-1",
+            session_id="session-1",
+            entity_kind="agent",
+            entity_name=bot.agent_name,
+            room_id="!test:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            response_event_id="$waiting",
+            source_event_ids=("$source", "$coalesced"),
+            calls=(),
+            state="ready",
+        )
+        assert await store.create_approval_continuation(continuation) == continuation
+        resume_started = asyncio.Event()
+        release_resume = asyncio.Event()
+
+        async def resume(_source_event_id: str) -> bool:
+            resume_started.set()
+            await release_resume.wait()
+            return False
+
+        with patch.object(bot._response_runner, "resume_approval_source", new=resume):
+            handoff = asyncio.create_task(
+                bot._journal_dispatcher.callbacks.on_approval_continuation("$source"),
+            )
+            try:
+                await resume_started.wait()
+                await asyncio.sleep(0)
+
+                assert handoff.done()
+                assert await handoff is False
+                assert bot._response_runner.has_live_inbox_response("$source")
+                assert bot._response_runner.has_live_inbox_response("$coalesced")
+                deferred = await store.load_event("$source")
+                assert deferred is not None
+                bot._journal_dispatcher._worker._deferred[deferred.event_id] = deferred
+                assert bot._journal_dispatcher._deferral_is_live(deferred)
+                assert bot._journal_dispatcher._worker._reclaim_lost_deferrals() == {}
+            finally:
+                release_resume.set()
+                await asyncio.gather(handoff, return_exceptions=True)
+                await bot._response_runner.wait_for_source_owned_inbox_responses()
+                assert "$source" not in bot._journal_dispatcher._worker._deferred
+
+    @pytest.mark.asyncio
+    async def test_persisted_pause_resumes_once_in_fresh_bot_runtime(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """The real suspend transaction must let a fresh bot execute the exact tool once."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        session_db = tmp_path / "persisted-approval-agent.db"
+        executed: list[list[str]] = []
+        target = MessageTarget.resolve("!test:localhost", None, "$source")
+
+        def run_shell_command(args: list[str]) -> str:
+            executed.append(args)
+            return "ok"
+
+        def new_agent() -> AgnoAgent:
+            return AgnoAgent(
+                id=mock_agent_user.agent_name,
+                model=SyntheticModel(
+                    id="synthetic",
+                    seed=1,
+                    min_response_chars=20,
+                    max_response_chars=20,
+                    chars_per_second=0,
+                    tool_call_probability=1,
+                ),
+                tools=[
+                    Function(
+                        name="run_shell_command",
+                        entrypoint=run_shell_command,
+                        requires_confirmation=True,
+                    ),
+                ],
+                db=SqliteDb(db_file=str(session_db), session_table="sessions"),
+            )
+
+        first_agent = new_agent()
+        paused_response = await first_agent.arun(
+            "exercise the tool",
+            session_id=target.session_id,
+            user_id="@user:localhost",
+            stream=False,
+        )
+        assert isinstance(paused_response, RunOutput)
+        assert paused_response.status is RunStatus.paused
+        paused = paused_attempt_from_response(
+            paused_response,
+            fallback_session_id=target.session_id,
+            fallback_run_id=paused_response.run_id,
+        )
+        assert paused is not None
+        paused.tools[0].approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
+
+        first = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        first.client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
+        first.client.room_send.return_value = nio.RoomSendResponse("$waiting", "!test:localhost")
+        source = InboundEvent(
+            event_id="$source",
+            room_id="!test:localhost",
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1,
+            source={"event_id": "$source", "content": {"body": "exercise the tool"}},
+        )
+        projected = ProjectedEvent(
+            event_id="$source",
+            room_id="!test:localhost",
+            thread_id=None,
+            sender="@user:localhost",
+            origin_server_ts=1,
+            content={"body": "exercise the tool"},
+            replaces_event_id=None,
+            redacts_event_id=None,
+        )
+        assert await first.approval_store.admit(source, projected)
+        request = _direct_response_request(target, "exercise the tool", "$source")
+        identity = first._response_runner.deps.tool_runtime.build_execution_identity(
+            target=target,
+            user_id="@user:localhost",
+            agent_name=mock_agent_user.agent_name,
+        )
+
+        with patch(
+            "mindroom.approval_response.evaluate_tool_approval",
+            new=AsyncMock(return_value=(False, 60.0)),
+        ):
+            suspended = await first._response_runner._suspend_for_approval(
+                paused,
+                request=request,
+                target=target,
+                progress=_DeliveryProgress(),
+                execution_identity=identity,
+                entity_kind="agent",
+                history_scope=first._response_runner.deps.state_writer.history_scope(),
+            )
+
+        assert suspended.terminal_status == "suspended"
+        assert executed == []
+        persisted = await first.approval_store.approval_continuation_for_source("$source")
+        assert persisted is not None
+        assert persisted.state == "ready"
+        if first_agent.db is not None:
+            first_agent.db.close()
+
+        restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted.client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
+        restarted.client.room_send.return_value = nio.RoomSendResponse("$final", "!test:localhost")
+        with patch("mindroom.approval_execution.create_agent", side_effect=lambda *_args, **_kwargs: new_agent()):
+            restarted._journal_dispatcher.release_turn_replay()
+            await restarted._journal_dispatcher.drain_once()
+            await restarted._response_runner.wait_for_source_owned_inbox_responses()
+            await restarted._journal_dispatcher.drain_once()
+
+        remaining = await restarted.approval_store.approval_continuation_for_source("$source")
+        assert len(executed) == 1, remaining
+        assert remaining is None
+        assert not await restarted.approval_store.is_pending("$source")
 
     @pytest.mark.asyncio
     async def test_restart_stop_waits_for_source_owner_registered_during_dispatcher_stop(

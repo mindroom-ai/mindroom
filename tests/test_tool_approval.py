@@ -336,8 +336,8 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
 
 
 @pytest.mark.asyncio
-async def test_removed_owner_cleanup_finishes_acknowledged_frozen_success(tmp_path: Path) -> None:
-    """An accepted original answer wins without a contradictory router failure notice."""
+async def test_removed_owner_cleanup_recovers_frozen_success_through_original_owner(tmp_path: Path) -> None:
+    """Unavailable cleanup must recover and finalize FINAL debt through its original principal."""
     journal = EventJournalStore.open_sqlite(tmp_path / "approval-frozen-success.db")
     principal = journal.principal("agent@removed")
     source_event_id = "$source"
@@ -382,17 +382,25 @@ async def test_removed_owner_cleanup_finishes_acknowledged_frozen_success(tmp_pa
         },
     )
     assert await principal.claim_delivery(turn_id=source_event_id, stage=DeliveryStage.FINAL) is not None
-    await principal.acknowledge_delivery(
-        turn_id=source_event_id,
-        stage=DeliveryStage.FINAL,
-        event_id="$final-edit",
-    )
+
+    recovered: list[tuple[str, str]] = []
+
+    async def recover_final(principal_id: str, observed: ApprovalContinuation) -> bool:
+        recovered.append((principal_id, observed.approval_id))
+        await principal.acknowledge_delivery(
+            turn_id=source_event_id,
+            stage=DeliveryStage.FINAL,
+            event_id="$final-edit",
+        )
+        return await principal.finish_approval_continuation(observed.approval_id)
+
     transport = approval_transport.ApprovalMatrixTransport(
         runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda _name: None,
         cards_provider=lambda: None,
         journal_provider=lambda: journal,
         entity_configured=lambda name: name != "removed",
+        recover_unavailable_final=recover_final,
     )
 
     try:
@@ -407,6 +415,7 @@ async def test_removed_owner_cleanup_finishes_acknowledged_frozen_success(tmp_pa
             )
 
         expire_cards.assert_not_awaited()
+        assert recovered == [("agent@removed", approval_id)]
         assert await principal.approval_continuation(approval_id) is None
         assert not await principal.is_pending(source_event_id)
     finally:

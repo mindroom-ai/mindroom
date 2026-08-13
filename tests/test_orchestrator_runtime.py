@@ -113,6 +113,89 @@ async def _await_until(condition: Callable[[], bool]) -> None:
             await asyncio.sleep(0)
 
 
+@pytest.mark.asyncio
+async def test_unavailable_final_recovery_uses_retained_owner_bot(tmp_path: Path) -> None:
+    """Config removal must finalize frozen success before closing the original principal."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    continuation = MagicMock(approval_id="approval-1", entity_name="removed")
+    bot = MagicMock()
+    bot.approval_store.principal_id = "removed@@removed:localhost"
+    bot.recover_approval_final = AsyncMock(return_value=True)
+    orchestrator.agent_bots["removed"] = bot
+
+    assert await orchestrator._recover_unavailable_final("removed@@removed:localhost", continuation)
+
+    bot.recover_approval_final.assert_awaited_once_with("approval-1")
+
+
+@pytest.mark.asyncio
+async def test_unavailable_final_recovery_restores_offline_owner_account(tmp_path: Path) -> None:
+    """Startup cleanup must recover FINAL debt under a removed owner's persisted Matrix principal."""
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "router": {"model": "default"},
+        },
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = config
+    continuation = MagicMock(approval_id="approval-1", entity_name="removed")
+    account = AgentMatrixUser(
+        agent_name="removed",
+        user_id="@removed:localhost",
+        display_name="Removed",
+        password="secret",  # noqa: S106
+        device_id="DEVICE",
+        access_token="token",  # noqa: S106
+    )
+    recovery_bot = MagicMock()
+    recovery_bot.client = None
+    recovery_bot.approval_store.principal_id = "removed@@removed:localhost"
+    recovery_bot.open_approval_recovery_client = AsyncMock()
+    recovery_bot.recover_approval_final = AsyncMock(return_value=True)
+    recovery_bot.close_approval_recovery_client = AsyncMock()
+
+    with (
+        patch("mindroom.orchestrator.load_agent_user", return_value=account) as load_account,
+        patch("mindroom.orchestrator.AgentBot", return_value=recovery_bot) as create_recovery_bot,
+    ):
+        assert await orchestrator._recover_unavailable_final("removed@@removed:localhost", continuation)
+
+    load_account.assert_called_once_with("removed", orchestrator.runtime_paths)
+    create_recovery_bot.assert_called_once()
+    recovery_bot.open_approval_recovery_client.assert_awaited_once()
+    recovery_bot.recover_approval_final.assert_awaited_once_with("approval-1")
+    recovery_bot.close_approval_recovery_client.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_entity_removal_recovers_original_final_before_bot_cleanup(tmp_path: Path) -> None:
+    """The original sender must remain live until unavailable-continuation recovery finishes."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    order: list[str] = []
+    bot = MagicMock()
+    bot.prepare_for_sync_shutdown = AsyncMock(side_effect=lambda **_kwargs: order.append("quiesce"))
+    bot.cleanup = AsyncMock(side_effect=lambda: order.append("cleanup"))
+    orchestrator.agent_bots["removed"] = bot
+    orchestrator._approval_transport.reconcile_unavailable_entities = AsyncMock(
+        side_effect=lambda _names: order.append("recover"),
+    )
+
+    await orchestrator._remove_deleted_entities({"removed"})
+
+    assert order == ["quiesce", "recover", "cleanup"]
+    assert "removed" not in orchestrator.agent_bots
+
+
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
 

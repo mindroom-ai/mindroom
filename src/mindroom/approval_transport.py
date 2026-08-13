@@ -34,7 +34,7 @@ from mindroom.tool_approval import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import (
@@ -132,6 +132,7 @@ class ApprovalMatrixTransport:
     journal_provider: Callable[[], EventJournalStore] | None = None
     entity_configured: Callable[[str], bool] | None = None
     entity_permanently_unavailable: Callable[[str], bool] | None = None
+    recover_unavailable_final: Callable[[str, ApprovalContinuation], Awaitable[bool]] | None = None
     _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_done: bool = field(default=False, init=False, repr=False)
@@ -310,8 +311,9 @@ class ApprovalMatrixTransport:
             stage=DeliveryStage.FINAL,
         )
         if final_delivery is not None:
-            return final_delivery.acknowledged_event_id is not None and await store.finish_approval_continuation(
-                current.approval_id,
+            return self.recover_unavailable_final is not None and await self.recover_unavailable_final(
+                principal_id,
+                current,
             )
         if current.state != "failing":
             current = await store.request_approval_failure(

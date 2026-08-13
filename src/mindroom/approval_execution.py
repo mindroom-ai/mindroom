@@ -7,9 +7,12 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
+from agno.db.base import SessionType
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 
+from mindroom import ai_runtime
+from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.history.runtime import close_agent_runtime_state_dbs
@@ -69,19 +72,36 @@ class AgentApprovalExecution:
             continuation.entity_name,
             execution_identity=execution_identity,
         )
-        agent = await asyncio.to_thread(
-            create_agent,
+        history_storage = await asyncio.to_thread(
+            create_session_storage,
             continuation.entity_name,
             config,
             self.runtime_paths,
             execution_identity,
-            session_id=continuation.session_id,
-            active_model_name=continuation.runtime_model_name,
-            knowledge=knowledge,
-            refresh_scheduler=self.refresh_scheduler(),
-            dynamic_tool_continuation=True,
-            supports_native_tool_approval=True,
         )
+        try:
+            agent = await asyncio.to_thread(
+                create_agent,
+                continuation.entity_name,
+                config,
+                self.runtime_paths,
+                execution_identity,
+                session_id=continuation.session_id,
+                history_storage=history_storage,
+                active_model_name=continuation.runtime_model_name,
+                knowledge=knowledge,
+                refresh_scheduler=self.refresh_scheduler(),
+                dynamic_tool_continuation=True,
+                supports_native_tool_approval=True,
+            )
+        except BaseException:
+            history_storage.close()
+            raise
+        if agent.model is not None:
+            ai_runtime.install_queued_message_notice_hook(
+                agent.model,
+                notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
+            )
         try:
             session = await agent.aget_session(
                 session_id=continuation.session_id,
@@ -103,6 +123,7 @@ class AgentApprovalExecution:
                     requirements=requirements,
                     session_id=continuation.session_id,
                     user_id=continuation.requester_id,
+                    metadata=deepcopy(persisted.metadata),
                     stream=False,
                 )
                 return await cast("Awaitable[RunOutput]", result)
@@ -116,7 +137,19 @@ class AgentApprovalExecution:
                     ),
                 )
         finally:
-            close_agent_runtime_state_dbs(agent)
+            ai_runtime.register_queued_notice_storage(
+                storage_factory=lambda: create_session_storage(
+                    continuation.entity_name,
+                    config,
+                    self.runtime_paths,
+                    execution_identity,
+                ),
+                session_id=continuation.session_id,
+                session_type=SessionType.AGENT,
+                entity_name=continuation.entity_name,
+            )
+            close_agent_runtime_state_dbs(agent, shared_scope_storage=history_storage)
+            history_storage.close()
         paused = paused_attempt_from_response(
             response,
             fallback_session_id=continuation.session_id,

@@ -155,6 +155,28 @@ def _get_agent_credentials(
     return None
 
 
+def load_agent_user(agent_name: str, runtime_paths: RuntimePaths) -> AgentMatrixUser | None:
+    """Load one already-provisioned managed account without creating it."""
+    credentials = _get_agent_credentials(agent_name, runtime_paths)
+    if credentials is None:
+        return None
+    username = credentials["username"]
+    if username is None:
+        return None
+    domain = credentials["domain"] or extract_server_name_from_homeserver(
+        runtime_matrix_homeserver(runtime_paths),
+        runtime_paths=runtime_paths,
+    )
+    return AgentMatrixUser(
+        agent_name=agent_name,
+        user_id=MatrixID.from_username(username, domain).full_id,
+        display_name=agent_name,
+        password=credentials["password"],
+        device_id=credentials["device_id"],
+        access_token=credentials["access_token"],
+    )
+
+
 def _save_agent_credentials(
     agent_name: str,
     username: str,

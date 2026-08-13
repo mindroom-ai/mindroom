@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import ExitStack, aclosing
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -1904,6 +1905,7 @@ async def continue_paused_team_run(
                 requirements=requirements,
                 session_id=session_id,
                 user_id=user_id,
+                metadata=deepcopy(persisted.metadata),
                 stream=False,
             ),
         )
@@ -1936,6 +1938,11 @@ async def continue_paused_team_run(
             ),
         )
     finally:
+        _register_team_notice_storage(
+            scope_context=scope,
+            session_id=session_id,
+            entity_name=configured_team_name,
+        )
         close_team_runtime_state_dbs(
             agents=members.agents,
             team_db=cast("BaseDb | None", team.db) if team is not None else None,
