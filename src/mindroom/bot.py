@@ -673,6 +673,7 @@ class AgentBot:
             ),
             room_for_id=self._room_for_journal_event,
             on_persist_failure=self._record_dispatch_persist_failure,
+            room_is_one_conversation=self._room_scope_is_single_conversation,
             room_lifecycle_admission_enabled=lambda: (
                 self.agent_name == ROUTER_AGENT_NAME and self._first_sync_done and self._room_member_join_hooks_armed
             ),

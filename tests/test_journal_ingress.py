@@ -42,7 +42,8 @@ from mindroom.matrix.journal_ingress import (
     parse_journal_event,
     projected_event,
 )
-from mindroom.pending_event_worker import _BATCH_SIZE, PendingEventWorker
+from mindroom.message_target import MessageTarget
+from mindroom.pending_event_worker import _BATCH_SIZE, PendingEventWorker, _lane_key
 from tests.test_event_journal_store import corrupt
 
 if TYPE_CHECKING:
@@ -1312,6 +1313,143 @@ class TestPendingEventWorker:
             with suppress(asyncio.CancelledError):
                 await drain
 
+    async def test_a_parked_root_message_does_not_hold_another_root_message(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Two unrelated root messages are two conversations, not one.
+
+        A root carries no thread relation, so its raw thread ID is empty and
+        keying a lane on that field alone puts every root in one room into the
+        same lane -- which is the state that made a single pending approval
+        silence a whole room. The conversation a root belongs to is the one it
+        starts, so its lane is its own event ID, matching the thread root that
+        ``MessageTarget.resolve`` derives for the response lock.
+        """
+        parked = asyncio.Event()
+        second_ran = asyncio.Event()
+
+        async def handle(event: JournalEvent) -> bool:
+            if event.event_id == "$parked-root":
+                parked.set()
+                await asyncio.sleep(30)
+                return True
+            second_ran.set()
+            return True
+
+        await self._admit(alice, text_event("$parked-root", ts=1_000))
+        await self._admit(alice, text_event("$other-root", ts=2_000))
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        drain = asyncio.create_task(worker.drain_once())
+        try:
+            async with asyncio.timeout(5):
+                await parked.wait()
+                await second_ran.wait()
+        finally:
+            drain.cancel()
+            with suppress(asyncio.CancelledError):
+                await drain
+
+    async def test_a_dispatchers_room_scope_reaches_the_lanes_it_owns(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The worker is built inside the dispatcher, so only it can say the scope.
+
+        A default is the wrong thing to fall back on here: the worker's own
+        default assumes thread scope, so a dispatcher that failed to pass the
+        agent's real mode would split a room-scoped room into a lane per root
+        and nothing would report it.
+        """
+
+        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+            return None
+
+        dispatcher = JournalDispatcher(
+            store=alice,
+            self_sender=BOT,
+            callbacks=JournalCallbacks(
+                on_message=cast("Any", noop),
+                on_media=cast("Any", noop),
+                on_reaction=cast("Any", noop),
+                on_approval=cast("Any", noop),
+                on_room_lifecycle=cast("Any", noop),
+                on_redaction=cast("Any", noop),
+                on_decryption_failure=cast("Any", noop),
+                source_has_live_owner=lambda _event_id: False,
+                turn_has_live_claim=lambda _event_id: False,
+            ),
+            room_for_id=lambda _room_id: room(),
+            room_is_one_conversation=lambda room_id: room_id == ROOM,
+        )
+
+        assert dispatcher._worker.room_is_one_conversation(ROOM)
+        assert not dispatcher._worker.room_is_one_conversation("!elsewhere:example.org")
+
+    async def test_a_room_scoped_agent_still_answers_its_room_in_one_order(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A room-mode agent holds one conversation, so its room holds one lane.
+
+        Thread mode is not universal: an agent configured for room scope
+        resolves every message in the room to the same thread root, so the
+        response lifecycle lock serialises the whole room by design. Splitting
+        that room into a lane per root would start turns concurrently and let
+        them take that one lock in whatever order they reached it, answering
+        the room out of the order it was spoken in.
+        """
+        running = 0
+        peak = 0
+
+        async def handle(event: JournalEvent) -> bool:
+            nonlocal running, peak
+            del event
+            running += 1
+            peak = max(peak, running)
+            await asyncio.sleep(0)
+            running -= 1
+            return True
+
+        await self._admit(alice, text_event("$one", ts=1_000))
+        await self._admit(alice, text_event("$two", ts=2_000))
+
+        worker = PendingEventWorker(
+            store=alice,
+            handle=handle,
+            room_is_one_conversation=lambda room_id: room_id == ROOM,
+        )
+        await worker.drain_once()
+
+        assert peak == 1
+
+    async def test_a_lane_matches_the_thread_root_the_response_lock_uses(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A lane and the response lifecycle lock must name the same conversation.
+
+        The lane decides what runs concurrently and the lock decides what runs
+        alone. Key them on different things and either the room over-serialises
+        or two turns answer one thread at once, so the lane key is asserted
+        against the resolved thread root rather than against itself.
+        """
+        for event_id, thread_id in (("$root", None), ("$reply", "$root")):
+            await self._admit(alice, text_event(event_id, thread_id=thread_id))
+
+        page = await alice.pending(limit=10)
+
+        assert {event.event_id for event in page} == {"$root", "$reply"}
+        for event in page:
+            target = MessageTarget.resolve(
+                room_id=event.room_id,
+                thread_id=event.thread_id or None,
+                reply_to_event_id=event.event_id,
+                thread_start_root_event_id=event.event_id,
+            )
+            assert _lane_key(event) == (target.room_id, target.resolved_thread_id)
+
     async def test_a_settled_event_never_runs_again(self, alice: PrincipalStore) -> None:
         """A settled event never runs again."""
         runs = 0
@@ -1344,11 +1482,11 @@ class TestPendingEventWorker:
 
         assert [event.event_id for event in await alice.pending()] == ["$m"]
 
-    async def test_a_failure_stops_that_rooms_later_events(
+    async def test_a_failure_stops_that_conversations_later_events(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """Otherwise the room is answered out of order, and the retry lands last."""
+        """Otherwise the thread is answered out of order, and the retry lands last."""
         handled: list[str] = []
 
         async def handle(event: JournalEvent) -> bool:
@@ -1358,8 +1496,8 @@ class TestPendingEventWorker:
                 raise RuntimeError(msg)
             return True
 
-        await self._admit(alice, text_event("$first", ts=1_000))
-        await self._admit(alice, text_event("$second", ts=2_000))
+        await self._admit(alice, text_event("$first", thread_id="$topic", ts=1_000))
+        await self._admit(alice, text_event("$second", thread_id="$topic", ts=2_000))
 
         await PendingEventWorker(store=alice, handle=handle).drain_once()
 
@@ -1558,18 +1696,18 @@ class TestPendingEventWorker:
             return True
 
         worker = PendingEventWorker(store=alice, handle=handle)
-        await self._admit(alice, text_event("$slow", ts=1_000))
+        await self._admit(alice, text_event("$slow", thread_id="$topic", ts=1_000))
         worker.start()
         await _eventually(lambda: worker._lanes != {})
 
-        await self._admit(alice, text_event("$late", ts=2_000))
+        await self._admit(alice, text_event("$late", thread_id="$topic", ts=2_000))
         worker.wake()
         # Waited on rather than yielded to: the point of the test is that the
         # busy lane was noted as still owing work *before* it finished,
         # because that note is the only thing that arranges the second look. A
         # bare yield cannot fail -- a second lane over one thread is impossible
         # either way -- so it proved the wakeup without exercising it.
-        await _eventually(lambda: worker._lanes_with_more == {(ROOM, None)})
+        await _eventually(lambda: worker._lanes_with_more == {(ROOM, "$topic")})
         released.set()
 
         await _eventually(lambda: handled == ["$slow", "$late"])
@@ -1730,8 +1868,8 @@ class TestPendingEventWorker:
             handled.append(event.event_id)
             return False
 
-        await self._admit(alice, text_event("$early", ts=1_000))
-        await self._admit(alice, text_event("$late", ts=2_000))
+        await self._admit(alice, text_event("$early", thread_id="$topic", ts=1_000))
+        await self._admit(alice, text_event("$late", thread_id="$topic", ts=2_000))
         worker = PendingEventWorker(
             store=alice,
             handle=handle,
@@ -1765,7 +1903,7 @@ class TestPendingEventWorker:
         monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
         monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 3)
         for index in range(8):
-            await self._admit(alice, text_event(f"$m{index}", ts=1_000 + index))
+            await self._admit(alice, text_event(f"$m{index}", thread_id="$topic", ts=1_000 + index))
 
         async def handle(event: JournalEvent) -> bool:
             del event
@@ -1777,7 +1915,7 @@ class TestPendingEventWorker:
         await worker._collect_dispatchable()
         by_lane, _more = await worker._collect_dispatchable()
 
-        assert [event.event_id for event in by_lane[(ROOM, None)]] == ["$m0", "$m1", "$m6", "$m7"]
+        assert [event.event_id for event in by_lane[(ROOM, "$topic")]] == ["$m0", "$m1", "$m6", "$m7"]
 
     async def test_a_lost_owner_is_noticed_without_any_further_admission(
         self,
@@ -2300,14 +2438,14 @@ class TestABoundedScanIsFair:
         result can hide.
         """
         for index in range(5):
-            await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), ROOM)
+            await self._admit(alice, text_event(f"$e{index}", thread_id="$topic", ts=1_000 + index), ROOM)
         admitted = await alice.pending(limit=5)
         worker = PendingEventWorker(store=alice, handle=_never_called)
         worker._scan_cursor = admitted[2].receipt_order
 
         by_lane, more_remains = await worker._collect_dispatchable()
 
-        assert [event.event_id for event in by_lane[(ROOM, None)]] == ["$e0", "$e1", "$e2", "$e3", "$e4"]
+        assert [event.event_id for event in by_lane[(ROOM, "$topic")]] == ["$e0", "$e1", "$e2", "$e3", "$e4"]
         assert not more_remains
         assert worker._scan_cursor is None
 
@@ -2328,7 +2466,7 @@ class TestABoundedScanIsFair:
         monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
         monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
         for index in range(3):
-            await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), ROOM)
+            await self._admit(alice, text_event(f"$e{index}", thread_id="$topic", ts=1_000 + index), ROOM)
         admitted = await alice.pending(limit=3)
         worker = PendingEventWorker(store=alice, handle=_never_called, deferral_is_live=lambda _event: False)
         worker._deferred[admitted[0].event_id] = admitted[0]
@@ -2336,7 +2474,7 @@ class TestABoundedScanIsFair:
 
         by_lane, _ = await worker._collect_dispatchable()
 
-        assert [event.event_id for event in by_lane[(ROOM, None)]] == ["$e0", "$e1"]
+        assert [event.event_id for event in by_lane[(ROOM, "$topic")]] == ["$e0", "$e1"]
 
     async def test_an_object_handed_over_mid_pass_is_not_read_as_unreachable(
         self,

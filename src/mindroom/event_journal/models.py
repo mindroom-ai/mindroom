@@ -152,6 +152,19 @@ class JournalEvent:
     receipt_order: int
     semantic_consumer: SemanticConsumer | None = None
 
+    @property
+    def names_its_own_conversation(self) -> bool:
+        """Return whether this event says which conversation it belongs to.
+
+        A message does: ``thread_id`` is its thread, and a message without one
+        is the root of the thread it starts. Nothing else does. ``thread_id``
+        is the ``m.thread`` relation and only that, so a reaction, an edit, and
+        a redaction all record ``None`` while belonging to whatever
+        conversation the event they point at is in -- which is not recorded
+        here and cannot be inferred from here.
+        """
+        return self.kind is EventKind.MESSAGE
+
 
 # A non-empty ``__slots__`` is a TypeError on a subtype of a variable-length
 # built-in, so SLOT001 cannot be satisfied by a tuple that carries anything.

@@ -41,7 +41,7 @@ from mindroom.matrix.journal_ingress import (
     projected_event,
 )
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent
-from mindroom.pending_event_worker import PendingEventWorker
+from mindroom.pending_event_worker import PendingEventWorker, every_room_is_threaded
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -98,6 +98,11 @@ class JournalDispatcher:
     callbacks: JournalCallbacks
     room_for_id: Callable[[str], nio.MatrixRoom]
     on_persist_failure: Callable[[], None] | None = None
+    # Whether this agent reads a room as one conversation rather than a set of
+    # threads. Only the bot knows its own thread mode, and the worker this
+    # dispatcher builds needs it to key lanes the way the response lifecycle
+    # lock keys itself.
+    room_is_one_conversation: Callable[[str], bool] = every_room_is_threaded
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
     # Replaying a turn needs the agent fleet up, so the orchestrator releases
     # turn-backed replay separately from the rest of startup. Until it does,
@@ -116,6 +121,7 @@ class JournalDispatcher:
         self._worker = PendingEventWorker(
             store=self.store,
             handle=self._run_event,
+            room_is_one_conversation=self.room_is_one_conversation,
             deferral_is_live=self._deferral_is_live,
             retained_event_ids=self._retained_live_event_ids,
             release_retained=self._forget_live_events,

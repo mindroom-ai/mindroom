@@ -108,26 +108,59 @@ def _assume_owner_is_live(event: JournalEvent) -> bool:
 # thread in it is, and a turn parked on a human decision can hold its lane for
 # as long as that decision takes. Keying on the room made every thread wait for
 # whichever one was slowest, so an unanswered approval in one silenced the rest.
-_LaneKey = tuple[str, str | None]
+#
+# A root message carries no thread relation, so keying on the raw relation
+# alone would put every root in a room back into one lane and change nothing.
+# The conversation a root belongs to is the one it starts, which is the same
+# root ``MessageTarget.resolve`` derives for the response lifecycle lock. The
+# two must name the same conversation: the lane decides what may run
+# concurrently and the lock decides what must run alone, so disagreeing keys
+# either serialise a room that need not be or admit two turns to one thread.
+_LaneKey = tuple[str, str]
+
+# The lane a whole room shares when the agent reads that room as one
+# conversation. Empty because no event owns it: it is the room's own lane, not
+# any message's.
+_WHOLE_ROOM_LANE = ""
 
 
 def _lane_key(event: JournalEvent) -> _LaneKey:
-    """Return the lane one event runs in: its thread, within its room."""
-    return (event.room_id, event.thread_id)
+    """Return the lane one event runs in: its thread root, within its room.
+
+    An event that does not name its own conversation keeps the room-wide lane
+    it has always run in. Splitting one off on the strength of an absent
+    ``m.thread`` relation would put a reaction in a lane of its own, beside the
+    thread it annotates, rather than in it.
+    """
+    if not event.names_its_own_conversation:
+        return (event.room_id, _WHOLE_ROOM_LANE)
+    return (event.room_id, event.thread_id or event.event_id)
+
+
+def every_room_is_threaded(room_id: str) -> bool:
+    """Assume thread scope, the mode ``get_entity_thread_mode`` defaults to."""
+    del room_id
+    return False
 
 
 @dataclass
 class PendingEventWorker:
-    """Drain pending journal events, in receipt order within each room.
+    """Drain pending journal events, in receipt order within each conversation.
 
-    Order is preserved per room rather than globally. A room's events are a
-    conversation and must be answered in the order they were received; two
-    different rooms are unrelated, and making one wait for the other would let
-    a single slow turn stall every other conversation the bot is in.
+    Order is preserved per conversation rather than globally. A conversation's
+    events must be answered in the order they were received; two different
+    conversations are unrelated, and making one wait for the other would let a
+    single slow turn stall every other conversation the bot is in.
     """
 
     store: ReplayView
     handle: _EventHandler
+    # Which rooms are one conversation rather than a set of threads. An agent
+    # in room scope resolves every message to the same thread root, so its
+    # response lifecycle lock already serialises the room; lanes must agree
+    # with that lock or turns would start concurrently and then take it in
+    # arrival order rather than receipt order.
+    room_is_one_conversation: Callable[[str], bool] = every_room_is_threaded
     # Asked about every deferred event on every scan. A deferral whose owner is
     # gone is durable work nobody is left to release, so the scan takes it back
     # rather than waiting for a restart to notice.
@@ -163,6 +196,12 @@ class PendingEventWorker:
     # Where the next bounded scan resumes, so a prefix of events this worker
     # cannot act on cannot spend the whole page budget on every pass.
     _scan_cursor: int | None = field(default=None, init=False, repr=False)
+
+    def _lane_key(self, event: JournalEvent) -> _LaneKey:
+        """Return the conversation one event runs in order against."""
+        if self.room_is_one_conversation(event.room_id):
+            return (event.room_id, _WHOLE_ROOM_LANE)
+        return _lane_key(event)
 
     def start(self) -> None:
         """Begin draining, including anything a previous process left behind."""
@@ -506,7 +545,7 @@ class PendingEventWorker:
             if event.event_id in self._deferred:
                 # Handed to an owner the reclaim found still alive.
                 continue
-            by_lane.setdefault(_lane_key(event), []).append(event)
+            by_lane.setdefault(self._lane_key(event), []).append(event)
         return False
 
     def _release_events_no_run_can_reach(self, retained: frozenset[str], still_pending: set[str]) -> None:
@@ -557,7 +596,7 @@ class PendingEventWorker:
                 kind=event.kind.value,
                 room_id=event.room_id,
             )
-            by_lane.setdefault(_lane_key(event), []).append(event)
+            by_lane.setdefault(self._lane_key(event), []).append(event)
         return by_lane
 
     async def _run_lane(self, events: list[JournalEvent]) -> None:
@@ -575,7 +614,7 @@ class PendingEventWorker:
         until some unrelated event woke the pump, and then run its handler a
         second time.
         """
-        key = _lane_key(events[0]) if events else ("", None)
+        key = self._lane_key(events[0]) if events else ("", _WHOLE_ROOM_LANE)
         for event in events:
             try:
                 if not await self.store.is_pending(event.event_id):
