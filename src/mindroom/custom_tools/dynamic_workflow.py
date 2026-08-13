@@ -714,13 +714,13 @@ async def _aexecute_ephemeral_agent_participant(
 
 def _filter_nonresumable_toolkits(toolkits: dict[str, Toolkit], config: Config) -> dict[str, Toolkit]:
     """Hide gated functions from embedded agents that cannot resume paused runs."""
-    from mindroom.agents import _apply_tool_approval_capability  # noqa: PLC0415
+    from mindroom.agents import apply_tool_approval_capability  # noqa: PLC0415
 
     return {
         name: filtered
         for name, toolkit in toolkits.items()
         if (
-            filtered := _apply_tool_approval_capability(
+            filtered := apply_tool_approval_capability(
                 toolkit,
                 config,
                 supports_native_tool_approval=False,

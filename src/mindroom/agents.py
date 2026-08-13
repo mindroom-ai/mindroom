@@ -1300,7 +1300,7 @@ def _prune_toolkit_functions(
     return toolkit if toolkit.functions or toolkit.async_functions else None
 
 
-def _apply_tool_approval_capability(
+def apply_tool_approval_capability(
     toolkit: Toolkit | None,
     config: Config,
     *,
@@ -1545,7 +1545,7 @@ def _assemble_agent_toolkits(
                 )
             if toolkit:
                 toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
-            toolkit = _apply_tool_approval_capability(
+            toolkit = apply_tool_approval_capability(
                 toolkit,
                 config,
                 supports_native_tool_approval=supports_native_tool_approval,
@@ -2079,6 +2079,7 @@ def create_agent(
 
 __all__ = [
     "agent_build_can_overlap_file_memory",
+    "apply_tool_approval_capability",
     "build_agent_toolkit",
     "create_agent",
     "describe_agent",

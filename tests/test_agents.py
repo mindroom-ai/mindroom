@@ -3230,7 +3230,7 @@ def test_native_approval_capability_marks_only_potentially_gated_calls() -> None
         ],
     )
 
-    filtered = agents_module._apply_tool_approval_capability(
+    filtered = agents_module.apply_tool_approval_capability(
         toolkit,
         config,
         supports_native_tool_approval=True,
@@ -3268,7 +3268,7 @@ def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
         ],
     )
 
-    filtered = agents_module._apply_tool_approval_capability(
+    filtered = agents_module.apply_tool_approval_capability(
         toolkit,
         config,
         supports_native_tool_approval=False,

@@ -1363,6 +1363,7 @@ class ResponseRunner:
         user_id: str | None,
     ) -> Callable[[], None]:
         """Build the shared completed-agent memory handoff."""
+
         def queue() -> None:
             mark_auto_flush_dirty_session(
                 self.deps.storage_path,
@@ -1525,30 +1526,28 @@ class ResponseRunner:
 
             async def continue_team() -> str | PausedAttempt:
                 return await continue_paused_team_run(
-                        member_names=continuation.team_member_names,
-                        mode=TeamMode(continuation.team_mode or "coordinate"),
-                        config=self.deps.runtime.config,
-                        runtime_paths=self.deps.runtime_paths,
-                        execution_identity=execution_identity,
-                        session_id=continuation.session_id,
-                        run_id=continuation.run_id,
-                        user_id=continuation.requester_id,
-                        configured_team_name=continuation.entity_name,
-                        model_name=select_model_for_team(
-                            continuation.entity_name,
-                            continuation.room_id,
-                            self.deps.runtime.config,
-                            self.deps.runtime_paths,
-                            thread_id=continuation.thread_id,
-                        )
-                        if continuation.runtime_model_name is None
-                        else continuation.runtime_model_name,
-                        decisions=decisions,
-                        refresh_scheduler=(
-                            orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
-                        ),
-                        tool_trace_collector=tool_trace_collector,
+                    member_names=continuation.team_member_names,
+                    mode=TeamMode(continuation.team_mode or "coordinate"),
+                    config=self.deps.runtime.config,
+                    runtime_paths=self.deps.runtime_paths,
+                    execution_identity=execution_identity,
+                    session_id=continuation.session_id,
+                    run_id=continuation.run_id,
+                    user_id=continuation.requester_id,
+                    configured_team_name=continuation.entity_name,
+                    model_name=select_model_for_team(
+                        continuation.entity_name,
+                        continuation.room_id,
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
+                        thread_id=continuation.thread_id,
                     )
+                    if continuation.runtime_model_name is None
+                    else continuation.runtime_model_name,
+                    decisions=decisions,
+                    refresh_scheduler=(orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None),
+                    tool_trace_collector=tool_trace_collector,
+                )
 
             async with typing_indicator(self._client(), continuation.room_id):
                 response_text = await self._run_in_tool_context(tool_dispatch=tool_dispatch, operation=continue_team)

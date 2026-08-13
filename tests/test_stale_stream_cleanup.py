@@ -75,6 +75,8 @@ def test_approval_waiting_message_is_not_a_stale_stream_candidate() -> None:
     )
 
     assert stale_stream_cleanup_module._is_cleanup_candidate(state) is False
+
+
 NOW_MS = 1_000_000
 STALE_AGE_MS = stale_stream_cleanup_module._STALE_STREAM_RECENCY_GUARD_MS + 60_000
 OLD_STALE_AGE_MS = stale_stream_cleanup_module._STALE_STREAM_LOOKBACK_MS + 60_000

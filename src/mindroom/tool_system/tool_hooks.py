@@ -274,18 +274,6 @@ def _format_declined_result(tool_name: str, reason: str) -> str:
     return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
 
 
-def _approval_status_reason(status: str, reason: str | None) -> str:
-    if reason:
-        return reason
-    if status == "approved":
-        return "Tool approval was granted."
-    if status == "denied":
-        return "Tool approval was denied."
-    if status == "expired":
-        return "Tool approval request expired."
-    return "Tool approval request is pending."
-
-
 async def _await_result(awaitable: Awaitable[_ToolHookResult]) -> _ToolHookResult:
     return await awaitable
 
