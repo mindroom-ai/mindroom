@@ -101,7 +101,6 @@ class ApprovalResponseCoordinator:
     runtime_generation: Callable[[], str]
     journal_principal_id: str
     outbox_for_principal: Callable[[str], OutboxView]
-    legacy_principal_for_entity: Callable[[str], str | None]
     failure_requester: Callable[[ApprovalContinuation, str], Awaitable[None]]
     continuation_scheduler: Callable[[ApprovalContinuation], None]
 
@@ -561,12 +560,8 @@ class ApprovalResponseCoordinator:
 
     def _delivery_outbox(self, continuation: ApprovalContinuation) -> OutboxView:
         """Return the principal-bound outbox that owns this continuation's delivery."""
-        principal_id = self._delivery_principal_id(continuation)
+        principal_id = continuation.delivery_principal_id
         return self.delivery_gateway.deps.outbox if principal_id is None else self.outbox_for_principal(principal_id)
-
-    def _delivery_principal_id(self, continuation: ApprovalContinuation) -> str | None:
-        """Return explicit delivery ownership, deriving it for additive legacy rows."""
-        return continuation.delivery_principal_id or self.legacy_principal_for_entity(continuation.entity_name)
 
     async def _reconcile_unacknowledged_delivery(
         self,
@@ -576,7 +571,7 @@ class ApprovalResponseCoordinator:
         outbox: OutboxView,
     ) -> OutboxDelivery | None:
         """Resolve one frozen delivery without ever sending as the wrong principal."""
-        principal_id = self._delivery_principal_id(continuation)
+        principal_id = continuation.delivery_principal_id
         if principal_id in {None, self.journal_principal_id}:
             await self.delivery_gateway.recover_deliveries()
             return await outbox.load_delivery(turn_id=delivery.turn_id, stage=delivery.stage)

@@ -139,9 +139,11 @@ def test_failure_fence_cannot_take_a_claim_won_by_another_owner(tmp_path: Path) 
         runtime_generation="runtime-current",
     )
 
-    assert fenced is not None
-    assert fenced.state == "claimed"
-    assert fenced.claimant_id == "resume-owner"
+    assert fenced is None
+    persisted = store.get("approval-1")
+    assert persisted is not None
+    assert persisted.state == "claimed"
+    assert persisted.claimant_id == "resume-owner"
 
 
 def test_claim_failure_waits_for_final_outbox_reconciliation_before_settling(tmp_path: Path) -> None:

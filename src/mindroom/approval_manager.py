@@ -765,14 +765,13 @@ class _ApprovalManager:
                     exc_info=True,
                 )
 
-    async def _sweep_detached_expiries(self) -> int:
+    async def _sweep_detached_expiries(self) -> None:
         """Settle due or already-recorded current-format cards once."""
         if self._cards is None:
-            return 0
+            return
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
-            return 0
-        settled = 0
+            return
         room_ids = self._configured_approval_room_ids()
         room_ids.update(await self._cards.pending_approval_room_ids())
         for room_id in room_ids:
@@ -800,12 +799,10 @@ class _ApprovalManager:
                         or (stored.resolution is None and self._pending_expiry(pending) > _utcnow())
                     ):
                         continue
-                    if await self.expire_detached_card(
+                    await self.expire_detached_card(
                         room_id=room_id,
                         card_event_id=stored.card_event_id,
-                    ):
-                        settled += 1
-        return settled
+                    )
 
     async def discard_pending_on_startup(self) -> ApprovalStartupSweep:
         """Settle every router-authored card this bot restarted holding.

@@ -540,7 +540,7 @@ class ApprovalContinuationStore:
             if current is None or current.state in {"completed", "failed"}:
                 return current
             if current.state == "claimed" and current.claimant_id != claimant_id:
-                return current
+                return None
             if current.state == "claimed":
                 return self._persist(
                     current,

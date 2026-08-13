@@ -277,7 +277,14 @@ class ApprovalMatrixTransport:
             claimant_id=continuation.claimant_id,
             runtime_generation=self.runtime_generation,
         )
-        if requested is not None and requested.state in {"claimed", "settling"}:
+        if requested is None:
+            logger.warning(
+                "approval_continuation_failure_request_not_owned",
+                approval_id=continuation.approval_id,
+                claimant_id=continuation.claimant_id,
+            )
+            return
+        if requested.state in {"claimed", "settling"}:
             self._schedule_continuation(requested)
 
     async def reconcile_unavailable_entities(self, entity_names: Iterable[str]) -> None:
@@ -403,8 +410,14 @@ class ApprovalMatrixTransport:
             claimant_id=continuation.claimant_id,
             runtime_generation=self.runtime_generation,
         )
-        if requested is not None:
-            await self._fail_continuation_until_terminal(requested, reason)
+        if requested is None:
+            logger.warning(
+                "approval_continuation_unavailable_failure_not_owned",
+                approval_id=continuation.approval_id,
+                claimant_id=continuation.claimant_id,
+            )
+            return True
+        await self._fail_continuation_until_terminal(requested, reason)
         return True
 
     async def _resume_continuation_once(
@@ -479,12 +492,6 @@ class ApprovalMatrixTransport:
             )
             return completed is not None and completed.state == "completed"
         reason = self._resume_failure_reason(refreshed, outcome=outcome, error=error)
-        visibly_settled = (
-            refreshed.state == "claimed"
-            and outcome is not None
-            and outcome.terminal_status in {"cancelled", "error"}
-            and (outcome.event_id is None or outcome.delivery_kind is not None)
-        )
         requested = await asyncio.to_thread(
             self._continuations.request_failure,
             refreshed.approval_id,
@@ -493,20 +500,12 @@ class ApprovalMatrixTransport:
             runtime_generation=self.runtime_generation,
         )
         if requested is None:
-            return True
-        if visibly_settled and requested.claimant_id is not None:
-            fenced = await asyncio.to_thread(
-                self._continuations.fence_claimed_failure,
-                requested.approval_id,
-                requested.claimant_id,
+            logger.warning(
+                "approval_continuation_resume_failure_not_owned",
+                approval_id=refreshed.approval_id,
+                claimant_id=refreshed.claimant_id,
             )
-            if fenced is not None and fenced.state == "settling":
-                failed = await asyncio.to_thread(
-                    self._continuations.finish_failure,
-                    fenced.approval_id,
-                    reason,
-                )
-                return failed is not None and failed.state == "failed"
+            return True
         return await self._fail_continuation_until_terminal(requested, reason)
 
     @staticmethod

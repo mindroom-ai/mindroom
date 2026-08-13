@@ -43,7 +43,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
-from mindroom.entity_resolution import current_entity_id, current_internal_sender_ids, entity_identity_registry
+from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
@@ -549,9 +549,6 @@ class ResponseRunner:
             runtime_generation=self._approval_runtime_generation,
             journal_principal_id=self.deps.journal_principal_id,
             outbox_for_principal=self.deps.outbox_for_principal,
-            legacy_principal_for_entity=lambda entity_name: (
-                f"{entity_name}@{current_entity_id(entity_name, self.deps.runtime_paths).full_id}"
-            ),
             failure_requester=self._request_approval_failure,
             continuation_scheduler=self._schedule_approval_continuation,
         )
@@ -954,7 +951,7 @@ class ResponseRunner:
             FinalDeliveryRequest(
                 target=target,
                 existing_event_id=continuation.response_event_id,
-                existing_event_is_placeholder=True,
+                existing_event_is_placeholder=False,
                 response_text=response_text,
                 identity=self._response_identity(
                     request,
@@ -976,26 +973,24 @@ class ResponseRunner:
         target: MessageTarget,
         claimant_id: str,
     ) -> tuple[str, bool, list[ToolTraceEntry], dict[str, Any] | None]:
-        """Continue through auto-approved pauses until completion or the next human decision."""
-        current = claimed
+        """Continue one persisted pause until completion or its next approval generation."""
         tool_trace: list[ToolTraceEntry] = []
-        while True:
-            result = await self._continue_entity_call(
-                current,
-                request=request,
-                target=target,
-                tool_trace_collector=tool_trace,
-            )
-            if isinstance(result, CompletedApprovalRun):
-                return result.response_text, True, tool_trace, result.metadata_content
-            _advanced, waiting_text = await self._approval_responses.advance_pause(
-                current,
-                result,
-                target=target,
-                claimant_id=claimant_id,
-                tool_trace=tool_trace if self._show_tool_calls() else [],
-            )
-            return waiting_text, False, tool_trace, None
+        result = await self._continue_entity_call(
+            claimed,
+            request=request,
+            target=target,
+            tool_trace_collector=tool_trace,
+        )
+        if isinstance(result, CompletedApprovalRun):
+            return result.response_text, True, tool_trace, result.metadata_content
+        _advanced, waiting_text = await self._approval_responses.advance_pause(
+            claimed,
+            result,
+            target=target,
+            claimant_id=claimant_id,
+            tool_trace=tool_trace if self._show_tool_calls() else [],
+        )
+        return waiting_text, False, tool_trace, None
 
     async def _execute_claimed_approval(
         self,
@@ -1107,6 +1102,7 @@ class ResponseRunner:
                     post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                         room_id=claimed.room_id,
                         interactive_agent_name=claimed.entity_name,
+                        membership_turn_id=claimed.source_event_ids[0],
                         queue_memory_persistence=self._approval_memory_persistence(claimed),
                         persist_response_event_id=self._approval_response_event_persistence(claimed),
                     ),
