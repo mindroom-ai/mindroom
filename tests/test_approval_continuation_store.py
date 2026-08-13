@@ -492,9 +492,10 @@ async def test_recovery_attaches_card_delivered_before_crash(tmp_path: Path) -> 
     )
     transport._continuations.create(_continuation())
 
-    recovered = await transport._attach_recovered_cards(_continuation())
+    recovered, publication_unresolved = await transport._attach_recovered_cards(_continuation())
 
     assert recovered.calls[0].card_event_id == "$approval"
+    assert publication_unresolved is False
     assert transport._continuations.get("approval-1") == recovered
 
 
@@ -550,6 +551,49 @@ async def test_startup_identifies_unacknowledged_card_before_continuation_recove
     assert recovered.state == "pending"
     assert recovered.calls[0].card_event_id == "$approval"
     sweep.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_startup_defers_continuation_while_attempted_card_outcome_is_unknown(tmp_path: Path) -> None:
+    """A transient card-recovery miss must not terminalize a possibly visible approval."""
+    unacknowledged = StoredApprovalCard(
+        card={
+            "content": {
+                "continuation_id": "approval-1",
+                "tool_call_id": "call-1",
+            },
+        },
+        resolution=None,
+        transaction_id="mindroom-approval-approval-1-0",
+        card_event_id=None,
+        attempted=True,
+        sending_device_id="DEVICE",
+        created_at_ns=1,
+    )
+    cards = AsyncMock()
+    cards.pending_approval_cards.side_effect = [(unacknowledged,), ()]
+    transport = ApprovalMatrixTransport(
+        runtime_paths=RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path,
+        ),
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: cards,
+    )
+    continuation = _continuation()
+    transport._continuations.create(continuation)
+
+    with patch.object(
+        transport,
+        "_fail_recovered_continuation",
+        new=AsyncMock(return_value=True),
+    ) as fail:
+        complete = await transport._recover_pending_continuation(continuation)
+
+    assert complete is False
+    fail.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1038,6 +1082,59 @@ async def test_completed_runner_outcome_is_committed_only_by_transport(tmp_path:
     completed = transport._continuations.get("approval-1")
     assert completed is not None
     assert completed.state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_transient_completion_write_keeps_dispatcher_until_outbox_reconciliation(tmp_path: Path) -> None:
+    """A transient terminal mutation failure must not drop the only dispatcher task."""
+    transport: ApprovalMatrixTransport
+
+    async def resume(continuation: ApprovalContinuation) -> FinalDeliveryOutcome:
+        claimed = transport._continuations.claim(continuation.approval_id, "worker")
+        assert claimed is not None
+        return FinalDeliveryOutcome(terminal_status="completed", event_id="$answer")
+
+    async def reconcile_success(continuation: ApprovalContinuation, _reason: str) -> None:
+        assert continuation.claimant_id is not None
+        completed = original_complete(continuation.approval_id, continuation.claimant_id)
+        assert completed is not None
+
+    bot = SimpleNamespace(
+        running=True,
+        resume_approval_continuation=AsyncMock(side_effect=resume),
+        settle_approval_continuation_failure=AsyncMock(side_effect=reconcile_success),
+    )
+    transport = ApprovalMatrixTransport(
+        runtime_paths=RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path,
+        ),
+        bot_provider=lambda _name: cast("Any", bot),
+        cards_provider=lambda: None,
+    )
+    transport._continuations.create(_continuation())
+    transport._continuations.resolve_call("approval-1", "call-1", ApprovalDecision.APPROVED)
+    assert transport._continuations.acknowledge_call("approval-1", "call-1") is not None
+    original_complete = transport._continuations.complete
+    completion_attempts = 0
+
+    def flaky_complete(approval_id: str, claimant_id: str) -> ApprovalContinuation | None:
+        nonlocal completion_attempts
+        completion_attempts += 1
+        if completion_attempts == 1:
+            msg = "temporary completion write failure"
+            raise RuntimeError(msg)
+        return original_complete(approval_id, claimant_id)
+
+    with patch.object(transport._continuations, "complete", side_effect=flaky_complete):
+        await asyncio.wait_for(transport._dispatch_continuation("approval-1"), timeout=2)
+
+    completed = transport._continuations.get("approval-1")
+    assert completed is not None
+    assert completed.state == "completed"
+    bot.settle_approval_continuation_failure.assert_awaited_once()
 
 
 @pytest.mark.asyncio

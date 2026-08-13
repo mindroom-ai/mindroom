@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
@@ -19,6 +20,7 @@ from mindroom.constants import STREAM_STATUS_APPROVAL_PENDING, STREAM_STATUS_COM
 from mindroom.delivery_gateway import DeliveryStage, EditTextRequest, SendTextRequest
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import (
+    SentApprovalEvent,
     ToolApprovalCall,
     ToolApprovalTransportError,
     evaluate_tool_approval,
@@ -49,6 +51,13 @@ class _ApprovalPausePlan:
     decisions: dict[str, tuple[ContinuationDecision | None, float]]
     calls: tuple[ApprovalCall, ...]
     waiting_text: str
+
+
+def _require_sent_event(sent: SentApprovalEvent | None, failure_reason: str) -> SentApprovalEvent:
+    """Return one sent card or raise the publication failure."""
+    if sent is None:
+        raise RuntimeError(failure_reason)
+    return sent
 
 
 def identify_approval_tools(
@@ -291,11 +300,11 @@ class ApprovalResponseCoordinator:
         """Publish and attach every human-gated card for one persisted generation."""
         current = continuation
         config = self.config()
-        for index, (tool, tool_call_id, tool_name, invoking_agent) in enumerate(plan.tools):
-            decision, timeout_seconds = plan.decisions[tool_call_id]
-            if decision is not None:
-                continue
-            try:
+        try:
+            for index, (tool, tool_call_id, tool_name, invoking_agent) in enumerate(plan.tools):
+                decision, timeout_seconds = plan.decisions[tool_call_id]
+                if decision is not None:
+                    continue
                 sent = await send_suspended_tool_approval(
                     ToolApprovalCall(
                         config=config,
@@ -312,20 +321,27 @@ class ApprovalResponseCoordinator:
                     tool_call_id=tool_call_id,
                     timeout_seconds=timeout_seconds,
                 )
-            except ToolApprovalTransportError as error:
-                await self.fail_publication(current.approval_id, reason=error.reason)
-                raise
-            if sent is None:
-                await self.fail_publication(current.approval_id, reason=failure_reason)
-                raise RuntimeError(failure_reason)
-            attached = await self._write(
-                self._store.attach_card,
+                sent = _require_sent_event(sent, failure_reason)
+                attached = await self._write(
+                    self._store.attach_card,
+                    current.approval_id,
+                    tool_call_id,
+                    sent.event_id,
+                )
+                if attached is not None:
+                    current = attached
+        except asyncio.CancelledError:
+            await self.fail_publication(
                 current.approval_id,
-                tool_call_id,
-                sent.event_id,
+                reason="Approval card publication was cancelled.",
             )
-            if attached is not None:
-                current = attached
+            raise
+        except ToolApprovalTransportError as error:
+            await self.fail_publication(current.approval_id, reason=error.reason)
+            raise
+        except Exception as error:
+            await self.fail_publication(current.approval_id, reason=str(error) or failure_reason)
+            raise
         return current
 
     async def advance_pause(
@@ -375,11 +391,17 @@ class ApprovalResponseCoordinator:
             self.schedule(advanced)
         return advanced, plan.waiting_text
 
-    async def fail_publication(self, approval_id: str, *, reason: str) -> None:
+    async def fail_publication(self, approval_id: str, *, reason: str) -> ApprovalContinuation | None:
         """Hand a partially published approval set to transport settlement."""
         continuation = await self.get(approval_id)
-        if continuation is not None:
+        if continuation is None:
+            return None
+        with suppress(asyncio.CancelledError):
             await self.request_failure(continuation, reason)
+        # request_failure waits for the durable handoff before restoring
+        # cancellation.  The caller now needs that committed owner so the
+        # original response lifecycle does not settle the same event.
+        return await self.get(approval_id)
 
     async def settle_failure(self, continuation: ApprovalContinuation, reason: str) -> bool:
         """Attempt transport-owned terminal settlement once."""

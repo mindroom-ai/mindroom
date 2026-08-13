@@ -743,6 +743,29 @@ class ResponseRunner:
             agent_name or self.deps.agent_name,
         )
 
+    async def _failed_approval_handoff(
+        self,
+        approval_id: str,
+        *,
+        error: BaseException,
+    ) -> FinalDeliveryOutcome | None:
+        """Return suspension ownership only after failure intent is durable."""
+        reason = (
+            "Tool approval suspension was cancelled."
+            if isinstance(error, asyncio.CancelledError)
+            else str(error) or "Tool approval suspension failed."
+        )
+        continuation = await self._approval_responses.fail_publication(approval_id, reason=reason)
+        if continuation is None or continuation.state not in {"settling", "failed"}:
+            return None
+        response_event_id = continuation.response_event_id
+        return FinalDeliveryOutcome(
+            terminal_status="suspended",
+            event_id=response_event_id,
+            is_visible_response=response_event_id is not None,
+            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
+        )
+
     async def _suspend_for_approval(
         self,
         paused: PausedAttempt,
@@ -891,17 +914,13 @@ class ResponseRunner:
                 delivery_kind=delivery_kind,
                 extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
             )
-        except asyncio.CancelledError:
-            await self._approval_responses.fail_publication(
+        except (asyncio.CancelledError, Exception) as error:
+            handoff = await self._failed_approval_handoff(
                 approval_id,
-                reason="Tool approval suspension was cancelled.",
+                error=error,
             )
-            raise
-        except Exception as error:
-            await self._approval_responses.fail_publication(
-                approval_id,
-                reason=str(error) or "Tool approval suspension failed.",
-            )
+            if handoff is not None:
+                return handoff
             raise
 
     async def _deliver_completed_approval_chain(
@@ -925,7 +944,7 @@ class ResponseRunner:
                     request,
                     response_kind="team" if continuation.entity_kind == "team" else "ai",
                 ),
-                tool_trace=tool_trace or None,
+                tool_trace=tool_trace if self._show_tool_calls() else None,
                 extra_content=_merge_response_extra_content(
                     {**metadata_content, STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
                     continuation.attachment_ids,
@@ -958,7 +977,7 @@ class ResponseRunner:
                 result,
                 target=target,
                 claimant_id=claimant_id,
-                tool_trace=tool_trace,
+                tool_trace=tool_trace if self._show_tool_calls() else [],
             )
             return waiting_text, False, tool_trace, None
 
@@ -997,7 +1016,7 @@ class ResponseRunner:
                 is_visible_response=True,
                 final_visible_body=response_text,
                 delivery_kind="edited",
-                tool_trace=tuple(tool_trace),
+                tool_trace=tuple(tool_trace) if self._show_tool_calls() else (),
                 extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
             ),
             current,

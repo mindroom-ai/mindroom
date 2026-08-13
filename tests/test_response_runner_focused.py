@@ -69,6 +69,7 @@ from mindroom.streaming import (
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import ToolDispatchContext, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch
@@ -826,8 +827,9 @@ async def test_suspension_owns_source_before_waiting_response_delivery(tmp_path:
         )
         await asyncio.wait_for(delivery_started.wait(), timeout=1.0)
         suspension.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await suspension
+        outcome = await suspension
+        assert outcome.terminal_status == "suspended"
+        assert outcome.event_id is None
 
     owned = runner._approval_responses._store.get("approval-cancel")
     assert owned is not None
@@ -888,8 +890,9 @@ async def test_cancelled_initial_ownership_commit_is_settled_before_return(tmp_p
         assert await asyncio.to_thread(create_started.wait, 1)
         suspension.cancel()
         allow_create.set()
-        with pytest.raises(asyncio.CancelledError):
-            await suspension
+        outcome = await suspension
+        assert outcome.terminal_status == "suspended"
+        assert outcome.event_id is None
         assert await asyncio.to_thread(create_finished.wait, 1)
 
     owned = runner._approval_responses._store.get("approval-create-cancel")
@@ -951,8 +954,9 @@ async def test_cancelled_waiting_response_binding_is_settled_before_return(tmp_p
         assert await asyncio.to_thread(bind_started.wait, 1)
         suspension.cancel()
         allow_bind.set()
-        with pytest.raises(asyncio.CancelledError):
-            await suspension
+        outcome = await suspension
+        assert outcome.terminal_status == "suspended"
+        assert outcome.event_id == "$waiting"
         assert await asyncio.to_thread(bind_finished.wait, 1)
 
     owned = runner._approval_responses._store.get("approval-bind-cancel")
@@ -1048,6 +1052,66 @@ async def test_approval_chain_hands_second_pause_back_to_the_dispatcher(tmp_path
     assert settled.state == "ready"
     assert settled.generation == 1
     continue_call.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_chained_card_publication_failure_requests_transport_settlement(tmp_path: Path) -> None:
+    """A failed second-generation card publish must not masquerade as a pending decision."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-chain-publish-failure",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="first",
+                invoking_agent="general",
+                expires_at="2026-08-14T00:00:00+00:00",
+                decision=response_runner.ContinuationDecision.APPROVED,
+                decision_recorded=True,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    runner._approval_responses._store.create(continuation)
+    claimed = runner._approval_responses._store.claim(continuation.approval_id, "worker")
+    assert claimed is not None
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-2",
+        tools=(ToolExecution(tool_call_id="call-2", tool_name="second", requires_confirmation=True),),
+    )
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch(
+            "mindroom.approval_response.send_suspended_tool_approval",
+            new=AsyncMock(side_effect=RuntimeError("card journal unavailable")),
+        ),
+        pytest.raises(RuntimeError, match="card journal unavailable"),
+    ):
+        await runner._approval_responses.advance_pause(
+            claimed,
+            paused,
+            target=_target(),
+            claimant_id="worker",
+            tool_trace=[],
+        )
+
+    persisted = runner._approval_responses._store.get(continuation.approval_id)
+    assert persisted is not None
+    assert persisted.state == "settling"
 
 
 @pytest.mark.asyncio
@@ -1175,6 +1239,103 @@ async def test_final_approval_delivery_does_not_write_continuation_state(tmp_pat
     persisted = runner._approval_responses._store.get(continuation.approval_id)
     assert persisted is not None
     assert persisted.state == "claimed"
+
+
+@pytest.mark.asyncio
+async def test_final_approval_delivery_hides_tool_trace_when_disabled(tmp_path: Path) -> None:
+    """A resumed response must honor the same tool-trace visibility as a normal response."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    runner.deps.runtime.config.agents["general"].show_tool_calls = False
+    continuation = ApprovalContinuation(
+        approval_id="approval-hidden-trace",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="claimed",
+        claimant_id="worker",
+    )
+    deliver = AsyncMock(
+        return_value=FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$waiting",
+            is_visible_response=True,
+            final_visible_body="done",
+            delivery_kind="edited",
+        ),
+    )
+
+    with patch.object(DeliveryGateway, "deliver_final", new=deliver):
+        await runner._deliver_completed_approval_chain(
+            continuation,
+            request=_plain_request(_target()),
+            target=_target(),
+            response_text="done",
+            tool_trace=[ToolTraceEntry(type="tool_call_completed", tool_name="dangerous")],
+            metadata_content={},
+        )
+
+    assert deliver.await_args.args[0].tool_trace is None
+
+
+@pytest.mark.asyncio
+async def test_chained_approval_hides_tool_trace_when_disabled(tmp_path: Path) -> None:
+    """A second approval waiting edit must not expose disabled tool traces."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    runner.deps.runtime.config.agents["general"].show_tool_calls = False
+    continuation = ApprovalContinuation(
+        approval_id="approval-hidden-chain-trace",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="claimed",
+        claimant_id="worker",
+    )
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-2",
+        tools=(ToolExecution(tool_call_id="call-2", tool_name="second", requires_confirmation=True),),
+    )
+    advance = AsyncMock(return_value=(continuation, "Waiting for approval: `second`"))
+
+    with (
+        patch.object(
+            runner,
+            "_continue_entity_call",
+            new=AsyncMock(
+                side_effect=lambda *_args, tool_trace_collector, **_kwargs: (
+                    tool_trace_collector.append(
+                        ToolTraceEntry(type="tool_call_completed", tool_name="first"),
+                    )
+                    or paused
+                ),
+            ),
+        ),
+        patch.object(runner._approval_responses, "advance_pause", new=advance),
+    ):
+        await runner._run_approval_chain(
+            continuation,
+            request=_plain_request(_target()),
+            target=_target(),
+            claimant_id="worker",
+        )
+
+    assert advance.await_args.kwargs["tool_trace"] == []
 
 
 @pytest.mark.asyncio
@@ -2321,16 +2482,17 @@ async def test_card_publication_exception_terminalizes_partial_set(tmp_path: Pat
         patch("mindroom.approval_response.expire_suspended_tool_approval", new=AsyncMock(return_value=True)) as expire,
         patch.object(runner._approval_responses, "_edit_response", new=AsyncMock(return_value=True)),
     ):
-        with pytest.raises(RuntimeError, match="card journal unavailable"):
-            await runner._suspend_for_approval(
-                paused,
-                request=request,
-                target=request.response_envelope.target,
-                progress=response_runner._DeliveryProgress(),
-                execution_identity=identity,
-                entity_kind="agent",
-                history_scope=runner.deps.state_writer.history_scope(),
-            )
+        outcome = await runner._suspend_for_approval(
+            paused,
+            request=request,
+            target=request.response_envelope.target,
+            progress=response_runner._DeliveryProgress(),
+            execution_identity=identity,
+            entity_kind="agent",
+            history_scope=runner.deps.state_writer.history_scope(),
+        )
+        assert outcome.terminal_status == "suspended"
+        assert outcome.event_id == "$waiting"
         requested = runner._approval_responses._store.get("approval-publication-error")
         assert requested is not None
         assert requested.state == "settling"

@@ -309,19 +309,30 @@ class ApprovalMatrixTransport:
     async def _dispatch_continuation(self, approval_id: str) -> None:
         retry_seconds = _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS
         while True:
-            continuation = await self._read_continuation_with_retry(approval_id)
-            if continuation is None or continuation.state in {"completed", "failed"}:
-                return
-            if continuation.state in {"claimed", "settling"}:
-                reason = continuation.failure_reason or (
-                    "Tool approval continuation was interrupted after it was claimed; it was denied safely."
+            try:
+                continuation = await self._read_continuation_with_retry(approval_id)
+                if continuation is None or continuation.state in {"completed", "failed"}:
+                    return
+                if continuation.state in {"claimed", "settling"}:
+                    reason = continuation.failure_reason or (
+                        "Tool approval continuation was interrupted after it was claimed; it was denied safely."
+                    )
+                    await self._fail_continuation_until_terminal(continuation, reason)
+                    return
+                if continuation.state != "ready":
+                    return
+                if await self._dispatch_ready_once(continuation, retry_seconds=retry_seconds):
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning(
+                    "approval_continuation_dispatch_retry",
+                    approval_id=approval_id,
+                    retry_seconds=retry_seconds,
+                    error=str(error),
+                    exc_info=(type(error), error, error.__traceback__),
                 )
-                await self._fail_continuation_until_terminal(continuation, reason)
-                return
-            if continuation.state != "ready":
-                return
-            if await self._dispatch_ready_once(continuation, retry_seconds=retry_seconds):
-                return
             await asyncio.sleep(retry_seconds)
             retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
 
@@ -588,7 +599,9 @@ class ApprovalMatrixTransport:
 
     async def _recover_pending_continuation(self, continuation: ApprovalContinuation) -> bool:
         """Repair or fail closed one pending continuation discovered at startup."""
-        recovered = await self._attach_recovered_cards(continuation)
+        recovered, publication_unresolved = await self._attach_recovered_cards(continuation)
+        if publication_unresolved:
+            return False
         if any(not call.decision_recorded and call.card_event_id is None for call in recovered.calls):
             return await self._fail_recovered_continuation(
                 recovered,
@@ -608,7 +621,10 @@ class ApprovalMatrixTransport:
         """Return whether startup may act on this row without racing live work."""
         return continuation.runtime_generation != self.runtime_generation
 
-    async def _attach_recovered_cards(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
+    async def _attach_recovered_cards(
+        self,
+        continuation: ApprovalContinuation,
+    ) -> tuple[ApprovalContinuation, bool]:
         """Repair the crash window between durable card delivery and continuation attachment."""
         missing_ids = {
             call.tool_call_id
@@ -617,7 +633,8 @@ class ApprovalMatrixTransport:
         }
         cards = self.cards_provider()
         if not missing_ids or cards is None:
-            return continuation
+            return continuation, False
+        unresolved_attempted_ids: set[str] = set()
         cursor: tuple[int, str] | None = None
         while missing_ids:
             page = await cards.pending_approval_cards(room_id=continuation.room_id, limit=256, after=cursor)
@@ -629,7 +646,11 @@ class ApprovalMatrixTransport:
                 if not isinstance(content, dict) or content.get("continuation_id") != continuation.approval_id:
                     continue
                 tool_call_id = content.get("tool_call_id")
-                if not isinstance(tool_call_id, str) or tool_call_id not in missing_ids or stored.card_event_id is None:
+                if not isinstance(tool_call_id, str) or tool_call_id not in missing_ids:
+                    continue
+                if stored.card_event_id is None:
+                    if stored.attempted:
+                        unresolved_attempted_ids.add(tool_call_id)
                     continue
                 attached = await asyncio.to_thread(
                     self._continuations.attach_card,
@@ -640,7 +661,8 @@ class ApprovalMatrixTransport:
                 if attached is not None:
                     continuation = attached
                     missing_ids.discard(tool_call_id)
-        return continuation
+                    unresolved_attempted_ids.discard(tool_call_id)
+        return continuation, bool(missing_ids & unresolved_attempted_ids)
 
     async def _attached_cards_exist(self, continuation: ApprovalContinuation) -> bool:
         """Return whether every unresolved attached card still has durable Matrix ownership."""
