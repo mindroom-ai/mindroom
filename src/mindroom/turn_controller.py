@@ -192,12 +192,17 @@ class _InteractiveResponseHandoff:
         if self._cleanup_task is None:
             self._cleanup_task = asyncio.create_task(self._run_unstarted_cleanup())
         cancellation_requested = False
-        while not self._cleanup_task.done():
-            try:
-                await asyncio.shield(self._cleanup_task)
-            except asyncio.CancelledError:
-                cancellation_requested = True
-        self._cleanup_task.result()
+        try:
+            while not self._cleanup_task.done():
+                try:
+                    await asyncio.shield(self._cleanup_task)
+                except asyncio.CancelledError:
+                    cancellation_requested = True
+            self._cleanup_task.result()
+        except Exception as cleanup_error:
+            if cancellation_requested:
+                raise asyncio.CancelledError from cleanup_error
+            raise
         if cancellation_requested:
             raise asyncio.CancelledError
 

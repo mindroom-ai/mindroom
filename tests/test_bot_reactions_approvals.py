@@ -1205,8 +1205,10 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("registration_failure", [False, True])
+    @pytest.mark.parametrize("cleanup_failure", [False, True])
     async def test_unstarted_interactive_cleanup_survives_caller_cancellation(
         self,
+        cleanup_failure: bool,
         registration_failure: bool,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1219,7 +1221,14 @@ class TestAgentBot(AgentBotTestBase):
         release_started = asyncio.Event()
         allow_release = asyncio.Event()
         reservations: list[ResponseLifecycleReservation] = []
-        restore_selection = MagicMock(side_effect=lambda: interactive.restore_selection(selection))
+        cleanup_error = RuntimeError("simulated cleanup failure")
+
+        def restore() -> None:
+            interactive.restore_selection(selection)
+            if cleanup_failure:
+                raise cleanup_error
+
+        restore_selection = MagicMock(side_effect=restore)
         real_release = ResponseLifecycleReservation.release
         start_task: asyncio.Task[None] | None = None
 
