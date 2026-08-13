@@ -792,6 +792,46 @@ async def test_startup_retry_ignores_rows_owned_by_the_current_runtime(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_unavailable_entity_reconciliation_settles_same_runtime_pending_approval(
+    tmp_path: Path,
+) -> None:
+    """Removing an entity must not leave its live approval card actionable until timeout."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    transport: ApprovalMatrixTransport
+
+    async def settle_failure(continuation: ApprovalContinuation, reason: str) -> None:
+        _finish_test_failure(transport._continuations, continuation.approval_id, reason)
+
+    router = SimpleNamespace(
+        running=True,
+        settle_approval_continuation_failure=AsyncMock(side_effect=settle_failure),
+    )
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda name: cast("Any", router if name == "router" else None),
+        cards_provider=lambda: None,
+        entity_configured=lambda name: name != "research",
+    )
+    transport._continuations.create(
+        replace(_continuation(), runtime_generation=transport.runtime_generation),
+    )
+
+    await transport.reconcile_unavailable_entities({"research"})
+    await asyncio.gather(*tuple(transport._continuation_tasks))
+
+    failed = transport._continuations.get("approval-1")
+    assert failed is not None
+    assert failed.state == "failed"
+    assert failed.failure_reason == "Requesting agent 'research' is no longer available."
+    router.settle_approval_continuation_failure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_running_owner_that_cannot_claim_is_polled_with_backoff(tmp_path: Path) -> None:
     """A stopping bot that returns without claiming must not create a tight dispatcher loop."""
     runtime_paths = RuntimePaths(

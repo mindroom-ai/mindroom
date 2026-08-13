@@ -782,6 +782,41 @@ async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_s
 
 
 @pytest.mark.asyncio
+async def test_removed_entity_reconciles_live_approval_continuations(tmp_path: Path) -> None:
+    """Config removal must notify approval recovery after the old bot is stopped."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    new_config = Config.validate_with_runtime({}, _runtime_paths(tmp_path))
+    orchestrator.config = new_config
+    orchestrator.agent_bots = {"code": MagicMock(spec=AgentBot)}
+    plan = ConfigUpdatePlan(
+        new_config=new_config,
+        changed_mcp_servers=set(),
+        configured_entities=set(),
+        entities_to_restart={"code"},
+        new_entities=set(),
+        removed_entities={"code"},
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+
+    with (
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock()),
+        patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock(return_value=EntityStartResults())),
+        patch.object(orchestrator, "_remove_deleted_entities", new=AsyncMock()),
+        patch.object(
+            orchestrator._approval_transport,
+            "reconcile_unavailable_entities",
+            new=AsyncMock(),
+        ) as reconcile,
+    ):
+        await orchestrator._restart_changed_entities(plan)
+
+    reconcile.assert_awaited_once_with({"code"})
+
+
+@pytest.mark.asyncio
 async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_path: Path) -> None:
     """Restarting a trigger target should make trigger delivery fail closed until rooms are reconciled."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))

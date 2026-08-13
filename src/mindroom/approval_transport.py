@@ -31,7 +31,7 @@ from mindroom.tool_approval import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Iterable
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalView
@@ -280,6 +280,30 @@ class ApprovalMatrixTransport:
         if requested is not None and requested.state in {"claimed", "settling"}:
             self._schedule_continuation(requested)
 
+    async def reconcile_unavailable_entities(self, entity_names: Iterable[str]) -> None:
+        """Fail nonterminal continuations whose owner just became unavailable."""
+        unavailable = set(entity_names)
+        if not unavailable:
+            return
+        recoverable = await asyncio.to_thread(self._continuations.recoverable)
+        for continuation in recoverable:
+            if continuation.entity_name not in unavailable:
+                continue
+            reason = self._unavailable_entity_reason(continuation.entity_name)
+            if reason is not None:
+                await self.request_continuation_failure(continuation, reason)
+
+    def _unavailable_entity_reason(self, entity_name: str) -> str | None:
+        permanently_unavailable = (
+            self.entity_permanently_unavailable is not None and self.entity_permanently_unavailable(entity_name)
+        )
+        configured = self.entity_configured is None or self.entity_configured(entity_name)
+        if configured and not permanently_unavailable:
+            return None
+        if permanently_unavailable:
+            return f"Requesting agent '{entity_name}' could not start and is unavailable."
+        return f"Requesting agent '{entity_name}' is no longer available."
+
     def _schedule_continuation(self, continuation: ApprovalContinuation) -> None:
         if any(
             not task.done() and task.get_name() == f"approval-continuation-{continuation.approval_id}"
@@ -354,12 +378,8 @@ class ApprovalMatrixTransport:
                     retry_seconds=retry_seconds,
                 )
             return finished
-        permanently_unavailable = (
-            self.entity_permanently_unavailable is not None
-            and self.entity_permanently_unavailable(continuation.entity_name)
-        )
-        configured = self.entity_configured is None or self.entity_configured(continuation.entity_name)
-        if configured and not permanently_unavailable:
+        reason = self._unavailable_entity_reason(continuation.entity_name)
+        if reason is None:
             logger.warning(
                 "approval_continuation_waiting_for_owner",
                 approval_id=continuation.approval_id,
@@ -367,11 +387,6 @@ class ApprovalMatrixTransport:
                 retry_seconds=retry_seconds,
             )
             return False
-        reason = (
-            f"Requesting agent '{continuation.entity_name}' could not start and is unavailable."
-            if permanently_unavailable
-            else f"Requesting agent '{continuation.entity_name}' is no longer available."
-        )
         fallback = self.bot_provider(ROUTER_AGENT_NAME)
         if fallback is None or not fallback.running:
             logger.warning(
@@ -564,12 +579,7 @@ class ApprovalMatrixTransport:
         owner = self.bot_provider(continuation.entity_name)
         if owner is not None and owner.running:
             return owner
-        permanently_unavailable = (
-            self.entity_permanently_unavailable is not None
-            and self.entity_permanently_unavailable(continuation.entity_name)
-        )
-        configured = self.entity_configured is None or self.entity_configured(continuation.entity_name)
-        if configured and not permanently_unavailable:
+        if self._unavailable_entity_reason(continuation.entity_name) is None:
             return None
         fallback = self.bot_provider(ROUTER_AGENT_NAME)
         return fallback if fallback is not None and fallback.running else None
@@ -578,6 +588,11 @@ class ApprovalMatrixTransport:
         complete = True
         recoverable = await asyncio.to_thread(self._continuations.recoverable)
         for continuation in filter(self._needs_startup_recovery, recoverable):
+            unavailable_reason = self._unavailable_entity_reason(continuation.entity_name)
+            if unavailable_reason is not None:
+                settled = await self._fail_recovered_continuation(continuation, unavailable_reason)
+                complete = settled and complete
+                continue
             if continuation.state == "publishing":
                 settled = await self._fail_recovered_continuation(
                     continuation,

@@ -623,6 +623,7 @@ class _MultiAgentOrchestrator:
                     start_status = await self._try_start_bot_once(entity_name, bot)
                 if start_status is None:
                     self._permanently_failed_entities.add(entity_name)
+                    await self._approval_transport.reconcile_unavailable_entities({entity_name})
                     return
                 if start_status:
                     self._permanently_failed_entities.discard(entity_name)
@@ -1449,6 +1450,9 @@ class _MultiAgentOrchestrator:
             self.agent_bots.pop(entity_name, None)
 
         await self._remove_deleted_entities(plan.removed_entities)
+        await self._approval_transport.reconcile_unavailable_entities(
+            plan.removed_entities | set(start_results.permanently_failed_entities),
+        )
         self._schedule_ready_turn_dispatch_recovery()
         return changed_entities, start_results.retryable_entities, start_results.permanently_failed_entities
 
@@ -1515,6 +1519,9 @@ class _MultiAgentOrchestrator:
             for entity_name in start_results.retryable_entities:
                 await self._schedule_bot_start_retry(entity_name)
             if start_results.permanently_failed_entities:
+                await self._approval_transport.reconcile_unavailable_entities(
+                    start_results.permanently_failed_entities,
+                )
                 logger.warning(
                     "MCP catalog restart left some bots disabled",
                     server_id=server_id,
