@@ -2807,52 +2807,6 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
 class TestOutbox:
     """Delivery survives a crash at every point around the network call."""
 
-    async def test_only_exact_unacknowledged_delivery_can_be_retired(
-        self,
-        journal_store: EventJournalStore,
-    ) -> None:
-        """Absence reconciliation cannot delete another or already-acknowledged send."""
-        alice = journal_store.principal("agent@alice")
-        transaction_id = await alice.enqueue_delivery(
-            turn_id="turn-1",
-            stage=DeliveryStage.FINAL,
-            room_id=ROOM,
-            thread_id=None,
-            payload=text("answer"),
-        )
-        assert transaction_id is not None
-
-        assert not await alice.retire_unacknowledged_delivery(
-            turn_id="turn-1",
-            stage=DeliveryStage.FINAL,
-            transaction_id="wrong-transaction",
-        )
-        assert await alice.retire_unacknowledged_delivery(
-            turn_id="turn-1",
-            stage=DeliveryStage.FINAL,
-            transaction_id=transaction_id,
-        )
-        assert await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL) is None
-
-        transaction_id = await alice.enqueue_delivery(
-            turn_id="turn-2",
-            stage=DeliveryStage.FINAL,
-            room_id=ROOM,
-            thread_id=None,
-            payload=text("answer"),
-        )
-        assert transaction_id is not None
-        await alice.acknowledge_delivery(
-            turn_id="turn-2",
-            stage=DeliveryStage.FINAL,
-            event_id="$answer",
-        )
-        assert not await alice.retire_unacknowledged_delivery(
-            turn_id="turn-2",
-            stage=DeliveryStage.FINAL,
-            transaction_id=transaction_id,
-        )
-
     async def test_a_losing_acknowledgement_writes_neither_the_row_nor_the_record(
         self,
         journal_store: EventJournalStore,
@@ -3725,7 +3679,7 @@ class TestApprovalContinuations:
                     decision=ApprovalDecision.APPROVED if state == "ready" else None,
                 ),
             ),
-            snapshot={"request_body": "run it"},
+            request_body="run it",
             state=state,
         )
 
@@ -3734,6 +3688,36 @@ class TestApprovalContinuations:
         """Admit the two sources one coalesced approval turn owns."""
         await admit(store, "$source-1", ts=1_001)
         await admit(store, "$source-2", ts=1_002)
+
+    @staticmethod
+    async def remember_card(
+        store: PrincipalStore,
+        *,
+        tool_call_id: str = "call-1",
+    ) -> None:
+        """Persist one current-format card for the first continuation generation."""
+        card = {
+            "event_id": "$approval",
+            "sender": ALICE,
+            "type": "io.mindroom.tool_approval",
+            "content": {
+                "approval_id": "approval-card-1",
+                "continuation_id": "approval-1",
+                "continuation_generation": 0,
+                "tool_call_id": tool_call_id,
+                "status": "pending",
+            },
+        }
+        await store.claim_approval_card(room_id=ROOM, transaction_id="approval-card-1", card=card)
+        await store.mark_approval_card_attempted(
+            transaction_id="approval-card-1",
+            sending_device_id=DEVICE,
+        )
+        await store.acknowledge_approval_card(
+            transaction_id="approval-card-1",
+            card_event_id="$approval",
+            card=card,
+        )
 
     async def test_continuation_is_reachable_from_every_owned_source(self, alice: PrincipalStore) -> None:
         """A coalesced source cannot replay outside its one paused-run owner."""
@@ -3758,6 +3742,49 @@ class TestApprovalContinuations:
         assert winner.state == "claimed"
         assert winner.runtime_generation == "runtime-a"
         assert loser is None
+
+    async def test_pending_page_exposes_only_runnable_primary_source(self, alice: PrincipalStore) -> None:
+        """Waiting and live claims stay hidden while ready and old claims re-enter once."""
+        await self.admit_sources(alice)
+        waiting = self.continuation(state="waiting")
+        await alice.create_approval_continuation(waiting)
+
+        assert list(await alice.pending(runtime_generation="runtime-a")) == []
+
+        await alice.request_approval_failure(
+            waiting.approval_id,
+            "make it runnable",
+            expected_state="waiting",
+        )
+        failing = await alice.pending(runtime_generation="runtime-a")
+        assert [event.event_id for event in failing] == ["$source-1"]
+
+    async def test_current_claim_is_hidden_and_old_runtime_claim_is_recoverable(self, alice: PrincipalStore) -> None:
+        """A restart recovers delivery debt without replaying the coalesced source twice."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+
+        assert list(await alice.pending(runtime_generation="runtime-a")) == []
+        recovered = await alice.pending(runtime_generation="runtime-b")
+        assert [event.event_id for event in recovered] == ["$source-1"]
+
+    async def test_current_claim_with_final_delivery_debt_is_recoverable(self, alice: PrincipalStore) -> None:
+        """A transient FINAL failure re-enters only to reconcile its frozen outbox payload."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await alice.enqueue_delivery(
+            turn_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("finished"),
+        )
+
+        recovered = await alice.pending(runtime_generation="runtime-a")
+
+        assert [event.event_id for event in recovered] == ["$source-1"]
 
     async def test_claimed_continuation_advances_only_from_its_current_generation(
         self,
@@ -3822,6 +3849,141 @@ class TestApprovalContinuations:
         assert failing.state == "failing"
         assert failing.failure_reason == "entity is unavailable"
 
+    async def test_card_decision_atomically_readies_the_exact_call(self, alice: PrincipalStore) -> None:
+        """The card and final call decision become durable in one transaction."""
+        from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
+
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await self.remember_card(alice)
+
+        recorded = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="approved",
+            reason="Looks safe.",
+            resolution={"status": "approved", "resolution_reason": "Looks safe."},
+        )
+
+        assert recorded.recorded is True
+        assert recorded.resolution == {"status": "approved", "resolution_reason": "Looks safe."}
+        assert recorded.continuation_ready is True
+        assert recorded.source_event_ids == ("$source-1", "$source-2")
+        continuation = await alice.approval_continuation_for_source("$source-1")
+        assert continuation is not None
+        assert continuation.state == "ready"
+        assert continuation.calls[0].decision is ApprovalDecision.APPROVED
+        assert continuation.calls[0].reason == "Looks safe."
+
+    async def test_late_approval_atomically_expires_the_call_and_card(self, alice: PrincipalStore) -> None:
+        """A click at or after the exact deadline cannot authorize execution."""
+        from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
+
+        await self.admit_sources(alice)
+        expired = replace(
+            self.continuation(state="waiting"),
+            calls=(replace(self.continuation(state="waiting").calls[0], expires_at_ns=1),),
+        )
+        await alice.create_approval_continuation(expired)
+        await self.remember_card(alice)
+
+        recorded = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="approved",
+            reason=None,
+            resolution={"status": "approved", "body": "Approved: shell"},
+        )
+
+        assert recorded.recorded is True
+        assert recorded.resolution == {
+            "status": "expired",
+            "body": "Expired: shell",
+            "resolution_reason": "Tool approval request timed out.",
+        }
+        continuation = await alice.approval_continuation_for_source("$source-1")
+        assert continuation is not None
+        assert continuation.state == "ready"
+        assert continuation.calls[0].decision is ApprovalDecision.EXPIRED
+
+    async def test_approval_cannot_authorize_a_failure_fenced_continuation(self, alice: PrincipalStore) -> None:
+        """A late click terminalizes the card but cannot approve work fenced for failure."""
+        from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
+
+        await self.admit_sources(alice)
+        waiting = self.continuation(state="waiting")
+        await alice.create_approval_continuation(waiting)
+        await self.remember_card(alice)
+        failing = await alice.request_approval_failure(
+            waiting.approval_id,
+            "Approval publication failed safely.",
+            expected_state="waiting",
+        )
+        assert failing is not None
+
+        recorded = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="approved",
+            reason=None,
+            resolution={"status": "approved", "body": "Approved: shell"},
+        )
+
+        assert recorded.recorded is True
+        assert recorded.continuation_ready is False
+        assert recorded.resolution == {
+            "status": "denied",
+            "body": "Denied: shell",
+            "resolution_reason": "Approval publication failed safely.",
+        }
+        continuation = await alice.approval_continuation_for_source("$source-1")
+        assert continuation is not None
+        assert continuation.state == "failing"
+        assert continuation.calls[0].decision is ApprovalDecision.DENIED
+        assert continuation.calls[0].reason == "Approval publication failed safely."
+
+    async def test_duplicate_card_decision_preserves_the_first_winner(self, alice: PrincipalStore) -> None:
+        """A later reaction can redeliver but never reverse the stored decision."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await self.remember_card(alice)
+        await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="approved",
+            reason=None,
+            resolution={"status": "approved"},
+        )
+
+        duplicate = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="denied",
+            reason="Changed my mind.",
+            resolution={"status": "denied", "resolution_reason": "Changed my mind."},
+        )
+
+        assert duplicate.recorded is False
+        assert duplicate.resolution == {"status": "approved"}
+
+    async def test_unknown_exact_call_leaves_card_and_continuation_undecided(self, alice: PrincipalStore) -> None:
+        """Malformed current-format identity fails closed without a half-commit."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await self.remember_card(alice, tool_call_id="unknown-call")
+
+        refused = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="approved",
+            reason=None,
+            resolution={"status": "approved"},
+        )
+
+        assert refused.recorded is False
+        assert refused.resolution is None
+        card = await alice.pending_approval_card(room_id=ROOM, card_event_id="$approval")
+        assert card is not None
+        assert card.resolution is None
+        continuation = await alice.approval_continuation_for_source("$source-1")
+        assert continuation is not None
+        assert continuation.state == "waiting"
+        assert continuation.calls[0].decision is None
+
     async def test_finish_requires_acknowledged_final_before_releasing_sources(self, alice: PrincipalStore) -> None:
         """A paused run cannot disappear before its frozen final answer is visible."""
         await self.admit_sources(alice)
@@ -3850,6 +4012,47 @@ class TestApprovalContinuations:
         assert await alice.approval_continuation_for_source("$source-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
+
+    async def test_permanently_unavailable_owner_can_discard_fenced_sources(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only explicit permanent-unavailability cleanup may finish without a FINAL."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+
+        owners = await journal_store.approval_continuations_for_entities({"agent"})
+        assert [(principal, continuation.approval_id) for principal, continuation in owners] == [
+            ("agent@alice", "approval-1"),
+        ]
+
+        failing = await alice.request_approval_failure(
+            "approval-1",
+            "agent removed",
+            expected_state="waiting",
+        )
+        assert failing is not None
+        assert await alice.discard_unavailable_approval_continuation("approval-1") is True
+        assert await alice.approval_continuation("approval-1") is None
+        assert not await alice.is_pending("$source-1")
+        assert not await alice.is_pending("$source-2")
+
+    async def test_room_departure_discards_continuation_and_cards_with_its_sources(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A membership fence cannot leave a continuation pointing at settled room work."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await self.remember_card(alice)
+
+        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+
+        assert await alice.approval_continuation("approval-1") is None
+        assert not await alice.is_pending("$source-1")
+        assert not await alice.is_pending("$source-2")
+        assert await alice.pending_approval_cards(room_id=ROOM) == ()
 
 
 class TestConcurrency:

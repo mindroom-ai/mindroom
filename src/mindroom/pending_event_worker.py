@@ -116,6 +116,7 @@ class PendingEventWorker:
 
     store: ReplayView
     handle: _EventHandler
+    runtime_generation: str = "unmanaged"
     # Asked about every deferred event on every scan. A deferral whose owner is
     # gone is durable work nobody is left to release, so the scan takes it back
     # rather than waiting for a restart to notice.
@@ -419,7 +420,11 @@ class PendingEventWorker:
         cursor = origin
         wrapped = origin is None
         for _ in range(_MAX_SCAN_PAGES):
-            page = await self.store.pending(limit=_BATCH_SIZE, after_receipt_order=cursor)
+            page = await self.store.pending(
+                limit=_BATCH_SIZE,
+                after_receipt_order=cursor,
+                runtime_generation=self.runtime_generation,
+            )
             reached_origin = self._collect_page(
                 page,
                 by_room,
@@ -456,7 +461,11 @@ class PendingEventWorker:
         still_pending: set[str] = set(reclaimed)
         cursor: int | None = None
         while True:
-            page = await self.store.pending(limit=_BATCH_SIZE, after_receipt_order=cursor)
+            page = await self.store.pending(
+                limit=_BATCH_SIZE,
+                after_receipt_order=cursor,
+                runtime_generation=self.runtime_generation,
+            )
             self._collect_page(page, by_room, still_pending, already_taken=reclaimed, stop_after=None)
             if page.reached_end:
                 self._release_events_no_run_can_reach(retained, still_pending)

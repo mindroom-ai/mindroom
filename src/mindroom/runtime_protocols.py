@@ -9,7 +9,6 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.approval_continuation import ApprovalContinuation
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -43,9 +42,6 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     def runtime_paths(self) -> RuntimePaths: ...  # noqa: D102
 
     @property
-    def approval_runtime_generation(self) -> str: ...  # noqa: D102
-
-    @property
     def agent_bots(self) -> object: ...  # noqa: D102
 
     @property
@@ -67,18 +63,6 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     def entity_first_sync_complete(self, entity_name: str) -> bool | None:
         """Return first-sync readiness for the current entity generation."""
-        ...
-
-    def schedule_approval_continuation(self, continuation: ApprovalContinuation) -> None:
-        """Wake the runtime's sole continuation dispatcher."""
-        ...
-
-    def request_approval_continuation_failure(
-        self,
-        continuation: ApprovalContinuation,
-        reason: str,
-    ) -> Awaitable[None]:
-        """Persist failure intent for transport-owned settlement."""
         ...
 
     def handle_bot_ready(self, bot: AgentBot | TeamBot) -> Awaitable[None]:

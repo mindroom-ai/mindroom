@@ -46,14 +46,10 @@ from mindroom.matrix.client_delivery import (
     send_message_outcome,
     send_message_result,
 )
-from mindroom.matrix.event_info import reply_to_event_id_from_content
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.matrix.room_history_reads import (
-    find_outbox_delivery_event_id_via_room_messages,
-    find_response_event_ids_via_room_messages,
-)
+from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.response_delivery import (
     DeliveryStage,
     RecoveryOutcome,
@@ -247,6 +243,7 @@ class SendTextRequest:  # noqa: D101
     # text by editing that message; the placeholder is therefore the delivery
     # whose duplication a reader would see, and it is the initial stage.
     delivery_stage: DeliveryStage = DeliveryStage.FINAL
+    defer_source_handoff: bool = False
 
 
 @dataclass(frozen=True)
@@ -261,6 +258,7 @@ class EditTextRequest:  # noqa: D101
     # the answer reaches the room as an edit of it, so this is the delivery
     # whose loss leaves a user looking at "Thinking..." for good.
     delivery_turn_id: str | None = None
+    defer_source_handoff: bool = False
 
 
 @dataclass(frozen=True)
@@ -273,6 +271,7 @@ class FinalDeliveryRequest:  # noqa: D101
     extra_content: dict[str, Any] | None
     existing_event_is_placeholder: bool = False
     skip_mentions: bool = False
+    defer_source_handoff: bool = False
 
 
 @dataclass(frozen=True)
@@ -738,9 +737,6 @@ class DeliveryGateway:
         if not response_sender:
             return None
         source_event_ids = self.deps.turn_handoff.sources_for_turn(claimed.turn_id)
-        reply_to_event_id = reply_to_event_id_from_content(claimed.payload)
-        if reply_to_event_id is not None and reply_to_event_id not in source_event_ids:
-            source_event_ids = (*source_event_ids, reply_to_event_id)
         delivered = await find_response_event_ids_via_room_messages(
             client,
             claimed.room_id,
@@ -781,21 +777,6 @@ class DeliveryGateway:
             return delivered.event_id
 
         return await self._response_delivery(send, handoff=None).recover()
-
-    async def locate_delivery_from_sender(
-        self,
-        delivery: OutboxDelivery,
-        *,
-        response_sender: str,
-        source_event_ids: tuple[str, ...],
-    ) -> str | None:
-        """Locate a frozen delivery through the current bot's read access."""
-        return await find_outbox_delivery_event_id_via_room_messages(
-            self._client(),
-            delivery,
-            response_sender=response_sender,
-            source_event_ids=source_event_ids,
-        )
 
     async def _send_content(
         self,
@@ -842,7 +823,8 @@ class DeliveryGateway:
             return delivered.event_id
 
         try:
-            event_id = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver(
+            handoff = None if request.defer_source_handoff else self.deps.turn_handoff
+            event_id = await self._response_delivery(send, handoff=handoff).deliver(
                 turn_id=request.delivery_turn_id,
                 stage=request.delivery_stage,
                 room_id=room_id,
@@ -997,7 +979,8 @@ class DeliveryGateway:
             return outcome.event_id
 
         try:
-            event_id = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver(
+            handoff = None if request.defer_source_handoff else self.deps.turn_handoff
+            event_id = await self._response_delivery(send, handoff=handoff).deliver(
                 turn_id=request.delivery_turn_id,
                 stage=DeliveryStage.FINAL,
                 room_id=room_id,
@@ -1186,6 +1169,7 @@ class DeliveryGateway:
                     extra_content=draft.extra_content,
                     delivery_turn_id=request.identity.response_envelope.source_event_id,
                     retry_sync_recovery=True,
+                    defer_source_handoff=request.defer_source_handoff,
                 ),
             )
             if edited:
@@ -1231,6 +1215,7 @@ class DeliveryGateway:
                 # ledger already keys on it, and it re-derives to the same
                 # value after a restart, which a generated ID would not.
                 delivery_turn_id=request.identity.response_envelope.source_event_id,
+                defer_source_handoff=request.defer_source_handoff,
             ),
         )
         if event_id is None:

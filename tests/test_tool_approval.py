@@ -116,6 +116,130 @@ def test_tool_approval_config_coerces_numeric_timeout_strings() -> None:
     assert config.tool_approval.rules[0].timeout_days == 3.0
 
 
+@pytest.mark.asyncio
+async def test_continuation_decision_wakes_its_owning_bot_sources(tmp_path: Path) -> None:
+    """Router-owned card decisions wake the entity journal that owns the paused run."""
+    owner = MagicMock(running=True)
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: owner if name == "code" else None,
+        cards_provider=lambda: None,
+    )
+
+    await transport._wake_continuation_sources("code", ("$source-1", "$source-2"))
+
+    owner.retry_approval_sources.assert_called_once_with(("$source-1", "$source-2"))
+
+
+@pytest.mark.asyncio
+async def test_transient_removed_owner_cleanup_rearms_startup_retry(tmp_path: Path) -> None:
+    """A failed card edit cannot abandon a removed entity's fenced journal work."""
+    continuation = MagicMock(
+        approval_id="approval-removed",
+        entity_name="removed",
+        state="waiting",
+        generation=0,
+        runtime_generation=None,
+    )
+    failing = MagicMock(
+        approval_id="approval-removed",
+        entity_name="removed",
+        state="failing",
+        generation=0,
+        runtime_generation=None,
+    )
+    principal = MagicMock(
+        approval_continuation=AsyncMock(return_value=continuation),
+        request_approval_failure=AsyncMock(return_value=failing),
+        discard_unavailable_approval_continuation=AsyncMock(),
+    )
+    journal = MagicMock(
+        approval_continuations_for_entities=AsyncMock(return_value=(("agent@removed", continuation),)),
+    )
+    journal.principal.return_value = principal
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: None,
+        journal_provider=lambda: journal,
+        entity_configured=lambda name: name != "removed",
+    )
+    transport._startup_cleanup_done = True
+
+    with (
+        patch("mindroom.approval_transport.expire_continuation_approval_cards", new=AsyncMock(return_value=False)),
+        patch.object(transport, "_schedule_startup_cleanup_retry") as schedule_retry,
+    ):
+        await transport.reconcile_unavailable_entities({"removed"})
+
+    assert transport._startup_cleanup_done is False
+    schedule_retry.assert_called_once_with()
+    principal.discard_unavailable_approval_continuation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sources(tmp_path: Path) -> None:
+    """A removed entity's waiting response must not be the last visible lifecycle state."""
+    continuation = MagicMock(
+        approval_id="approval-removed",
+        entity_name="removed",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        response_event_id="$waiting",
+        state="waiting",
+        generation=0,
+        runtime_generation=None,
+    )
+    failing = MagicMock(
+        approval_id="approval-removed",
+        entity_name="removed",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        response_event_id="$waiting",
+        state="failing",
+        generation=0,
+        runtime_generation=None,
+    )
+    principal = MagicMock(
+        approval_continuation=AsyncMock(return_value=continuation),
+        request_approval_failure=AsyncMock(return_value=failing),
+        discard_unavailable_approval_continuation=AsyncMock(return_value=True),
+    )
+    journal = MagicMock(
+        approval_continuations_for_entities=AsyncMock(return_value=(("agent@removed", continuation),)),
+    )
+    journal.principal.return_value = principal
+    client = MagicMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", client.user_id)}
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$notice", room_id="!room:localhost"))
+    router = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: router if name == "router" else None,
+        cards_provider=lambda: None,
+        journal_provider=lambda: journal,
+        entity_configured=lambda name: name != "removed",
+    )
+
+    with patch(
+        "mindroom.approval_transport.expire_continuation_approval_cards",
+        new=AsyncMock(return_value=True),
+    ):
+        await transport.reconcile_unavailable_entities({"removed"})
+
+    content = client.room_send.await_args.kwargs["content"]
+    assert content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$waiting"}
+    assert "no longer available" in content["body"]
+    assert client.room_send.await_args.kwargs["tx_id"] == "approval-unavailable-approval-removed"
+    principal.discard_unavailable_approval_continuation.assert_awaited_once_with("approval-removed")
+
+
 @pytest.mark.parametrize(
     ("tool_approval", "expected_location"),
     [
@@ -199,56 +323,6 @@ def _approval_edit(
     }
 
 
-async def _await_claim(cards: FakeApprovalCards, *, count: int = 1) -> None:
-    """Wait until this many claim rows exist, without waiting for their sends."""
-    async with asyncio.timeout(5):
-        while len(cards.rows) < count:  # noqa: ASYNC110 - the store double has nothing to signal on
-            await asyncio.sleep(0)
-
-
-@pytest.mark.asyncio
-async def test_detached_card_displays_the_durable_winning_decision(tmp_path: Path) -> None:
-    """A human click racing expiry must not overwrite the decision that released the continuation."""
-    cards = FakeApprovalCards()
-    editor = AsyncMock(return_value=True)
-    decision_handler = AsyncMock(return_value=("expired", "Tool approval request timed out."))
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        detached_decision_handler=decision_handler,
-    )
-    await store.create_detached_approval(
-        approval_id="approval-1",
-        continuation_id="continuation-1",
-        tool_call_id="call-1",
-        tool_name="dangerous",
-        arguments={},
-        agent_name="code",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        approver_user_id="@user:localhost",
-        timeout_seconds=30,
-    )
-
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id="$approval",
-        status="approved",
-        reason=None,
-    )
-
-    assert result.resolved is True
-    assert editor.await_args.args[2]["status"] == "expired"
-    assert editor.await_args.args[2]["resolution_reason"] == "Tool approval request timed out."
-    assert editor.await_args.args[2]["resolved_by"] is None
-
-
 @pytest.mark.asyncio
 async def test_detached_transport_refusal_forgets_the_unsent_card_row(tmp_path: Path) -> None:
     """A fail-closed transport refusal must not block every later startup sweep."""
@@ -266,6 +340,7 @@ async def test_detached_transport_refusal_forgets_the_unsent_card_row(tmp_path: 
         await store.create_detached_approval(
             approval_id="approval-refused",
             continuation_id="continuation-refused",
+            continuation_generation=0,
             tool_call_id="call-refused",
             tool_name="dangerous",
             arguments={},
@@ -278,95 +353,6 @@ async def test_detached_transport_refusal_forgets_the_unsent_card_row(tmp_path: 
         )
 
     assert cards.rows == {}
-
-
-@pytest.mark.asyncio
-async def test_missing_detached_card_notifies_continuation_owner(tmp_path: Path) -> None:
-    """A membership-fenced card must fail its continuation instead of silently ending expiry."""
-    cards = FakeApprovalCards()
-    missing = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=AsyncMock(),
-        editor=AsyncMock(),
-        cards=cards,
-        detached_card_missing=missing,
-    )
-
-    settled = await store.expire_detached_card(
-        room_id="!room:localhost",
-        card_event_id="$departed-card",
-    )
-
-    assert settled is True
-    missing.assert_awaited_once_with("$departed-card")
-
-
-@pytest.mark.asyncio
-async def test_detached_approval_expiry_resolves_continuation_without_waiter(tmp_path: Path) -> None:
-    """Expiry must wake the durable continuation even though no response coroutine is waiting."""
-    cards = FakeApprovalCards()
-    decision_handler = AsyncMock(return_value=("expired", "Tool approval request timed out."))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        detached_decision_handler=decision_handler,
-    )
-
-    await store.create_detached_approval(
-        approval_id="approval-1",
-        continuation_id="continuation-1",
-        tool_call_id="call-1",
-        tool_name="dangerous",
-        arguments={},
-        agent_name="code",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        approver_user_id="@user:localhost",
-        timeout_seconds=0,
-    )
-    for _attempt in range(20):
-        if decision_handler.await_count:
-            break
-        await asyncio.sleep(0.01)
-
-    decision_handler.assert_awaited_once_with(
-        "continuation-1",
-        "call-1",
-        "expired",
-        "Tool approval request timed out.",
-    )
-    assert editor.await_args.args[2]["status"] == "expired"
-
-
-@pytest.mark.asyncio
-async def test_startup_reclaims_expiry_for_unresolved_continuation_card(tmp_path: Path) -> None:
-    """The card coordinator alone must restore expiry ownership after restart."""
-    cards = FakeApprovalCards()
-    card = _approval_card()
-    card["content"]["continuation_id"] = "continuation-1"
-    card["content"]["tool_call_id"] = "call-1"
-    await cards.store_card("$approval", "!room:localhost", card)
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        editor=AsyncMock(return_value=True),
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-    )
-
-    sweep = await store.discard_pending_on_startup()
-
-    assert sweep.failed == 0
-    assert store._detached_expiry_sweep_task is not None
-    await store.shutdown(reason="test complete")
 
 
 @pytest.mark.asyncio
@@ -395,206 +381,6 @@ async def test_startup_terminalizes_malformed_continuation_card_without_call_id(
     assert editor.await_args.args[2]["status"] == "expired"
 
 
-@pytest.mark.asyncio
-async def test_detached_approval_retries_recorded_expiry_until_card_edit_lands(tmp_path: Path) -> None:
-    """A transient Matrix edit failure must not retire the only in-process expiry owner."""
-    cards = FakeApprovalCards()
-    editor = AsyncMock(side_effect=[False, True])
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        detached_decision_handler=AsyncMock(return_value=("expired", "Tool approval request timed out.")),
-        detached_decision_ready=AsyncMock(),
-    )
-
-    await store.create_detached_approval(
-        approval_id="approval-retry",
-        continuation_id="continuation-retry",
-        tool_call_id="call-retry",
-        tool_name="dangerous",
-        arguments={},
-        agent_name="code",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        approver_user_id="@user:localhost",
-        timeout_seconds=0,
-    )
-    for _attempt in range(100):
-        if editor.await_count == 1:
-            break
-        await asyncio.sleep(0.01)
-    await store._sweep_detached_expiries()
-
-    assert editor.await_count == 2
-    assert cards.rows == {}
-
-
-@pytest.mark.asyncio
-async def test_detached_decision_retries_terminal_edit_without_waiting_for_deadline(tmp_path: Path) -> None:
-    """A recorded human decision must keep retry ownership when its first Matrix edit fails."""
-    cards = FakeApprovalCards()
-    editor = AsyncMock(side_effect=[False, True])
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        detached_decision_handler=AsyncMock(return_value=("approved", None)),
-        detached_decision_ready=AsyncMock(),
-    )
-    await store.create_detached_approval(
-        approval_id="approval-edit-retry",
-        continuation_id="continuation-edit-retry",
-        tool_call_id="call-edit-retry",
-        tool_name="dangerous",
-        arguments={},
-        agent_name="code",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        approver_user_id="@user:localhost",
-        timeout_seconds=30,
-    )
-
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id="$approval",
-        status="approved",
-        reason=None,
-    )
-    await store._sweep_detached_expiries()
-
-    assert result.resolved is False
-    assert editor.await_count == 2
-    assert cards.rows == {}
-
-
-@pytest.mark.asyncio
-async def test_cancelled_detached_card_bind_expires_after_recovery(tmp_path: Path) -> None:
-    """Cancellation after send must bind and immediately terminalize the delivered card."""
-    cards = FakeApprovalCards()
-    first_bind_started = asyncio.Event()
-    release_first_bind = asyncio.Event()
-    real_acknowledge = cards.acknowledge_approval_card
-    bind_attempts = 0
-
-    async def flaky_acknowledge(*args: object, **kwargs: object) -> object:
-        nonlocal bind_attempts
-        bind_attempts += 1
-        if bind_attempts == 1:
-            first_bind_started.set()
-            await release_first_bind.wait()
-            msg = "journal unavailable"
-            raise RuntimeError(msg)
-        return await real_acknowledge(*args, **kwargs)
-
-    cards.acknowledge_approval_card = flaky_acknowledge  # type: ignore[method-assign]
-    card_ready = AsyncMock(return_value=True)
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        detached_decision_handler=AsyncMock(return_value=("expired", "expired")),
-        detached_card_ready=card_ready,
-    )
-    create = asyncio.create_task(
-        store.create_detached_approval(
-            approval_id="approval-bind",
-            continuation_id="continuation-bind",
-            tool_call_id="call-bind",
-            tool_name="dangerous",
-            arguments={},
-            agent_name="code",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await first_bind_started.wait()
-
-    create.cancel()
-    release_first_bind.set()
-    with pytest.raises(asyncio.CancelledError):
-        await create
-    for _attempt in range(100):
-        if not cards.rows and editor.await_count:
-            break
-        await asyncio.sleep(0.01)
-
-    assert bind_attempts >= 2
-    card_ready.assert_awaited_with("continuation-bind", "call-bind", "$approval")
-    assert cards.rows == {}
-    assert editor.await_args.args[2]["status"] == "expired"
-
-
-@pytest.mark.asyncio
-async def test_cancelled_detached_send_hands_delivered_event_to_recovery(tmp_path: Path) -> None:
-    """Cancellation during send must terminally expire a card whose event id arrives afterward."""
-    cards = FakeApprovalCards()
-    send_started = asyncio.Event()
-    release_send = asyncio.Event()
-
-    async def sender(*_args: object) -> SentApprovalEvent:
-        send_started.set()
-        await release_send.wait()
-        return SentApprovalEvent("$approval")
-
-    card_ready = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=AsyncMock(return_value=True),
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        detached_decision_handler=AsyncMock(return_value=("expired", "expired")),
-        detached_card_ready=card_ready,
-    )
-    create = asyncio.create_task(
-        store.create_detached_approval(
-            approval_id="approval-send",
-            continuation_id="continuation-send",
-            tool_call_id="call-send",
-            tool_name="dangerous",
-            arguments={},
-            agent_name="code",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await send_started.wait()
-
-    create.cancel()
-    await asyncio.sleep(0)
-    release_send.set()
-    with pytest.raises(asyncio.CancelledError):
-        await create
-    for _attempt in range(100):
-        if card_ready.await_count and not cards.rows:
-            break
-        await asyncio.sleep(0.01)
-
-    card_ready.assert_awaited_with("continuation-send", "call-send", "$approval")
-    assert cards.rows == {}
-
-
 def test_resolution_after_deadline_is_forced_to_expired() -> None:
     """A click queued before the expiry task runs must not authorize an already-expired request."""
     event = _approval_card()
@@ -612,54 +398,6 @@ def test_resolution_after_deadline_is_forced_to_expired() -> None:
     assert status == "expired"
     assert reason == "Tool approval request timed out."
     assert truncated is False
-
-
-@pytest.mark.asyncio
-async def test_detached_expiry_registration_cannot_escape_shutdown(tmp_path: Path) -> None:
-    """Shutdown racing a successful send must still leave no detached expiry task behind."""
-    send_started = asyncio.Event()
-    release_send = asyncio.Event()
-
-    async def sender(*_args: object) -> SentApprovalEvent:
-        send_started.set()
-        await release_send.wait()
-        return SentApprovalEvent("$approval")
-
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=AsyncMock(return_value=True),
-        cards=FakeApprovalCards(),
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        detached_decision_handler=AsyncMock(return_value=("expired", "shutdown")),
-    )
-    create = asyncio.create_task(
-        store.create_detached_approval(
-            approval_id="approval-1",
-            continuation_id="continuation-1",
-            tool_call_id="call-1",
-            tool_name="dangerous",
-            arguments={},
-            agent_name="code",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await send_started.wait()
-    shutdown = asyncio.create_task(store.shutdown(reason="shutdown"))
-    await asyncio.sleep(0)
-    release_send.set()
-
-    await create
-    await shutdown
-    try:
-        assert store._detached_expiry_sweep_task is None
-    finally:
-        await store.shutdown(reason="test cleanup")
 
 
 async def _wait_for_room_send_approval_id(client: MagicMock) -> str:

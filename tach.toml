@@ -109,10 +109,16 @@ visibility = [
 
 [[modules]]
 path = "mindroom.event_journal"
-depends_on = ["mindroom.logging_config", "mindroom.matrix.sidecar_content"]
+depends_on = [
+    "mindroom.history.types",
+    "mindroom.logging_config",
+    "mindroom.matrix.sidecar_content",
+]
 visibility = [
+    "mindroom.approval_execution",
     "mindroom.approval_manager",
     "mindroom.approval_response",
+    "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.delivery_gateway",
     "mindroom.dispatch_replay_guard",
@@ -127,6 +133,7 @@ visibility = [
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
     "mindroom.response_delivery",
+    "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
     "mindroom.turn_controller",
     "mindroom.visible_response_reconciliation",
@@ -445,7 +452,6 @@ depends_on = [
     "mindroom.runtime_resolution",
 ]
 visibility = [
-    "mindroom.approval_continuation",
     "mindroom.agents",
     "mindroom.conversation_state_writer",
     "mindroom.history.interrupted_replay",
@@ -569,24 +575,10 @@ depends_on = [
 visibility = ["mindroom.approval_manager"]
 
 [[modules]]
-path = "mindroom.approval_continuation"
-depends_on = [
-    "mindroom.agent_storage",
-    "mindroom.history.types",
-    "sqlalchemy",
-]
-visibility = [
-    "mindroom.approval_response",
-    "mindroom.approval_transport",
-    "mindroom.bot",
-    "mindroom.response_runner",
-]
-
-[[modules]]
 path = "mindroom.approval_transport"
 depends_on = [
-    "mindroom.approval_continuation",
     "mindroom.constants",
+    "mindroom.event_journal",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.message_builder",
@@ -601,6 +593,7 @@ path = "mindroom.approval_execution"
 depends_on = [
     "mindroom.agents",
     "mindroom.ai_run_metadata",
+    "mindroom.event_journal",
     "mindroom.history.runtime",
     "mindroom.matrix.typing",
     "mindroom.response_turn",
@@ -613,7 +606,6 @@ visibility = ["mindroom.response_runner"]
 [[modules]]
 path = "mindroom.approval_response"
 depends_on = [
-    "mindroom.approval_continuation",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.event_journal",
@@ -1578,12 +1570,12 @@ depends_on = [
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_run_metadata",
-    "mindroom.approval_continuation",
     "mindroom.approval_execution",
     "mindroom.approval_response",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.entity_resolution",
+    "mindroom.event_journal",
     "mindroom.history.interrupted_replay",
     "mindroom.history.runtime",
     "mindroom.history.storage",
@@ -4605,6 +4597,7 @@ expose = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "evaluate_tool_approval",
+    "expire_continuation_approval_cards",
     "expire_orphaned_approval_cards_on_startup",
     "expire_suspended_tool_approval",
     "handle_matrix_approval_action",

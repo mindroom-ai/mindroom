@@ -1,15 +1,13 @@
-"""Matrix transport adapter for tool approval cards."""
+"""Matrix transport adapter for journal-owned tool approvals."""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
-from uuid import uuid4
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import nio
 
-from mindroom.approval_continuation import ApprovalContinuation, ApprovalContinuationStore, ApprovalDecision
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
@@ -25,8 +23,8 @@ from mindroom.tool_approval import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     SentApprovalEvent,
     ToolApprovalTransportError,
+    expire_continuation_approval_cards,
     expire_orphaned_approval_cards_on_startup,
-    expire_suspended_tool_approval,
     initialize_approval_runtime,
 )
 
@@ -34,59 +32,33 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterable
 
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import ApprovalView
-    from mindroom.final_delivery import FinalDeliveryOutcome
+    from mindroom.event_journal import ApprovalContinuation, ApprovalView, EventJournalStore
 
 logger = get_logger(__name__)
 
 _TApprovalTransportResult = TypeVar("_TApprovalTransportResult")
-
-# How long a startup approval sweep that could not finish waits before asking
-# again. Nothing else will trigger it: the gates that arm the sweep are startup
-# events that have already happened, so a pass that gave up on a transient
-# failure would leave answered cards clickable until the next restart.
 _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS = 1.0
 _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
-# How many passes may come up short before the sweep stops saying so quietly.
-# It keeps retrying past this: a pass cannot take a row that is still being
-# published, so the cost of asking again is a read, while the cost of stopping
-# is durable cleanup that no longer happens until the next restart -- and an
-# outage that outlasts any fixed budget is exactly when cleanup is owed most.
-# What changes is the volume, because a sweep still owed something this long
-# after start is not waiting on anything transient.
 _STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION = 10
-_CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS = 0.25
-_CONTINUATION_DISPATCH_MAX_RETRY_SECONDS = 30.0
 
 
 class _ApprovalTransportBot(Protocol):
+    """The live bot surface needed for card transport and source wakeups."""
+
     agent_name: str
     running: bool
     client: nio.AsyncClient | None
 
     @property
-    def approval_room_ids(self) -> frozenset[str]:
-        """Return rooms this bot durably owns for approval transport."""
-        ...
+    def approval_room_ids(self) -> frozenset[str]: ...
 
     async def latest_thread_event_id_if_needed(
         self,
         room_id: str,
         thread_id: str,
-    ) -> str | None:
-        """Return the latest event id for one Matrix thread when known."""
-        ...
+    ) -> str | None: ...
 
-    async def resume_approval_continuation(
-        self,
-        continuation: ApprovalContinuation,
-    ) -> FinalDeliveryOutcome | None: ...
-
-    async def settle_approval_continuation_failure(
-        self,
-        continuation: ApprovalContinuation,
-        reason: str,
-    ) -> None: ...
+    def retry_approval_sources(self, source_event_ids: tuple[str, ...]) -> None: ...
 
 
 def _approval_relation_agent_name(content: dict[str, Any], *, fallback: str) -> str:
@@ -99,15 +71,10 @@ async def _offload_oversized_full_arguments(
     room_id: str,
     send_content: dict[str, Any],
 ) -> dict[str, Any]:
-    """Move full arguments that would overflow the card event into an uploaded JSON sidecar.
-
-    A failed upload strips the payload and marks the card non-approvable so the manager's
-    fail-closed resolution still holds: nothing approvable ships without complete arguments.
-    """
+    """Move oversized arguments to a sidecar without weakening approval integrity."""
     full_arguments = send_content.get("full_arguments")
     if not isinstance(full_arguments, dict) or content_fits_normal_event(send_content):
         return send_content
-
     offloaded = {key: value for key, value in send_content.items() if key != "full_arguments"}
     room_encrypted = await resolve_room_encryption_for_delivery(
         client,
@@ -142,18 +109,18 @@ async def _offload_oversized_full_arguments(
 
 @dataclass
 class ApprovalMatrixTransport:
-    """Own Matrix delivery for tool approval cards and terminal edits."""
+    """Own Matrix card transport and permanent-owner cleanup."""
 
     runtime_paths: RuntimePaths
     bot_provider: Callable[[str], _ApprovalTransportBot | None]
     cards_provider: Callable[[], ApprovalView | None]
+    journal_provider: Callable[[], EventJournalStore] | None = None
     entity_configured: Callable[[str], bool] | None = None
     entity_permanently_unavailable: Callable[[str], bool] | None = None
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_done: bool = field(default=False, init=False, repr=False)
-    _continuations_recovered: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _startup_cleanup_retry: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _startup_cleanup_retry_delay: float = field(
@@ -161,24 +128,7 @@ class ApprovalMatrixTransport:
         init=False,
         repr=False,
     )
-    _continuations: ApprovalContinuationStore = field(init=False, repr=False)
-    _continuation_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _startup_cleanup_attempts: int = field(default=0, init=False, repr=False)
-    _runtime_generation: str = field(default_factory=lambda: uuid4().hex, init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        """Open the shared durable continuation coordinator."""
-        self._continuations = ApprovalContinuationStore(self.runtime_paths.storage_root)
-
-    @property
-    def runtime_generation(self) -> str:
-        """Return the identifier for continuation work owned by this runtime."""
-        return self._runtime_generation
-
-    @property
-    def continuations(self) -> ApprovalContinuationStore:
-        """Return the single continuation-store handle shared by managed runners."""
-        return self._continuations
 
     def capture_runtime_loop(self) -> None:
         """Remember the runtime loop that owns Matrix client I/O."""
@@ -191,7 +141,7 @@ class ApprovalMatrixTransport:
             raise RuntimeError(msg)
 
     def bind_approval_runtime(self) -> None:
-        """Bind approval manager runtime hooks to the current Matrix transport."""
+        """Bind approval manager hooks to the current Matrix transport."""
         initialize_approval_runtime(
             self.runtime_paths,
             sender=self.send_approval_event,
@@ -201,104 +151,18 @@ class ApprovalMatrixTransport:
             transport_sender=self.transport_sender_id,
             sending_device=self.transport_device_id,
             locate_card=self.locate_approval_card,
-            detached_decision_handler=self._handle_continuation_decision,
-            detached_decision_ready=self._handle_continuation_decision_ready,
-            detached_card_ready=self._handle_detached_card_ready,
-            detached_card_missing=self._handle_detached_card_missing,
+            continuation_ready=self._wake_continuation_sources,
         )
 
-    async def _handle_detached_card_ready(
+    async def _wake_continuation_sources(
         self,
-        approval_id: str,
-        tool_call_id: str,
-        card_event_id: str,
-    ) -> bool:
-        """Attach a delivered card even if its response coroutine was cancelled."""
-        current = await asyncio.to_thread(self._continuations.get, approval_id)
-        if current is None or current.state != "pending":
-            return True
-        call = next((call for call in current.calls if call.tool_call_id == tool_call_id), None)
-        if call is None or call.decision_recorded:
-            return True
-        if call.card_event_id is not None:
-            return call.card_event_id == card_event_id
-        attached = await asyncio.to_thread(
-            self._continuations.attach_card,
-            approval_id,
-            tool_call_id,
-            card_event_id,
-        )
-        if attached is None:
-            return False
-        attached_call = next((call for call in attached.calls if call.tool_call_id == tool_call_id), None)
-        return attached_call is not None and attached_call.card_event_id == card_event_id
-
-    async def _handle_continuation_decision(
-        self,
-        approval_id: str,
-        tool_call_id: str,
-        status: Literal["approved", "denied", "expired"],
-        reason: str | None,
-    ) -> tuple[Literal["approved", "denied", "expired"], str | None]:
-        decision = ApprovalDecision(status)
-        continuation = await asyncio.to_thread(
-            self._continuations.resolve_call,
-            approval_id,
-            tool_call_id,
-            decision,
-            reason=reason,
-        )
-        if continuation is None:
-            return "denied", "Approval decision could not be persisted; the tool was denied safely."
-        call = next((call for call in continuation.calls if call.tool_call_id == tool_call_id), None)
-        if call is None or call.decision is None:
-            return "denied", "The exact paused tool call no longer exists; the tool was denied safely."
-        return call.decision.value, call.reason
-
-    async def _handle_continuation_decision_ready(self, approval_id: str, tool_call_id: str) -> None:
-        continuation = await asyncio.to_thread(self._continuations.acknowledge_call, approval_id, tool_call_id)
-        if continuation is not None and continuation.state == "ready":
-            self._schedule_continuation(continuation)
-
-    def schedule_continuation(self, continuation: ApprovalContinuation) -> None:
-        """Wake the sole dispatcher for a newly ready continuation."""
-        self._schedule_continuation(continuation)
-
-    async def request_continuation_failure(
-        self,
-        continuation: ApprovalContinuation,
-        reason: str,
+        entity_name: str,
+        source_event_ids: tuple[str, ...],
     ) -> None:
-        """Persist failure intent and wake the sole terminal-settlement driver."""
-        requested = await asyncio.to_thread(
-            self._continuations.request_failure,
-            continuation.approval_id,
-            reason,
-            claimant_id=continuation.claimant_id,
-            runtime_generation=self.runtime_generation,
-        )
-        if requested is None:
-            logger.warning(
-                "approval_continuation_failure_request_not_owned",
-                approval_id=continuation.approval_id,
-                claimant_id=continuation.claimant_id,
-            )
-            return
-        if requested.state in {"claimed", "settling"}:
-            self._schedule_continuation(requested)
-
-    async def reconcile_unavailable_entities(self, entity_names: Iterable[str]) -> None:
-        """Fail nonterminal continuations whose owner just became unavailable."""
-        unavailable = set(entity_names)
-        if not unavailable:
-            return
-        recoverable = await asyncio.to_thread(self._continuations.recoverable)
-        for continuation in recoverable:
-            if continuation.entity_name not in unavailable:
-                continue
-            reason = self._unavailable_entity_reason(continuation.entity_name)
-            if reason is not None:
-                await self.request_continuation_failure(continuation, reason)
+        """Wake the exact owner after an atomic card decision makes work ready."""
+        bot = self.bot_provider(entity_name)
+        if bot is not None and bot.running:
+            bot.retry_approval_sources(source_event_ids)
 
     def _unavailable_entity_reason(self, entity_name: str) -> str | None:
         permanently_unavailable = (
@@ -311,435 +175,66 @@ class ApprovalMatrixTransport:
             return f"Requesting agent '{entity_name}' could not start and is unavailable."
         return f"Requesting agent '{entity_name}' is no longer available."
 
-    def _schedule_continuation(self, continuation: ApprovalContinuation) -> None:
-        if any(
-            not task.done() and task.get_name() == f"approval-continuation-{continuation.approval_id}"
-            for task in self._continuation_tasks
-        ):
+    async def reconcile_unavailable_entities(self, entity_names: Iterable[str]) -> None:
+        """Fail closed continuations whose owner cannot ever run them."""
+        names = set(entity_names)
+        journal = None if self.journal_provider is None else self.journal_provider()
+        if not names or journal is None:
             return
-        task = asyncio.create_task(
-            self._dispatch_continuation(continuation.approval_id),
-            name=f"approval-continuation-{continuation.approval_id}",
-        )
-        self._continuation_tasks.add(task)
-        task.add_done_callback(self._finish_continuation_task)
-
-    def _finish_continuation_task(self, task: asyncio.Task[None]) -> None:
-        """Retire one dispatcher and observe failures from its detached task."""
-        self._continuation_tasks.discard(task)
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error is not None:
-            logger.error(
-                "approval_continuation_dispatch_failed",
-                error=str(error),
-                exception_type=type(error).__name__,
-            )
-
-    async def _dispatch_continuation(self, approval_id: str) -> None:
-        retry_seconds = _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS
-        while True:
-            try:
-                continuation = await self._read_continuation_with_retry(approval_id)
-                if continuation is None or continuation.state in {"completed", "failed"}:
-                    return
-                if continuation.state in {"claimed", "settling"}:
-                    reason = continuation.failure_reason or (
-                        "Tool approval continuation was interrupted after it was claimed; it was denied safely."
-                    )
-                    await self._fail_continuation_until_terminal(continuation, reason)
-                    return
-                if continuation.state != "ready":
-                    return
-                if await self._dispatch_ready_once(continuation, retry_seconds=retry_seconds):
-                    return
-                refreshed = await self._read_continuation_with_retry(approval_id)
-                if (
-                    refreshed is not None
-                    and refreshed.state == "ready"
-                    and refreshed.generation != continuation.generation
-                ):
-                    retry_seconds = _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS
-                    continue
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                logger.warning(
-                    "approval_continuation_dispatch_retry",
-                    approval_id=approval_id,
-                    retry_seconds=retry_seconds,
-                    error=str(error),
-                    exc_info=(type(error), error, error.__traceback__),
-                )
-            await asyncio.sleep(retry_seconds)
-            retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
-
-    async def _dispatch_ready_once(
-        self,
-        continuation: ApprovalContinuation,
-        *,
-        retry_seconds: float,
-    ) -> bool:
-        """Try one ready row against the currently available runtime entities."""
-        bot = self.bot_provider(continuation.entity_name)
-        if bot is not None and bot.running:
-            finished = await self._resume_continuation_once(bot, continuation)
-            if not finished:
-                logger.warning(
-                    "approval_continuation_resume_deferred",
-                    approval_id=continuation.approval_id,
-                    entity_name=continuation.entity_name,
-                    retry_seconds=retry_seconds,
-                )
-            return finished
-        reason = self._unavailable_entity_reason(continuation.entity_name)
-        if reason is None:
-            logger.warning(
-                "approval_continuation_waiting_for_owner",
-                approval_id=continuation.approval_id,
-                entity_name=continuation.entity_name,
-                retry_seconds=retry_seconds,
-            )
-            return False
-        fallback = self.bot_provider(ROUTER_AGENT_NAME)
-        if fallback is None or not fallback.running:
-            logger.warning(
-                "approval_continuation_waiting_for_router",
-                approval_id=continuation.approval_id,
-                entity_name=continuation.entity_name,
-                retry_seconds=retry_seconds,
-            )
-            return False
-        requested = await asyncio.to_thread(
-            self._continuations.request_failure,
-            continuation.approval_id,
-            reason,
-            claimant_id=continuation.claimant_id,
-            runtime_generation=self.runtime_generation,
-        )
-        if requested is None:
-            logger.warning(
-                "approval_continuation_unavailable_failure_not_owned",
-                approval_id=continuation.approval_id,
-                claimant_id=continuation.claimant_id,
-            )
-            return True
-        await self._fail_continuation_until_terminal(requested, reason)
-        return True
-
-    async def _resume_continuation_once(
-        self,
-        bot: _ApprovalTransportBot,
-        continuation: ApprovalContinuation,
-    ) -> bool:
-        """Attempt one resume, returning whether durable state says dispatch is finished."""
-        error: Exception | None = None
-        outcome: FinalDeliveryOutcome | None = None
-        resume_task = asyncio.create_task(
-            bot.resume_approval_continuation(continuation),
-            name=f"approval-resume-attempt-{continuation.approval_id}",
-        )
-        try:
-            outcome = await resume_task
-        except asyncio.CancelledError:
-            dispatch_task = asyncio.current_task()
-            if dispatch_task is not None and dispatch_task.cancelling():
-                resume_task.cancel()
-                await asyncio.gather(resume_task, return_exceptions=True)
-                raise
-            error = RuntimeError("Approval continuation attempt was interrupted during entity reload")
-        except Exception as caught:
-            error = caught
-        refreshed = await self._read_continuation_with_retry(continuation.approval_id)
-        return await self._settle_resume_result(continuation, refreshed, outcome=outcome, error=error)
-
-    async def _settle_resume_result(
-        self,
-        continuation: ApprovalContinuation,
-        refreshed: ApprovalContinuation | None,
-        *,
-        outcome: FinalDeliveryOutcome | None,
-        error: Exception | None,
-    ) -> bool:
-        """Commit one runner outcome or hand its failure to terminal settlement."""
-        if refreshed is not None and refreshed.state == "ready":
-            if error is not None:
-                logger.warning(
-                    "approval_continuation_resume_retry",
-                    approval_id=continuation.approval_id,
-                    entity_name=continuation.entity_name,
-                    error=str(error),
-                    exc_info=(type(error), error, error.__traceback__),
-                )
-            return False
-        if refreshed is not None and refreshed.state == "pending":
-            return True
-        if refreshed is None or refreshed.state not in {"claimed", "settling"}:
-            return True
-        return await self._settle_claimed_resume(refreshed, outcome=outcome, error=error)
-
-    async def _settle_claimed_resume(
-        self,
-        refreshed: ApprovalContinuation,
-        *,
-        outcome: FinalDeliveryOutcome | None,
-        error: Exception | None,
-    ) -> bool:
-        """Resolve one claimed runner return under the dispatcher claim."""
-        if (
-            refreshed.state == "claimed"
-            and outcome is not None
-            and outcome.terminal_status == "completed"
-            and refreshed.claimant_id is not None
-        ):
-            completed = await asyncio.to_thread(
-                self._continuations.complete,
-                refreshed.approval_id,
-                refreshed.claimant_id,
-            )
-            return completed is not None and completed.state == "completed"
-        reason = self._resume_failure_reason(refreshed, outcome=outcome, error=error)
-        requested = await asyncio.to_thread(
-            self._continuations.request_failure,
-            refreshed.approval_id,
-            reason,
-            claimant_id=refreshed.claimant_id,
-            runtime_generation=self.runtime_generation,
-        )
-        if requested is None:
-            logger.warning(
-                "approval_continuation_resume_failure_not_owned",
-                approval_id=refreshed.approval_id,
-                claimant_id=refreshed.claimant_id,
-            )
-            return True
-        return await self._fail_continuation_until_terminal(requested, reason)
-
-    @staticmethod
-    def _resume_failure_reason(
-        continuation: ApprovalContinuation,
-        *,
-        outcome: FinalDeliveryOutcome | None,
-        error: Exception | None,
-    ) -> str:
-        """Choose the most specific durable reason for an unfinished claim."""
-        if continuation.failure_reason is not None:
-            return continuation.failure_reason
-        if error is not None:
-            return f"Tool approval continuation failed safely after it was claimed: {error}"
-        if outcome is not None and outcome.failure_reason is not None:
-            return outcome.failure_reason
-        return "Tool approval continuation ended without terminal settlement; it was denied safely."
-
-    async def _read_continuation_with_retry(self, approval_id: str) -> ApprovalContinuation | None:
-        """Read one dispatcher row without retiring its only in-process owner on outage."""
-        retry_seconds = _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS
-        while True:
-            try:
-                return await asyncio.to_thread(self._continuations.get, approval_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                logger.warning(
-                    "approval_continuation_dispatch_read_retry",
-                    approval_id=approval_id,
-                    retry_seconds=retry_seconds,
-                    error=str(error),
-                    exc_info=(type(error), error, error.__traceback__),
-                )
-                await asyncio.sleep(retry_seconds)
-                retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
-
-    async def _fail_continuation_until_terminal(
-        self,
-        continuation: ApprovalContinuation,
-        reason: str,
-    ) -> bool:
-        """Retain sole settlement ownership while resolving the live bot each pass."""
-        retry_seconds = _CONTINUATION_DISPATCH_INITIAL_RETRY_SECONDS
-        current = continuation
-        while True:
-            bot = self._failure_settlement_bot(current)
-            if bot is not None:
-                try:
-                    await bot.settle_approval_continuation_failure(current, reason)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    logger.warning(
-                        "approval_continuation_failure_retry",
-                        approval_id=current.approval_id,
-                        retry_seconds=retry_seconds,
-                        error=str(error),
-                        exc_info=(type(error), error, error.__traceback__),
-                    )
-            refreshed = await self._read_continuation_with_retry(current.approval_id)
-            if refreshed is None or refreshed.state in {"completed", "failed"}:
-                return True
-            current = refreshed
-            await asyncio.sleep(retry_seconds)
-            retry_seconds = min(retry_seconds * 2, _CONTINUATION_DISPATCH_MAX_RETRY_SECONDS)
-
-    def _failure_settlement_bot(self, continuation: ApprovalContinuation) -> _ApprovalTransportBot | None:
-        """Resolve the live principal allowed to settle this continuation now."""
-        owner = self.bot_provider(continuation.entity_name)
-        if owner is not None and owner.running:
-            return owner
-        if self._unavailable_entity_reason(continuation.entity_name) is None:
-            return None
-        fallback = self.bot_provider(ROUTER_AGENT_NAME)
-        return fallback if fallback is not None and fallback.running else None
-
-    async def _recover_continuations(self) -> bool:
         complete = True
-        recoverable = await asyncio.to_thread(self._continuations.recoverable)
-        for continuation in filter(self._needs_startup_recovery, recoverable):
-            unavailable_reason = self._unavailable_entity_reason(continuation.entity_name)
-            if unavailable_reason is not None:
-                settled = await self._fail_recovered_continuation(continuation, unavailable_reason)
-                complete = settled and complete
-                continue
-            if continuation.state == "publishing":
-                settled = await self._fail_recovered_continuation(
-                    continuation,
-                    "Tool approval response publication was interrupted; the paused run was not replayed.",
-                )
-                complete = settled and complete
-            elif continuation.state == "pending":
-                complete = await self._recover_pending_continuation(continuation) and complete
-            elif continuation.state == "ready":
-                self._schedule_continuation(continuation)
-            else:
-                settled = await self._fail_recovered_continuation(
-                    continuation,
-                    continuation.failure_reason
-                    or "Tool approval continuation was interrupted after it was claimed; it was not replayed.",
-                )
-                complete = settled and complete
-        return complete
+        for principal_id, continuation in await journal.approval_continuations_for_entities(names):
+            reason = self._unavailable_entity_reason(continuation.entity_name)
+            if reason is not None:
+                complete = await self._discard_unavailable(principal_id, continuation, reason) and complete
+        if not complete:
+            self._startup_cleanup_done = False
+            self._schedule_startup_cleanup_retry()
 
-    async def _recover_pending_continuation(self, continuation: ApprovalContinuation) -> bool:
-        """Repair or fail closed one pending continuation discovered at startup."""
-        recovered, publication_unresolved = await self._attach_recovered_cards(continuation)
-        if publication_unresolved:
-            return False
-        if any(not call.decision_recorded and call.card_event_id is None for call in recovered.calls):
-            return await self._fail_recovered_continuation_if_unchanged(
-                recovered,
-                "Tool approval card was not delivered before the restart.",
-            )
-        if not await self._attached_cards_exist(recovered):
-            return await self._fail_recovered_continuation_if_unchanged(
-                recovered,
-                "Tool approval card no longer exists after room membership changed; the tool was denied safely.",
-            )
-        for call in recovered.calls:
-            if call.decision is not None and not call.decision_recorded and call.card_event_id is not None:
-                await expire_suspended_tool_approval(recovered.room_id, call.card_event_id)
-        return True
-
-    def _needs_startup_recovery(self, continuation: ApprovalContinuation) -> bool:
-        """Return whether startup may act on this row without racing live work."""
-        return continuation.runtime_generation != self.runtime_generation
-
-    async def _attach_recovered_cards(
+    async def _discard_unavailable(
         self,
-        continuation: ApprovalContinuation,
-    ) -> tuple[ApprovalContinuation, bool]:
-        """Repair the crash window between durable card delivery and continuation attachment."""
-        missing_ids = {
-            call.tool_call_id
-            for call in continuation.calls
-            if not call.decision_recorded and call.card_event_id is None
-        }
-        cards = self.cards_provider()
-        if not missing_ids or cards is None:
-            return continuation, False
-        unresolved_attempted_ids: set[str] = set()
-        cursor: tuple[int, str] | None = None
-        while missing_ids:
-            page = await cards.pending_approval_cards(room_id=continuation.room_id, limit=256, after=cursor)
-            if not page:
-                break
-            cursor = (page[-1].created_at_ns, page[-1].transaction_id)
-            for stored in page:
-                content = stored.card.get("content")
-                if not isinstance(content, dict) or content.get("continuation_id") != continuation.approval_id:
-                    continue
-                tool_call_id = content.get("tool_call_id")
-                if not isinstance(tool_call_id, str) or tool_call_id not in missing_ids:
-                    continue
-                if stored.card_event_id is None:
-                    if stored.attempted:
-                        unresolved_attempted_ids.add(tool_call_id)
-                    continue
-                attached = await asyncio.to_thread(
-                    self._continuations.attach_card,
-                    continuation.approval_id,
-                    tool_call_id,
-                    stored.card_event_id,
-                )
-                if attached is not None:
-                    continuation = attached
-                    missing_ids.discard(tool_call_id)
-                    unresolved_attempted_ids.discard(tool_call_id)
-        return continuation, bool(missing_ids & unresolved_attempted_ids)
-
-    async def _attached_cards_exist(self, continuation: ApprovalContinuation) -> bool:
-        """Return whether every unresolved attached card still has durable Matrix ownership."""
-        cards = self.cards_provider()
-        if cards is None:
-            return True
-        for call in continuation.calls:
-            if call.decision_recorded or call.card_event_id is None:
-                continue
-            stored = await cards.pending_approval_card(
-                room_id=continuation.room_id,
-                card_event_id=call.card_event_id,
-            )
-            if stored is None:
-                return False
-        return True
-
-    async def _handle_detached_card_missing(self, card_event_id: str) -> bool:
-        """Fail closed when membership fencing removed a continuation's card row."""
-        continuation = await asyncio.to_thread(self._continuations.for_card_event, card_event_id)
-        if continuation is None:
-            return True
-        return await self._fail_recovered_continuation(
-            continuation,
-            "Tool approval card no longer exists after room membership changed; the tool was denied safely.",
-        )
-
-    async def _fail_recovered_continuation(self, continuation: ApprovalContinuation, reason: str) -> bool:
-        """Hand one recovered failure to the normal serialized dispatcher."""
-        await self.request_continuation_failure(continuation, reason)
-        refreshed = await asyncio.to_thread(self._continuations.get, continuation.approval_id)
-        return refreshed is not None and refreshed.state in {"claimed", "settling", "completed", "failed"}
-
-    async def _fail_recovered_continuation_if_unchanged(
-        self,
+        principal_id: str,
         continuation: ApprovalContinuation,
         reason: str,
     ) -> bool:
-        """Fail one stale-card snapshot only if no live decision changed it."""
-        requested = await asyncio.to_thread(
-            self._continuations.request_failure,
-            continuation.approval_id,
-            reason,
-            claimant_id=continuation.claimant_id,
-            runtime_generation=self.runtime_generation,
-            expected=continuation,
-        )
-        if requested is None:
-            refreshed = await asyncio.to_thread(self._continuations.get, continuation.approval_id)
-            if refreshed is not None and refreshed.state == "ready":
-                self._schedule_continuation(refreshed)
-            return refreshed is None or refreshed.state != "pending"
-        if requested.state in {"claimed", "settling"}:
-            self._schedule_continuation(requested)
-        return requested.state in {"claimed", "settling", "completed", "failed"}
+        """Expire visible cards, then atomically release the removed owner's sources."""
+        assert self.journal_provider is not None
+        store = self.journal_provider().principal(principal_id)
+        current = await store.approval_continuation(continuation.approval_id)
+        if current is None:
+            return True
+        if current.state != "failing":
+            current = await store.request_approval_failure(
+                current.approval_id,
+                reason,
+                expected_state=current.state,
+                expected_generation=current.generation,
+                expected_runtime_generation=current.runtime_generation,
+            )
+            if current is None:
+                return False
+        if not await expire_continuation_approval_cards(current.approval_id):
+            return False
+        if not await self.send_notice(
+            room_id=current.room_id,
+            approval_event_id=current.response_event_id,
+            thread_id=current.thread_id,
+            reason=reason,
+            transaction_id=f"approval-unavailable-{current.approval_id}",
+        ):
+            return False
+        return await store.discard_unavailable_approval_continuation(current.approval_id)
+
+    async def _reconcile_startup_unavailable(self) -> bool:
+        """Clean rows left by entities removed while the process was offline."""
+        journal = None if self.journal_provider is None else self.journal_provider()
+        if journal is None:
+            return True
+        complete = True
+        for principal_id, continuation in await journal.approval_continuations():
+            reason = self._unavailable_entity_reason(continuation.entity_name)
+            if reason is not None:
+                complete = await self._discard_unavailable(principal_id, continuation, reason) and complete
+        return complete
 
     async def _run_on_runtime_loop(
         self,
@@ -750,11 +245,9 @@ class ApprovalMatrixTransport:
         if runtime_loop is None or runtime_loop.is_closed():
             msg = "Approval runtime loop is not available."
             raise RuntimeError(msg)
-
         current_loop = asyncio.get_running_loop()
         if current_loop is runtime_loop:
             return await coroutine_factory()
-
         if is_loop_blocked_by_sync_tool_bridge(runtime_loop):
             msg = (
                 "Cannot perform Matrix approval transport while synchronous FunctionCall.execute() "
@@ -762,7 +255,6 @@ class ApprovalMatrixTransport:
                 "outside the runtime event loop."
             )
             raise ToolApprovalTransportError(msg)
-
         future = asyncio.run_coroutine_threadsafe(coroutine_factory(), runtime_loop)
         try:
             return await asyncio.wrap_future(future)
@@ -780,9 +272,9 @@ class ApprovalMatrixTransport:
         bot = self.bot_provider(agent_name)
         latest_thread_event_id = thread_id
         if bot is not None:
-            resolved_latest_event_id = await bot.latest_thread_event_id_if_needed(room_id, thread_id)
-            if resolved_latest_event_id is not None:
-                latest_thread_event_id = resolved_latest_event_id
+            resolved = await bot.latest_thread_event_id_if_needed(room_id, thread_id)
+            if resolved is not None:
+                latest_thread_event_id = resolved
         return build_thread_relation(
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
@@ -807,12 +299,7 @@ class ApprovalMatrixTransport:
         content: dict[str, Any],
         transaction_id: str,
     ) -> SentApprovalEvent | None:
-        """Send one custom approval event on the current loop.
-
-        The transaction is the caller's, not a fresh one per attempt, so a send
-        repeated after a crash collapses onto the event the homeserver already
-        accepted instead of putting a second card in the room.
-        """
+        """Send one idempotent approval event on the runtime loop."""
         bot = self.bot_provider(ROUTER_AGENT_NAME)
         if bot is None or not bot.running or bot.client is None:
             return None
@@ -837,14 +324,6 @@ class ApprovalMatrixTransport:
             operation="send_approval_event",
         )
         if isinstance(response, nio.RoomSendResponse):
-            sender_user_id = bot.client.user_id
-            if not isinstance(sender_user_id, str) or not sender_user_id:
-                logger.warning(
-                    "Approval sender bot is missing a Matrix user id",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    agent_name=bot.agent_name,
-                )
             return SentApprovalEvent(event_id=str(response.event_id), sent_content=send_content)
         logger.warning(
             "Failed to send approval Matrix event",
@@ -861,7 +340,7 @@ class ApprovalMatrixTransport:
         card_sender: str,
         approval_id: str,
     ) -> str | None:
-        """Find the Matrix event one unacknowledged approval card became."""
+        """Find the Matrix event one unacknowledged card became."""
         return await self._run_on_runtime_loop(
             lambda: self.locate_approval_card_now(room_id, card_sender, approval_id),
         )
@@ -872,15 +351,7 @@ class ApprovalMatrixTransport:
         card_sender: str,
         approval_id: str,
     ) -> str | None:
-        """Read the room for one approval card on the current loop.
-
-        Raising and returning None mean different things to the caller: None is
-        the room's answer that no such card exists, and an exception says the
-        question could not be put. So a transport that cannot read the room
-        raises rather than reporting an absence it did not establish -- a
-        wrong absence there retires the row, and the card it belongs to stays
-        clickable with nothing behind it forever.
-        """
+        """Read the room for one approval card on the runtime loop."""
         bot = self.transport_bot(room_id)
         if bot is None or bot.client is None:
             msg = f"Router approval transport cannot read {room_id} to locate a card"
@@ -900,35 +371,22 @@ class ApprovalMatrixTransport:
     ) -> bool:
         """Edit one previously sent approval event."""
         return await self._run_on_runtime_loop(
-            lambda: self.edit_approval_event_now(
-                room_id,
-                event_id,
-                new_content,
-            ),
+            lambda: self.edit_approval_event_now(room_id, event_id, new_content),
         )
 
-    def _bot_has_approval_room(
-        self,
-        bot: _ApprovalTransportBot,
-        room_id: str,
-    ) -> bool:
+    def _bot_has_approval_room(self, bot: _ApprovalTransportBot, room_id: str) -> bool:
         """Return whether one bot can safely post into an approval room."""
         return bot.client is not None and room_id in bot.approval_room_ids
 
-    def transport_bot(
-        self,
-        room_id: str,
-    ) -> _ApprovalTransportBot | None:
-        """Return the live router bot that owns approval transport for one room."""
+    def transport_bot(self, room_id: str) -> _ApprovalTransportBot | None:
+        """Return the live router bot serving one approval room."""
         bot = self.bot_provider(ROUTER_AGENT_NAME)
         if bot is None or not bot.running or bot.client is None:
             return None
-        if not self._bot_has_approval_room(bot, room_id):
-            return None
-        return bot
+        return bot if self._bot_has_approval_room(bot, room_id) else None
 
     def transport_sender_id(self) -> str | None:
-        """Return the Matrix user id that owns approval cards for this runtime."""
+        """Return the Matrix user id that owns approval cards."""
         bot = self.bot_provider(ROUTER_AGENT_NAME)
         if bot is None or bot.client is None:
             return None
@@ -936,11 +394,7 @@ class ApprovalMatrixTransport:
         return user_id if isinstance(user_id, str) and user_id else None
 
     def transport_device_id(self) -> str | None:
-        """Return the Matrix device that sends approval cards for this runtime.
-
-        The transaction IDs the recovery pass relies on belong to this device,
-        so a card claimed under a different one cannot be presented again.
-        """
+        """Return the Matrix device that sends approval cards."""
         bot = self.bot_provider(ROUTER_AGENT_NAME)
         if bot is None or bot.client is None:
             return None
@@ -948,7 +402,7 @@ class ApprovalMatrixTransport:
         return device_id if isinstance(device_id, str) and device_id else None
 
     def configured_approval_room_ids(self) -> set[str]:
-        """Return rooms currently served by the router approval transport."""
+        """Return rooms currently served by router approval transport."""
         bot = self.bot_provider(ROUTER_AGENT_NAME)
         return set() if bot is None or bot.client is None else set(bot.approval_room_ids)
 
@@ -958,31 +412,30 @@ class ApprovalMatrixTransport:
         event_id: str,
         new_content: dict[str, Any],
     ) -> bool:
-        """Edit one previously sent approval event on the current loop."""
+        """Edit one previously sent approval event on the runtime loop."""
         bot = self.transport_bot(room_id)
         if bot is None or bot.client is None:
             return False
         if not can_send_to_encrypted_room(bot.client, room_id, operation="edit_approval_event"):
             return False
-
-        replacement_content = {key: value for key, value in new_content.items() if key != "thread_id"}
+        replacement = {key: value for key, value in new_content.items() if key != "thread_id"}
         response = await send_room_event_result(
             bot.client,
             room_id,
             "io.mindroom.tool_approval",
-            build_matrix_edit_content(event_id, replacement_content),
+            build_matrix_edit_content(event_id, replacement),
             operation="edit_approval_event",
         )
-        if not isinstance(response, nio.RoomSendResponse):
-            logger.warning(
-                "Failed to edit approval Matrix event",
-                room_id=room_id,
-                event_id=event_id,
-                agent_name=bot.agent_name,
-                response=str(response),
-            )
-            return False
-        return True
+        if isinstance(response, nio.RoomSendResponse):
+            return True
+        logger.warning(
+            "Failed to edit approval Matrix event",
+            room_id=room_id,
+            event_id=event_id,
+            agent_name=bot.agent_name,
+            response=str(response),
+        )
+        return False
 
     async def send_notice(
         self,
@@ -991,19 +444,14 @@ class ApprovalMatrixTransport:
         approval_event_id: str,
         thread_id: str | None,
         reason: str,
+        transaction_id: str | None = None,
     ) -> bool:
-        """Send one approval notice through the router transport bot."""
+        """Send one approval notice through router transport."""
         bot = self.transport_bot(room_id)
         if bot is None or bot.client is None:
-            logger.warning(
-                "Router approval transport unavailable for notice",
-                room_id=room_id,
-                approval_event_id=approval_event_id,
-            )
             return False
         if not can_send_to_encrypted_room(bot.client, room_id, operation="send_approval_notice"):
             return False
-
         content = build_message_content(
             reason,
             thread_event_id=thread_id,
@@ -1015,26 +463,16 @@ class ApprovalMatrixTransport:
             room_id,
             "m.room.message",
             content,
+            transaction_id=transaction_id,
             operation="send_approval_notice",
         )
-        if isinstance(response, nio.RoomSendResponse):
-            return True
-
-        logger.warning(
-            "Failed to send approval notice",
-            room_id=room_id,
-            approval_event_id=approval_event_id,
-            agent_name=bot.agent_name,
-            response=str(response),
-        )
-        return False
+        return isinstance(response, nio.RoomSendResponse)
 
     def reset_startup_cleanup_gate(self) -> None:
-        """Reset one-shot startup approval cleanup state for a fresh runtime start."""
+        """Reset one-shot startup approval cleanup state."""
         self._startup_router_ready_for_cleanup = False
         self._startup_runtime_support_ready_for_cleanup = False
         self._startup_cleanup_done = False
-        self._continuations_recovered = False
         self._startup_cleanup_retry_delay = _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS
         self._startup_cleanup_attempts = 0
         retry = self._startup_cleanup_retry
@@ -1043,48 +481,31 @@ class ApprovalMatrixTransport:
             retry.cancel()
 
     async def cancel_startup_cleanup_retry(self) -> None:
-        """Await the cancellation of a sweep still waiting to try again.
-
-        A retry sleeps for up to half a minute, which is long enough to outlive
-        an orderly shutdown and be torn down as a pending task instead.
-        """
+        """Cancel and await a delayed cleanup pass."""
         retry = self._startup_cleanup_retry
         self._startup_cleanup_retry = None
-        tasks: list[asyncio.Task[None]] = [*self._continuation_tasks]
         if retry is not None and not retry.done():
             retry.cancel()
-            tasks.append(retry)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._continuation_tasks.clear()
+            await asyncio.gather(retry, return_exceptions=True)
 
     async def close(self) -> None:
-        """Close the transport-owned continuation-store handle."""
-        await asyncio.to_thread(self._continuations.close)
+        """Release transport-owned tasks; the orchestrator owns the journal."""
+        await self.cancel_startup_cleanup_retry()
 
     async def mark_startup_runtime_support_ready(self) -> None:
-        """Record that approval runtime support can now perform startup cleanup."""
+        """Record that startup cleanup may use runtime services."""
         self._startup_runtime_support_ready_for_cleanup = True
         await self._run_startup_cleanup_if_ready()
 
     async def handle_bot_ready(self, bot: _ApprovalTransportBot) -> None:
-        """Record router first sync and run startup approval cleanup once all gates are ready."""
+        """Record router first sync and attempt startup cleanup."""
         if bot.agent_name != ROUTER_AGENT_NAME or not bot.running or bot.client is None:
             return
         self._startup_router_ready_for_cleanup = True
         await self._run_startup_cleanup_if_ready()
 
     async def _run_startup_cleanup_if_ready(self) -> None:
-        """Run the startup approval sweep once it can run, and until it finishes.
-
-        Marked done only by a sweep that settled everything it found. A card it
-        could not settle is still in the room and still clickable, with nothing
-        live behind it to answer the click -- and the gates that arm this sweep
-        are startup events that will not happen a second time. So a pass that
-        came up short arranges the next one itself.
-        """
+        """Retry legacy-card and unavailable-owner cleanup until both finish."""
         if (
             self._startup_cleanup_done
             or not self._startup_router_ready_for_cleanup
@@ -1092,47 +513,27 @@ class ApprovalMatrixTransport:
         ):
             return
         async with self._startup_cleanup_lock:
-            if (
-                self._startup_cleanup_done
-                or not self._startup_router_ready_for_cleanup
-                or not self._startup_runtime_support_ready_for_cleanup
-            ):
+            if self._startup_cleanup_done:
                 return
             self._startup_cleanup_attempts += 1
-            if not self._continuations_recovered:
-                try:
-                    # This health read must succeed before the card sweep can
-                    # safely classify any current-format approval as orphaned.
-                    await asyncio.to_thread(self._continuations.recoverable)
-                except Exception:
-                    logger.warning(
-                        "tool_approval_continuation_read_failed",
-                        attempt=self._startup_cleanup_attempts,
-                        exc_info=True,
-                    )
-                    self._schedule_startup_cleanup_retry()
-                    return
             cards_settled = await self._discard_orphaned_approval_cards_on_startup()
-            continuations_recovered = self._continuations_recovered
-            if not self._continuations_recovered:
-                try:
-                    continuations_recovered = await self._recover_continuations()
-                except Exception:
-                    logger.warning(
-                        "tool_approval_continuation_recovery_failed",
-                        attempt=self._startup_cleanup_attempts,
-                        exc_info=True,
-                    )
-                    continuations_recovered = False
-                self._continuations_recovered = continuations_recovered
-            if not continuations_recovered or not cards_settled:
+            try:
+                owners_settled = await self._reconcile_startup_unavailable()
+            except Exception:
+                logger.warning(
+                    "tool_approval_unavailable_owner_cleanup_failed",
+                    attempt=self._startup_cleanup_attempts,
+                    exc_info=True,
+                )
+                owners_settled = False
+            if not cards_settled or not owners_settled:
                 self._schedule_startup_cleanup_retry()
                 return
             self._startup_cleanup_done = True
             self._retire_startup_cleanup_retry()
 
     async def _discard_orphaned_approval_cards_on_startup(self) -> bool:
-        """Discard orphaned approval cards, reporting whether any are still owed."""
+        """Run the retained one-cycle legacy-card settlement."""
         try:
             sweep = await expire_orphaned_approval_cards_on_startup()
         except Exception as exc:
@@ -1143,9 +544,6 @@ class ApprovalMatrixTransport:
                 exc_info=True,
             )
             return False
-        # Said unconditionally, because the healthy outcome of the guards this
-        # sweep runs under is a pass that settles nothing, and a pass that
-        # settled nothing has to be distinguishable from one that never ran.
         logger.info(
             "approval_startup_sweep_finished",
             attempt=self._startup_cleanup_attempts,
@@ -1171,16 +569,7 @@ class ApprovalMatrixTransport:
         return sweep.complete
 
     def _schedule_startup_cleanup_retry(self) -> None:
-        """Arrange one later sweep, since no startup gate will fire again.
-
-        The guard is there so two different callers cannot each arm a task. It
-        deliberately does not count the caller's own retry: a retry runs the
-        sweep itself, so the pass that discovers another attempt is owed is
-        always running inside the very task a plain "is one live?" check would
-        find. Counting it would let a retry block its own successor, and the
-        whole backoff would collapse into one extra attempt -- which is the
-        failure this retry exists to prevent, arriving one round later.
-        """
+        """Arrange a later cleanup pass after a transient failure."""
         pending = self._startup_cleanup_retry
         if pending is not None and not pending.done() and pending is not asyncio.current_task():
             return
@@ -1190,12 +579,6 @@ class ApprovalMatrixTransport:
         )
 
     def _retire_startup_cleanup_retry(self) -> None:
-        """Drop a waiting retry the finished sweep has made pointless.
-
-        Cancelled rather than merely forgotten, because a forgotten task is one
-        no shutdown can reach. The caller's own task is exempt: it is finishing
-        anyway, and cancelling it here would cancel the sweep reporting success.
-        """
         retry = self._startup_cleanup_retry
         self._startup_cleanup_retry = None
         if retry is not None and not retry.done() and retry is not asyncio.current_task():

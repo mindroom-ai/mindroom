@@ -29,8 +29,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.approval_continuation import ApprovalContinuation
-
 
 def _config(tmp_path: Path) -> Config:
     return bind_runtime_paths(
@@ -55,16 +53,6 @@ def _bot(tmp_path: Path) -> AgentBot:
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     install_runtime_journal_support(bot)
-
-    async def request_local_failure(continuation: ApprovalContinuation, reason: str) -> None:
-        await bot._response_runner._approval_responses._request_failure(
-            continuation.approval_id,
-            reason,
-            claimant_id=continuation.claimant_id,
-        )
-
-    bot._response_runner._approval_responses.failure_requester = request_local_failure
-    bot._response_runner._approval_responses.continuation_scheduler = lambda _continuation: None
     wrap_extracted_collaborators(bot)
     return bot
 

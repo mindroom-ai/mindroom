@@ -2435,8 +2435,13 @@ class _FlakyReplayView:
         *,
         limit: int = 256,
         after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
     ) -> PendingPage:
-        return await self.inner.pending(limit=limit, after_receipt_order=after_receipt_order)
+        return await self.inner.pending(
+            limit=limit,
+            after_receipt_order=after_receipt_order,
+            runtime_generation=runtime_generation,
+        )
 
     async def is_pending(self, event_id: str) -> bool:
         if event_id in self.fail_is_pending:

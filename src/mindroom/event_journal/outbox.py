@@ -354,27 +354,6 @@ def load(
     return None if row is None else _delivery(row)
 
 
-def retire_unacknowledged(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    turn_id: str,
-    stage: DeliveryStage,
-    transaction_id: str,
-) -> bool:
-    """Retire one exact delivery after its Matrix absence was established."""
-    retired = transaction.fetchone(
-        """
-        DELETE FROM response_outbox
-        WHERE principal_id = ? AND turn_id = ? AND stage = ?
-          AND transaction_id = ? AND acknowledged_event_id IS NULL
-        RETURNING turn_id
-        """,
-        (principal_id, turn_id, stage.value, transaction_id),
-    )
-    return retired is not None
-
-
 def _delivery(row: Row) -> OutboxDelivery:
     payload = json.loads(row["payload_json"])
     if not isinstance(payload, dict):

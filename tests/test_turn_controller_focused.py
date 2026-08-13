@@ -154,6 +154,7 @@ class _RecordingResponseRunner:
         name: str,
         recovery_proof_ready: Callable[[], bool],
         on_failure: Callable[[], None] | None = None,
+        source_event_ids: tuple[str, ...] = (),  # noqa: ARG002
     ) -> asyncio.Task[None]:
         self.recovery_proof_checks.append(recovery_proof_ready)
         self.failure_callbacks.append(on_failure)

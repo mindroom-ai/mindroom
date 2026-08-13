@@ -42,13 +42,7 @@ SendingDeviceProvider = Callable[[], str | None]
 # says the question could not be put, which is a different fact and must not be
 # mistaken for the first.
 ApprovalCardLocator = Callable[[str, str, str], Awaitable[str | None]]
-DetachedApprovalDecisionHandler = Callable[
-    [str, str, _ApprovalStatus, str | None],
-    Awaitable[tuple[_ApprovalStatus, str | None]],
-]
-DetachedApprovalDecisionReadyHandler = Callable[[str, str], Awaitable[None]]
-DetachedApprovalCardReadyHandler = Callable[[str, str, str], Awaitable[bool]]
-DetachedApprovalCardMissingHandler = Callable[[str], Awaitable[bool]]
+ContinuationReadyHandler = Callable[[str, tuple[str, ...]], Awaitable[None] | None]
 
 _STARTUP_DISCARD_SCAN_PAGE = 256
 # How long shutdown waits on work it does not own. Every such wait is on a
@@ -371,10 +365,7 @@ class _ApprovalManager:
         transport_sender: TransportSenderProvider | None = None,
         sending_device: SendingDeviceProvider | None = None,
         locate_card: ApprovalCardLocator | None = None,
-        detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
-        detached_decision_ready: DetachedApprovalDecisionReadyHandler | None = None,
-        detached_card_ready: DetachedApprovalCardReadyHandler | None = None,
-        detached_card_missing: DetachedApprovalCardMissingHandler | None = None,
+        continuation_ready: ContinuationReadyHandler | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
         self._send_event = sender
@@ -384,10 +375,7 @@ class _ApprovalManager:
         self._transport_sender = transport_sender
         self._sending_device = sending_device
         self._locate_card = locate_card
-        self._detached_decision_handler = detached_decision_handler
-        self._detached_decision_ready = detached_decision_ready
-        self._detached_card_ready = detached_card_ready
-        self._detached_card_missing = detached_card_missing
+        self._continuation_ready = continuation_ready
         self._live_lock = threading.RLock()
         self._resolving_card_event_ids: set[str] = set()
         self._resolved_card_event_ids = _BoundedCardEventIds(_MAX_REMEMBERED_TERMINAL_CARD_IDS)
@@ -406,6 +394,7 @@ class _ApprovalManager:
         *,
         approval_id: str,
         continuation_id: str,
+        continuation_generation: int,
         tool_call_id: str,
         tool_name: str,
         arguments: dict[str, Any],
@@ -440,6 +429,7 @@ class _ApprovalManager:
             status="pending",
         )
         content["continuation_id"] = continuation_id
+        content["continuation_generation"] = continuation_generation
         content["tool_call_id"] = tool_call_id
         transaction_id = _approval_transaction_id(approval_id)
         claimed_card = self._claimed_card_body(content=content, requested_at=requested_at)
@@ -628,13 +618,8 @@ class _ApprovalManager:
                         card_event_id=card_event_id,
                         card=card,
                     )
-                    attached = await self._notify_detached_card_ready(
-                        continuation_id=continuation_id,
-                        tool_call_id=tool_call_id,
-                        card_event_id=card_event_id,
-                    )
                     first_attempt.set()
-                    if acknowledged and attached:
+                    if acknowledged:
                         self._detached_expiry_wakeup.set()
                         return
                     if self._current_shutdown_reason() is not None:
@@ -684,27 +669,6 @@ class _ApprovalManager:
             )
             return False
         return True
-
-    async def _notify_detached_card_ready(
-        self,
-        *,
-        continuation_id: str,
-        tool_call_id: str,
-        card_event_id: str,
-    ) -> bool:
-        if self._detached_card_ready is None:
-            return True
-        try:
-            return await self._detached_card_ready(continuation_id, tool_call_id, card_event_id)
-        except Exception:
-            logger.warning(
-                "detached_approval_continuation_attach_failed",
-                continuation_id=continuation_id,
-                tool_call_id=tool_call_id,
-                card_event_id=card_event_id,
-                exc_info=True,
-            )
-            return False
 
     def _schedule_post_bind_expiry(
         self,
@@ -925,29 +889,17 @@ class _ApprovalManager:
             tally.kept_unusable += 1
             return None
         if identified.card.resolution is not None:
-            content = identified.card.card.get("content")
-            continuation_id = content.get("continuation_id") if isinstance(content, dict) else None
-            tool_call_id = content.get("tool_call_id") if isinstance(content, dict) else None
-            if isinstance(continuation_id, str) and isinstance(tool_call_id, str):
-                restored = await self._restore_recorded_continuation_resolution(
-                    pending,
-                    identified.card,
-                    continuation_id=continuation_id,
-                    tool_call_id=tool_call_id,
-                )
-                if restored is not None:
-                    return restored
             return await self._redeliver_recorded_resolution(pending, identified.card)
-        content = identified.card.card.get("content")
         if (
-            isinstance(content, dict)
-            and isinstance(content.get("continuation_id"), str)
-            and isinstance(content.get("tool_call_id"), str)
+            identified.card.continuation_id is not None
+            and identified.card.continuation_generation is not None
+            and identified.card.tool_call_id is not None
         ):
             self._ensure_detached_expiry_sweep()
             if self._pending_expiry(pending) <= _utcnow():
                 self._detached_expiry_wakeup.set()
             return None
+        content = identified.card.card.get("content")
         if isinstance(content, dict) and isinstance(content.get("continuation_id"), str):
             result = await self._discard_matrix_only_card(
                 pending=pending,
@@ -963,30 +915,6 @@ class _ApprovalManager:
             resolved_by=transport_sender,
         )
         return result.resolved
-
-    async def _restore_recorded_continuation_resolution(
-        self,
-        pending: PendingApproval,
-        stored: StoredApprovalCard,
-        *,
-        continuation_id: str,
-        tool_call_id: str,
-    ) -> bool | None:
-        """Restore one durable continuation decision and redeliver its Matrix resolution."""
-        if stored.resolution is None or self._detached_decision_handler is None:
-            return None
-        recorded_status = stored.resolution.get("status")
-        if recorded_status not in ("approved", "denied", "expired"):
-            return None
-        await self._detached_decision_handler(
-            continuation_id,
-            tool_call_id,
-            recorded_status,
-            cast("str | None", stored.resolution.get("resolution_reason")),
-        )
-        if self._detached_decision_ready is not None:
-            await self._detached_decision_ready(continuation_id, tool_call_id)
-        return await self._redeliver_recorded_resolution(pending, stored)
 
     async def _redeliver_recorded_resolution(self, pending: PendingApproval, stored: StoredApprovalCard) -> bool:
         """Show a decision a previous process committed to but may not have shown.
@@ -1026,36 +954,22 @@ class _ApprovalManager:
         if before_consume is not None:
             await before_consume()
         pending, transaction_id, stored = recovered
-        content = stored.card.get("content")
-        continuation_id = content.get("continuation_id") if isinstance(content, dict) else None
-        tool_call_id = content.get("tool_call_id") if isinstance(content, dict) else None
-        if isinstance(continuation_id, str) and isinstance(tool_call_id, str):
+        if (
+            stored.continuation_id is not None
+            and stored.continuation_generation is not None
+            and stored.tool_call_id is not None
+        ):
             resolved_status, resolved_reason, resolution_was_truncated = self._normalized_resolution_request(
                 pending,
                 status=status,
                 reason=reason,
             )
-            if self._detached_decision_handler is None:
-                return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
-            committed_status, committed_reason = await self._detached_decision_handler(
-                continuation_id,
-                tool_call_id,
-                resolved_status,
-                resolved_reason,
-            )
-            outcome = await self._emit_resolution(
+            outcome = await self._emit_continuation_resolution(
                 pending,
                 transaction_id=transaction_id,
-                status=committed_status,
-                reason=committed_reason,
-                resolved_by=sender_id if committed_status == resolved_status == status else None,
-                after_recorded=(
-                    lambda: (
-                        self._detached_decision_ready(continuation_id, tool_call_id)
-                        if self._detached_decision_ready is not None
-                        else None
-                    )
-                ),
+                status=resolved_status,
+                reason=resolved_reason,
+                resolved_by=sender_id if resolved_status == status else None,
             )
             if outcome is _ResolutionOutcome.RECORDED:
                 self._detached_expiry_wakeup.set()
@@ -1083,9 +997,7 @@ class _ApprovalManager:
         if stored is None:
             with self._live_lock:
                 binding = any(write.card_event_id == card_event_id for write in self._detached_card_writes)
-            if binding:
-                return False
-            return self._detached_card_missing is None or await self._detached_card_missing(card_event_id)
+            return not binding
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
             return False
@@ -1097,44 +1009,48 @@ class _ApprovalManager:
         )
         if pending is None:
             return False
-        content = stored.card.get("content")
-        continuation_id = content.get("continuation_id") if isinstance(content, dict) else None
-        tool_call_id = content.get("tool_call_id") if isinstance(content, dict) else None
-        if (
-            not isinstance(continuation_id, str)
-            or not isinstance(tool_call_id, str)
-            or self._detached_decision_handler is None
-        ):
+        if stored.continuation_id is None or stored.continuation_generation is None or stored.tool_call_id is None:
             return False
         if stored.resolution is not None:
-            restored = await self._restore_recorded_continuation_resolution(
-                pending,
-                stored,
-                continuation_id=continuation_id,
-                tool_call_id=tool_call_id,
-            )
-            return False if restored is None else restored
-        committed_status, committed_reason = await self._detached_decision_handler(
-            continuation_id,
-            tool_call_id,
-            "expired",
-            _DEFAULT_TIMEOUT_REASON,
-        )
-        outcome = await self._emit_resolution(
+            return await self._redeliver_recorded_resolution(pending, stored)
+        outcome = await self._emit_continuation_resolution(
             pending,
             transaction_id=stored.transaction_id,
-            status=committed_status,
-            reason=committed_reason,
+            status="expired",
+            reason=_DEFAULT_TIMEOUT_REASON,
             resolved_by=None,
-            after_recorded=(
-                lambda: (
-                    self._detached_decision_ready(continuation_id, tool_call_id)
-                    if self._detached_decision_ready is not None
-                    else None
-                )
-            ),
         )
         return outcome is _ResolutionOutcome.DELIVERED
+
+    async def expire_continuation_cards(self, continuation_id: str) -> bool:  # noqa: C901
+        """Terminalize every durable card belonging to one failed continuation."""
+        if self._cards is None:
+            return False
+        tally = _SweepTally()
+        for room_id in await self._cards.pending_approval_room_ids():
+            cursor: tuple[int, str] | None = None
+            while True:
+                page = await self._cards.pending_approval_cards(room_id=room_id, limit=256, after=cursor)
+                if not page:
+                    break
+                cursor = (page[-1].created_at_ns, page[-1].transaction_id)
+                for stored in page:
+                    if stored.continuation_id != continuation_id:
+                        continue
+                    if self._send_is_in_flight(stored.transaction_id):
+                        return False
+                    identified = await self._identified_card(room_id, stored, tally=tally)
+                    if identified.card is None:
+                        if not identified.settled:
+                            return False
+                        continue
+                    card_event_id = identified.card.card_event_id
+                    if card_event_id is None or not await self.expire_detached_card(
+                        room_id=room_id,
+                        card_event_id=card_event_id,
+                    ):
+                        return False
+        return True
 
     def configure_transport(
         self,
@@ -1146,10 +1062,7 @@ class _ApprovalManager:
         transport_sender: TransportSenderProvider | None = None,
         sending_device: SendingDeviceProvider | None = None,
         locate_card: ApprovalCardLocator | None = None,
-        detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
-        detached_decision_ready: DetachedApprovalDecisionReadyHandler | None = None,
-        detached_card_ready: DetachedApprovalCardReadyHandler | None = None,
-        detached_card_missing: DetachedApprovalCardMissingHandler | None = None,
+        continuation_ready: ContinuationReadyHandler | None = None,
     ) -> None:
         """Update Matrix transport hooks for an existing runtime manager."""
         if sender is not None:
@@ -1166,29 +1079,8 @@ class _ApprovalManager:
             self._sending_device = sending_device
         if locate_card is not None:
             self._locate_card = locate_card
-        self._configure_detached_handlers(
-            decision_handler=detached_decision_handler,
-            decision_ready=detached_decision_ready,
-            card_ready=detached_card_ready,
-            card_missing=detached_card_missing,
-        )
-
-    def _configure_detached_handlers(
-        self,
-        *,
-        decision_handler: DetachedApprovalDecisionHandler | None,
-        decision_ready: DetachedApprovalDecisionReadyHandler | None,
-        card_ready: DetachedApprovalCardReadyHandler | None,
-        card_missing: DetachedApprovalCardMissingHandler | None,
-    ) -> None:
-        if decision_handler is not None:
-            self._detached_decision_handler = decision_handler
-        if decision_ready is not None:
-            self._detached_decision_ready = decision_ready
-        if card_ready is not None:
-            self._detached_card_ready = card_ready
-        if card_missing is not None:
-            self._detached_card_missing = card_missing
+        if continuation_ready is not None:
+            self._continuation_ready = continuation_ready
 
     def _current_shutdown_reason(self) -> str | None:
         with self._live_lock:
@@ -1236,7 +1128,6 @@ class _ApprovalManager:
         status: _ApprovalStatus,
         reason: str | None,
         resolved_by: str | None,
-        after_recorded: Callable[[], Awaitable[None] | None] | None = None,
     ) -> _ResolutionOutcome:
         if self._edit_event is None:
             return _ResolutionOutcome.UNRECORDED
@@ -1254,11 +1145,66 @@ class _ApprovalManager:
         # shows -- possibly an approval whose tool has already run.
         if not await self._record_resolution(pending.card_event_id, resolution):
             return _ResolutionOutcome.UNRECORDED
-        if after_recorded is not None:
-            recorded_callback = after_recorded()
-            if recorded_callback is not None:
-                await recorded_callback
         if await self._deliver_resolution(pending, resolution, transaction_id):
+            return _ResolutionOutcome.DELIVERED
+        return _ResolutionOutcome.RECORDED
+
+    async def _emit_continuation_resolution(
+        self,
+        pending: PendingApproval,
+        *,
+        transaction_id: str,
+        status: _ApprovalStatus,
+        reason: str | None,
+        resolved_by: str | None,
+    ) -> _ResolutionOutcome:
+        """Commit one native card and exact call before showing its winner."""
+        if self._edit_event is None or self._cards is None:
+            return _ResolutionOutcome.UNRECORDED
+        offered = self._resolved_event_content(
+            pending,
+            status=status,
+            reason=reason,
+            resolved_by=resolved_by,
+            resolved_at=_utcnow(),
+        )
+        try:
+            recorded = await self._cards.resolve_continuation_approval_card(
+                card_event_id=pending.card_event_id,
+                requested_status=status,
+                reason=reason,
+                resolution=offered,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to record a native approval decision before showing it",
+                event_id=pending.card_event_id,
+                exc_info=True,
+            )
+            return _ResolutionOutcome.UNRECORDED
+        if recorded.resolution is None:
+            logger.warning(
+                "A native approval decision was not recorded",
+                event_id=pending.card_event_id,
+            )
+            return _ResolutionOutcome.UNRECORDED
+        if (
+            recorded.recorded
+            and recorded.continuation_ready
+            and recorded.continuation_entity_name is not None
+            and self._continuation_ready is not None
+        ):
+            try:
+                wake = self._continuation_ready(recorded.continuation_entity_name, recorded.source_event_ids)
+                if wake is not None:
+                    await wake
+            except Exception:
+                logger.warning(
+                    "approval_continuation_ready_wake_failed",
+                    event_id=pending.card_event_id,
+                    exc_info=True,
+                )
+        if await self._deliver_resolution(pending, recorded.resolution, transaction_id):
             return _ResolutionOutcome.DELIVERED
         return _ResolutionOutcome.RECORDED
 
@@ -2147,10 +2093,7 @@ def initialize_approval_store(
     transport_sender: TransportSenderProvider | None = None,
     sending_device: SendingDeviceProvider | None = None,
     locate_card: ApprovalCardLocator | None = None,
-    detached_decision_handler: DetachedApprovalDecisionHandler | None = None,
-    detached_decision_ready: DetachedApprovalDecisionReadyHandler | None = None,
-    detached_card_ready: DetachedApprovalCardReadyHandler | None = None,
-    detached_card_missing: DetachedApprovalCardMissingHandler | None = None,
+    continuation_ready: ContinuationReadyHandler | None = None,
 ) -> _ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
@@ -2164,10 +2107,7 @@ def initialize_approval_store(
             transport_sender=transport_sender,
             sending_device=sending_device,
             locate_card=locate_card,
-            detached_decision_handler=detached_decision_handler,
-            detached_decision_ready=detached_decision_ready,
-            detached_card_ready=detached_card_ready,
-            detached_card_missing=detached_card_missing,
+            continuation_ready=continuation_ready,
         )
         return _MANAGER
 
@@ -2184,10 +2124,7 @@ def initialize_approval_store(
         transport_sender=transport_sender,
         sending_device=sending_device,
         locate_card=locate_card,
-        detached_decision_handler=detached_decision_handler,
-        detached_decision_ready=detached_decision_ready,
-        detached_card_ready=detached_card_ready,
-        detached_card_missing=detached_card_missing,
+        continuation_ready=continuation_ready,
     )
     return _MANAGER
 

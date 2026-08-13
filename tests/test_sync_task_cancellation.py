@@ -2089,10 +2089,7 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     # sets. stop() releases the journal lane, which a real bot always has.
     bot._journal_dispatcher = MagicMock(stop=AsyncMock())
     bot._journal_store = MagicMock(close=AsyncMock())
-    bot._response_runner = MagicMock(
-        close=AsyncMock(),
-        drain_approval_responses=AsyncMock(),
-    )
+    bot._response_runner = MagicMock()
     # Owned rather than borrowed, so stop() closes it -- which is what this
     # test's shutdown-intent assertions run through.
     bot._own_journal = MagicMock(close=AsyncMock())
@@ -2106,10 +2103,7 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
 
     bot._emit_agent_lifecycle_event.assert_awaited_once_with("agent:stopped", stop_reason="restart")
     bot.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
-    assert bot._response_runner.mock_calls[:2] == [
-        call.drain_approval_responses(),
-        call.close(),
-    ]
+    assert bot._response_runner.mock_calls == []
 
 
 @pytest.mark.asyncio

@@ -16,7 +16,7 @@ type-check.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -66,6 +66,7 @@ class ReplayView(Protocol):
         *,
         limit: int = ...,
         after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
     ) -> PendingPage:
         """Return actionable events awaiting semantic work, in receipt order."""
         ...
@@ -310,16 +311,6 @@ class OutboxView(Protocol):
         """Return one delivery without claiming it."""
         ...
 
-    async def retire_unacknowledged_delivery(
-        self,
-        *,
-        turn_id: str,
-        stage: DeliveryStage,
-        transaction_id: str,
-    ) -> bool:
-        """Retire an exact row after its Matrix absence was established."""
-        ...
-
     async def acknowledge_delivery(
         self,
         *,
@@ -397,6 +388,17 @@ class ApprovalView(Protocol):
         matched nothing is indistinguishable from one that committed unless
         the store says so.
         """
+        ...
+
+    async def resolve_continuation_approval_card(
+        self,
+        *,
+        card_event_id: str,
+        requested_status: Literal["approved", "denied", "expired"],
+        reason: str | None,
+        resolution: Mapping[str, Any],
+    ) -> RecordedApprovalDecision:
+        """Atomically record one native card and its exact-call decision."""
         ...
 
     async def forget_approval_card(self, *, transaction_id: str) -> None:

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
+
+from mindroom.history.types import HistoryScope
+from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from . import journal
 from .models import DeliveryStage
@@ -45,6 +48,47 @@ class ApprovalCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalMemoryTurn:
+    """The original history fields consumed by conversation memory."""
+
+    sender: str
+    body: str
+
+
+def _origin_to_dict(origin: TurnOrigin) -> dict[str, object]:
+    """Serialize exact hook origin without coupling the store to responses."""
+    return {
+        "transport_sender_id": origin.transport_sender_id,
+        "requester_id": origin.requester_id,
+        "sender_entity_name": origin.sender_entity_name,
+        "requester_entity_name": origin.requester_entity_name,
+        "sender_kind": origin.sender_kind.value,
+        "requester_kind": origin.requester_kind.value,
+        "intent": origin.intent.value,
+        "source_kind": origin.source_kind,
+        "trust": origin.trust.value,
+    }
+
+
+def _origin_from_dict(value: object) -> TurnOrigin | None:
+    """Restore one exact hook origin from the durable snapshot."""
+    if not isinstance(value, dict):
+        return None
+    stored = cast("dict[str, object]", value)
+    return TurnOrigin(
+        transport_sender_id=cast("str", stored["transport_sender_id"]),
+        requester_id=cast("str", stored["requester_id"]),
+        sender_entity_name=cast("str | None", stored.get("sender_entity_name")),
+        requester_entity_name=cast("str | None", stored.get("requester_entity_name")),
+        sender_kind=SenderKind(cast("str", stored["sender_kind"])),
+        requester_kind=SenderKind(cast("str", stored["requester_kind"])),
+        intent=TurnIntent(cast("str", stored["intent"])),
+        source_kind=cast("str", stored["source_kind"]),
+        trust=TurnTrust(cast("str", stored["trust"])),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalContinuation:
     """The MindRoom context required to continue one persisted Agno pause."""
 
@@ -59,8 +103,21 @@ class ApprovalContinuation:
     response_event_id: str
     source_event_ids: tuple[str, ...]
     calls: tuple[ApprovalCall, ...]
-    snapshot: Mapping[str, object]
     state: ApprovalContinuationState
+    execution_identity: dict[str, object] = field(default_factory=dict)
+    runtime_model_name: str | None = None
+    team_member_names: tuple[str, ...] = ()
+    team_mode: str | None = None
+    request_body: str = ""
+    transport_sender_id: str | None = None
+    source_kind: str = "message"
+    attachment_ids: tuple[str, ...] = ()
+    message_received_depth: int = 0
+    history_scope: HistoryScope | None = None
+    origin: TurnOrigin | None = None
+    memory_prompt: str | None = None
+    memory_thread_history: tuple[ApprovalMemoryTurn, ...] = ()
+    thread_summary_message_count_hint: int | None = None
     runtime_generation: str | None = None
     failure_reason: str | None = None
     generation: int = 0
@@ -76,7 +133,22 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "thread_id": continuation.thread_id,
         "requester_id": continuation.requester_id,
         "response_event_id": continuation.response_event_id,
-        "snapshot": dict(continuation.snapshot),
+        "execution_identity": continuation.execution_identity,
+        "runtime_model_name": continuation.runtime_model_name,
+        "team_member_names": list(continuation.team_member_names),
+        "team_mode": continuation.team_mode,
+        "request_body": continuation.request_body,
+        "transport_sender_id": continuation.transport_sender_id,
+        "source_kind": continuation.source_kind,
+        "attachment_ids": list(continuation.attachment_ids),
+        "message_received_depth": continuation.message_received_depth,
+        "history_scope": continuation.history_scope.to_metadata() if continuation.history_scope is not None else None,
+        "origin": _origin_to_dict(continuation.origin) if continuation.origin is not None else None,
+        "memory_prompt": continuation.memory_prompt,
+        "memory_thread_history": [
+            {"sender": turn.sender, "body": turn.body} for turn in continuation.memory_thread_history
+        ],
+        "thread_summary_message_count_hint": continuation.thread_summary_message_count_hint,
     }
 
 
@@ -133,10 +205,6 @@ def _from_rows(
         msg = f"Approval continuation {row['approval_id']!r} has a non-object context"
         raise TypeError(msg)
     stored = cast("dict[str, Any]", context)
-    raw_snapshot = stored.get("snapshot", {})
-    if not isinstance(raw_snapshot, dict):
-        msg = f"Approval continuation {row['approval_id']!r} has a non-object snapshot"
-        raise TypeError(msg)
     calls = tuple(
         ApprovalCall(
             tool_call_id=str(call["tool_call_id"]),
@@ -160,12 +228,62 @@ def _from_rows(
         response_event_id=cast("str", stored["response_event_id"]),
         source_event_ids=tuple(str(source["event_id"]) for source in source_rows),
         calls=calls,
-        snapshot=cast("dict[str, object]", raw_snapshot),
         state=cast("ApprovalContinuationState", row["state"]),
+        execution_identity=cast("dict[str, object]", stored.get("execution_identity", {})),
+        runtime_model_name=cast("str | None", stored.get("runtime_model_name")),
+        team_member_names=tuple(cast("list[str]", stored.get("team_member_names", []))),
+        team_mode=cast("str | None", stored.get("team_mode")),
+        request_body=cast("str", stored.get("request_body", "")),
+        transport_sender_id=cast("str | None", stored.get("transport_sender_id")),
+        source_kind=cast("str", stored.get("source_kind", "message")),
+        attachment_ids=tuple(cast("list[str]", stored.get("attachment_ids", []))),
+        message_received_depth=int(stored.get("message_received_depth", 0)),
+        history_scope=HistoryScope.from_metadata(stored.get("history_scope")),
+        origin=_origin_from_dict(stored.get("origin")),
+        memory_prompt=cast("str | None", stored.get("memory_prompt")),
+        memory_thread_history=tuple(
+            ApprovalMemoryTurn(
+                sender=cast("str", turn["sender"]),
+                body=cast("str", turn["body"]),
+            )
+            for turn in cast("list[dict[str, object]]", stored.get("memory_thread_history", []))
+        ),
+        thread_summary_message_count_hint=cast("int | None", stored.get("thread_summary_message_count_hint")),
         runtime_generation=cast("str | None", row["runtime_generation"]),
         failure_reason=cast("str | None", row["failure_reason"]),
         generation=int(row["generation"]),
     )
+
+
+def _insert_calls(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+    generation: int,
+    calls: tuple[ApprovalCall, ...],
+) -> None:
+    """Insert one ordered exact-call generation."""
+    for ordinal, call in enumerate(calls):
+        transaction.execute(
+            """
+            INSERT INTO approval_continuation_calls (
+                principal_id, approval_id, generation, tool_call_id, call_ordinal,
+                tool_name, invoking_agent, expires_at_ns, decision, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                principal_id,
+                approval_id,
+                generation,
+                call.tool_call_id,
+                ordinal,
+                call.tool_name,
+                call.invoking_agent,
+                call.expires_at_ns,
+                call.decision.value if call.decision is not None else None,
+                call.reason,
+            ),
+        )
 
 
 def create(
@@ -220,27 +338,13 @@ def create(
             """,
             (principal_id, continuation.approval_id, event_id, ordinal),
         )
-    for ordinal, call in enumerate(continuation.calls):
-        transaction.execute(
-            """
-            INSERT INTO approval_continuation_calls (
-                principal_id, approval_id, generation, tool_call_id, call_ordinal,
-                tool_name, invoking_agent, expires_at_ns, decision, reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                principal_id,
-                continuation.approval_id,
-                continuation.generation,
-                call.tool_call_id,
-                ordinal,
-                call.tool_name,
-                call.invoking_agent,
-                call.expires_at_ns,
-                call.decision.value if call.decision is not None else None,
-                call.reason,
-            ),
-        )
+    _insert_calls(
+        transaction,
+        principal_id,
+        continuation.approval_id,
+        continuation.generation,
+        continuation.calls,
+    )
     return _load(transaction, principal_id, approval_id=continuation.approval_id)
 
 
@@ -259,6 +363,58 @@ def for_source(
         (principal_id, event_id),
     )
     return None if row is None else _load(transaction, principal_id, approval_id=str(row["approval_id"]))
+
+
+def get(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+) -> ApprovalContinuation | None:
+    """Return one principal-owned continuation by its stable identity."""
+    return _load(transaction, principal_id, approval_id=approval_id)
+
+
+def for_entities(
+    transaction: Transaction,
+    entity_names: set[str],
+) -> tuple[tuple[str, ApprovalContinuation], ...]:
+    """Return every nonterminal continuation owned by exact managed entities."""
+    if not entity_names:
+        return ()
+    ordered_names = sorted(entity_names)
+    placeholders = ", ".join("?" for _name in ordered_names)
+    rows = transaction.fetchall(
+        f"""
+        SELECT principal_id, approval_id FROM approval_continuations
+        WHERE entity_name IN ({placeholders})
+        ORDER BY created_at_ns, approval_id
+        """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
+        tuple(ordered_names),
+    )
+    return _load_owners(transaction, rows)
+
+
+def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple[str, ApprovalContinuation], ...]:
+    """Load ordered continuation identities with their owning principals."""
+    found: list[tuple[str, ApprovalContinuation]] = []
+    for row in rows:
+        principal_id = str(row["principal_id"])
+        continuation = _load(transaction, principal_id, approval_id=str(row["approval_id"]))
+        if continuation is not None:
+            found.append((principal_id, continuation))
+    return tuple(found)
+
+
+def all_owners(transaction: Transaction) -> tuple[tuple[str, ApprovalContinuation], ...]:
+    """Return every nonterminal continuation with its journal principal."""
+    rows = transaction.fetchall(
+        """
+        SELECT principal_id, approval_id FROM approval_continuations
+        ORDER BY created_at_ns, approval_id
+        """,
+    )
+    return _load_owners(transaction, rows)
 
 
 def claim(
@@ -327,27 +483,7 @@ def advance(
     )
     if updated is None:
         return None
-    for ordinal, call in enumerate(calls):
-        transaction.execute(
-            """
-            INSERT INTO approval_continuation_calls (
-                principal_id, approval_id, generation, tool_call_id, call_ordinal,
-                tool_name, invoking_agent, expires_at_ns, decision, reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                principal_id,
-                approval_id,
-                next_generation,
-                call.tool_call_id,
-                ordinal,
-                call.tool_name,
-                call.invoking_agent,
-                call.expires_at_ns,
-                call.decision.value if call.decision is not None else None,
-                call.reason,
-            ),
-        )
+    _insert_calls(transaction, principal_id, approval_id, next_generation, calls)
     return _load(transaction, principal_id, approval_id=approval_id)
 
 
@@ -358,16 +494,26 @@ def request_failure(
     approval_id: str,
     reason: str,
     expected_state: ApprovalContinuationState,
+    expected_generation: int,
+    expected_runtime_generation: str | None,
 ) -> ApprovalContinuation | None:
     """Fence one observed continuation state against any later execution."""
     updated = transaction.fetchone(
         """
         UPDATE approval_continuations
         SET state = 'failing', failure_reason = ?
-        WHERE principal_id = ? AND approval_id = ? AND state = ?
+        WHERE principal_id = ? AND approval_id = ? AND state = ? AND generation = ?
+          AND runtime_generation IS NOT DISTINCT FROM ?
         RETURNING approval_id
         """,
-        (reason, principal_id, approval_id, expected_state),
+        (
+            reason,
+            principal_id,
+            approval_id,
+            expected_state,
+            expected_generation,
+            expected_runtime_generation,
+        ),
     )
     return None if updated is None else _load(transaction, principal_id, approval_id=approval_id)
 
@@ -391,6 +537,24 @@ def finish(
         (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
     )
     if delivered is None:
+        return False
+    journal.settle_many(transaction, principal_id, continuation.source_event_ids)
+    transaction.execute(
+        "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
+        (principal_id, approval_id),
+    )
+    return True
+
+
+def discard_unavailable(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+) -> bool:
+    """Release a permanently unavailable owner's sources after visible card cleanup."""
+    continuation = _load(transaction, principal_id, approval_id=approval_id)
+    if continuation is None or continuation.state != "failing":
         return False
     journal.settle_many(transaction, principal_id, continuation.source_event_ids)
     transaction.execute(

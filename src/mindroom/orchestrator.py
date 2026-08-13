@@ -125,7 +125,6 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.approval_continuation import ApprovalContinuation
     from mindroom.event_journal import ApprovalView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
 
@@ -294,6 +293,7 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
             cards_provider=self._approval_cards,
+            journal_provider=self._shared_journal_store,
             entity_configured=lambda name: (
                 self.config is not None and (name in self.config.agents or name in self.config.teams)
             ),
@@ -317,23 +317,6 @@ class _MultiAgentOrchestrator:
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler:
         """Return the orchestrator-owned background knowledge refresh scheduler."""
         return self._knowledge_refresh_scheduler
-
-    @property
-    def approval_runtime_generation(self) -> str:
-        """Return the current process generation for live approval ownership."""
-        return self._approval_transport.runtime_generation
-
-    def schedule_approval_continuation(self, continuation: ApprovalContinuation) -> None:
-        """Wake the sole transport dispatcher for one ready continuation."""
-        self._approval_transport.schedule_continuation(continuation)
-
-    async def request_approval_continuation_failure(
-        self,
-        continuation: ApprovalContinuation,
-        reason: str,
-    ) -> None:
-        """Persist failure intent for transport-owned terminal settlement."""
-        await self._approval_transport.request_continuation_failure(continuation, reason)
 
     def entity_first_sync_complete(self, entity_name: str) -> bool | None:
         """Return first-sync readiness for the current entity generation."""
@@ -836,7 +819,6 @@ class _MultiAgentOrchestrator:
                 self.storage_path,
                 config_path=self.config_path,
                 journal_store=self._shared_journal_store(),
-                approval_continuations=self._approval_transport.continuations,
             ),
         )
         bot.orchestrator = self

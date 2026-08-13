@@ -19,7 +19,7 @@ from mindroom.approval_manager import (
     ApprovalCardLocator,
     ApprovalRoomProvider,
     ApprovalStartupSweep,
-    DetachedApprovalCardReadyHandler,
+    ContinuationReadyHandler,
     MatrixEventEditor,
     MatrixEventSender,
     SendingDeviceProvider,
@@ -51,6 +51,7 @@ __all__ = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "evaluate_tool_approval",
+    "expire_continuation_approval_cards",
     "expire_orphaned_approval_cards_on_startup",
     "expire_suspended_tool_approval",
     "handle_matrix_approval_action",
@@ -226,6 +227,7 @@ async def send_suspended_tool_approval(
     *,
     approval_id: str,
     continuation_id: str,
+    continuation_generation: int,
     tool_call_id: str,
     timeout_seconds: float,
 ) -> SentApprovalEvent | None:
@@ -237,6 +239,7 @@ async def send_suspended_tool_approval(
     return await manager.create_detached_approval(
         approval_id=approval_id,
         continuation_id=continuation_id,
+        continuation_generation=continuation_generation,
         tool_call_id=tool_call_id,
         tool_name=call.tool_name,
         arguments=deepcopy(call.arguments),
@@ -293,10 +296,7 @@ def initialize_approval_runtime(
     transport_sender: TransportSenderProvider,
     sending_device: SendingDeviceProvider,
     locate_card: ApprovalCardLocator,
-    detached_decision_handler: approval_manager.DetachedApprovalDecisionHandler | None = None,
-    detached_decision_ready: approval_manager.DetachedApprovalDecisionReadyHandler | None = None,
-    detached_card_ready: DetachedApprovalCardReadyHandler | None = None,
-    detached_card_missing: approval_manager.DetachedApprovalCardMissingHandler | None = None,
+    continuation_ready: ContinuationReadyHandler | None = None,
 ) -> None:
     """Initialize the approval runtime behind the public approval seam."""
     approval_manager.initialize_approval_store(
@@ -308,10 +308,7 @@ def initialize_approval_runtime(
         transport_sender=transport_sender,
         sending_device=sending_device,
         locate_card=locate_card,
-        detached_decision_handler=detached_decision_handler,
-        detached_decision_ready=detached_decision_ready,
-        detached_card_ready=detached_card_ready,
-        detached_card_missing=detached_card_missing,
+        continuation_ready=continuation_ready,
     )
 
 
@@ -326,6 +323,12 @@ async def expire_suspended_tool_approval(room_id: str, card_event_id: str) -> bo
             card_event_id=card_event_id,
         )
     )
+
+
+async def expire_continuation_approval_cards(continuation_id: str) -> bool:
+    """Expire every unresolved Matrix card for one continuation."""
+    manager = approval_manager.get_approval_store()
+    return False if manager is None else await manager.expire_continuation_cards(continuation_id)
 
 
 async def expire_orphaned_approval_cards_on_startup() -> ApprovalStartupSweep:

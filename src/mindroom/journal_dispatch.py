@@ -107,6 +107,7 @@ class JournalDispatcher:
     room_for_id: Callable[[str], nio.MatrixRoom]
     on_persist_failure: Callable[[], None] | None = None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
+    runtime_generation: str = "unmanaged"
     # Replaying a turn needs the agent fleet up, so the orchestrator releases
     # turn-backed replay separately from the rest of startup. Until it does,
     # those events stay pending; everything else drains immediately.
@@ -127,6 +128,7 @@ class JournalDispatcher:
         self._worker = PendingEventWorker(
             store=self.store,
             handle=self._run_event,
+            runtime_generation=self.runtime_generation,
             deferral_is_live=self._deferral_is_live,
             retained_event_ids=self._retained_live_event_ids,
             release_retained=self._forget_live_events,

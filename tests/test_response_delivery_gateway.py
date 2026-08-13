@@ -131,33 +131,6 @@ def _gateway(
     )
 
 
-async def test_previous_device_recovery_includes_frozen_reply_target(tmp_path: Path) -> None:
-    """A router notice replying to an approval bubble must be found after relogin."""
-    gateway = _gateway(tmp_path)
-    delivery = SimpleNamespace(
-        turn_id="$source",
-        room_id=_ROOM_ID,
-        payload={
-            "msgtype": "m.text",
-            "body": "Agent removed",
-            "m.relates_to": {
-                "rel_type": "m.thread",
-                "event_id": "$thread",
-                "is_falling_back": False,
-                "m.in_reply_to": {"event_id": "$waiting"},
-            },
-        },
-    )
-
-    with patch(
-        "mindroom.delivery_gateway.find_response_event_ids_via_room_messages",
-        new=AsyncMock(return_value=frozenset({"$terminal"})),
-    ) as find:
-        assert await gateway._delivered_under_a_previous_device(delivery) == "$terminal"
-
-    assert find.await_args.kwargs["source_event_ids"] == ("$waiting",)
-
-
 class TestTurnDeliveryGoesThroughTheOutbox:
     """A send that belongs to a turn is durable before it is attempted."""
 

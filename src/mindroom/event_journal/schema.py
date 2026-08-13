@@ -217,6 +217,11 @@ _TABLES = (
         -- card is answered the moment this is set, whether or not the edit
         -- carrying it reached the room.
         resolution_json TEXT,
+        -- Present only for native persisted-run approvals. Legacy rows keep
+        -- these NULL and can never authorize continuation execution.
+        continuation_id TEXT,
+        continuation_generation BIGINT,
+        tool_call_id TEXT,
         membership_epoch BIGINT NOT NULL,
         created_at_ns BIGINT NOT NULL,
         PRIMARY KEY (principal_id, transaction_id)

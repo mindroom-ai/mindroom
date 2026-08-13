@@ -24,9 +24,9 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.approval_continuation import ApprovalContinuation
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import ApprovalContinuation
     from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.events import ToolTraceEntry

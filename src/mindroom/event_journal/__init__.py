@@ -13,7 +13,7 @@ from mindroom.history_recovery import (
     RoomHistoryRecovery,
 )
 
-from .approval_continuations import ApprovalCall, ApprovalContinuation, ApprovalDecision
+from .approval_continuations import ApprovalCall, ApprovalContinuation, ApprovalDecision, ApprovalMemoryTurn
 from .approvals import RecordedApprovalDecision, StoredApprovalCard
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership import MembershipFence, MembershipView
@@ -62,6 +62,7 @@ __all__ = [
     "ApprovalCall",
     "ApprovalContinuation",
     "ApprovalDecision",
+    "ApprovalMemoryTurn",
     "ApprovalView",
     "ConversationCursor",
     "ConversationPage",

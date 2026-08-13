@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import batched
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.history_recovery import (
     HistoryRecoveryOutcome,
@@ -86,6 +86,7 @@ class PrincipalStore:
         *,
         limit: int = _DEFAULT_PENDING_LIMIT,
         after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
     ) -> PendingPage:
         """Return actionable events awaiting semantic work, in receipt order."""
         return await self._backend.read(
@@ -94,6 +95,7 @@ class PrincipalStore:
                 self._principal_id,
                 limit=limit,
                 after_receipt_order=after_receipt_order,
+                runtime_generation=runtime_generation,
             ),
         )
 
@@ -606,24 +608,6 @@ class PrincipalStore:
             ),
         )
 
-    async def retire_unacknowledged_delivery(
-        self,
-        *,
-        turn_id: str,
-        stage: DeliveryStage,
-        transaction_id: str,
-    ) -> bool:
-        """Retire an exact row after its Matrix absence was established."""
-        return await self._backend.write(
-            lambda transaction: outbox.retire_unacknowledged(
-                transaction,
-                self._principal_id,
-                turn_id=turn_id,
-                stage=stage,
-                transaction_id=transaction_id,
-            ),
-        )
-
     async def acknowledge_delivery(
         self,
         *,
@@ -785,6 +769,26 @@ class PrincipalStore:
             ),
         )
 
+    async def resolve_continuation_approval_card(
+        self,
+        *,
+        card_event_id: str,
+        requested_status: Literal["approved", "denied", "expired"],
+        reason: str | None,
+        resolution: Mapping[str, Any],
+    ) -> RecordedApprovalDecision:
+        """Atomically record one native card and its exact-call decision."""
+        return await self._backend.write(
+            lambda transaction: approvals.resolve_continuation(
+                transaction,
+                self._principal_id,
+                card_event_id=card_event_id,
+                requested_status=requested_status,
+                reason=reason,
+                resolution=resolution,
+            ),
+        )
+
     async def forget_approval_card(self, *, transaction_id: str) -> None:
         """Drop one approval card that has reached a terminal state."""
         await self._backend.write(
@@ -861,6 +865,16 @@ class PrincipalStore:
             ),
         )
 
+    async def approval_continuation(self, approval_id: str) -> ApprovalContinuation | None:
+        """Return one principal-owned paused run by its stable identity."""
+        return await self._backend.read(
+            lambda transaction: approval_continuations.get(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+            ),
+        )
+
     async def claim_approval_continuation(
         self,
         approval_id: str,
@@ -905,6 +919,8 @@ class PrincipalStore:
         reason: str,
         *,
         expected_state: ApprovalContinuationState,
+        expected_generation: int = 0,
+        expected_runtime_generation: str | None = None,
     ) -> ApprovalContinuation | None:
         """Fence one observed continuation state against any later execution."""
         return await self._backend.write(
@@ -914,6 +930,8 @@ class PrincipalStore:
                 approval_id=approval_id,
                 reason=reason,
                 expected_state=expected_state,
+                expected_generation=expected_generation,
+                expected_runtime_generation=expected_runtime_generation,
             ),
         )
 
@@ -921,6 +939,16 @@ class PrincipalStore:
         """Settle one paused run only after its FINAL delivery is acknowledged."""
         return await self._backend.write(
             lambda transaction: approval_continuations.finish(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+            ),
+        )
+
+    async def discard_unavailable_approval_continuation(self, approval_id: str) -> bool:
+        """Release sources after permanent owner loss and visible card cleanup."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.discard_unavailable(
                 transaction,
                 self._principal_id,
                 approval_id=approval_id,
@@ -1187,6 +1215,19 @@ class EventJournalStore:
             msg = "An event-journal principal requires an identity"
             raise ValueError(msg)
         return PrincipalStore(_backend=self.backend, _principal_id=principal_id)
+
+    async def approval_continuations_for_entities(
+        self,
+        entity_names: set[str],
+    ) -> tuple[tuple[str, ApprovalContinuation], ...]:
+        """Return nonterminal continuation owners for unavailable entities."""
+        return await self.backend.read(
+            lambda transaction: approval_continuations.for_entities(transaction, entity_names),
+        )
+
+    async def approval_continuations(self) -> tuple[tuple[str, ApprovalContinuation], ...]:
+        """Return every nonterminal continuation with its journal principal."""
+        return await self.backend.read(approval_continuations.all_owners)
 
     async def generation(self, *, new_generation: str) -> str:
         """Return this database's identity, minting it the first time it is opened.
