@@ -1076,12 +1076,18 @@ class FencedRoomRecorder:
         room_id: str,
         *,
         source: DepartureSource,
-        report_event_id: str | None = None,
+        report_observation_id: str | None = None,
     ) -> DepartureOutcome:
         """Record one invalidation and hand back the room's new epoch."""
-        del source, report_event_id
+        del report_observation_id
         self.fenced_room_ids.append(room_id)
-        return DepartureOutcome(DepartureObservation.FENCED, len(self.fenced_room_ids), 0)
+        epoch = len(self.fenced_room_ids)
+        return DepartureOutcome(
+            DepartureObservation.FENCED,
+            epoch,
+            0,
+            reported_fence_epoch=(epoch if source is DepartureSource.REPORTED else None),
+        )
 
     async def cleanup_fenced_departure(self, room_id: str, cleanup: Callable[[], None]) -> None:
         """Run cleanup for every departure this focused recorder accepted."""
@@ -1093,8 +1099,10 @@ class FencedRoomRecorder:
         room_id: str,
         *,
         cleanup: Callable[[], None] | None = None,
+        expected_membership_epoch: int | None = None,
     ) -> None:
         """Accept a confirmed join without recording it."""
+        del expected_membership_epoch
         if cleanup is not None and room_id in self.fenced_room_ids:
             cleanup()
 

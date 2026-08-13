@@ -1755,7 +1755,11 @@ def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> Non
     assert membership.joined_room_ids == {"!joined:localhost", "!window:localhost"}
     assert membership.departed_room_ids == {"!kicked:localhost", "!banned:localhost"}
     assert sorted(membership.departures) == ["!banned:localhost", "!kicked:localhost"]
-    assert membership.departure_event_ids == (None, None)
+    assert membership.departure_observation_ids == (
+        "sliding:pos:!kicked:localhost",
+        "sliding:pos:!banned:localhost",
+    )
+    assert membership.departure_rejoined_after == (False, False)
 
 
 def test_sliding_own_membership_counts_a_rejoined_room_departing_twice() -> None:
@@ -1778,7 +1782,8 @@ def test_sliding_own_membership_counts_a_rejoined_room_departing_twice() -> None
     membership = own_membership_from_sliding_sync(response, self_user_id=user_id)
 
     assert membership.departures == ("!churned:localhost", "!churned:localhost")
-    assert membership.departure_event_ids == ("$leave", "$kick")
+    assert membership.departure_observation_ids == ("$leave", "$kick")
+    assert membership.departure_rejoined_after == (True, False)
 
 
 def _member_event(event_id: str, *, user_id: str, membership: str, ts: int) -> nio.Event:
@@ -1881,10 +1886,10 @@ async def test_sliding_sync_remote_departure_fences_and_purges(
             room_id: str,
             *,
             source: DepartureSource,
-            report_event_id: str | None = None,
+            report_observation_id: str | None = None,
         ) -> DepartureOutcome:
             """Record the fenced room, then wait to be released."""
-            del report_event_id
+            del report_observation_id
             fenced_room_ids.append(room_id)
             fence_started.set()
             await allow_fence_finish.wait()
@@ -2108,14 +2113,13 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     bot._call_manager = None
     bot._response_runner = MagicMock()
     bot._response_runner.drain_inbox_responses = AsyncMock(return_value=True)
+    bot._response_runner.wait_for_source_owned_inbox_responses = AsyncMock()
 
     await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
     bot._emit_agent_lifecycle_event.assert_awaited_once_with("agent:stopped", stop_reason="restart")
     bot.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
-    bot._response_runner.drain_inbox_responses.assert_awaited_once_with(
-        shutdown_intent=SYNC_RESTART_SHUTDOWN,
-    )
+    bot._response_runner.wait_for_source_owned_inbox_responses.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

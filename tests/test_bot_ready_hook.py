@@ -30,7 +30,6 @@ from mindroom.matrix import journal_ingress
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from tests.bot_helpers import FencedRoomRecorder
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -561,6 +560,21 @@ async def test_replaying_one_sync_response_fences_its_departures_once(
 
 
 @pytest.mark.asyncio
+async def test_replayed_truncated_leave_cannot_fence_a_rejoined_membership(tmp_path: Path) -> None:
+    """The response token identifies a leave whose timeline omits its event."""
+    bot = _agent_bot(tmp_path)
+    room_id = "!departed:localhost"
+    response = _sync_response_with_room_membership_section(room_id, membership="leave")
+
+    await bot._apply_own_room_membership_from_sync(response)
+    await bot._membership_fence.note_membership_restarted(room_id)
+    epoch_after_rejoin = await bot._journal_principal().membership_epoch(room_id)
+    await bot._apply_own_room_membership_from_sync(response)
+
+    assert await bot._journal_principal().membership_epoch(room_id) == epoch_after_rejoin
+
+
+@pytest.mark.asyncio
 async def test_replayed_departure_cannot_leave_a_confirmed_join_fenced(tmp_path: Path) -> None:
     """A duplicated old leave report cannot invalidate a confirmed rejoin."""
     bot = _agent_bot(tmp_path)
@@ -658,13 +672,17 @@ async def test_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(
             },
         },
     )
-    recorder = FencedRoomRecorder()
-    bot._membership_fence.store = recorder
-    fenced_room_ids = recorder.fenced_room_ids
-
     await bot._apply_own_room_membership_from_sync(response)
 
-    assert fenced_room_ids == [room_id]
+    principal = bot._journal_principal()
+    assert await principal.membership_epoch(room_id) == 1
+    registered: list[str] = []
+    assert await principal.run_if_membership_epoch(
+        room_id=room_id,
+        expected_membership_epoch=1,
+        operation=lambda: registered.append(room_id),
+    )
+    assert registered == [room_id]
 
 
 @pytest.mark.asyncio

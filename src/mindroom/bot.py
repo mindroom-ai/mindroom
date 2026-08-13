@@ -1840,7 +1840,8 @@ class AgentBot:
         """Fence departed rooms and report current membership for one sync response."""
         await self._membership_fence.fence_reported_departures(
             membership.departures,
-            event_ids=membership.departure_event_ids,
+            observation_ids=membership.departure_observation_ids,
+            rejoined_after=membership.departure_rejoined_after,
         )
         departed_room_ids = membership.departed_room_ids
         for room_id in departed_room_ids:
@@ -2051,7 +2052,7 @@ class AgentBot:
             # A same-process replacement shares interactive claim ownership
             # with this generation. It cannot safely replay while an old
             # detached response can still restore or commit that claim.
-            await self._response_runner.drain_inbox_responses(shutdown_intent=shutdown_intent)
+            await self._response_runner.wait_for_source_owned_inbox_responses()
 
         if self.agent_name == ROUTER_AGENT_NAME:
             cleared_queued_tasks = clear_deferred_overdue_tasks()

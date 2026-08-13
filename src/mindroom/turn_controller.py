@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom import interactive
 from mindroom.attachments import parse_attachment_ids_from_event_source
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing_batch import (
     CoalescingKey,
@@ -1349,17 +1350,24 @@ class TurnController:
             )
             interactive.commit_selection(selection)
         except BaseException as error:
-            try:
-                source_is_terminal = await self.deps.dispatch_source_is_terminal(source_event_id)
-            except BaseException:
-                interactive.restore_selection(selection)
-                raise
+
+            async def reconcile_selection() -> bool:
+                try:
+                    source_is_terminal = await self.deps.dispatch_source_is_terminal(source_event_id)
+                except BaseException:
+                    interactive.restore_selection(selection)
+                    raise
+                if source_is_terminal:
+                    interactive.commit_selection(selection)
+                else:
+                    interactive.restore_selection(selection)
+                return source_is_terminal
+
+            source_is_terminal = await run_coroutine_until_complete(reconcile_selection())
             if source_is_terminal:
-                interactive.commit_selection(selection)
                 if isinstance(error, asyncio.CancelledError):
                     raise
                 return
-            interactive.restore_selection(selection)
             raise
 
     async def _execute_interactive_selection(

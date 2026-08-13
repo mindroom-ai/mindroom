@@ -27,6 +27,7 @@ sync resumes at -- which is exactly the right window again.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.logging_config import get_logger
@@ -66,7 +67,7 @@ class MembershipView(Protocol):
         room_id: str,
         *,
         source: DepartureSource,
-        report_event_id: str | None = None,
+        report_observation_id: str | None = None,
     ) -> DepartureOutcome:
         """Apply one observation of a departure, invalidating at most once per departure."""
         ...
@@ -80,6 +81,7 @@ class MembershipView(Protocol):
         room_id: str,
         *,
         cleanup: Callable[[], None] | None = None,
+        expected_membership_epoch: int | None = None,
     ) -> None:
         """Record a confirmed join, so the room's next departure fences again."""
         ...
@@ -117,7 +119,8 @@ class MembershipFence:
         self,
         room_ids: Iterable[str],
         *,
-        event_ids: Iterable[str | None] | None = None,
+        observation_ids: Iterable[str | None] | None = None,
+        rejoined_after: Iterable[bool] | None = None,
     ) -> None:
         """Fence departures a sync reported, absorbing the report local ones are owed.
 
@@ -125,24 +128,40 @@ class MembershipFence:
         and left again inside one sync interval is two departures, and only the
         first of them is the report the local leave is owed; offered as a set
         it would be one observation, absorbed, and the second departure would
-        never invalidate anything. Matching event ids make an exact departure
-        idempotent across replayed sync responses and process restarts.
+        never invalidate anything. Matching observation ids make an exact
+        departure idempotent across replayed sync responses and process
+        restarts. A proven later join rearms only the epoch this report fenced.
         """
         reported = tuple(room_ids)
-        report_event_ids = (None,) * len(reported) if event_ids is None else tuple(event_ids)
-        if len(report_event_ids) != len(reported):
-            msg = "Each reported departure must have one matching event identity"
+        report_observation_ids = (None,) * len(reported) if observation_ids is None else tuple(observation_ids)
+        report_rejoins = (False,) * len(reported) if rejoined_after is None else tuple(rejoined_after)
+        if len(report_observation_ids) != len(reported) or len(report_rejoins) != len(reported):
+            msg = "Each reported departure must have matching identity and rejoin state"
             raise ValueError(msg)
         await self._recover_owed_reports()
-        for room_id, event_id in zip(reported, report_event_ids, strict=True):
+        for room_id, observation_id, rejoined in zip(
+            reported,
+            report_observation_ids,
+            report_rejoins,
+            strict=True,
+        ):
             outcome = await self.store.fence_departure(
                 room_id,
                 source=DepartureSource.REPORTED,
-                report_event_id=event_id,
+                report_observation_id=observation_id,
             )
             self._log(room_id, outcome)
             self._track(room_id, outcome)
-            await self._clear_room(room_id, outcome)
+            if rejoined and outcome.reported_fence_epoch is not None:
+                clear_departed_room = self.clear_departed_room
+                cleanup = None if clear_departed_room is None else partial(clear_departed_room, room_id)
+                await self.store.note_membership_restarted(
+                    room_id,
+                    cleanup=cleanup,
+                    expected_membership_epoch=outcome.reported_fence_epoch,
+                )
+            else:
+                await self._clear_room(room_id, outcome)
         await self._expire_unarrived_reports()
 
     async def note_membership_restarted(self, room_id: str) -> None:

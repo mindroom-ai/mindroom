@@ -339,7 +339,7 @@ def fence_departure(
     room_id: str,
     *,
     source: DepartureSource,
-    report_event_id: str | None = None,
+    report_observation_id: str | None = None,
 ) -> DepartureOutcome:
     """Invalidate a room's derived state once per departure, however often it is seen.
 
@@ -363,28 +363,41 @@ def fence_departure(
 
     That asymmetry is in what each observation *records*, not in whether it may
     fence a room that is already fenced. Neither may. Matrix can replay an old
-    leave after the room has rejoined, so exact reported event ids are claimed
-    durably here as part of the same transaction. A replay then remains a
-    replay even though the rejoin has re-armed the room for a genuinely new
-    departure.
+    leave after the room has rejoined, so each report's stable observation id
+    is claimed durably here as part of the same transaction. The Matrix event
+    id supplies it when visible; otherwise the sync response token does. A
+    replay then remains a replay even though the rejoin has re-armed the room
+    for a genuinely new departure.
     """
-    state = _membership_state(transaction, principal_id, room_id)
-    if source is DepartureSource.REPORTED and report_event_id is not None:
+    if source is DepartureSource.REPORTED and report_observation_id is not None:
         claimed_report = transaction.fetchone(
             """
-            INSERT INTO reported_departures (principal_id, event_id, room_id)
-            VALUES (?, ?, ?)
-            ON CONFLICT (principal_id, event_id) DO NOTHING
-            RETURNING event_id
+            INSERT INTO reported_departures (principal_id, observation_id, room_id, fenced_epoch)
+            VALUES (?, ?, ?, NULL)
+            ON CONFLICT (principal_id, observation_id) DO NOTHING
+            RETURNING observation_id
             """,
-            (principal_id, report_event_id, room_id),
+            (principal_id, report_observation_id, room_id),
         )
         if claimed_report is None:
+            repeated_report = transaction.fetchone(
+                """
+                SELECT fenced_epoch FROM reported_departures
+                WHERE principal_id = ? AND observation_id = ?
+                """,
+                (principal_id, report_observation_id),
+            )
+            assert repeated_report is not None
+            state = _membership_state(transaction, principal_id, room_id)
             return DepartureOutcome(
                 observation=DepartureObservation.REPEATED_REPORT,
                 membership_epoch=state.membership_epoch,
                 owed_reports=state.owed_reports,
+                reported_fence_epoch=(
+                    None if repeated_report["fenced_epoch"] is None else int(repeated_report["fenced_epoch"])
+                ),
             )
+    state = _membership_state(transaction, principal_id, room_id)
     if source is DepartureSource.REPORTED and state.owed_reports > 0:
         # Asked before the fenced check, not after: a local departure fences
         # and *then* waits for its report, so the report always arrives at a
@@ -422,14 +435,29 @@ def fence_departure(
         departure_fenced=True,
         owed_reports=owed_reports,
     )
+    if source is DepartureSource.REPORTED and report_observation_id is not None:
+        transaction.execute(
+            """
+            UPDATE reported_departures SET fenced_epoch = ?
+            WHERE principal_id = ? AND observation_id = ?
+            """,
+            (membership_epoch, principal_id, report_observation_id),
+        )
     return DepartureOutcome(
         observation=DepartureObservation.FENCED,
         membership_epoch=membership_epoch,
         owed_reports=owed_reports,
+        reported_fence_epoch=(membership_epoch if source is DepartureSource.REPORTED else None),
     )
 
 
-def note_membership_restarted(transaction: Transaction, principal_id: str, room_id: str) -> None:
+def note_membership_restarted(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    *,
+    expected_membership_epoch: int | None = None,
+) -> None:
     """Record that the bot is in a room again, so its next departure fences.
 
     Only the fenced mark is cleared. An owed sync report survives a rejoin on
@@ -437,9 +465,18 @@ def note_membership_restarted(transaction: Transaction, principal_id: str, room_
     membership, and letting it fence the new one is exactly the deletion of a
     freshly hydrated conversation this whole mechanism exists to prevent.
     """
+    if expected_membership_epoch is None:
+        transaction.execute(
+            "UPDATE room_membership SET departure_fenced = 0 WHERE principal_id = ? AND room_id = ?",
+            (principal_id, room_id),
+        )
+        return
     transaction.execute(
-        "UPDATE room_membership SET departure_fenced = 0 WHERE principal_id = ? AND room_id = ?",
-        (principal_id, room_id),
+        """
+        UPDATE room_membership SET departure_fenced = 0
+        WHERE principal_id = ? AND room_id = ? AND membership_epoch = ?
+        """,
+        (principal_id, room_id, expected_membership_epoch),
     )
 
 
@@ -448,12 +485,24 @@ def note_membership_restarted_after(
     principal_id: str,
     room_id: str,
     cleanup: Callable[[], None],
+    *,
+    expected_membership_epoch: int | None = None,
 ) -> None:
     """Clear external departure state before atomically rearming one room."""
-    if not _claim_departure_fence(transaction, principal_id, room_id):
+    if not _claim_departure_fence(
+        transaction,
+        principal_id,
+        room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    ):
         return
     cleanup()
-    note_membership_restarted(transaction, principal_id, room_id)
+    note_membership_restarted(
+        transaction,
+        principal_id,
+        room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    )
 
 
 def cleanup_fenced_departure(
@@ -512,17 +561,27 @@ def _membership_state(transaction: Transaction, principal_id: str, room_id: str)
     )
 
 
-def _claim_departure_fence(transaction: Transaction, principal_id: str, room_id: str) -> bool:
+def _claim_departure_fence(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    *,
+    expected_membership_epoch: int | None = None,
+) -> bool:
     """Lock one room's membership row and return its departure-fence state."""
     row = transaction.fetchone(
         """
         UPDATE room_membership SET departure_fenced = departure_fenced
         WHERE principal_id = ? AND room_id = ?
-        RETURNING departure_fenced
+        RETURNING departure_fenced, membership_epoch
         """,
         (principal_id, room_id),
     )
-    return row is not None and bool(row["departure_fenced"])
+    return (
+        row is not None
+        and bool(row["departure_fenced"])
+        and (expected_membership_epoch is None or int(row["membership_epoch"]) == expected_membership_epoch)
+    )
 
 
 def _write_departure_state(

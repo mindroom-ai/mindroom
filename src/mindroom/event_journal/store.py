@@ -201,7 +201,7 @@ class PrincipalStore:
         room_id: str,
         *,
         source: DepartureSource,
-        report_event_id: str | None = None,
+        report_observation_id: str | None = None,
     ) -> DepartureOutcome:
         """Apply one observation of a departure, invalidating at most once per departure."""
         return await self._backend.write(
@@ -210,7 +210,7 @@ class PrincipalStore:
                 self._principal_id,
                 room_id,
                 source=source,
-                report_event_id=report_event_id,
+                report_observation_id=report_observation_id,
             ),
         )
 
@@ -268,11 +268,17 @@ class PrincipalStore:
         room_id: str,
         *,
         cleanup: Callable[[], None] | None = None,
+        expected_membership_epoch: int | None = None,
     ) -> None:
         """Rearm one room after any committed-departure cleanup succeeds."""
         if cleanup is None:
             await self._backend.write(
-                lambda transaction: journal.note_membership_restarted(transaction, self._principal_id, room_id),
+                lambda transaction: journal.note_membership_restarted(
+                    transaction,
+                    self._principal_id,
+                    room_id,
+                    expected_membership_epoch=expected_membership_epoch,
+                ),
             )
             return
         await self._backend.write(
@@ -281,6 +287,7 @@ class PrincipalStore:
                 self._principal_id,
                 room_id,
                 cleanup,
+                expected_membership_epoch=expected_membership_epoch,
             ),
         )
 

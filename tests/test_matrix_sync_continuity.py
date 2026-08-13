@@ -1156,6 +1156,7 @@ async def test_authoritative_leave_fences_the_room_without_discarding_continuity
         store_generation=_STORE_GENERATION,
     )
     response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_leave"
     response.rooms = MagicMock(join={}, leave={"!left:localhost": MagicMock()})
 
     await bot._apply_own_room_membership_from_sync(response)
@@ -1182,6 +1183,7 @@ async def test_leave_fences_before_failing_call_reconciliation(
     """Call cleanup cannot suspend or fail before the departure is fenced."""
     bot = _agent_bot(tmp_path)
     response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_leave"
     response.rooms = MagicMock(join={}, leave={"!left:localhost": MagicMock()})
     operation_order: list[str] = []
 
@@ -1193,10 +1195,10 @@ async def test_leave_fences_before_failing_call_reconciliation(
             room_id: str,
             *,
             source: DepartureSource,
-            report_event_id: str | None = None,
+            report_observation_id: str | None = None,
         ) -> DepartureOutcome:
             """Note where this invalidation fell relative to call cleanup."""
-            del report_event_id
+            del report_observation_id
             operation_order.append("fence")
             return await super().fence_departure(room_id, source=source)
 

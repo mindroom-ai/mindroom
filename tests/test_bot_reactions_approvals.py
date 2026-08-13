@@ -1102,6 +1102,63 @@ class TestAgentBot(AgentBotTestBase):
         restore_selection.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_terminal_interactive_selection_survives_repeated_cancellation(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Terminal reconciliation finishes before a second cancellation propagates."""
+        interactive._cleanup()
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        execution_started = asyncio.Event()
+        terminal_probe_started = asyncio.Event()
+        release_terminal_probe = asyncio.Event()
+
+        async def execute_selection(*_args: object, **_kwargs: object) -> None:
+            execution_started.set()
+            await asyncio.Event().wait()
+
+        async def source_is_terminal(_source_event_id: str) -> bool:
+            terminal_probe_started.set()
+            await release_terminal_probe.wait()
+            return True
+
+        controller = replace_turn_controller_deps(bot, dispatch_source_is_terminal=source_is_terminal)
+        selection, target = _claimed_test_selection(bot)
+        room = nio.MatrixRoom(target.room_id, bot.matrix_id.full_id)
+        commit_selection = MagicMock(wraps=interactive.commit_selection)
+        restore_selection = MagicMock()
+
+        with (
+            patch.object(controller, "_execute_interactive_selection", new=execute_selection),
+            patch("mindroom.turn_controller.interactive.commit_selection", commit_selection),
+            patch("mindroom.turn_controller.interactive.restore_selection", restore_selection),
+        ):
+            response = asyncio.create_task(
+                controller.handle_interactive_selection(
+                    room,
+                    selection=selection,
+                    user_id="@user:localhost",
+                    source_event_id="$reaction",
+                    response_target=target,
+                ),
+            )
+            await execution_started.wait()
+            response.cancel("first restart cancellation")
+            await terminal_probe_started.wait()
+            response.cancel("second restart cancellation")
+            await asyncio.sleep(0)
+            assert not response.done()
+
+            release_terminal_probe.set()
+            with pytest.raises(asyncio.CancelledError):
+                await response
+
+        commit_selection.assert_called_once_with(selection)
+        restore_selection.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_restart_stop_waits_for_live_interactive_claim_owner(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -1115,6 +1172,7 @@ class TestAgentBot(AgentBotTestBase):
         response_started = asyncio.Event()
         cleanup_started = asyncio.Event()
         finish_cleanup = asyncio.Event()
+        ordinary_response_started = asyncio.Event()
 
         async def response_owner() -> None:
             response_started.set()
@@ -1125,13 +1183,23 @@ class TestAgentBot(AgentBotTestBase):
                 await finish_cleanup.wait()
                 interactive.restore_selection(selection)
 
+        async def ordinary_response() -> None:
+            ordinary_response_started.set()
+            await asyncio.Event().wait()
+
         response_task = bot._response_runner.track_inbox_response(
             response_owner(),
             name="test_interactive_claim_owner",
             recovery_proof_ready=lambda: False,
             source_event_ids=("$reaction",),
         )
+        ordinary_response_task = bot._response_runner.track_inbox_response(
+            ordinary_response(),
+            name="test_ordinary_response",
+            recovery_proof_ready=lambda: False,
+        )
         await response_started.wait()
+        await ordinary_response_started.wait()
         response_task.cancel()
         await cleanup_started.wait()
         dispatcher_stop = AsyncMock()
@@ -1155,10 +1223,12 @@ class TestAgentBot(AgentBotTestBase):
 
             assert selection.question_event_id in interactive._active_questions
             assert selection.question_event_id not in interactive._claimed_questions
+            assert not ordinary_response_task.done()
             dispatcher_stop.assert_awaited_once_with()
         finally:
             finish_cleanup.set()
-            await asyncio.gather(response_task, return_exceptions=True)
+            ordinary_response_task.cancel()
+            await asyncio.gather(response_task, ordinary_response_task, return_exceptions=True)
             interactive._cleanup()
 
     @pytest.mark.asyncio

@@ -127,11 +127,15 @@ _TABLES = (
     """
     CREATE TABLE IF NOT EXISTS reported_departures (
         -- Matrix may replay an old leave after a later join has re-armed the
-        -- room. Exact event identity keeps that replay from fencing again.
+        -- room. Event identity, or the sync token when the event was omitted,
+        -- keeps that replay from fencing again.
         principal_id TEXT NOT NULL,
-        event_id {ordered_text} NOT NULL,
+        observation_id {ordered_text} NOT NULL,
         room_id TEXT NOT NULL,
-        PRIMARY KEY (principal_id, event_id)
+        -- The epoch advanced by this reported departure, retained so a replay
+        -- can retry a failed cleanup/rearm without touching a newer fence.
+        fenced_epoch BIGINT,
+        PRIMARY KEY (principal_id, observation_id)
     )
     """,
     """
