@@ -1240,6 +1240,18 @@ class TurnController:
         # Ownership registration is synchronous, and the task cannot execute
         # until this callback yields after reporting its deferred handoff.
 
+    def _interactive_selection_target(
+        self,
+        room_id: str,
+        selection: interactive.InteractiveSelection,
+    ) -> MessageTarget:
+        """Return the canonical response target for one interactive selection."""
+        return self.deps.resolver.build_message_target(
+            room_id=room_id,
+            thread_id=selection.thread_id,
+            reply_to_event_id=selection.question_event_id,
+        )
+
     async def enqueue_interactive_selection(
         self,
         reservation_owner: _PromptIngressReservationOwner,
@@ -1249,11 +1261,11 @@ class TurnController:
         requester_user_id: str,
         user_id: str,
         source_event_id: str,
-        response_target: MessageTarget,
         handle_interactive_selection: Callable[..., Awaitable[None]],
         start_interactive_selection: Callable[..., Awaitable[None]],
     ) -> None:
         """Queue a selection handoff as a FIFO barrier behind earlier ingress."""
+        response_target = self._interactive_selection_target(room.room_id, selection)
 
         def restore_selection() -> None:
             interactive.restore_selection(selection)
@@ -1335,11 +1347,7 @@ class TurnController:
         response_target: MessageTarget | None = None,
     ) -> None:
         """Own claim settlement around one validated interactive selection."""
-        target = response_target or self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=selection.thread_id,
-            reply_to_event_id=selection.question_event_id,
-        )
+        target = response_target or self._interactive_selection_target(room.room_id, selection)
         try:
             await self._execute_interactive_selection(
                 room,

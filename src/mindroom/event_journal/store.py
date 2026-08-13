@@ -263,17 +263,12 @@ class PrincipalStore:
         cleanup: Callable[[], None] | None = None,
     ) -> None:
         """Rearm one room after any committed-departure cleanup succeeds."""
-        if cleanup is None:
-            await self._backend.write(
-                lambda transaction: journal.note_membership_restarted(transaction, self._principal_id, room_id),
-            )
-            return
         await self._backend.write(
             lambda transaction: journal.note_membership_restarted_after(
                 transaction,
                 self._principal_id,
                 room_id,
-                cleanup,
+                cleanup if cleanup is not None else lambda: None,
             ),
         )
 

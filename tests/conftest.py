@@ -70,6 +70,7 @@ from mindroom.event_journal import (
     OutboxDelivery,
     OutboxView,
     PendingTurnView,
+    PrincipalStore,
     RelationView,
     TerminalTurnWrite,
     VisibleMessage,
@@ -1606,6 +1607,23 @@ def make_conversation_reader_mock() -> ConversationReader:
     )
 
 
+def make_membership_stub() -> PrincipalStore:
+    """Return a membership view that treats every epoch as current and runs side effects."""
+
+    async def run_operation(*, operation: Callable[[], None], **_kwargs: object) -> bool:
+        operation()
+        return True
+
+    return cast(
+        "PrincipalStore",
+        SimpleNamespace(
+            membership_epoch=AsyncMock(return_value=0),
+            run_if_turn_membership_current=run_operation,
+            run_if_membership_epoch=run_operation,
+        ),
+    )
+
+
 def install_runtime_journal_support(bot: RuntimeBot) -> RuntimeBot:
     """Pin the journal identity a test bot certifies its sync checkpoints against.
 
@@ -2221,7 +2239,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         ingress=rebuilt.deps.ingress,
         stop_manager=bot.stop_manager,
         reserve_prompt_ingress_order=rebuilt.reserve_prompt_ingress_order,
-        build_message_target=rebuilt.deps.resolver.build_message_target,
         enqueue_interactive_selection=rebuilt.enqueue_interactive_selection,
         handle_interactive_selection=rebuilt.handle_interactive_selection,
         start_interactive_selection=rebuilt.start_interactive_selection,
