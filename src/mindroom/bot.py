@@ -817,6 +817,7 @@ class AgentBot:
                 visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
                 settle_dispatch_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
+                dispatch_source_is_terminal=self._journal_dispatcher.source_is_terminal,
             ),
         )
         self._reaction_dispatcher = ReactionDispatcher(

@@ -454,6 +454,9 @@ def _build_harness(
     async def _settle_ignored_dispatch_sources(source_event_ids: tuple[str, ...]) -> None:
         ignored_dispatch_sources.append(source_event_ids)
 
+    async def _dispatch_source_is_terminal(_source_event_id: str) -> bool:
+        return False
+
     def _retry_dispatch_sources(source_event_ids: tuple[str, ...]) -> None:
         retried_dispatch_sources.append(source_event_ids)
 
@@ -534,6 +537,7 @@ def _build_harness(
             visible_responses=visible_responses,
             retry_dispatch_sources=_retry_dispatch_sources,
             settle_dispatch_sources=_settle_ignored_dispatch_sources,
+            dispatch_source_is_terminal=_dispatch_source_is_terminal,
         ),
     )
     controller_ref.append(controller)
@@ -2707,6 +2711,7 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
     assert ack_request.response_text.startswith("You selected: 1 Option 1")
     assert ack_request.target.resolved_thread_id == selection.thread_id
     assert ack_request.target.reply_to_event_id == selection.question_event_id
+    assert ack_request.delivery_turn_id == "$selection:localhost"
 
     assert len(harness.runner.requests) == 1
     request = harness.runner.requests[0]

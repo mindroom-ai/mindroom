@@ -414,6 +414,10 @@ class JournalDispatcher:
         event = _RUNNING_EVENT.get()
         return None if event is None else event.semantic_consumer
 
+    async def source_is_terminal(self, event_id: str) -> bool:
+        """Return whether an admitted source has finished its journal work."""
+        return await self.store.load_event(event_id) is not None and not await self.store.is_pending(event_id)
+
     async def claim_semantic_consumer(self, consumer: SemanticConsumer) -> bool:
         """Freeze the running event's consumer if it remains actionable."""
         event = _RUNNING_EVENT.get()

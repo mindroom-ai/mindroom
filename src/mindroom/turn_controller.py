@@ -346,6 +346,7 @@ class TurnControllerDeps:
     visible_responses: VisibleResponseReconciler
     retry_dispatch_sources: Callable[[tuple[str, ...]], None]
     settle_dispatch_sources: Callable[[tuple[str, ...]], Awaitable[None]]
+    dispatch_source_is_terminal: Callable[[str], Awaitable[bool]]
 
 
 @dataclass
@@ -1348,6 +1349,14 @@ class TurnController:
             )
             interactive.commit_selection(selection)
         except BaseException:
+            try:
+                source_is_terminal = await self.deps.dispatch_source_is_terminal(source_event_id)
+            except BaseException:
+                interactive.restore_selection(selection)
+                raise
+            if source_is_terminal:
+                interactive.commit_selection(selection)
+                return
             interactive.restore_selection(selection)
             raise
 
@@ -1416,6 +1425,7 @@ class TurnController:
                 f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
             ),
             recovered_response_event_id=ack_event_id,
+            delivery_turn_id=source_event_id,
             # This acknowledgement is the placeholder the selection's answer
             # then edits, which is what `existing_event_is_placeholder` below
             # says, so it is the turn's initial delivery and not its answer.
@@ -1455,7 +1465,7 @@ class TurnController:
                     selection_handled_turn,
                     event_id,
                 ),
-                delivery_turn_id=selection_handled_turn.anchor_event_id,
+                delivery_turn_id=source_event_id,
             )
             if response_event_id is not None:
                 await self.deps.turn_store.record_responded_turn(
@@ -1518,7 +1528,9 @@ class TurnController:
         source_event_id: str,
     ) -> bool:
         """Return whether the question or exact selection source is durably terminal."""
-        return any(self.deps.turn_store.is_handled(event_id) for event_id in {question_event_id, source_event_id})
+        return any(
+            self.deps.turn_store.is_handled(event_id) for event_id in {question_event_id, source_event_id}
+        ) or await self.deps.dispatch_source_is_terminal(source_event_id)
 
     async def _require_durable_interactive_selection(
         self,

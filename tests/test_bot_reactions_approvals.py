@@ -540,6 +540,61 @@ class TestAgentBot(AgentBotTestBase):
             interactive._cleanup()
 
     @pytest.mark.asyncio
+    async def test_departure_while_claimed_selection_waits_discards_selection(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A fence makes a claimed selection terminal while it waits for its response lock."""
+        interactive._cleanup()
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        question = _message_event("$question")
+        await bot._journal_dispatcher.admit_out_of_band(
+            room,
+            question,
+            EventKind.MESSAGE,
+            EventClass.CONTEXT_ONLY,
+        )
+        interactive.register_interactive_question(
+            question.event_id,
+            room.room_id,
+            None,
+            {"👍": "Selected"},
+            bot.agent_name,
+        )
+        reaction = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        target = MessageTarget.resolve(room.room_id, None, question.event_id)
+        lifecycle_lock = unwrap_extracted_collaborator(
+            bot._response_runner,
+        )._lifecycle_coordinator._response_lifecycle_lock(target)
+        await lifecycle_lock.acquire()
+
+        try:
+            await asyncio.wait_for(_dispatch_reaction(bot, room, reaction), timeout=1.0)
+            stored_reaction = await bot._journal_principal().load_event(reaction.event_id)
+            assert stored_reaction is not None
+            assert stored_reaction.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
+            assert question.event_id in interactive._claimed_question_ids
+
+            await bot._journal_principal().fence_departure(room.room_id, source=DepartureSource.LOCAL)
+            assert reaction.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
+
+            lifecycle_lock.release()
+            await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
+            await asyncio.wait_for(bot._response_runner.drain_inbox_responses(), timeout=1.0)
+
+            assert question.event_id not in interactive._active_questions
+            assert question.event_id not in interactive._claimed_question_ids
+        finally:
+            if lifecycle_lock.locked():
+                lifecycle_lock.release()
+            await asyncio.wait_for(bot._response_runner.drain_inbox_responses(), timeout=1.0)
+            interactive._cleanup()
+
+    @pytest.mark.asyncio
     async def test_interactive_reaction_selection_reserves_prompt_order(
         self,
         mock_agent_user: AgentMatrixUser,
