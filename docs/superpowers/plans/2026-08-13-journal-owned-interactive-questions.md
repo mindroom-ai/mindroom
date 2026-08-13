@@ -1,467 +1,266 @@
-# Journal-Owned Interactive Questions Implementation Plan
+# Projection-Owned Interactive Prompts Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 > Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace JSON and process-global interactive-question ownership with one event-journal transaction boundary for registration, selection, settlement, and membership invalidation.
+**Goal:** Make the admitted Matrix-visible revision the sole authority for active interactive prompts while retaining durable source-owned selections.
 
-**Architecture:** A focused `event_journal.interactive_questions` module owns active-question revisions and source-bound selection snapshots.
-The event journal snapshots the prompt revision at reaction admission, assigns exclusive ownership at claim, consumes the selection during source settlement, and deletes membership-scoped interactive state during fencing, while runtime code executes the exact selecting source.
+**Architecture:** Outbound terminal messages and edits carry typed `io.mindroom.interactive` metadata before transport.
+The existing projection orders revisions, and the same admission transaction reconciles the active prompt from the resulting visible row before any later reaction can be admitted.
+Runtime code renders buttons but no longer registers, replaces, or forgets durable questions.
 
-**Tech Stack:** Python 3.13, asyncio, dataclasses, SQLite, PostgreSQL, pytest, Ruff, ty, Tach.
+**Tech Stack:** Python 3.13, asyncio, dataclasses, Matrix message content, SQLite, PostgreSQL, pytest, Ruff, ty, Tach.
 
 ## Global Constraints
 
-- Keep all required behavior in PR #1825.
-- Preserve detached interactive reaction execution so room dispatch remains non-blocking.
-- Keep PR #1807's journal-owned approval continuation model compatible.
-- Implement the smallest correct change and remove obsolete machinery aggressively.
-- Do not add durable runtime execution leases.
-- Do not preserve `interactive_questions.json` compatibility.
+- Preserve detached interactive reaction execution and source-owned selection replay.
+- Preserve membership fencing and exact selecting-source turn identity.
+- Keep PR #1807's journal-owned approval continuation model mechanically and semantically compatible.
+- Do not add a staging table, retry queue, runtime lease, or callback state machine.
+- Remove the public question registration, replacement, and forget APIs.
+- Use Matrix projection order rather than HTTP completion order.
 - Write one sentence per Markdown line.
 - Write and run each behavior test before its production implementation.
+- Finish with materially fewer production lines than commit `728a980c1`.
 
 ---
 
 ## File Structure
 
-- `src/mindroom/event_journal/interactive_questions.py` owns question and selection serialization plus transactional registration, admission snapshots, and claim operations.
-- `src/mindroom/event_journal/schema.py` owns the `interactive_questions` and `interactive_selections` tables plus their lookup indexes.
-- `src/mindroom/event_journal/store.py` exposes typed async `PrincipalStore` methods and composes turn membership proof with registration.
-- `src/mindroom/event_journal/views.py` exposes only the methods required by typed runtime collaborators.
-- `src/mindroom/event_journal/journal.py` composes selection consumption with source settlement and active-question deletion with membership invalidation.
-- `src/mindroom/interactive.py` retains parsing, prompt building, sender policy, and Matrix button I/O only.
-- `src/mindroom/reaction_dispatch.py` asks the journal for one durable reaction selection.
-- `src/mindroom/turn_controller.py` asks the journal for text selections and executes durable selections without restore or commit callbacks.
-- `src/mindroom/post_response_effects.py` registers delivered response questions through `PrincipalStore`.
-- `src/mindroom/custom_tools/matrix_conversation_operations.py` registers and clears direct-tool questions through `PrincipalStore`.
-- `src/mindroom/event_journal/membership.py` translates membership evidence without external cleanup callbacks.
-- `src/mindroom/membership_models.py` keeps one reported departure's room, durable identity, and rejoin evidence in one immutable record.
-- `src/mindroom/bot.py` wires the journal methods and no longer initializes interactive JSON persistence.
-- `tests/test_event_journal_store.py` proves storage invariants against SQLite and PostgreSQL.
-- `tests/test_bot_reactions_approvals.py`, `tests/test_turn_controller_focused.py`, and `tests/test_matrix_message_tool.py` prove runtime integration.
-- `tests/test_journal_membership_fence.py` proves atomic membership deletion.
-- `tests/test_interactive.py` retains pure parsing, prompt, policy, and Matrix I/O tests and drops persistence-only cases.
+- `src/mindroom/interactive_models.py` owns the dependency-free prompt metadata and source selection value objects plus Matrix-content encoding and decoding.
+- `src/mindroom/event_journal/interactive_questions.py` reconciles active prompts from visible projection rows and owns durable selection claims.
+- `src/mindroom/event_journal/store.py` composes projection reconciliation with admission and exposes only claim APIs to runtime consumers.
+- `src/mindroom/event_journal/views.py` keeps only claim methods required by typed runtime collaborators.
+- `src/mindroom/delivery_gateway.py` includes prompt metadata in terminal non-streaming content.
+- `src/mindroom/streaming.py` includes prompt metadata only in terminal streamed content.
+- `src/mindroom/custom_tools/matrix_conversation_operations.py` includes prompt metadata before direct sends and edits and only adds buttons after successful transport.
+- `src/mindroom/post_response_effects.py` adds buttons after response delivery without writing journal state.
+- `tests/test_event_journal_store.py` proves projection ordering, membership authorization, admission snapshots, and selection replay on SQLite and PostgreSQL.
+- `tests/test_matrix_message_tool.py`, `tests/test_streaming_finalize.py`, and `tests/test_response_delivery_gateway.py` prove outbound metadata is present before transport.
 
-### Task 1: Add Durable Interactive Records and Registration APIs
+### Task 1: Make Projection Admission Own Active Prompt State
 
 **Files:**
 
-- Create: `src/mindroom/event_journal/interactive_questions.py`
-- Modify: `src/mindroom/event_journal/schema.py`
+- Modify: `src/mindroom/interactive_models.py`
+- Modify: `src/mindroom/event_journal/interactive_questions.py`
+- Modify: `src/mindroom/event_journal/store.py`
+- Test: `tests/test_event_journal_store.py`
+
+**Interfaces:**
+
+- Produce: `InteractivePrompt(creator_agent, question_text, options, option_labels, source_event_id, membership_epoch)`.
+- Produce: `interactive_prompt_content(prompt: InteractivePrompt) -> dict[str, object]`.
+- Produce: `interactive_prompt_from_content(content: Mapping[str, object]) -> InteractivePrompt | None`.
+- Produce: `reconcile_projected_prompt(transaction, principal_id, projected) -> None`.
+- Remove: `register_if_current`, `replace_if_current`, and `forget` from durable runtime use.
+
+- [ ] **Step 1: Write failing projection-order tests**
+
+Add real-store tests that admit a self-authored original prompt and prove a reaction snapshots it.
+Add a test that admits an interactive edit before any transport callback could run, then admits a reaction and proves the replacement prompt is selected.
+Add a test that admits two edits in reverse callback order and proves `origin_server_ts` plus event-ID projection ordering selects the Matrix-visible prompt.
+Add tests that a non-interactive self edit clears the prompt, another sender cannot forge one, and an old source or stale epoch cannot activate one.
+
+```python
+await admit(alice, "$turn")
+await admit(alice, "$target", sender=ALICE, content=prompt_content("Old?", "old", source="$turn"))
+await admit(alice, "$newer", sender=ALICE, ts=3_000, content=prompt_edit("$target", "New?", "new"))
+await admit(alice, "$older", sender=ALICE, ts=2_000, content=prompt_edit("$target", "Stale?", "stale"))
+await admit(alice, "$reaction", kind=EventKind.REACTION, content=reaction("$target", "1"))
+selection = await alice.claim_interactive_reaction(
+    source_event_id="$reaction",
+    question_event_id="$target",
+    selection_key="1",
+    creator_agent="agent",
+)
+assert selection is not None
+assert (selection.question_text, selection.selected_value) == ("New?", "new")
+```
+
+- [ ] **Step 2: Run the new store tests and verify RED**
+
+Run: `uv run pytest -q -n 0 --no-cov tests/test_event_journal_store.py -k 'projected_prompt or visible_prompt_revision'`.
+Expected: FAIL because prompt activation still requires the public post-delivery registration API.
+
+- [ ] **Step 3: Implement typed Matrix prompt metadata**
+
+Replace the ID-bearing `InteractiveQuestion` transport object with `InteractivePrompt` containing only immutable payload, creator identity, and membership proof.
+Encode it under `io.mindroom.interactive` and decode only exact typed fields.
+When both proof forms are present, use the admitted source event if it exists and use the captured epoch only when the source does not exist.
+
+- [ ] **Step 4: Reconcile from the visible projection**
+
+After `journal.admit` projects a newly admitted actionable message or edit, read the target's current `visible_messages` row.
+Accept self authorship only when `principal_id == f"{prompt.creator_agent}@{visible_sender}"` for interactive content or when the principal suffix matches the visible sender for a clearing edit.
+Validate the source or epoch through `reads.claim_membership_epoch` and then replace or delete the active row in the same backend transaction.
+Always reconcile from the currently visible row rather than the incoming edit so a losing older revision cannot reactivate itself.
+Delete any active row whose current self-authored visible revision has no valid prompt metadata.
+
+- [ ] **Step 5: Remove the claim-time active-row fallback**
+
+Require reaction admission to have created its immutable source-bound selection snapshot.
+Do not reinterpret a source through a prompt revision that appeared after admission.
+
+- [ ] **Step 6: Run the store tests and verify GREEN**
+
+Run: `uv run pytest -q -n 0 --no-cov tests/test_event_journal_store.py -k 'InteractiveQuestion or projected_prompt or visible_prompt_revision'`.
+Expected: PASS on SQLite and PostgreSQL.
+
+- [ ] **Step 7: Commit the projection-owned store slice**
+
+Run: `git add src/mindroom/interactive_models.py src/mindroom/event_journal/interactive_questions.py src/mindroom/event_journal/store.py tests/test_event_journal_store.py && git commit -m "Activate interactive prompts from Matrix projection"`.
+
+### Task 2: Put Prompt Metadata on the Wire Before Delivery
+
+**Files:**
+
+- Modify: `src/mindroom/delivery_gateway.py`
+- Modify: `src/mindroom/streaming.py`
+- Modify: `src/mindroom/custom_tools/matrix_conversation_operations.py`
+- Modify: `src/mindroom/post_response_effects.py`
+- Test: `tests/test_matrix_message_tool.py`
+- Test: `tests/test_streaming_finalize.py`
+- Test: `tests/test_response_delivery_gateway.py`
+
+**Interfaces:**
+
+- Consume: `interactive_prompt_content` and `InteractivePrompt` from Task 1.
+- Remove: runtime calls to `register_interactive_question_for_turn`, `register_interactive_question_for_epoch`, and `forget_interactive_question`.
+- Retain: `add_reaction_buttons` after successful Matrix delivery.
+
+- [ ] **Step 1: Write failing wire-content tests**
+
+Assert a direct interactive send carries the prompt and captured membership proof in its event content before `send_message_result` resolves.
+Assert an interactive edit carries the prompt inside `m.new_content` and the physical edit event becomes the revision identity at admission.
+Assert a plain edit omits prompt metadata and therefore clears the active row when admitted.
+Assert terminal blocking and streaming responses carry source-turn proof, while nonterminal streaming revisions never carry prompt metadata.
+
+```python
+sent_content = mock_send.await_args.args[2]
+assert sent_content["io.mindroom.interactive"] == {
+    "creator_agent": "general",
+    "membership_epoch": 0,
+    "option_labels": {"1": "Approve"},
+    "options": {"1": "approve"},
+    "question_text": "Continue?",
+}
+```
+
+- [ ] **Step 2: Run the outbound tests and verify RED**
+
+Run: `uv run pytest -q -n 0 --no-cov tests/test_matrix_message_tool.py tests/test_streaming_finalize.py tests/test_response_delivery_gateway.py -k 'interactive and (content or metadata or edit)'`.
+Expected: FAIL because prompt metadata is still registered only after delivery.
+
+- [ ] **Step 3: Add metadata to direct Matrix operations**
+
+Parse direct text once with mapping enabled.
+Capture the target membership epoch before transport only when the message is interactive.
+Include the typed prompt metadata in send or edit content and add reaction buttons after a successful result.
+Delete `_register_interactive`, `_maybe_add_interactive_question`, the post-send epoch registration branch, and the explicit forget branch.
+
+- [ ] **Step 4: Add metadata to terminal response delivery**
+
+For blocking delivery, merge prompt metadata into the `SendTextRequest` or `EditTextRequest` content using the response source event ID and delivery agent.
+For streaming delivery, carry the creator agent and source event ID into the immutable delivery snapshot and add metadata only when the resolved stream status is terminal.
+Keep progressive placeholders and edits free of prompt metadata.
+
+- [ ] **Step 5: Reduce post-response effects to buttons**
+
+Rename the dependency from registration language to button-rendering language.
+Remove `PrincipalStore` and membership-turn plumbing from `PostResponseEffectsSupport` where it exists only for question registration.
+
+- [ ] **Step 6: Run the outbound tests and verify GREEN**
+
+Run: `uv run pytest -q -n 0 --no-cov tests/test_matrix_message_tool.py tests/test_streaming_finalize.py tests/test_response_delivery_gateway.py`.
+Expected: PASS.
+
+- [ ] **Step 7: Commit the wire-format slice**
+
+Run: `git add src/mindroom/delivery_gateway.py src/mindroom/streaming.py src/mindroom/custom_tools/matrix_conversation_operations.py src/mindroom/post_response_effects.py tests && git commit -m "Carry interactive prompts in Matrix revisions"`.
+
+### Task 3: Delete Registration Surface and Reconcile Documentation
+
+**Files:**
+
 - Modify: `src/mindroom/event_journal/store.py`
 - Modify: `src/mindroom/event_journal/views.py`
 - Modify: `src/mindroom/event_journal/__init__.py`
-- Test: `tests/test_event_journal_store.py`
+- Modify: `docs/architecture/bot-runtime.md`
+- Modify: `docs/superpowers/specs/2026-08-13-journal-owned-interactive-questions-design.md`
+- Test: affected runtime and membership suites.
 
 **Interfaces:**
 
-- Produce: `InteractiveQuestion(question_event_id, revision_event_id, room_id, thread_id, creator_agent, question_text, options, option_labels)`.
-- Produce: `InteractiveSelection(question_event_id, question_text, selection_key, selected_label, selected_value, thread_id)`.
-- Produce: `PrincipalStore.register_interactive_question_for_turn(turn_id: str, question: InteractiveQuestion, *, replace_existing: bool = False) -> bool`.
-- Produce: `PrincipalStore.register_interactive_question_for_epoch(expected_membership_epoch: int, question: InteractiveQuestion, *, replace_existing: bool = False) -> bool`.
-- Produce: `PrincipalStore.forget_interactive_question(question_event_id: str) -> None`.
+- Retain: `claim_interactive_reaction` and `claim_interactive_text`.
+- Remove: every public registration, replacement, and forget method plus associated test fakes.
 
-- [ ] **Step 1: Write failing registration tests**
+- [ ] **Step 1: Delete obsolete APIs and tests**
 
-Add parametrized real-store tests that admit a source at epoch zero, register one question, and assert a duplicate registration preserves the original immutable payload.
-Add tests that reject a stale turn, a stale captured epoch, and every registration while `departure_fenced` is true.
-Add a test that `forget_interactive_question` removes only the addressed question.
+Remove the public store and view methods, registration helpers, `replace_existing` policy flag, and tests that exercise callback registration rather than visible-revision behavior.
+Update typed fakes directly instead of retaining compatibility wrappers.
 
-```python
-question = InteractiveQuestion(
-    question_event_id="$question",
-    revision_event_id="$question",
-    room_id="!room:test",
-    thread_id="$thread",
-    creator_agent="agent",
-    question_text="Choose",
-    options={"1": "one", "👍": "one"},
-    option_labels={"1": "One", "👍": "One"},
-)
-assert await principal.register_interactive_question_for_turn("$source", question)
-assert not await principal.register_interactive_question_for_epoch(0, replace(question, question_event_id="$stale"))
-```
+- [ ] **Step 2: Prove obsolete symbols are gone**
 
-- [ ] **Step 2: Run the registration tests and verify RED**
-
-Run: `uv run pytest -q -n 0 --no-cov tests/test_event_journal_store.py -k 'interactive_question_registration or interactive_question_forget'`
-Expected: FAIL because the table, dataclasses, and store methods do not exist.
-
-- [ ] **Step 3: Implement the narrow schema and registration module**
-
-Create the active-question and source-selection tables from the approved design.
-Add an index on `(principal_id, room_id, thread_id, creator_agent, created_at_ns, question_event_id)` for deterministic active-question lookup.
-Serialize only `question_text`, `options`, and `option_labels` into deterministic JSON.
-Use `reads.claim_membership_epoch` before inserting so epoch matching, fenced rejection, and the insert share one transaction.
-Use `ON CONFLICT (principal_id, question_event_id) DO NOTHING` so replay never rewrites the question users saw.
-
-- [ ] **Step 4: Run the registration tests and verify GREEN**
-
-Run: `uv run pytest -q -n 0 --no-cov tests/test_event_journal_store.py -k 'interactive_question_registration or interactive_question_forget'`
-Expected: PASS on SQLite and PostgreSQL.
-
-- [ ] **Step 5: Commit the durable registration slice**
-
-Run: `git add src/mindroom/event_journal tests/test_event_journal_store.py && git commit -m "Store interactive questions in the event journal"`
-
-### Task 2: Make Selection Claims Durable and Replayable
-
-**Files:**
-
-- Modify: `src/mindroom/event_journal/interactive_questions.py`
-- Modify: `src/mindroom/event_journal/store.py`
-- Modify: `src/mindroom/event_journal/views.py`
-- Test: `tests/test_event_journal_store.py`
-
-**Interfaces:**
-
-- Consume: `InteractiveQuestion` and `InteractiveSelection` from Task 1.
-- Produce: `PrincipalStore.claim_interactive_reaction(source_event_id: str, question_event_id: str, selection_key: str, creator_agent: str) -> InteractiveSelection | None`.
-- Produce: `PrincipalStore.claim_interactive_text(source_event_id: str, selection_key: str, creator_agent: str) -> InteractiveSelection | None`.
-
-- [ ] **Step 1: Write failing atomic-claim tests**
-
-Add tests proving reaction admission snapshots the visible prompt revision and claim assigns `INTERACTIVE_REACTION` plus one immutable source-owned selection.
-Assert replay by the same reaction returns the same literal selection.
-Assert a second reaction cannot steal the question and does not gain the interactive semantic consumer.
-Assert an edit between reaction admission and claim cannot reinterpret the already-selected option through the replacement prompt.
-Assert a reaction in another room, a terminal reaction, an old-membership reaction, an invalid option, and another agent all return `None` without mutation.
-Add text tests proving the oldest eligible question is selected deterministically and same-message replay returns it.
-
-```python
-selection = await principal.claim_interactive_reaction(
-    source_event_id="$reaction",
-    question_event_id="$question",
-    selection_key="👍",
-    creator_agent="agent",
-)
-assert selection == InteractiveSelection(
-    question_event_id="$question",
-    question_text="Choose",
-    selection_key="👍",
-    selected_label="One",
-    selected_value="one",
-    thread_id="$thread",
-)
-assert await principal.claim_interactive_reaction(...) == selection
-```
-
-- [ ] **Step 2: Run the claim tests and verify RED**
-
-Run: `uv run pytest -q -n 0 --no-cov tests/test_event_journal_store.py -k 'interactive_reaction_claim or interactive_text_claim'`
-Expected: FAIL because claim methods do not exist.
-
-- [ ] **Step 3: Implement row-locked claim transitions**
-
-Snapshot a reaction's active prompt revision in the same transaction that admits its source.
-Lock the source, membership, and relevant question rows with portable no-op `UPDATE ... RETURNING` statements before validating a claim.
-Require a pending source, current unfenced membership, matching room and membership epoch, matching creator agent, and an available option.
-Set `semantic_consumer`, retain the immutable source-owned selection, and delete only its matching active revision after all facts are locked and validated.
-Delete competing unclaimed snapshots for that prompt revision so only one source can answer it.
-For text selection, first return a selection already owned by the same source, otherwise claim the oldest matching active row by `created_at_ns` and byte-ordered event ID.
-
-- [ ] **Step 4: Run the claim tests and verify GREEN**
-
-Run: `uv run pytest -q -n 0 --no-cov tests/test_event_journal_store.py -k 'interactive_reaction_claim or interactive_text_claim'`
-Expected: PASS on SQLite and PostgreSQL.
-
-- [ ] **Step 5: Commit the durable claim slice**
-
-Run: `git add src/mindroom/event_journal tests/test_event_journal_store.py && git commit -m "Claim interactive selections transactionally"`
-
-### Task 3: Couple Consumption and Membership Invalidation to Journal Transactions
-
-**Files:**
-
-- Modify: `src/mindroom/event_journal/interactive_questions.py`
-- Modify: `src/mindroom/event_journal/journal.py`
-- Test: `tests/test_event_journal_store.py`
-- Test: `tests/test_journal_membership_fence.py`
-
-**Interfaces:**
-
-- Modify: `journal.settle` to consume its source-owned selection while terminalizing the source.
-- Modify: `_advance_membership_epoch` to delete active room questions and the selections owned by sources it settles.
-
-- [ ] **Step 1: Write failing transaction-boundary tests**
-
-Register and select a question, call the real `settle_many` path, and assert the source is terminal and its stored selection is absent in the committed state.
-Raise after selection consumption inside a backend write and assert rollback preserves both the pending source and stored selection.
-Fence a room and assert active questions and stale source selections from that room disappear while another room and another principal survive.
-Raise during the fence transaction and assert its question row survives rollback.
-
-- [ ] **Step 2: Run the boundary tests and verify RED**
-
-Run: `uv run pytest -q -n 0 --no-cov tests/test_event_journal_store.py tests/test_journal_membership_fence.py -k 'interactive_question and (settle or fence or rollback)'`
-Expected: FAIL because settlement and membership invalidation do not touch the new table.
-
-- [ ] **Step 3: Implement transactional deletion**
-
-Delete a source's selection from the sole `settle` implementation after compacting that source row in the same transaction.
-Delete active room questions from `_advance_membership_epoch`, then delete selections for the stale sources that transition to settled there.
-Do not introduce callbacks, retry tables, or cleanup state.
-
-- [ ] **Step 4: Run the boundary tests and verify GREEN**
-
-Run: `uv run pytest -q -n 0 --no-cov tests/test_event_journal_store.py tests/test_journal_membership_fence.py -k 'interactive_question and (settle or fence or rollback)'`
-Expected: PASS on SQLite and PostgreSQL.
-
-- [ ] **Step 5: Commit the transactional boundary slice**
-
-Run: `git add src/mindroom/event_journal tests/test_event_journal_store.py tests/test_journal_membership_fence.py && git commit -m "Consume interactive selections with journal truth"`
-
-### Task 4: Route Registration and Selection Through the Journal
-
-**Files:**
-
-- Modify: `src/mindroom/post_response_effects.py`
-- Modify: `src/mindroom/custom_tools/matrix_conversation_operations.py`
-- Modify: `src/mindroom/reaction_dispatch.py`
-- Modify: `src/mindroom/journal_dispatch.py`
-- Modify: `src/mindroom/turn_controller.py`
-- Modify: `src/mindroom/bot.py`
-- Test: `tests/test_bot_reactions_approvals.py`
-- Test: `tests/test_matrix_message_tool.py`
-- Test: `tests/test_turn_controller_focused.py`
-
-**Interfaces:**
-
-- Consume: Task 1 registration APIs.
-- Consume: Task 2 reaction and text claim APIs.
-- Produce: Journal dispatcher methods that transfer a validated selection to the current admitted source ID without exposing transaction details.
-
-- [ ] **Step 1: Write failing runtime-boundary tests**
-
-Add a real-store reaction test that registers a question, dispatches a reaction, and observes a deferred selection without touching interactive module globals.
-Add a replay test that recreates the bot-facing collaborators over the same database and receives the same stored selection.
-Add an edit test that preserves the pre-edit snapshot while atomically registering the delivered edit as a new revision at the same Matrix target.
-Add post-response and direct-tool tests that verify buttons are added only after the journal registration succeeds.
-Add a text-response test that claims through the admitted message source and returns the literal oldest selection.
-
-- [ ] **Step 2: Run the runtime-boundary tests and verify RED**
-
-Run: `uv run pytest -q -n 0 --no-cov tests/test_bot_reactions_approvals.py tests/test_matrix_message_tool.py tests/test_turn_controller_focused.py -k 'journal_owned_interactive or durable_interactive'`
-Expected: FAIL because runtime callers still use `interactive.py` persistence.
-
-- [ ] **Step 3: Replace runtime registration and claim calls**
-
-Build `InteractiveQuestion` at the delivery boundary and call the explicit turn or epoch registration method.
-Make `ReactionDispatcher` perform sender policy checks and obtain its selection through the journal dispatcher.
-Make the text ingress path call `claim_interactive_text` with the admitted message event ID.
-Keep Matrix reaction-button sends outside the transaction and only after successful registration.
-Keep response parsing and `build_selection_prompt` in `interactive.py`.
-
-- [ ] **Step 4: Run the runtime-boundary tests and verify GREEN**
-
-Run: `uv run pytest -q -n 0 --no-cov tests/test_bot_reactions_approvals.py tests/test_matrix_message_tool.py tests/test_turn_controller_focused.py -k 'journal_owned_interactive or durable_interactive'`
-Expected: PASS.
-
-- [ ] **Step 5: Commit the runtime routing slice**
-
-Run: `git add src/mindroom tests/test_bot_reactions_approvals.py tests/test_matrix_message_tool.py tests/test_turn_controller_focused.py && git commit -m "Route interactive state through the journal"`
-
-### Task 5: Remove Restore and Commit Reconciliation
-
-**Files:**
-
-- Modify: `src/mindroom/turn_controller.py`
-- Modify: `src/mindroom/reaction_dispatch.py`
-- Modify: `src/mindroom/response_runner.py`
-- Test: `tests/test_bot_reactions_approvals.py`
-- Test: `tests/test_turn_controller_focused.py`
-- Test: `tests/test_response_runner_focused.py`
-
-**Interfaces:**
-
-- Consume: durable same-source replay from Task 2.
-- Consume: terminal consumption from Task 3.
-- Remove: `interactive.commit_selection` and `interactive.restore_selection` call sites.
-- Remove: selection-specific `dispatch_source_is_terminal` reconciliation.
-
-- [ ] **Step 1: Write failing failure-and-cancellation tests**
-
-Cause selection execution to fail before FINAL enqueue and assert the source remains pending and replay returns the same selection without any restore callback.
-Cancel before task start and after lifecycle acquisition and assert normal source retry preserves the durable claim.
-Reach FINAL handoff, then raise, and assert the source is terminal and its stored selection is already absent without a terminal probe.
-
-- [ ] **Step 2: Run the lifecycle tests and verify RED**
-
-Run: `uv run pytest -q -n 0 --no-cov tests/test_bot_reactions_approvals.py tests/test_turn_controller_focused.py tests/test_response_runner_focused.py -k 'durable_selection and (failure or cancellation or terminal)'`
-Expected: FAIL because current runtime callbacks still restore or commit process-local state.
-
-- [ ] **Step 3: Simplify the detached handoff**
-
-Remove restore callbacks from `_InteractiveSelectionDispatch` and `PendingDispatchMetadata`.
-Remove commit and restore branches from `handle_interactive_selection`.
-On prestart or execution failure, leave the immutable selection owned by the pending source and release that source through the existing retry path.
-Preserve `CancelledError` propagation.
-Keep the restart-only wait for live source-owned tasks because task execution ownership is not durable.
-
-- [ ] **Step 4: Run the lifecycle tests and verify GREEN**
-
-Run: `uv run pytest -q -n 0 --no-cov tests/test_bot_reactions_approvals.py tests/test_turn_controller_focused.py tests/test_response_runner_focused.py -k 'durable_selection and (failure or cancellation or terminal)'`
-Expected: PASS.
-
-- [ ] **Step 5: Commit the lifecycle simplification**
-
-Run: `git add src/mindroom/turn_controller.py src/mindroom/reaction_dispatch.py src/mindroom/response_runner.py tests && git commit -m "Replay durable interactive selections"`
-
-### Task 6: Remove JSON Persistence and External Membership Cleanup
-
-**Files:**
-
-- Modify: `src/mindroom/interactive.py`
-- Modify: `src/mindroom/event_journal/membership.py`
-- Modify: `src/mindroom/event_journal/store.py`
-- Modify: `src/mindroom/event_journal/journal.py`
-- Modify: `src/mindroom/bot.py`
-- Modify: `tests/test_interactive.py`
-- Modify: `tests/test_journal_membership_fence.py`
-- Modify: `tests/bot_helpers.py`
-
-**Interfaces:**
-
-- Remove: `init_persistence`, `_active_questions`, `_claimed_questions`, dirty and deleted overlays, JSON loaders and writers, and room cleanup functions.
-- Remove: membership cleanup callbacks and `cleanup_fenced_departure` APIs.
-- Retain: parsing, formatting, prompt construction, sender policy, and reaction-button I/O.
-
-- [ ] **Step 1: Add or retain pure interactive tests before deletion**
-
-Ensure parsing, prompt payload, managed-agent rejection, and reaction-button rendering have direct behavior tests that do not initialize persistence.
-Run those tests before deleting persistence code so each retained behavior has a passing baseline.
-
-- [ ] **Step 2: Delete persistence and callback machinery**
-
-Remove JSON, tempfile, threading, filesystem-lock, and time imports that only supported question persistence.
-Remove `AgentBot.start` persistence initialization.
-Make membership fence and rejoin methods direct journal transitions with no `Callable[[], None]` parameters.
-Delete tests whose only behavior is JSON corruption, flock interleaving, dirty overlay merging, or cross-process dictionary reconciliation.
-
-- [ ] **Step 3: Run focused suites and verify GREEN**
-
-Run: `uv run pytest -q -n 0 --no-cov tests/test_interactive.py tests/test_journal_membership_fence.py tests/test_bot_reactions_approvals.py tests/test_turn_controller_focused.py tests/test_matrix_message_tool.py`
-Expected: PASS on both configured database backends where parametrized.
-
-- [ ] **Step 4: Prove obsolete symbols are gone**
-
-Run: `rg -n 'interactive_questions\.json|_active_questions|_claimed_questions|commit_selection|restore_selection|clear_interactive_questions_for_room|cleanup_fenced_departure' src/mindroom`
+Run: `rg -n 'register_interactive_question|replace_existing|forget_interactive_question|_register_interactive|_maybe_add_interactive_question' src/mindroom`.
 Expected: no output.
 
-- [ ] **Step 5: Commit the deletion slice**
+- [ ] **Step 3: Update architecture language**
 
-Run: `git add src/mindroom tests && git commit -m "Remove split interactive persistence ownership"`
+Document that outbound metadata describes a candidate prompt but only journal admission activates it.
+Document that projection ordering chooses the active revision and source settlement consumes only the immutable selection.
+Remove every statement that transport callbacks register or replace active questions.
 
-### Task 7: Reconcile Documentation, Architecture, and Full Verification
+- [ ] **Step 4: Run affected suites**
+
+Run: `uv run pytest -q -n 0 --no-cov tests/test_event_journal_store.py tests/test_interactive.py tests/test_journal_membership_fence.py tests/test_response_runner_focused.py tests/test_matrix_message_tool.py tests/test_bot_reactions_approvals.py tests/test_streaming_finalize.py tests/test_journal_ingress.py tests/test_queued_message_notify.py tests/test_turn_controller_focused.py tests/test_matrix_sync_continuity.py tests/test_sync_task_cancellation.py tests/test_ingress_lanes.py tests/test_response_delivery_gateway.py tests/test_locked_turn_delivery.py tests/test_bot_ready_hook.py`.
+Expected: PASS on SQLite and PostgreSQL where parametrized.
+
+- [ ] **Step 5: Measure net simplification**
+
+Run: `git diff --numstat d89a7da9ce0474cdfde35777e92bf2f239bbf6ad...HEAD -- src/mindroom`.
+Expected: materially fewer than the `+410/-126` production diff at `728a980c1`, with fewer public methods and no replacement policy branch.
+
+- [ ] **Step 6: Commit the deletion and documentation slice**
+
+Run: `git add src tests docs && git commit -m "Remove post-delivery prompt registration"`.
+
+### Task 4: Verify Exact Head, PR #1807 Compatibility, and Merge Readiness
 
 **Files:**
 
-- Modify: `docs/architecture/bot-runtime.md`
-- Modify: PR description if the final scope changes materially.
-- Test: all affected suites.
+- No permanent files unless verification exposes a real defect.
 
 **Interfaces:**
 
-- Consume: all prior tasks.
-- Produce: final merge-and-forget documentation and verified source tree.
+- Consume: the latest exact pushed head of PR #1807 resolved immediately before verification.
+- Produce: a clean frozen PR head with independent correctness, simplicity, and compatibility approvals.
 
-- [ ] **Step 1: Update architecture documentation**
+- [ ] **Step 1: Run static verification**
 
-Document that reaction admission snapshots the active prompt revision, claim establishes exclusive source ownership, and source settlement consumes the selection inside journal transactions.
-Document that detached execution remains runtime-owned and that restart quiescence prevents overlapping execution.
-Remove descriptions of JSON question recovery or external departure cleanup.
-
-- [ ] **Step 2: Run focused affected suites**
-
-Run: `uv run pytest -q -n 0 --no-cov tests/test_event_journal_store.py tests/test_interactive.py tests/test_journal_membership_fence.py tests/test_response_runner_focused.py tests/test_matrix_message_tool.py tests/test_bot_reactions_approvals.py tests/test_streaming_finalize.py tests/test_journal_ingress.py tests/test_queued_message_notify.py tests/test_turn_controller_focused.py tests/test_matrix_sync_continuity.py tests/test_sync_task_cancellation.py`
-Expected: PASS.
-
-- [ ] **Step 3: Run static and dependency verification**
-
-Run: `pre-commit run --all-files`.
+Run: `uv run pre-commit run --all-files`.
 Run: `uv run tach check --dependencies --interfaces`.
 Run: `git diff --check`.
 Expected: every command exits zero.
 
-- [ ] **Step 4: Run the complete non-Matrix test suite**
+- [ ] **Step 2: Run the complete non-Matrix suite**
 
 Run: `uv run pytest -m 'not requires_matrix'`.
 Expected: zero failures.
 
-- [ ] **Step 5: Compare complexity against the prior PR head**
+- [ ] **Step 3: Verify PR #1807 mechanically and semantically**
 
-Run: `git diff --stat 192b5c8efa0cde0be45a527e5641d357892a8ea5..HEAD -- src/mindroom`.
-Run: `git diff --numstat fb10e4127489755da8202ed56c5712932c36f7aa...HEAD -- src/mindroom`.
-Expected: the redesign deletes the JSON and callback machinery and materially reduces the production growth from the previous head's `+634/-80` production diff.
+Resolve PR #1807's exact GitHub head with `gh pr view 1807 --repo mindroom-ai/mindroom --json headRefOid,baseRefOid`.
+Create a disposable merge worktree and require a conflict-free merge tree or only additive conflicts eliminated in this PR.
+Run the combined interactive, approval-continuation, schema, response-runner, and bot-reaction suites on SQLite and PostgreSQL.
 
-- [ ] **Step 6: Commit final documentation and cleanup**
+- [ ] **Step 4: Push and run independent exact-head reviews**
 
-Run: `git add docs src tests && git commit -m "Document journal-owned interactive recovery"`.
+Push only after local verification passes.
+Freeze the worktree and dispatch independent correctness, simplification, and PR #1807 compatibility reviewers against the immutable GitHub head.
+Address only verified in-scope findings and restart the exact-head round after any executable change.
 
-### Task 8: Verify PR #1807 Compatibility and Push
+- [ ] **Step 5: Merge only after all gates pass**
 
-**Files:**
-
-- No permanent production files unless conflict reconciliation exposes a real integration issue.
-- Temporary worktree created with `mktemp -d` and removed with `git worktree remove` after verification.
-
-**Interfaces:**
-
-- Consume: PR #1807 pushed head `c9bb299ccc40a812c95407d9b871efe3046c3af3` or a newer exact GitHub head resolved immediately before verification.
-- Produce: evidence that the two journal-owned workflows compose after mechanical conflict resolution.
-
-- [ ] **Step 1: Resolve the current #1807 exact head**
-
-Run: `gh pr view 1807 --repo mindroom-ai/mindroom --json headRefOid,baseRefOid,state,mergeable`.
-Record the returned head and use that immutable object for the compatibility test.
-
-- [ ] **Step 2: Create a temporary integration branch and merge tree**
-
-Create a temporary worktree from the redesigned #1825 head.
-Merge the exact #1807 head without committing.
-Resolve only mechanical shared-file conflicts by retaining both independent table modules, both membership deletions, both `PrincipalStore` API sets, #1807 runtime-generation filtering, and #1825 worker stop-generation checks.
-
-- [ ] **Step 3: Run combined focused verification**
-
-Run the event-journal, approval continuation, interactive reaction, response runner, pending worker, membership fence, and sync cancellation suites in the temporary integration worktree.
-Expected: zero failures on SQLite and PostgreSQL parametrizations.
-
-- [ ] **Step 4: Remove the temporary integration worktree**
-
-Abort the temporary merge if it remains in progress.
-Remove the explicit validated temporary path with `git worktree remove`.
-Do not modify PR #1807's existing dirty worktree.
-
-- [ ] **Step 5: Verify and push PR #1825**
-
-Run: `git status --short`, `git log --oneline -8`, and `git diff --check`.
-Push `fix/pr-1825-followup` to `origin/fix/interactive-reaction-cancel-before-start` only after every required verification succeeds.
-
-### Task 9: Final Boundary Simplification
-
-**Files:**
-
-- Create: `src/mindroom/membership_models.py`
-- Modify: `src/mindroom/matrix/sync_loop.py`
-- Modify: `src/mindroom/event_journal/membership.py`
-- Modify: `src/mindroom/event_journal/interactive_questions.py`
-- Test: `tests/test_sync_task_cancellation.py`
-- Test: `tests/test_journal_membership_fence.py`
-- Test: `tests/test_event_journal_store.py`
-
-**Interfaces:**
-
-- Replace the three parallel departure tuples with `tuple[ReportedDeparture, ...]`.
-- Give `ReactionDispatcher` one interactive-selection handoff instead of round-tripping two controller methods through its dependencies.
-- Preserve the membership, source, and question row-lock order.
-- Remove only local wrappers and duplicated SQL that do not own a distinct invariant.
-
-- [x] **Step 1: Prove the record boundary with a failing parser test**
-
-- [x] **Step 2: Consolidate reported-departure transport into one immutable record**
-
-- [x] **Step 3: Simplify question and selection decoding without changing transaction order**
-
-- [x] **Step 4: Collapse the circular reaction-to-controller callback seam**
-
-- [x] **Step 5: Run the complete affected suite, static checks, and exact PR #1807 integration**
+Require a clean worktree, local and GitHub SHA equality, zero unresolved review threads, all required CI green, two independent approvals, and PR #1807 compatibility approval.
+Then squash merge PR #1828 and verify its merged state and merge commit.
