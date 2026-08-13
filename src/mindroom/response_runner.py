@@ -1669,13 +1669,22 @@ class ResponseRunner:
     async def _settle_user_stopped_approval(
         self,
         *,
+        response_event_id: str,
         source_event_id: str,
         target: MessageTarget,
     ) -> bool | None:
         """Settle a stopped approval, returning ``None`` while frozen success remains unresolved."""
         continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
         if continuation is None:
-            return False
+            final_delivery = await self.deps.approval_store.load_delivery(
+                turn_id=source_event_id,
+                stage=DeliveryStage.FINAL,
+            )
+            return bool(
+                final_delivery is not None
+                and final_delivery.acknowledged_event_id is not None
+                and response_event_id in {final_delivery.edits_event_id, final_delivery.acknowledged_event_id},
+            )
         if continuation.state == "claimed":
             owns_final, event_id = await self._recover_frozen_approval_final(
                 continuation,
@@ -1714,6 +1723,7 @@ class ResponseRunner:
 
         async def finalize_locked() -> bool:
             approval_settled = await self._settle_user_stopped_approval(
+                response_event_id=message_id,
                 source_event_id=source_event_id,
                 target=target,
             )
