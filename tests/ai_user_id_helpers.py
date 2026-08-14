@@ -27,6 +27,7 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.event_journal import PrincipalStore
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.types import HistoryScope, PreparedHistoryState
@@ -457,6 +458,8 @@ def _build_response_runner(
         membership=make_membership_stub(),
     )
     bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
+    approval_store = MagicMock(spec=PrincipalStore)
+    approval_store.approval_continuation_for_source = AsyncMock(return_value=None)
 
     return ResponseRunner(
         ResponseRunnerDeps(
@@ -479,6 +482,9 @@ def _build_response_runner(
                 agent_name=bot.agent_name,
                 logger=bot.logger,
             ),
+            approval_store=approval_store,
+            retry_approval_sources=lambda _source_event_ids: None,
+            approval_runtime_generation="test-runtime",
         ),
     )
 

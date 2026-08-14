@@ -65,14 +65,12 @@ class ToolCallTiming:
     """Optional phase timing breakdown for one tool call."""
 
     before_hooks_ms: float | None = None
-    approval_ms: float | None = None
     tool_body_ms: float | None = None
     result_ready_ms: float | None = None
 
     def as_dict(self) -> dict[str, float]:
         """Return JSON-safe timing fields, omitting phases that were not measured."""
         fields = {
-            "approval_ms": self.approval_ms,
             "before_hooks_ms": self.before_hooks_ms,
             "result_ready_ms": self.result_ready_ms,
             "tool_body_ms": self.tool_body_ms,

@@ -257,9 +257,69 @@ _TABLES = (
         -- card is answered the moment this is set, whether or not the edit
         -- carrying it reached the room.
         resolution_json TEXT,
+        -- Present only for native persisted-run approvals. Legacy rows keep
+        -- these NULL and can never authorize continuation execution.
+        continuation_id TEXT,
+        continuation_generation BIGINT,
+        tool_call_id TEXT,
         membership_epoch BIGINT NOT NULL,
         created_at_ns BIGINT NOT NULL,
         PRIMARY KEY (principal_id, transaction_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS approval_action_tombstones (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        card_event_id TEXT NOT NULL,
+        PRIMARY KEY (principal_id, card_event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS approval_continuations (
+        principal_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL UNIQUE,
+        entity_name TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('waiting', 'ready', 'claimed', 'failing')),
+        generation BIGINT NOT NULL DEFAULT 0,
+        runtime_generation TEXT,
+        failure_reason TEXT,
+        context_json TEXT NOT NULL,
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, approval_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS approval_continuation_sources (
+        principal_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        source_ordinal BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, approval_id, event_id),
+        UNIQUE (principal_id, event_id),
+        UNIQUE (principal_id, approval_id, source_ordinal),
+        FOREIGN KEY (principal_id, approval_id)
+            REFERENCES approval_continuations (principal_id, approval_id) ON DELETE CASCADE,
+        FOREIGN KEY (principal_id, event_id)
+            REFERENCES journal_events (principal_id, event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS approval_continuation_calls (
+        principal_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        generation BIGINT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        call_ordinal BIGINT NOT NULL,
+        tool_name TEXT NOT NULL,
+        invoking_agent TEXT NOT NULL,
+        expires_at_ns BIGINT NOT NULL,
+        decision TEXT CHECK (decision IS NULL OR decision IN ('approved', 'denied', 'expired')),
+        reason TEXT,
+        PRIMARY KEY (principal_id, approval_id, generation, tool_call_id),
+        UNIQUE (principal_id, approval_id, generation, call_ordinal),
+        FOREIGN KEY (principal_id, approval_id)
+            REFERENCES approval_continuations (principal_id, approval_id) ON DELETE CASCADE
     )
     """,
     """
@@ -361,6 +421,16 @@ _INDEXES = (
     ON approval_cards (principal_id, card_event_id)
     WHERE card_event_id IS NOT NULL
     """,
+    """
+    CREATE INDEX IF NOT EXISTS approval_continuations_owner_scan
+    ON approval_continuations (entity_name/*bytes*/, approval_id/*bytes*/)
+    """,
+)
+
+_APPROVAL_CARD_CONTINUATION_COLUMNS = (
+    ("continuation_id", "TEXT"),
+    ("continuation_generation", "BIGINT"),
+    ("tool_call_id", "TEXT"),
 )
 
 
@@ -370,12 +440,7 @@ def _expand_byte_order(sql: str, dialect: _Dialect) -> str:
 
 
 def schema_statements(dialect: _Dialect) -> tuple[str, ...]:
-    """Return every DDL statement needed to create the schema.
-
-    Creation only. There is no upgrade path and deliberately so: this schema
-    has never shipped, so the only databases carrying an older shape are
-    prerelease ones on this branch, and those are required to be deleted rather
-    than migrated.
+    """Return every DDL statement needed to create the current schema.
 
     The byte-order marker is substituted here as well as in queries. An index
     whose trailing columns sort in the server's own collation cannot satisfy an
@@ -390,6 +455,24 @@ def schema_statements(dialect: _Dialect) -> tuple[str, ...]:
             ordered_text=dialect.ordered_text,
         )
         for statement in (*_TABLES, *_INDEXES)
+    )
+
+
+def approval_card_upgrade_statements(
+    dialect: _Dialect,
+    *,
+    existing_columns: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
+    """Add native-continuation identity to the approval-card table shipped by main."""
+    if dialect == SQLITE_DIALECT:
+        return tuple(
+            f"ALTER TABLE approval_cards ADD COLUMN {name} {column_type}"
+            for name, column_type in _APPROVAL_CARD_CONTINUATION_COLUMNS
+            if name not in existing_columns
+        )
+    return tuple(
+        f"ALTER TABLE approval_cards ADD COLUMN IF NOT EXISTS {name} {column_type}"
+        for name, column_type in _APPROVAL_CARD_CONTINUATION_COLUMNS
     )
 
 

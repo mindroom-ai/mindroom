@@ -64,6 +64,7 @@ class FakeApprovalCards:
 
     def __init__(self) -> None:
         self.rows: dict[str, _StoredRow] = {}
+        self.terminal_cards: set[tuple[str, str]] = set()
         self.lookups: list[tuple[str, str]] = []
         # Transactions this instance wrote a row for, so a test can see
         # redundant writes, and the ones a send outcome later settled.
@@ -162,6 +163,23 @@ class FakeApprovalCards:
         """Drop one card that is finished, shown or never sent."""
         self.rows.pop(transaction_id, None)
 
+    async def finish_approval_card(self, *, transaction_id: str, card_event_id: str) -> bool:
+        """Retire delivered payload while preserving approval-only classification."""
+        row = self.rows.get(transaction_id)
+        if row is None or row.card_event_id != card_event_id:
+            return (
+                (row.room_id, card_event_id) in self.terminal_cards
+                if row is not None
+                else any(event_id == card_event_id for _room_id, event_id in self.terminal_cards)
+            )
+        self.terminal_cards.add((row.room_id, card_event_id))
+        self.rows.pop(transaction_id, None)
+        return True
+
+    async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool:
+        """Return whether a delivered approval owns this event id."""
+        return (room_id, card_event_id) in self.terminal_cards
+
     async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> StoredApprovalCard | None:
         """Return one stored card, recording that the point lookup was used."""
         self.lookups.append((room_id, card_event_id))
@@ -174,6 +192,10 @@ class FakeApprovalCards:
             None,
         )
         return None if entry is None else _stored(*entry)
+
+    async def pending_approval_room_ids(self) -> tuple[str, ...]:
+        """Return every room represented by a pending fake row."""
+        return tuple(sorted({row.room_id for row in self.rows.values()}))
 
     async def pending_approval_cards(
         self,

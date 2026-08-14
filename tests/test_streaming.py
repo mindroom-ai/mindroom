@@ -39,6 +39,7 @@ from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
     StreamingDeliveryError,
+    StreamingLifecycleSuspensionError,
     StreamingResponse,
     send_streaming_response,
 )
@@ -147,6 +148,21 @@ async def _run_stream(
         runtime_paths=runtime_paths_for(config),
         response_stream=response_stream,
     )
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_suspension_escapes_stream_delivery_unchanged(config: Config) -> None:
+    """A native approval pause belongs to the response lifecycle, not stream error finalization."""
+    suspension = StreamingLifecycleSuspensionError("paused")
+
+    async def suspended_stream() -> AsyncIterator[object]:
+        raise suspension
+        yield  # pragma: no cover
+
+    with pytest.raises(StreamingLifecycleSuspensionError) as raised:
+        await _run_stream(config, suspended_stream())
+
+    assert raised.value is suspension
 
 
 @pytest.mark.asyncio

@@ -17,12 +17,13 @@ import yaml
 from agno.factory import RequestContext
 from agno.run.agent import RunOutput, RunStatus
 from agno.tools import Toolkit
+from agno.tools.function import Function
 from agno.workflow import Workflow, WorkflowFactory
 from agno.workflow.types import StepInput, StepOutput
 
 import mindroom.tools  # noqa: F401
-from mindroom.approval_manager import SentApprovalEvent, initialize_approval_store
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
@@ -35,7 +36,7 @@ from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
-from mindroom.tool_approval import ToolCallWorkflowOrigin, _matching_tool_approval_rule, _shutdown_approval_store
+from mindroom.tool_approval import _matching_tool_approval_rule
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from tests.conftest import (
@@ -1193,72 +1194,6 @@ async def test_service_async_run_fails_at_deadline_when_cancellation_is_suppress
 
 
 @pytest.mark.asyncio
-async def test_async_run_timeout_expires_pending_approval_card(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A participant blocked on approval must fail at the runtime cap and expire its card."""
-    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    approval_store = initialize_approval_store(
-        runtime_paths,
-        sender=sender,
-        editor=editor,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-
-    async def blocked_executor(**_kwargs: object) -> object:
-        return await approval_store.request_approval(
-            tool_name="run_shell_command",
-            arguments={"command": "ls"},
-            agent_name="general",
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=600,
-            workflow_id="competitor-research-report",
-            participant_id="writer",
-        )
-
-    service = DynamicWorkflowService(store, async_participant_executor=blocked_executor)
-    monkeypatch.setattr("mindroom.dynamic_workflows.service.workflow_runtime_seconds", lambda _spec: 0.1)
-    store.create_workflow(
-        spec=_workflow_spec(),
-        scope="agent",
-        owner_id="general",
-        created_by="general",
-        reason="initial design",
-    )
-
-    try:
-        run = await service.arun_workflow(
-            workflow_id="competitor-research-report",
-            scope="agent",
-            owner_id="general",
-            input_data={"topic": "Agno factories"},
-            requested_by="general",
-            base_url="https://acme.mindroom.chat",
-        )
-
-        assert run.status == "failed"
-        assert "max_runtime_seconds" in str(run.error)
-        # The cancelled approval wait finishes its cleanup in the background.
-        async with asyncio.timeout(5):
-            while True:
-                if editor.await_count:
-                    break
-                await asyncio.sleep(0)
-        assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
-        assert editor.await_args.args[2]["status"] == "expired"
-        assert editor.await_args.args[2]["workflow_id"] == "competitor-research-report"
-        assert editor.await_args.args[2]["participant_id"] == "writer"
-    finally:
-        await _shutdown_approval_store()
-
-
-@pytest.mark.asyncio
 async def test_service_async_run_persists_cancelled_status(tmp_path: Path) -> None:
     """Cancelling an async workflow run should not leave the run stuck as running."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
@@ -2111,6 +2046,49 @@ def test_participant_run_config_requires_approval_for_granted_tools(tmp_path: Pa
     assert context.config.tool_approval.default == "auto_approve"
 
 
+def test_non_resumable_participant_rejects_gated_functions(tmp_path: Path) -> None:
+    """Ephemeral participants must clearly reject grants that require approval."""
+    context = _make_context(tmp_path)
+    toolkit = Toolkit(
+        name="mixed",
+        tools=[
+            Function(name="safe", entrypoint=lambda: "safe"),
+            Function(name="dangerous", entrypoint=lambda: "dangerous"),
+        ],
+    )
+    run_config = context.config.model_copy(
+        update={
+            "tool_approval": context.config.tool_approval.model_copy(
+                update={
+                    "default": "require_approval",
+                    "rules": [ApprovalRuleConfig(match="safe", action="auto_approve")],
+                },
+            ),
+        },
+    )
+
+    with pytest.raises(DynamicWorkflowExecutionError, match=r"dangerous.*cannot suspend"):
+        dynamic_workflow_module._reject_nonresumable_toolkits(
+            {"mixed": toolkit},
+            run_config,
+        )
+
+
+def test_non_resumable_participant_rejects_native_confirmation(tmp_path: Path) -> None:
+    """A tool-authored Agno confirmation cannot enter an embedded participant with no resume owner."""
+    context = _make_context(tmp_path)
+    toolkit = Toolkit(
+        name="native",
+        tools=[Function(name="native_confirmation", entrypoint=lambda: None, requires_confirmation=True)],
+    )
+
+    with pytest.raises(DynamicWorkflowExecutionError, match=r"native_confirmation.*cannot suspend"):
+        dynamic_workflow_module._reject_nonresumable_toolkits(
+            {"native": toolkit},
+            context.config,
+        )
+
+
 def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> None:
     """Tools listed in the dynamic_workflow allowed_tools config skip per-call approval."""
     context = _make_context(tmp_path)
@@ -2319,54 +2297,6 @@ def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> Non
     assert build_calls["website"]["worker_tools"] == ["shell"]
     assert build_calls["website"]["session_id"] == context.session_id
     assert build_calls["shell"]["worker_tools"] == ["shell"]
-
-
-def test_ephemeral_participant_tool_bridge_carries_workflow_origin(tmp_path: Path) -> None:
-    """The participant's tool hook bridge must carry workflow + participant provenance for approval cards."""
-    context = _make_context(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow", "website"]),
-            },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
-        ),
-        context.runtime_paths,
-    )
-    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
-    tool = DynamicWorkflowTools()
-    spec = _workflow_spec(
-        participants=[
-            {
-                "id": "writer",
-                "kind": "ephemeral_agent",
-                "model": "claude-sonnet-4-6",
-                "tools": ["website"],
-            },
-        ],
-        permissions={"models": ["claude-sonnet-4-6"], "tools": ["website"]},
-    )
-    bridge_mock = Mock(return_value=None)
-    agent_mock = Mock(return_value=_fake_stream_agent(content="done"))
-    with (
-        tool_runtime_context(context),
-        patch(
-            "mindroom.agents.build_agent_toolkit",
-            side_effect=lambda name, **_kwargs: Toolkit(name=f"fake_{name}"),
-        ),
-        patch.object(dynamic_workflow_module, "build_tool_hook_bridge", bridge_mock),
-        patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=SimpleNamespace()),
-        patch.object(dynamic_workflow_module, "Agent", agent_mock),
-    ):
-        create_payload = _tool_payload(tool.create_workflow(spec))
-        run_payload = _tool_payload(tool.run_workflow("competitor-research-report", {"topic": "Agno"}))
-
-    assert create_payload["status"] == "ok"
-    assert run_payload["status"] == "completed"
-    assert bridge_mock.call_args.kwargs["workflow_origin"] == ToolCallWorkflowOrigin(
-        workflow_id="competitor-research-report",
-        participant_id="writer",
-    )
 
 
 def test_ephemeral_participant_without_grants_runs_with_empty_tools(tmp_path: Path) -> None:

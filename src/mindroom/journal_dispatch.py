@@ -77,6 +77,7 @@ type _ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[
 type _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
 type _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
 type _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
+type _ApprovalContinuationCallback = Callable[[str], Awaitable[bool | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +91,7 @@ class JournalCallbacks:
     on_room_lifecycle: _RoomLifecycleCallback
     on_redaction: _RedactionCallback
     on_decryption_failure: _DecryptionFailureCallback
+    on_approval_continuation: _ApprovalContinuationCallback
     source_has_live_owner: Callable[[str], bool]
     turn_has_live_claim: Callable[[str], bool]
 
@@ -107,6 +109,7 @@ class JournalDispatcher:
     room_for_id: Callable[[str], nio.MatrixRoom]
     on_persist_failure: Callable[[], None] | None = None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
+    runtime_generation: str = "unmanaged"
     on_own_membership_transition: Callable[[str, str, bool], Awaitable[None]] | None = None
     # Replaying a turn needs the agent fleet up, so the orchestrator releases
     # turn-backed replay separately from the rest of startup. Until it does,
@@ -128,6 +131,7 @@ class JournalDispatcher:
         self._worker = PendingEventWorker(
             store=self.store,
             handle=self._run_event,
+            runtime_generation=self.runtime_generation,
             deferral_is_live=self._deferral_is_live,
             retained_event_ids=self._retained_live_event_ids,
             release_retained=self._forget_live_events,
@@ -346,6 +350,14 @@ class JournalDispatcher:
             # settles, and it blocks holding the room's lane. Returning here
             # leaves the source deferred, which is what it already was.
             return False
+        approval_settled = await self.callbacks.on_approval_continuation(event.event_id)
+        if approval_settled is not None:
+            # A paused run already owns every prepared execution fact. Sending
+            # its source through ingress again would rerun hooks and current
+            # routing policy, either duplicating side effects or settling the
+            # source before the continuation can resume.
+            self._live_events.pop(event.event_id, None)
+            return approval_settled
         live = self._live_events.pop(event.event_id, None)
         # An event the journal loaded rather than nio just delivered is a
         # replay. Turn work behaves differently there: it defers silently

@@ -11,8 +11,6 @@ from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
 from mindroom.tool_approval import (
     MatrixApprovalAction,
     handle_matrix_approval_action,
-    is_process_active_approval_card,
-    is_process_approval_card,
 )
 
 if TYPE_CHECKING:
@@ -38,7 +36,6 @@ class ApprovalResponsePayload:
     """Decoded fields from one custom Matrix approval response event."""
 
     card_event_id: str | None
-    approval_id: str | None
     status: Literal["approved", "denied"] | None
     reason: str | None
 
@@ -47,11 +44,9 @@ def parse_approval_response_event(event: nio.UnknownEvent) -> ApprovalResponsePa
     """Parse one custom approval response event into a structured payload."""
     content = event.source.get("content", {})
     if not isinstance(content, dict):
-        return ApprovalResponsePayload(card_event_id=None, approval_id=None, status=None, reason=None)
+        return ApprovalResponsePayload(card_event_id=None, status=None, reason=None)
 
     card_event_id = EventInfo.from_event(event.source).reply_to_event_id
-    raw_approval_id = content.get("approval_id")
-    approval_id = raw_approval_id if isinstance(raw_approval_id, str) and raw_approval_id else None
 
     raw_status = content.get("status")
     status: Literal["approved", "denied"] | None = None
@@ -64,7 +59,6 @@ def parse_approval_response_event(event: nio.UnknownEvent) -> ApprovalResponsePa
     reason = raw_reason.strip() if isinstance(raw_reason, str) and raw_reason.strip() else None
     return ApprovalResponsePayload(
         card_event_id=card_event_id,
-        approval_id=approval_id,
         status=status,
         reason=reason,
     )
@@ -81,12 +75,11 @@ async def handle_tool_approval_action(
     approval_event_id: str | None,
     status: Literal["approved", "denied"],
     reason: str | None,
-    approval_id: str | None = None,
     before_consume: Callable[[], Awaitable[None]] | None = None,
     authorization_prevalidated: bool = False,
 ) -> bool:
     """Resolve one approval action only when the sender still has access."""
-    if approval_event_id is None and approval_id is None:
+    if approval_event_id is None:
         return False
     if not authorization_prevalidated and not is_authorized_sender(
         sender_id,
@@ -100,12 +93,11 @@ async def handle_tool_approval_action(
         room_id=room.room_id,
         sender_id=sender_id,
         card_event_id=approval_event_id,
-        approval_id=approval_id,
         status=status,
         reason=reason,
     )
     result = await handle_matrix_approval_action(action, before_consume=before_consume)
-    notice_event_id = approval_event_id or result.card_event_id
+    notice_event_id = approval_event_id
     if notice_event_id is not None and result.error_reason is not None and orchestrator is not None:
         await orchestrator.send_approval_notice(
             room_id=room.room_id,
@@ -135,8 +127,6 @@ async def maybe_handle_tool_approval_reply(
     content = event.source.get("content")
     relates_to = content.get("m.relates_to") if isinstance(content, dict) else None
     if event_info.is_thread and isinstance(relates_to, dict) and relates_to.get("is_falling_back") is True:
-        return False
-    if is_process_approval_card(reply_to_event_id) and not is_process_active_approval_card(reply_to_event_id):
         return False
     return await handle_tool_approval_action(
         room=room,

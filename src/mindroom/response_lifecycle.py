@@ -499,7 +499,7 @@ class ResponseLifecycleCoordinator:
         self,
         *,
         target: MessageTarget,
-        while_waiting: Callable[[], Awaitable[None]],
+        while_waiting: Callable[[], Awaitable[None]] | None,
         locked_operation: Callable[[], Awaitable[_LockedResponseResult]],
     ) -> _LockedResponseResult:
         """Run a non-response operation under one target's response lock."""
@@ -507,6 +507,10 @@ class ResponseLifecycleCoordinator:
         acquire_task = asyncio.create_task(lifecycle_lock.acquire())
         lock_acquired = False
         try:
+            if while_waiting is None:
+                await acquire_task
+                lock_acquired = True
+                return await locked_operation()
             while not acquire_task.done():
                 await while_waiting()
                 await asyncio.wait({acquire_task}, timeout=0.01)
@@ -561,10 +565,12 @@ def _response_outcome_label(final_delivery_outcome: FinalDeliveryOutcome | None)
     """Return one pipeline outcome label for the canonical final delivery outcome."""
     if final_delivery_outcome is not None and final_delivery_outcome.suppressed:
         return "suppressed"
-    if final_delivery_outcome is not None and final_delivery_outcome.terminal_status == "cancelled":
-        return "cancelled"
-    if final_delivery_outcome is not None and final_delivery_outcome.terminal_status == "error":
-        return "error"
+    if final_delivery_outcome is not None and final_delivery_outcome.terminal_status in {
+        "cancelled",
+        "error",
+        "suspended",
+    }:
+        return final_delivery_outcome.terminal_status
     if final_delivery_outcome is not None and final_delivery_outcome.delivery_kind is not None:
         return final_delivery_outcome.delivery_kind
     if (
@@ -717,6 +723,10 @@ class ResponseLifecycle:
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
     ) -> FinalDeliveryOutcome:
         """Run outer lifecycle finalization and return the canonical terminal outcome."""
+        if final_delivery_outcome.terminal_status == "suspended":
+            if self.pipeline_timing is not None:
+                self.pipeline_timing.emit_summary(self.deps.logger, outcome="suspended")
+            return final_delivery_outcome
         response_event_id = final_delivery_outcome.final_visible_event_id
         try:
             if final_delivery_outcome.terminal_status == "completed":

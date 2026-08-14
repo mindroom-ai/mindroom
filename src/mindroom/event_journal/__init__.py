@@ -14,6 +14,13 @@ from mindroom.history_recovery import (
 )
 from mindroom.interactive_models import InteractiveQuestion, InteractiveSelection
 
+from .approval_continuations import (
+    ApprovalCall,
+    ApprovalContinuation,
+    ApprovalDecision,
+    ApprovalMemoryTurn,
+    unavailable_notice_turn_id,
+)
 from .approvals import RecordedApprovalDecision, StoredApprovalCard
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership import MembershipFence, MembershipView
@@ -59,6 +66,10 @@ __all__ = [
     "TURN_BACKED_KINDS",
     "AdmissionResult",
     "AdmissionView",
+    "ApprovalCall",
+    "ApprovalContinuation",
+    "ApprovalDecision",
+    "ApprovalMemoryTurn",
     "ApprovalView",
     "ConversationCursor",
     "ConversationPage",
@@ -105,5 +116,6 @@ __all__ = [
     "encode_thread_id",
     "replacement_target",
     "thread_root",
+    "unavailable_notice_turn_id",
     "visible_content",
 ]

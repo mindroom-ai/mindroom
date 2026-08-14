@@ -56,6 +56,7 @@ from mindroom.matrix.users import (
     AgentMatrixUser,
     ManagedAccountProvisioningRequest,
     create_agent_user,
+    load_agent_user,
     preflight_managed_account_provisioning,
 )
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
@@ -64,7 +65,7 @@ from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.response_admission import ResponseAdmissionGate
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN, ORDERLY_SHUTDOWN
 from mindroom.runtime_state import (
     clear_api_server_address,
     reset_runtime_state,
@@ -125,7 +126,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.event_journal import ApprovalView
+    from mindroom.event_journal import ApprovalContinuation, ApprovalView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
 
     from .constants import RuntimePaths
@@ -240,6 +241,7 @@ class _MultiAgentOrchestrator:
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _bot_start_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
+    _permanently_failed_entities: set[str] = field(default_factory=set, init=False)
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     _todo_poke_runtime: TodoPokeRuntimeCoordinator = field(init=False, repr=False)
@@ -292,6 +294,12 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
             cards_provider=self._approval_cards,
+            journal_provider=self._shared_journal_store,
+            entity_configured=lambda name: (
+                self.config is not None and (name in self.config.agents or name in self.config.teams)
+            ),
+            entity_permanently_unavailable=lambda name: name in self._permanently_failed_entities,
+            recover_unavailable_final=self._recover_unavailable_final,
         )
         self._startup_maintenance = StartupMaintenanceController(
             recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (
@@ -360,10 +368,6 @@ class _MultiAgentOrchestrator:
         self._runtime_shutdown_event = shutdown_event
         return shutdown_event
 
-    def _capture_runtime_loop(self) -> None:
-        """Remember the runtime loop that owns Matrix client I/O."""
-        self._approval_transport.capture_runtime_loop()
-
     async def send_approval_notice(
         self,
         *,
@@ -380,6 +384,47 @@ class _MultiAgentOrchestrator:
             reason=reason,
         )
 
+    async def _recover_unavailable_final(
+        self,
+        principal_id: str,
+        continuation: ApprovalContinuation,
+    ) -> bool:
+        """Finalize frozen success as its original Matrix principal, without model startup."""
+        bot = self.agent_bots.get(continuation.entity_name)
+        if bot is not None and bot.approval_store.principal_id != principal_id:
+            bot = None
+        if bot is None:
+            agent_user = load_agent_user(continuation.entity_name, self.runtime_paths)
+            if agent_user is None:
+                logger.error(
+                    "approval_original_principal_account_missing",
+                    approval_id=continuation.approval_id,
+                    entity_name=continuation.entity_name,
+                    principal_id=principal_id,
+                )
+                return False
+            bot = AgentBot(
+                agent_user,
+                self.storage_path,
+                self._require_config(),
+                self.runtime_paths,
+                config_path=self.config_path,
+                journal_store=self._shared_journal_store(),
+            )
+            bot.orchestrator = self
+            bot.hook_registry = self.hook_registry
+            self._bind_response_admission_gate(bot)
+            if bot.approval_store.principal_id != principal_id:
+                logger.error(
+                    "approval_original_principal_identity_mismatch",
+                    approval_id=continuation.approval_id,
+                    expected_principal_id=principal_id,
+                    actual_principal_id=bot.approval_store.principal_id,
+                )
+                return False
+
+        return await bot.recover_approval_final(continuation.approval_id)
+
     def _bind_response_admission_gate(self, bot: AgentBot | TeamBot) -> None:
         """Share the orchestrator-owned response admission gate with one managed bot."""
         bot.admission_gate = self._response_admission_gate
@@ -394,7 +439,7 @@ class _MultiAgentOrchestrator:
         bot construction supplies the real one.
         """
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        return None if router_bot is None else router_bot.approval_cards
+        return None if router_bot is None else router_bot.approval_store
 
     def _bind_started_runtime_support_services(self, bots: list[AgentBot | TeamBot]) -> None:
         """Bind current runtime support objects needed by live callbacks."""
@@ -599,8 +644,11 @@ class _MultiAgentOrchestrator:
                 else:
                     start_status = await self._try_start_bot_once(entity_name, bot)
                 if start_status is None:
+                    self._permanently_failed_entities.add(entity_name)
+                    await self._approval_transport.reconcile_unavailable_entities({entity_name})
                     return
                 if start_status:
+                    self._permanently_failed_entities.discard(entity_name)
                     logger.info("Bot recovered after startup failure", agent_name=entity_name)
                     bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
                     self._bind_started_runtime_support_services([bot])
@@ -964,13 +1012,16 @@ class _MultiAgentOrchestrator:
         )
         for (entity_name, bot), start_status in zip(entity_bots, start_statuses):
             if start_status:
+                self._permanently_failed_entities.discard(entity_name)
                 results.started_bots.append(bot)
                 if start_sync_tasks:
                     self._start_sync_task(entity_name, bot)
                 continue
             if start_status is None:
+                self._permanently_failed_entities.add(entity_name)
                 results.permanently_failed_entities.append(entity_name)
                 continue
+            self._permanently_failed_entities.discard(entity_name)
             results.retryable_entities.append(entity_name)
         return results
 
@@ -991,7 +1042,6 @@ class _MultiAgentOrchestrator:
 
     async def initialize(self) -> None:
         """Initialize all managed bots from configuration."""
-        self._capture_runtime_loop()
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
@@ -1349,6 +1399,16 @@ class _MultiAgentOrchestrator:
             await self._cancel_bot_start_task(entity_name)
             await cancel_sync_task(entity_name, self._sync_tasks)
 
+            bot = self.agent_bots.get(entity_name)
+            if bot is not None:
+                await bot.prepare_for_sync_shutdown(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
+
+        # A frozen successful FINAL must be recovered while the original
+        # sender and its lifecycle collaborators still exist. Router fallback
+        # may settle only continuations that never acquired FINAL ownership.
+        await self._approval_transport.reconcile_unavailable_entities(removed_entities)
+
+        for entity_name in removed_entities:
             bot = self.agent_bots.pop(entity_name, None)
             if bot is not None:
                 await bot.cleanup()
@@ -1389,6 +1449,9 @@ class _MultiAgentOrchestrator:
         already_stopped_entities: set[str] | None = None,
     ) -> tuple[set[str], list[str], list[str]]:
         """Restart or create entities affected by the config change."""
+        self._permanently_failed_entities.difference_update(
+            plan.entities_to_restart | plan.new_entities | plan.removed_entities,
+        )
         entities_to_stop = plan.entities_to_restart - (already_stopped_entities or set())
         replaced_bots = self._replacement_bots(plan.entities_to_restart)
         if entities_to_stop:
@@ -1417,6 +1480,9 @@ class _MultiAgentOrchestrator:
             self.agent_bots.pop(entity_name, None)
 
         await self._remove_deleted_entities(plan.removed_entities)
+        await self._approval_transport.reconcile_unavailable_entities(
+            set(start_results.permanently_failed_entities),
+        )
         self._schedule_ready_turn_dispatch_recovery()
         return changed_entities, start_results.retryable_entities, start_results.permanently_failed_entities
 
@@ -1458,6 +1524,7 @@ class _MultiAgentOrchestrator:
                 server_id=server_id,
                 entities=sorted(changed_entities),
             )
+            self._permanently_failed_entities.difference_update(changed_entities)
             self._external_trigger_runtime.unbind_for_entity_changes(changed_entities)
             replaced_bots = self._replacement_bots(changed_entities)
             for entity_name in changed_entities:
@@ -1482,6 +1549,9 @@ class _MultiAgentOrchestrator:
             for entity_name in start_results.retryable_entities:
                 await self._schedule_bot_start_retry(entity_name)
             if start_results.permanently_failed_entities:
+                await self._approval_transport.reconcile_unavailable_entities(
+                    start_results.permanently_failed_entities,
+                )
                 logger.warning(
                     "MCP catalog restart left some bots disabled",
                     server_id=server_id,
@@ -1928,7 +1998,10 @@ class _MultiAgentOrchestrator:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
         await self._approval_transport.cancel_startup_cleanup_retry()
-        await shutdown_approval_runtime()
+        try:
+            await shutdown_approval_runtime()
+        finally:
+            await self._approval_transport.close()
         await self.config_reload.cancel()
         owner = self._mcp_catalog_change_task_owner
         await wait_for_background_tasks(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN)

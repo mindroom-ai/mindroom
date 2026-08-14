@@ -7,7 +7,6 @@ import inspect
 import threading
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
@@ -18,9 +17,9 @@ from mindroom.approval_manager import (
     DEFAULT_SHUTDOWN_REASON,
     ApprovalActionResult,
     ApprovalCardLocator,
-    ApprovalDecision,
     ApprovalRoomProvider,
     ApprovalStartupSweep,
+    ContinuationReadyHandler,
     MatrixEventEditor,
     MatrixEventSender,
     SendingDeviceProvider,
@@ -44,27 +43,28 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
+    "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
-    "ApprovalDecision",
     "ApprovalStartupSweep",
     "MatrixApprovalAction",
     "SentApprovalEvent",
     "ToolApprovalCall",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
-    "ToolCallWorkflowOrigin",
     "evaluate_tool_approval",
+    "expire_continuation_approval_cards",
     "expire_orphaned_approval_cards_on_startup",
     "handle_matrix_approval_action",
     "initialize_approval_runtime",
     "is_process_active_approval_card",
-    "is_process_approval_card",
-    "request_tool_approval_for_call",
     "resolve_tool_approval_approver",
+    "send_suspended_tool_approval",
     "shutdown_approval_runtime",
-    "tool_requires_approval_for_openai_compat",
+    "tool_may_require_approval",
 ]
 
+# Agno copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
+POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
 _SCRIPT_CACHE: dict[tuple[str, int], ModuleType] = {}
 _SCRIPT_CACHE_LOCK = threading.Lock()
 logger = get_logger(__name__)
@@ -72,14 +72,6 @@ logger = get_logger(__name__)
 
 class ToolApprovalScriptError(RuntimeError):
     """One approval-script load or execution failure."""
-
-
-@dataclass(frozen=True, slots=True)
-class ToolCallWorkflowOrigin:
-    """Dynamic Workflow provenance for one participant tool call."""
-
-    workflow_id: str
-    participant_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +86,6 @@ class ToolApprovalCall:
     room_id: str | None
     thread_id: str | None
     requester_id: str | None
-    workflow_origin: ToolCallWorkflowOrigin | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,18 +95,8 @@ class MatrixApprovalAction:
     room_id: str
     sender_id: str
     card_event_id: str | None
-    approval_id: str | None
     status: Literal["approved", "denied"]
     reason: str | None
-
-
-def _terminal_decision(status: Literal["denied", "expired"], reason: str) -> ApprovalDecision:
-    return ApprovalDecision(
-        status=status,
-        reason=reason,
-        resolved_by=None,
-        resolved_at=datetime.now(UTC),
-    )
 
 
 def _check_callable_from_module(
@@ -181,18 +162,12 @@ def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRule
     return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
 
 
-def tool_requires_approval_for_openai_compat(
-    config: Config,
-    tool_name: str,
-) -> bool:
-    """Return whether one `/v1` tool must be hidden because approval may be required."""
-    approval_config = config.tool_approval
+def tool_may_require_approval(config: Config, tool_name: str) -> bool:
+    """Return whether one tool must use Agno's persisted confirmation boundary."""
     rule = _matching_tool_approval_rule(config, tool_name)
     if rule is None:
-        return approval_config.default == "require_approval"
-    if rule.action is not None:
-        return rule.action == "require_approval"
-    return True
+        return config.tool_approval.default == "require_approval"
+    return rule.action != "auto_approve"
 
 
 def resolve_tool_approval_approver(
@@ -248,55 +223,34 @@ async def evaluate_tool_approval(
     return result, timeout_seconds
 
 
-async def request_tool_approval_for_call(call: ToolApprovalCall) -> ApprovalDecision | None:
-    """Return a terminal decision when one tool call is denied, or None when it may proceed."""
-    policy_arguments = deepcopy(call.arguments)
-    requires_approval, timeout_seconds = await evaluate_tool_approval(
-        call.config,
-        call.runtime_paths,
-        call.tool_name,
-        policy_arguments,
-        call.agent_name,
-    )
-    if not requires_approval:
-        return None
-
+async def send_suspended_tool_approval(
+    call: ToolApprovalCall,
+    *,
+    approval_id: str,
+    continuation_id: str,
+    continuation_generation: int,
+    tool_call_id: str,
+    expires_at_ns: int,
+) -> SentApprovalEvent | None:
+    """Send a durable card for a paused Agno run without retaining a waiter."""
     manager = approval_manager.get_approval_store()
-    if manager is None:
-        return _terminal_decision(
-            "expired",
-            "Tool approval is required but the approval store is not initialized.",
-        )
-
-    origin = call.workflow_origin
-    return await manager.request_approval(
+    approver = resolve_tool_approval_approver(call.config, call.runtime_paths, call.requester_id)
+    if manager is None or call.room_id is None or call.requester_id is None or approver is None:
+        return None
+    return await manager.create_detached_approval(
+        approval_id=approval_id,
+        continuation_id=continuation_id,
+        continuation_generation=continuation_generation,
+        tool_call_id=tool_call_id,
         tool_name=call.tool_name,
         arguments=deepcopy(call.arguments),
-        agent_name=call.agent_name,
         room_id=call.room_id,
-        thread_id=call.thread_id,
         requester_id=call.requester_id,
-        workflow_id=origin.workflow_id if origin is not None else None,
-        participant_id=origin.participant_id if origin is not None else None,
-        approver_user_id=resolve_tool_approval_approver(
-            call.config,
-            call.runtime_paths,
-            call.requester_id,
-        ),
-        timeout_seconds=timeout_seconds,
+        approver_user_id=approver,
+        expires_at_ns=expires_at_ns,
+        agent_name=call.agent_name,
+        thread_id=call.thread_id,
     )
-
-
-def is_process_approval_card(card_event_id: str) -> bool:
-    """Return whether the current process has seen one approval card id."""
-    manager = approval_manager.get_approval_store()
-    return manager is not None and manager.knows_in_memory_approval_card(card_event_id)
-
-
-def is_process_active_approval_card(card_event_id: str) -> bool:
-    """Return whether one approval card still has an active in-process waiter."""
-    manager = approval_manager.get_approval_store()
-    return manager is not None and manager.has_active_in_memory_approval_card(card_event_id)
 
 
 async def handle_matrix_approval_action(
@@ -304,22 +258,11 @@ async def handle_matrix_approval_action(
     *,
     before_consume: Callable[[], Awaitable[None]] | None = None,
 ) -> ApprovalActionResult:
-    """Resolve a live approval or expire a validated detached Matrix card."""
+    """Resolve a durable continuation card anchored to its Matrix event."""
     manager = approval_manager.get_approval_store()
     if manager is None:
         return ApprovalActionResult(consumed=False, resolved=False)
     sanitized_reason = action.reason.strip() if isinstance(action.reason, str) and action.reason.strip() else None
-    if action.approval_id is not None:
-        result = await manager.handle_live_approval_id_response(
-            room_id=action.room_id,
-            sender_id=action.sender_id,
-            approval_id=action.approval_id,
-            status=action.status,
-            reason=sanitized_reason,
-            before_consume=before_consume,
-        )
-        if result.consumed or action.card_event_id is None:
-            return result
     if action.card_event_id is None:
         return ApprovalActionResult(consumed=False, resolved=False)
     return await manager.handle_card_response(
@@ -332,6 +275,12 @@ async def handle_matrix_approval_action(
     )
 
 
+def is_process_active_approval_card(card_event_id: str) -> bool:
+    """Return whether one approval card is being settled in this process."""
+    manager = approval_manager.get_approval_store()
+    return manager is not None and manager.has_active_in_memory_approval_card(card_event_id)
+
+
 def initialize_approval_runtime(
     runtime_paths: RuntimePaths,
     *,
@@ -342,6 +291,7 @@ def initialize_approval_runtime(
     transport_sender: TransportSenderProvider,
     sending_device: SendingDeviceProvider,
     locate_card: ApprovalCardLocator,
+    continuation_ready: ContinuationReadyHandler | None = None,
 ) -> None:
     """Initialize the approval runtime behind the public approval seam."""
     approval_manager.initialize_approval_store(
@@ -353,11 +303,18 @@ def initialize_approval_runtime(
         transport_sender=transport_sender,
         sending_device=sending_device,
         locate_card=locate_card,
+        continuation_ready=continuation_ready,
     )
 
 
+async def expire_continuation_approval_cards(continuation_id: str) -> bool:
+    """Expire every unresolved Matrix card for one continuation."""
+    manager = approval_manager.get_approval_store()
+    return False if manager is None else await manager.expire_continuation_cards(continuation_id)
+
+
 async def expire_orphaned_approval_cards_on_startup() -> ApprovalStartupSweep:
-    """Expire router-authored approval cards that can no longer have live waiters."""
+    """Settle legacy and orphaned approval cards without executing their tools."""
     manager = approval_manager.get_approval_store()
     if manager is None:
         return ApprovalStartupSweep(discarded=0, failed=0)
@@ -365,12 +322,7 @@ async def expire_orphaned_approval_cards_on_startup() -> ApprovalStartupSweep:
 
 
 async def shutdown_approval_runtime(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
-    """Expire live approvals, drop runtime state, and clear approval script state."""
-    await _shutdown_approval_store(reason=reason)
-
-
-async def _shutdown_approval_store(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
-    """Expire pending approvals, drop the manager, and clear script state."""
+    """Stop approval transport work, drop runtime state, and clear script state."""
     try:
         await approval_manager.shutdown_approval_manager(reason=reason)
     finally:

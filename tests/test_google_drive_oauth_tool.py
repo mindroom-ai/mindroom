@@ -23,7 +23,7 @@ from mindroom.config.main import Config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, GOOGLE_DRIVE_READ_OAUTH_SCOPES
-from mindroom.tool_approval import tool_requires_approval_for_openai_compat
+from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
@@ -324,7 +324,7 @@ def test_google_drive_write_functions_can_require_approval() -> None:
         },
     )
 
-    assert all(tool_requires_approval_for_openai_compat(config, name) for name in write_functions)
+    assert all(tool_may_require_approval(config, name) for name in write_functions)
 
 
 def test_google_drive_download_uses_namespaced_model_function(tmp_path: Path) -> None:

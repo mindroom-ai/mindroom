@@ -27,6 +27,17 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
     [
         pytest.param(
             FinalDeliveryOutcome(
+                terminal_status="suspended",
+                event_id="$waiting",
+                is_visible_response=True,
+                final_visible_body="Waiting for approval",
+                delivery_kind="sent",
+            ),
+            _Expectation("$waiting", True, "$waiting", None, False),
+            id="suspended-visible-delivery",
+        ),
+        pytest.param(
+            FinalDeliveryOutcome(
                 terminal_status="completed",
                 event_id="$final",
                 is_visible_response=True,

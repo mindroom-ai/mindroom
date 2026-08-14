@@ -65,7 +65,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from mindroom.event_journal import OutboxDelivery, PrincipalStore, RefreshRequest, TurnRecordStore
+    from mindroom.event_journal import (
+        ApprovalContinuation,
+        OutboxDelivery,
+        PrincipalStore,
+        RefreshRequest,
+        TurnRecordStore,
+    )
     from mindroom.event_journal.backend import Backend, Operation, Transaction
     from mindroom.history_recovery import RoomHistoryRecovery
 
@@ -3544,6 +3550,13 @@ class TestApprovalCards:
             card=card,
         )
 
+    async def test_pending_rooms_are_discoverable_without_live_config(self, alice: PrincipalStore) -> None:
+        """Startup can find durable cards without already knowing their room IDs."""
+        await alice.claim_approval_card(room_id=OTHER_ROOM, transaction_id="txn-other", card=self.card("$other"))
+        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn-room", card=self.card("$room"))
+
+        assert await alice.pending_approval_room_ids() == tuple(sorted((OTHER_ROOM, ROOM)))
+
     async def test_a_remembered_card_reads_back_whole(self, alice: PrincipalStore) -> None:
         """A remembered card reads back whole, and unanswered."""
         await self.remember(alice, "$card")
@@ -3553,6 +3566,60 @@ class TestApprovalCards:
         assert stored.card == self.card("$card")
         assert stored.resolution is None
         assert stored.card_event_id == "$card"
+
+    async def test_malformed_legacy_card_does_not_block_later_rows(self, alice: PrincipalStore) -> None:
+        """One unreadable old row must fail closed without poisoning the startup page."""
+        await self.remember(alice, "$malformed")
+        await self.remember(alice, "$valid")
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE approval_cards SET card_json = ? WHERE principal_id = ? AND card_event_id = ?",
+                ("{", alice._principal_id, "$malformed"),
+            ),
+        )
+
+        assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$malformed") is None
+        scanned = await alice.pending_approval_cards(room_id=ROOM)
+        assert [stored.card_event_id for stored in scanned] == ["$valid"]
+
+    async def test_full_page_of_malformed_legacy_cards_does_not_starve_valid_rows(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A corrupt raw page must advance internally until later valid recovery work is found."""
+        for event_id in ("$malformed-1", "$malformed-2", "$valid"):
+            await self.remember(alice, event_id)
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                """
+                UPDATE approval_cards
+                SET card_json = ?
+                WHERE principal_id = ? AND card_event_id IN (?, ?)
+                """,
+                ("{", alice._principal_id, "$malformed-1", "$malformed-2"),
+            ),
+        )
+
+        scanned = await alice.pending_approval_cards(room_id=ROOM, limit=2)
+
+        assert [stored.card_event_id for stored in scanned] == ["$valid"]
+
+    async def test_wrong_shaped_legacy_resolution_does_not_crash_startup_reader(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Old or damaged resolution JSON is never reinterpreted as executable permission."""
+        await self.remember(alice, "$malformed")
+        await self.remember(alice, "$valid")
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE approval_cards SET resolution_json = ? WHERE principal_id = ? AND card_event_id = ?",
+                ("[]", alice._principal_id, "$malformed"),
+            ),
+        )
+
+        scanned = await alice.pending_approval_cards(room_id=ROOM)
+        assert [stored.card_event_id for stored in scanned] == ["$valid"]
 
     async def test_a_claim_is_recoverable_before_anything_knows_its_event(self, alice: PrincipalStore) -> None:
         """The window a crash lands in holds a row, not a stranded card.
@@ -3701,6 +3768,18 @@ class TestApprovalCards:
 
         await alice.forget_approval_card(transaction_id=self.transaction("$sent"))
         assert await alice.pending_approval_cards(room_id=ROOM) == ()
+
+    async def test_terminal_card_identity_survives_payload_retirement(self, alice: PrincipalStore) -> None:
+        """Every bot must keep classifying a delivered approval action as approval-only."""
+        await self.remember(alice, "$card")
+
+        await alice.finish_approval_card(
+            transaction_id=self.transaction("$card"),
+            card_event_id="$card",
+        )
+
+        assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
+        assert await alice.is_terminal_approval_card(room_id=ROOM, card_event_id="$card")
 
     async def test_a_recorded_decision_reads_back_with_the_card(self, alice: PrincipalStore) -> None:
         """A card keeps its decision until the room is known to show it.
@@ -3944,6 +4023,647 @@ class TestApprovalCards:
         assert await bob.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
         assert await bob.pending_approval_cards(room_id=ROOM) == ()
         assert await alice.pending_approval_cards(room_id=ROOM) != ()
+
+
+class TestApprovalContinuations:
+    """A paused Agno run remains owned by its original journal sources."""
+
+    @staticmethod
+    def continuation(*, state: str = "ready") -> ApprovalContinuation:
+        """Return one exact paused-run owner without importing it at collection time."""
+        from mindroom.event_journal import (  # noqa: PLC0415
+            ApprovalCall,
+            ApprovalContinuation,
+            ApprovalDecision,
+        )
+
+        return ApprovalContinuation(
+            approval_id="approval-1",
+            run_id="run-1",
+            session_id="session-1",
+            entity_kind="agent",
+            entity_name="agent",
+            room_id=ROOM,
+            thread_id="$thread",
+            requester_id=ALICE,
+            response_event_id="$waiting",
+            source_event_ids=("$source-1", "$source-2"),
+            calls=(
+                ApprovalCall(
+                    tool_call_id="call-1",
+                    tool_name="shell",
+                    invoking_agent="agent",
+                    expires_at_ns=time.time_ns() + 60_000_000_000,
+                    decision=ApprovalDecision.APPROVED if state == "ready" else None,
+                ),
+            ),
+            request_body="run it",
+            state=state,
+        )
+
+    @staticmethod
+    async def admit_sources(store: PrincipalStore) -> None:
+        """Admit the two sources one coalesced approval turn owns."""
+        await admit(store, "$source-1", ts=1_001)
+        await admit(store, "$source-2", ts=1_002)
+
+    @staticmethod
+    async def remember_card(
+        store: PrincipalStore,
+        *,
+        tool_call_id: str = "call-1",
+    ) -> None:
+        """Persist one current-format card for the first continuation generation."""
+        card = {
+            "event_id": "$approval",
+            "sender": ALICE,
+            "type": "io.mindroom.tool_approval",
+            "content": {
+                "approval_id": "approval-card-1",
+                "continuation_id": "approval-1",
+                "continuation_generation": 0,
+                "tool_call_id": tool_call_id,
+                "status": "pending",
+            },
+        }
+        await store.claim_approval_card(room_id=ROOM, transaction_id="approval-card-1", card=card)
+        await store.mark_approval_card_attempted(
+            transaction_id="approval-card-1",
+            sending_device_id=DEVICE,
+        )
+        await store.acknowledge_approval_card(
+            transaction_id="approval-card-1",
+            card_event_id="$approval",
+            card=card,
+        )
+
+    async def test_continuation_is_reachable_from_every_owned_source(self, alice: PrincipalStore) -> None:
+        """A coalesced source cannot replay outside its one paused-run owner."""
+        await self.admit_sources(alice)
+        continuation = self.continuation()
+
+        created = await alice.create_approval_continuation(continuation)
+
+        assert created == continuation
+        assert await alice.approval_continuation_for_source("$source-1") == continuation
+        assert await alice.approval_continuation_for_source("$source-2") == continuation
+
+    async def test_ready_continuation_has_one_claim_winner(self, alice: PrincipalStore) -> None:
+        """Only one response lifecycle may continue the exact persisted Agno run."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+
+        winner = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        loser = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-b")
+
+        assert winner is not None
+        assert winner.state == "claimed"
+        assert winner.runtime_generation == "runtime-a"
+        assert loser is None
+
+    async def test_pending_page_exposes_only_runnable_primary_source(self, alice: PrincipalStore) -> None:
+        """Waiting and live claims stay hidden while ready and old claims re-enter once."""
+        await self.admit_sources(alice)
+        waiting = self.continuation(state="waiting")
+        await alice.create_approval_continuation(waiting)
+
+        assert list(await alice.pending(runtime_generation="runtime-a")) == []
+
+        await alice.request_approval_failure(
+            waiting.approval_id,
+            "make it runnable",
+            expected_state="waiting",
+        )
+        failing = await alice.pending(runtime_generation="runtime-a")
+        assert [event.event_id for event in failing] == ["$source-1"]
+
+    async def test_abandoned_publication_exposes_its_primary_source_for_failure_cleanup(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A crash before every card is durable cannot hide the paused source forever."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(
+            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
+        )
+
+        recovered = await alice.pending(runtime_generation="runtime-b")
+
+        assert [event.event_id for event in recovered] == ["$source-1"]
+
+    async def test_current_claim_is_hidden_and_old_runtime_claim_is_recoverable(self, alice: PrincipalStore) -> None:
+        """A restart recovers delivery debt without replaying the coalesced source twice."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+
+        assert list(await alice.pending(runtime_generation="runtime-a")) == []
+        recovered = await alice.pending(runtime_generation="runtime-b")
+        assert [event.event_id for event in recovered] == ["$source-1"]
+
+    async def test_current_claim_with_final_delivery_debt_is_recoverable(self, alice: PrincipalStore) -> None:
+        """A transient FINAL failure re-enters only to reconcile its frozen outbox payload."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await alice.enqueue_delivery(
+            turn_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("finished"),
+        )
+
+        recovered = await alice.pending(runtime_generation="runtime-a")
+
+        assert [event.event_id for event in recovered] == ["$source-1"]
+
+    async def test_claimed_continuation_advances_only_from_its_current_generation(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A stale lifecycle cannot replace a newer chained approval pause."""
+        from mindroom.event_journal import ApprovalCall  # noqa: PLC0415
+
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        calls = (
+            ApprovalCall(
+                tool_call_id="call-2",
+                tool_name="write_file",
+                invoking_agent="agent",
+                expires_at_ns=time.time_ns() + 60_000_000_000,
+            ),
+        )
+
+        stale = await alice.advance_approval_continuation(
+            "approval-1",
+            claimant_generation=1,
+            run_id="run-2",
+            session_id="session-1",
+            calls=calls,
+        )
+        advanced = await alice.advance_approval_continuation(
+            "approval-1",
+            claimant_generation=0,
+            run_id="run-2",
+            session_id="session-1",
+            calls=calls,
+        )
+
+        assert stale is None
+        assert advanced is not None
+        assert advanced.state == "waiting"
+        assert advanced.generation == 1
+        assert advanced.run_id == "run-2"
+        assert advanced.runtime_generation == "runtime-a"
+        assert advanced.calls == calls
+
+    async def test_publication_activation_uses_decisions_recorded_while_cards_were_sent(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An immediate click is durable but cannot make a run executable before publication finishes."""
+        from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
+
+        await self.admit_sources(alice)
+        publishing = replace(self.continuation(state="waiting"), runtime_generation="runtime-a")
+        await alice.create_approval_continuation(publishing)
+        await self.remember_card(alice)
+
+        recorded = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="approved",
+            reason=None,
+            resolution={"status": "approved"},
+        )
+        before_activation = await alice.approval_continuation(publishing.approval_id)
+        activated = await alice.activate_approval_continuation(
+            publishing.approval_id,
+            expected_generation=0,
+        )
+
+        assert recorded.recorded
+        assert recorded.continuation_ready is False
+        assert before_activation is not None
+        assert before_activation.state == "waiting"
+        assert before_activation.calls[0].decision is ApprovalDecision.APPROVED
+        assert activated is not None
+        assert activated.state == "ready"
+
+    async def test_failure_request_is_guarded_by_observed_state(self, alice: PrincipalStore) -> None:
+        """A stale failure observer cannot fence work that already made progress."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+
+        stale = await alice.request_approval_failure(
+            "approval-1",
+            "stale recovery",
+            expected_state="waiting",
+        )
+        failing = await alice.request_approval_failure(
+            "approval-1",
+            "entity is unavailable",
+            expected_state="ready",
+        )
+
+        assert stale is None
+        assert failing is not None
+        assert failing.state == "failing"
+        assert failing.failure_reason == "entity is unavailable"
+
+    async def test_failure_request_cannot_fence_a_claim_after_final_delivery_is_enqueued(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The successful FINAL debt atomically outranks a concurrent failure request."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+        await alice.enqueue_delivery(
+            turn_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload={"msgtype": "m.text", "body": "finished"},
+        )
+
+        refused = await alice.request_approval_failure(
+            "approval-1",
+            "entity is unavailable",
+            expected_state="claimed",
+            expected_generation=claimed.generation,
+            expected_runtime_generation="runtime-a",
+        )
+
+        assert refused is None
+        retained = await alice.approval_continuation("approval-1")
+        assert retained is not None
+        assert retained.state == "claimed"
+
+    async def test_card_decision_atomically_readies_the_exact_call(self, alice: PrincipalStore) -> None:
+        """The card and final call decision become durable in one transaction."""
+        from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
+
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await self.remember_card(alice)
+
+        recorded = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="approved",
+            reason="Looks safe.",
+            resolution={"status": "approved", "resolution_reason": "Looks safe."},
+        )
+
+        assert recorded.recorded is True
+        assert recorded.resolution == {"status": "approved", "resolution_reason": "Looks safe."}
+        assert recorded.continuation_ready is True
+        assert recorded.source_event_ids == ("$source-1", "$source-2")
+        continuation = await alice.approval_continuation_for_source("$source-1")
+        assert continuation is not None
+        assert continuation.state == "ready"
+        assert continuation.calls[0].decision is ApprovalDecision.APPROVED
+        assert continuation.calls[0].reason == "Looks safe."
+
+    async def test_late_approval_atomically_expires_the_call_and_card(self, alice: PrincipalStore) -> None:
+        """A click at or after the exact deadline cannot authorize execution."""
+        from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
+
+        await self.admit_sources(alice)
+        expired = replace(
+            self.continuation(state="waiting"),
+            calls=(replace(self.continuation(state="waiting").calls[0], expires_at_ns=1),),
+        )
+        await alice.create_approval_continuation(expired)
+        await self.remember_card(alice)
+
+        recorded = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="approved",
+            reason=None,
+            resolution={"status": "approved", "body": "Approved: shell", "resolved_by": ALICE},
+        )
+
+        assert recorded.recorded is True
+        assert recorded.resolution == {
+            "status": "expired",
+            "body": "Expired: shell",
+            "resolution_reason": "Tool approval request timed out.",
+            "resolved_by": None,
+        }
+        continuation = await alice.approval_continuation_for_source("$source-1")
+        assert continuation is not None
+        assert continuation.state == "ready"
+        assert continuation.calls[0].decision is ApprovalDecision.EXPIRED
+
+    async def test_late_denial_atomically_expires_the_call_and_visible_card(self, alice: PrincipalStore) -> None:
+        """A denial crossing the exact deadline must display the durable expiry winner."""
+        await self.admit_sources(alice)
+        expired = replace(
+            self.continuation(state="waiting"),
+            calls=(replace(self.continuation(state="waiting").calls[0], expires_at_ns=1),),
+        )
+        await alice.create_approval_continuation(expired)
+        await self.remember_card(alice)
+
+        recorded = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="denied",
+            reason="Unsafe.",
+            resolution={"status": "denied", "body": "Denied: shell", "resolved_by": ALICE},
+        )
+
+        assert recorded.recorded is True
+        assert recorded.resolution == {
+            "status": "expired",
+            "body": "Expired: shell",
+            "resolution_reason": "Tool approval request timed out.",
+            "resolved_by": None,
+        }
+
+    async def test_approval_cannot_authorize_a_failure_fenced_continuation(self, alice: PrincipalStore) -> None:
+        """A late click terminalizes the card but cannot approve work fenced for failure."""
+        from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
+
+        await self.admit_sources(alice)
+        waiting = self.continuation(state="waiting")
+        await alice.create_approval_continuation(waiting)
+        await self.remember_card(alice)
+        failing = await alice.request_approval_failure(
+            waiting.approval_id,
+            "Approval publication failed safely.",
+            expected_state="waiting",
+        )
+        assert failing is not None
+
+        recorded = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="approved",
+            reason=None,
+            resolution={"status": "approved", "body": "Approved: shell", "resolved_by": ALICE},
+        )
+
+        assert recorded.recorded is True
+        assert recorded.continuation_ready is False
+        assert recorded.resolution == {
+            "status": "denied",
+            "body": "Denied: shell",
+            "resolution_reason": "Approval publication failed safely.",
+            "resolved_by": None,
+        }
+        continuation = await alice.approval_continuation_for_source("$source-1")
+        assert continuation is not None
+        assert continuation.state == "failing"
+        assert continuation.calls[0].decision is ApprovalDecision.DENIED
+        assert continuation.calls[0].reason == "Approval publication failed safely."
+
+    async def test_duplicate_card_decision_preserves_the_first_winner(self, alice: PrincipalStore) -> None:
+        """A later reaction can redeliver but never reverse the stored decision."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await self.remember_card(alice)
+        await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="approved",
+            reason=None,
+            resolution={"status": "approved"},
+        )
+
+        duplicate = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="denied",
+            reason="Changed my mind.",
+            resolution={"status": "denied", "resolution_reason": "Changed my mind."},
+        )
+
+        assert duplicate.recorded is False
+        assert duplicate.resolution == {"status": "approved"}
+
+    async def test_unknown_exact_call_leaves_card_and_continuation_undecided(self, alice: PrincipalStore) -> None:
+        """Malformed current-format identity fails closed without a half-commit."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await self.remember_card(alice, tool_call_id="unknown-call")
+
+        refused = await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="approved",
+            reason=None,
+            resolution={"status": "approved"},
+        )
+
+        assert refused.recorded is False
+        assert refused.resolution is None
+        card = await alice.pending_approval_card(room_id=ROOM, card_event_id="$approval")
+        assert card is not None
+        assert card.resolution is None
+        continuation = await alice.approval_continuation_for_source("$source-1")
+        assert continuation is not None
+        assert continuation.state == "waiting"
+        assert continuation.calls[0].decision is None
+
+    async def test_finish_requires_acknowledged_final_before_releasing_sources(self, alice: PrincipalStore) -> None:
+        """A paused run cannot disappear before its frozen final answer is visible."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+
+        assert await alice.finish_approval_continuation("approval-1") is False
+        assert await alice.is_pending("$source-1")
+        assert await alice.is_pending("$source-2")
+
+        await alice.enqueue_delivery(
+            turn_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("finished"),
+        )
+        await alice.claim_delivery(turn_id="$source-1", stage=DeliveryStage.FINAL)
+        await alice.acknowledge_delivery(
+            turn_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$finished",
+        )
+
+        assert await alice.finish_approval_continuation("approval-1") is True
+        assert await alice.approval_continuation_for_source("$source-1") is None
+        assert not await alice.is_pending("$source-1")
+        assert not await alice.is_pending("$source-2")
+
+    async def test_permanently_unavailable_owner_can_discard_fenced_sources(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """Permanent-unavailability cleanup requires its durable terminal notice."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+
+        owners = await journal_store.approval_continuations_for_entities({"agent"})
+        assert [(principal, continuation.approval_id) for principal, continuation in owners] == [
+            ("agent@alice", "approval-1"),
+        ]
+
+        failing = await alice.request_approval_failure(
+            "approval-1",
+            "agent removed",
+            expected_state="waiting",
+        )
+        assert failing is not None
+        assert (
+            await alice.discard_unavailable_approval_continuation(
+                "approval-1",
+                notice_principal_id="router@alice",
+            )
+            is False
+        )
+        assert await alice.is_pending("$source-1")
+        assert await alice.is_pending("$source-2")
+
+        router = journal_store.principal("router@alice")
+        await router.enqueue_delivery(
+            turn_id="approval-unavailable:approval-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("agent removed"),
+        )
+        await router.claim_delivery(
+            turn_id="approval-unavailable:approval-1",
+            stage=DeliveryStage.FINAL,
+        )
+        await router.acknowledge_delivery(
+            turn_id="approval-unavailable:approval-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$unavailable",
+        )
+
+        assert (
+            await alice.discard_unavailable_approval_continuation(
+                "approval-1",
+                notice_principal_id="router@alice",
+            )
+            is True
+        )
+        assert await alice.approval_continuation("approval-1") is None
+        assert not await alice.is_pending("$source-1")
+        assert not await alice.is_pending("$source-2")
+
+    async def test_continuation_owner_scans_are_cursor_paginated(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """Unavailable-owner scans visit a bounded page and resume after its final approval."""
+        for index in range(5):
+            source_event_id = f"$page-source-{index}"
+            await admit(alice, source_event_id, ts=2_000 + index)
+            continuation = replace(
+                self.continuation(state="waiting"),
+                approval_id=f"approval-page-{index}",
+                entity_name="removed" if index != 2 else "configured",
+                source_event_ids=(source_event_id,),
+            )
+            assert await alice.create_approval_continuation(continuation) == continuation
+
+        first = await journal_store.approval_continuations(limit=2)
+        second = await journal_store.approval_continuations(
+            limit=2,
+            after=(first[-1][1].entity_name, first[-1][1].approval_id),
+        )
+        third = await journal_store.approval_continuations(
+            limit=2,
+            after=(second[-1][1].entity_name, second[-1][1].approval_id),
+        )
+        assert [continuation.approval_id for _principal, continuation in first] == [
+            "approval-page-2",
+            "approval-page-0",
+        ]
+        assert [continuation.approval_id for _principal, continuation in second] == [
+            "approval-page-1",
+            "approval-page-3",
+        ]
+        assert [continuation.approval_id for _principal, continuation in third] == ["approval-page-4"]
+
+        removed_first = await journal_store.approval_continuations_for_entities(
+            {"removed"},
+            limit=2,
+        )
+        removed_second = await journal_store.approval_continuations_for_entities(
+            {"removed"},
+            limit=2,
+            after=(removed_first[-1][1].entity_name, removed_first[-1][1].approval_id),
+        )
+        assert [continuation.approval_id for _principal, continuation in removed_first] == [
+            "approval-page-0",
+            "approval-page-1",
+        ]
+        assert [continuation.approval_id for _principal, continuation in removed_second] == [
+            "approval-page-3",
+            "approval-page-4",
+        ]
+
+    async def test_room_departure_discards_continuation_and_cards_with_its_sources(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A membership fence cannot leave a continuation pointing at settled room work."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await self.remember_card(alice)
+
+        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+
+        assert await alice.approval_continuation("approval-1") is None
+        assert not await alice.is_pending("$source-1")
+        assert not await alice.is_pending("$source-2")
+        assert await alice.pending_approval_cards(room_id=ROOM) == ()
+
+    async def test_room_departure_terminalizes_router_owned_cards_before_discarding_the_continuation(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """The responder's membership fence must preserve the router's visible card cleanup debt."""
+        router = journal_store.principal("router@shared")
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await self.remember_card(router)
+
+        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+
+        assert await alice.approval_continuation("approval-1") is None
+        stored = await router.pending_approval_card(room_id=ROOM, card_event_id="$approval")
+        assert stored is not None
+        assert stored.resolution is not None
+        assert stored.resolution["status"] == "expired"
+        assert stored.resolution["resolution_reason"] == "Requesting agent left the room."
+
+    async def test_router_departure_wakes_the_responder_continuation_to_fail_closed(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """Deleting router-owned cards must not leave their responder-owned pause hidden forever."""
+        router = journal_store.principal("router@shared")
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await self.remember_card(router)
+
+        await router.fence_departure(ROOM, source=DepartureSource.REPORTED)
+
+        continuation = await alice.approval_continuation("approval-1")
+        assert continuation is not None
+        assert continuation.state == "failing"
+        assert continuation.failure_reason == "Approval transport left the room."
+        assert [event.event_id for event in await alice.pending(runtime_generation="replacement-runtime")] == [
+            "$source-1",
+        ]
+        assert await router.pending_approval_cards(room_id=ROOM) == ()
 
 
 class TestConcurrency:
@@ -4298,6 +5018,119 @@ class TestConnectionSecretsStayOutOfLogs:
         assert "db.example" not in rendered
 
 
+class TestSchemaUpgrades:
+    """Opening the journal upgrades additive columns without losing old rows."""
+
+    async def test_opening_main_schema_adds_native_continuation_card_identity(self, tmp_path: Path) -> None:
+        """A card written by main remains readable after native continuation columns are added."""
+        database_path = tmp_path / "main-schema.db"
+        with sqlite3.connect(database_path) as database:
+            database.execute(
+                """
+                CREATE TABLE approval_cards (
+                    principal_id TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    transaction_id TEXT NOT NULL,
+                    card_event_id TEXT,
+                    attempted INTEGER NOT NULL,
+                    sending_device_id TEXT,
+                    card_json TEXT NOT NULL,
+                    resolution_json TEXT,
+                    membership_epoch BIGINT NOT NULL,
+                    created_at_ns BIGINT NOT NULL,
+                    PRIMARY KEY (principal_id, transaction_id)
+                )
+                """,
+            )
+            database.execute(
+                """
+                INSERT INTO approval_cards (
+                    principal_id, room_id, transaction_id, card_event_id, attempted,
+                    sending_device_id, card_json, resolution_json, membership_epoch, created_at_ns
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("agent@alice", ROOM, "legacy", "$legacy", 1, DEVICE, '{"body":"old"}', None, 1, 1),
+            )
+
+        backend = SqliteBackend.open(database_path)
+        try:
+            row = await backend.read(
+                lambda transaction: transaction.fetchone(
+                    """
+                    SELECT card_event_id, continuation_id, continuation_generation, tool_call_id
+                    FROM approval_cards WHERE principal_id = ? AND transaction_id = ?
+                    """,
+                    ("agent@alice", "legacy"),
+                ),
+            )
+        finally:
+            await backend.close()
+
+        assert row is not None
+        assert row["card_event_id"] == "$legacy"
+        assert row["continuation_id"] is None
+        assert row["continuation_generation"] is None
+        assert row["tool_call_id"] is None
+
+    async def test_postgres_opening_main_schema_adds_native_continuation_card_identity(
+        self,
+        postgres_journal_url: str,
+    ) -> None:
+        """PostgreSQL upgrades the same shipped card row without a destructive migration."""
+        import psycopg  # noqa: PLC0415 - optional backend exercised only by this test
+
+        from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        with psycopg.connect(database_url) as database:
+            database.execute(
+                """
+                CREATE TABLE approval_cards (
+                    principal_id TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    transaction_id TEXT NOT NULL,
+                    card_event_id TEXT,
+                    attempted INTEGER NOT NULL,
+                    sending_device_id TEXT,
+                    card_json TEXT NOT NULL,
+                    resolution_json TEXT,
+                    membership_epoch BIGINT NOT NULL,
+                    created_at_ns BIGINT NOT NULL,
+                    PRIMARY KEY (principal_id, transaction_id)
+                )
+                """,
+            )
+            database.execute(
+                """
+                INSERT INTO approval_cards (
+                    principal_id, room_id, transaction_id, card_event_id, attempted,
+                    sending_device_id, card_json, resolution_json, membership_epoch, created_at_ns
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                ("agent@alice", ROOM, "legacy", "$legacy", 1, DEVICE, '{"body":"old"}', None, 1, 1),
+            )
+
+        backend = PostgresBackend.open(database_url)
+        try:
+            row = await backend.read(
+                lambda transaction: transaction.fetchone(
+                    """
+                    SELECT card_event_id, continuation_id, continuation_generation, tool_call_id
+                    FROM approval_cards WHERE principal_id = ? AND transaction_id = ?
+                    """,
+                    ("agent@alice", "legacy"),
+                ),
+            )
+        finally:
+            await backend.close()
+
+        assert row is not None
+        assert row["card_event_id"] == "$legacy"
+        assert row["continuation_id"] is None
+        assert row["continuation_generation"] is None
+        assert row["tool_call_id"] is None
+
+
 class TestHotQueriesAreIndexCovered:
     """Every scan a running bot repeats must come from an index, ordering included."""
 
@@ -4339,6 +5172,16 @@ class TestHotQueriesAreIndexCovered:
             "ORDER BY created_at_ns, transaction_id LIMIT 50"
         ),
         "approval card point lookup": ("SELECT * FROM approval_cards WHERE principal_id=? AND card_event_id=?"),
+        "continuation owner page": (
+            "SELECT * FROM approval_continuations "
+            "WHERE (entity_name, approval_id) > (?, ?) "
+            "ORDER BY entity_name, approval_id LIMIT 50"
+        ),
+        "continuation owners for entities": (
+            "SELECT * FROM approval_continuations WHERE entity_name IN (?, ?) "
+            "AND (entity_name, approval_id) > (?, ?) "
+            "ORDER BY entity_name, approval_id LIMIT 50"
+        ),
     }
 
     async def test_no_hot_query_falls_back_to_a_scan_or_a_temporary_sort(self, tmp_path: Path) -> None:
@@ -4404,7 +5247,9 @@ class TestHotQueriesAreIndexCovered:
         indexes = [s for s in rendered if "CREATE INDEX" in s]
 
         assert not [s for s in rendered if "/*bytes*/" in s], "byte-order marker left unexpanded"
-        ordered_text_indexes = [s for s in indexes if "turn_id" in s or "card_event_id" in s]
+        ordered_text_indexes = [
+            s for s in indexes if "turn_id" in s or "card_event_id" in s or "approval_continuations_owner_scan" in s
+        ]
         assert ordered_text_indexes, "expected indexes over the unpinned text columns"
         for statement in ordered_text_indexes:
             assert 'COLLATE "C"' in statement, statement

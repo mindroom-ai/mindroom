@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from contextlib import aclosing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.db.base import SessionType
@@ -86,6 +86,8 @@ from mindroom.response_turn import (
     TurnPartialSnapshot,
     TurnSinks,
     build_matrix_run_metadata,
+    paused_attempt_from_event,
+    paused_attempt_from_response,
     run_blocking_response_turn,
     stream_response_turn,
 )
@@ -1105,6 +1107,7 @@ async def _prepare_agent_and_prompt(
     current_prompt_is_structured: bool = False,
     pipeline_timing: DispatchPipelineTiming | None = None,
     eager_deferred_tools: bool = False,
+    supports_native_tool_approval: bool = False,
     reusable_agent: Agent | None = None,
 ) -> _PreparedAgentRun:
     """Prepare agent and full prompt for AI processing.
@@ -1145,6 +1148,7 @@ async def _prepare_agent_and_prompt(
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
                 dynamic_tool_continuation=True,
+                supports_native_tool_approval=supports_native_tool_approval,
                 eager_deferred_tools=eager_deferred_tools,
             )
         return runtime_model, agent
@@ -1300,6 +1304,7 @@ async def _prepare_agent_run_context(
     turn_recorder: TurnRecorder | None,
     pipeline_timing: DispatchPipelineTiming | None,
     eager_deferred_tools: bool = False,
+    supports_native_tool_approval: bool = False,
     reusable_agent: Agent | None = None,
 ) -> _AgentRunContext:
     """Prepare one agent response lifecycle through metadata assembly."""
@@ -1326,6 +1331,7 @@ async def _prepare_agent_run_context(
         current_prompt_is_structured=current_prompt_is_structured,
         pipeline_timing=pipeline_timing,
         eager_deferred_tools=eager_deferred_tools,
+        supports_native_tool_approval=supports_native_tool_approval,
         reusable_agent=reusable_agent,
     )
     if pipeline_timing is not None:
@@ -1392,6 +1398,7 @@ async def ai_response(  # noqa: C901
     turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     eager_deferred_tools: bool = False,
+    supports_native_tool_approval: bool = False,
     reusable_agent: Agent | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
@@ -1434,6 +1441,7 @@ async def ai_response(  # noqa: C901
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
         eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
+        supports_native_tool_approval: Whether this caller can resume Agno confirmation pauses.
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
             The caller must serialize uses and close its runtime database handles.
 
@@ -1469,6 +1477,7 @@ async def ai_response(  # noqa: C901
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
                 eager_deferred_tools=eager_deferred_tools,
+                supports_native_tool_approval=supports_native_tool_approval,
                 reusable_agent=reusable_agent,
             ),
             show_tool_calls=show_tool_calls,
@@ -1535,6 +1544,7 @@ async def ai_response(  # noqa: C901
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
                 eager_deferred_tools=eager_deferred_tools,
+                supports_native_tool_approval=supports_native_tool_approval,
                 reusable_agent=_reset_reusable_agent_context(reusable_agent, reusable_agent_base_context),
             )
         except Exception as e:
@@ -1586,6 +1596,13 @@ async def ai_response(  # noqa: C901
             )
 
         if response.status in (RunStatus.cancelled, RunStatus.error, RunStatus.paused):
+            paused_attempt = paused_attempt_from_response(
+                response,
+                fallback_session_id=session_id,
+                fallback_run_id=attempt.attempt_run_id,
+            )
+            if paused_attempt is not None:
+                return replace(paused_attempt, runtime_model_name=prepared_run.runtime_model_name)
             partial_text = _extract_interrupted_partial_text(
                 response.content,
                 messages=response.messages,
@@ -1749,7 +1766,11 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
                 state.paused_run_event = event
                 if state_updated is not None:
                     state_updated()
-                return
+                # Agno persists the pause before yielding this event, then
+                # finishes its generator on the next iteration. Draining that
+                # final step is load-bearing: closing the generator here sends
+                # it GeneratorExit, which Agno persists as a cancelled run.
+                continue
 
             if isinstance(event, RunErrorEvent):
                 error_text = _run_error_event_text(event)
@@ -1881,6 +1902,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     eager_deferred_tools: bool = False,
+    supports_native_tool_approval: bool = False,
     reusable_agent: Agent | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
@@ -1919,6 +1941,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
         eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
+        supports_native_tool_approval: Whether this caller can resume Agno confirmation pauses.
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
             The caller must serialize uses and close its runtime database handles.
 
@@ -1971,7 +1994,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901
+    async def _run_streaming_attempt(  # noqa: C901, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -2000,6 +2023,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
                 eager_deferred_tools=eager_deferred_tools,
+                supports_native_tool_approval=supports_native_tool_approval,
                 reusable_agent=_reset_reusable_agent_context(reusable_agent, reusable_agent_base_context),
             )
         except Exception as e:
@@ -2124,6 +2148,16 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 return
 
             if state.paused_run_event is not None:
+                paused_attempt = paused_attempt_from_event(
+                    state.paused_run_event,
+                    fallback_session_id=session_id,
+                    fallback_run_id=attempt.attempt_run_id,
+                )
+                if paused_attempt is not None:
+                    yield AttemptResolved(
+                        replace(paused_attempt, runtime_model_name=prepared_run.runtime_model_name),
+                    )
+                    return
                 paused_metadata = _build_interrupted_metadata(
                     state,
                     RunStatus.paused,

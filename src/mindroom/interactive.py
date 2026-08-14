@@ -52,6 +52,49 @@ class InteractiveMetadata:
         """Return a mutable copy for Matrix reaction-button registration."""
         return [dict(item) for item in self.options_list]
 
+    def to_metadata(self) -> dict[str, object]:
+        """Return the JSON-safe registration facts a durable delivery must retain."""
+        return {
+            "question_text": self.question_text,
+            "option_map": dict(self.option_map),
+            "option_labels": dict(self.option_labels),
+            "options_list": self.options_as_list(),
+        }
+
+    @classmethod
+    def from_metadata(cls, value: object) -> InteractiveMetadata | None:
+        """Restore registration facts from a frozen final-delivery payload."""
+        if not isinstance(value, dict):
+            return None
+        stored = cast("dict[str, object]", value)
+        question_text = stored.get("question_text")
+        option_map = stored.get("option_map")
+        option_labels = stored.get("option_labels")
+        options_list = stored.get("options_list")
+        if (
+            not isinstance(question_text, str)
+            or not isinstance(option_map, dict)
+            or not isinstance(option_labels, dict)
+            or not isinstance(options_list, list)
+        ):
+            return None
+        if not all(isinstance(key, str) and isinstance(item, str) for key, item in option_map.items()):
+            return None
+        if not all(isinstance(key, str) and isinstance(item, str) for key, item in option_labels.items()):
+            return None
+        if not all(
+            isinstance(item, dict)
+            and all(isinstance(key, str) and isinstance(field, str) for key, field in item.items())
+            for item in options_list
+        ):
+            return None
+        return cls(
+            question_text=question_text,
+            option_map=dict(cast("dict[str, str]", option_map)),
+            option_labels=dict(cast("dict[str, str]", option_labels)),
+            options_list=tuple(dict(cast("dict[str, str]", item)) for item in options_list),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class _InteractiveResponse:

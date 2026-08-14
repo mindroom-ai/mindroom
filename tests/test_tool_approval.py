@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import nio
 import pytest
@@ -17,51 +17,52 @@ from pydantic import ValidationError
 import mindroom.tool_approval as approval_module
 from mindroom import approval_transport
 from mindroom.approval_events import parse_approval_datetime
-from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
-    _MAX_REMEMBERED_TERMINAL_CARD_IDS,
-    DEFAULT_SHUTDOWN_REASON,
-    ApprovalDecision,
     ApprovalStartupSweep,
     PendingApproval,
     SentApprovalEvent,
-    _approval_transaction_id,
+    ToolApprovalTransportError,
     _ApprovalManager,
     _build_event_arguments_preview,
     _build_full_event_arguments,
-    _LiveApprovalWaiter,
     get_approval_store,
     initialize_approval_store,
 )
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
-from mindroom.logging_config import get_logger
+from mindroom.event_journal import (
+    ApprovalCall,
+    ApprovalContinuation,
+    DeliveryAcknowledgement,
+    DeliveryStage,
+    EventClass,
+    EventJournalStore,
+    EventKind,
+    InboundEvent,
+    OutboxDelivery,
+    RecordedApprovalDecision,
+    StoredApprovalCard,
+    delivery_transaction_id,
+)
+from mindroom.matrix.message_builder import build_message_content
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
-    MatrixApprovalAction,
-    ToolApprovalCall,
     ToolApprovalScriptError,
-    _shutdown_approval_store,
     evaluate_tool_approval,
-    handle_matrix_approval_action,
-    is_process_approval_card,
-    request_tool_approval_for_call,
     resolve_tool_approval_approver,
-    tool_requires_approval_for_openai_compat,
+    shutdown_approval_runtime,
+    tool_may_require_approval,
 )
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from tests.approval_test_support import (
     CLAIMING_DEVICE_ID,
     FakeApprovalCards,
-    UnclaimableApprovalCards,
-    UnwritableApprovalCards,
     transaction_id_for,
 )
-from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
@@ -99,9 +100,9 @@ def _recording_scan(
 
 @pytest.fixture(autouse=True)
 def reset_approval_store() -> Generator[None, None, None]:
-    asyncio.run(_shutdown_approval_store())
+    asyncio.run(shutdown_approval_runtime())
     yield
-    asyncio.run(_shutdown_approval_store())
+    asyncio.run(shutdown_approval_runtime())
 
 
 def _config(tmp_path: Path) -> Config:
@@ -130,6 +131,514 @@ def test_tool_approval_config_coerces_numeric_timeout_strings() -> None:
 
     assert config.tool_approval.timeout_days == 7.0
     assert config.tool_approval.rules[0].timeout_days == 3.0
+
+
+@pytest.mark.asyncio
+async def test_continuation_decision_wakes_its_owning_bot_sources(tmp_path: Path) -> None:
+    """Router-owned card decisions wake the entity journal that owns the paused run."""
+    owner = MagicMock(running=True)
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: owner if name == "code" else None,
+        cards_provider=lambda: None,
+    )
+
+    await transport._wake_continuation_sources("code", ("$source-1", "$source-2"))
+
+    owner.retry_approval_sources.assert_called_once_with(("$source-1", "$source-2"))
+
+
+@pytest.mark.asyncio
+async def test_transient_removed_owner_cleanup_rearms_startup_retry(tmp_path: Path) -> None:
+    """A failed card edit cannot abandon a removed entity's fenced journal work."""
+    continuation = MagicMock(
+        approval_id="approval-removed",
+        entity_name="removed",
+        state="waiting",
+        generation=0,
+        runtime_generation=None,
+    )
+    failing = MagicMock(
+        approval_id="approval-removed",
+        entity_name="removed",
+        state="failing",
+        generation=0,
+        runtime_generation=None,
+    )
+    principal = MagicMock(
+        approval_continuation=AsyncMock(return_value=continuation),
+        load_delivery=AsyncMock(return_value=None),
+        request_approval_failure=AsyncMock(return_value=failing),
+        discard_unavailable_approval_continuation=AsyncMock(),
+    )
+    journal = MagicMock(
+        approval_continuations_for_entities=AsyncMock(return_value=(("agent@removed", continuation),)),
+    )
+    journal.principal.return_value = principal
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: None,
+        journal_provider=lambda: journal,
+        entity_configured=lambda name: name != "removed",
+    )
+    transport._startup_cleanup_done = True
+
+    with (
+        patch("mindroom.approval_transport.expire_continuation_approval_cards", new=AsyncMock(return_value=False)),
+        patch.object(transport, "_schedule_startup_cleanup_retry") as schedule_retry,
+    ):
+        await transport.reconcile_unavailable_entities({"removed"})
+
+    assert transport._startup_cleanup_done is False
+    schedule_retry.assert_called_once_with()
+    principal.discard_unavailable_approval_continuation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_startup_unavailable_owner_cleanup_walks_cursor_pages(tmp_path: Path) -> None:
+    """Startup cleanup cannot stop after one bounded continuation-owner page."""
+    continuations = [MagicMock(approval_id=f"approval-{index}", entity_name="removed") for index in range(3)]
+    journal = MagicMock(
+        approval_continuations=AsyncMock(
+            side_effect=(
+                (("agent@removed", continuations[0]), ("agent@removed", continuations[1])),
+                (("agent@removed", continuations[2]),),
+            ),
+        ),
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: None,
+        journal_provider=lambda: journal,
+        entity_configured=lambda name: name != "removed",
+    )
+
+    with (
+        patch.object(approval_transport, "_UNAVAILABLE_OWNER_SCAN_LIMIT", 2),
+        patch.object(transport, "_discard_unavailable", new=AsyncMock(return_value=True)) as discard,
+    ):
+        assert await transport._reconcile_startup_unavailable()
+
+    assert journal.approval_continuations.await_args_list == [
+        call(limit=2, after=None),
+        call(limit=2, after=("removed", "approval-1")),
+    ]
+    assert [call.args[1].approval_id for call in discard.await_args_list] == [
+        "approval-0",
+        "approval-1",
+        "approval-2",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sources(tmp_path: Path) -> None:
+    """A removed entity's waiting response must not be the last visible lifecycle state."""
+    continuation = MagicMock(
+        approval_id="approval-removed",
+        entity_name="removed",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        response_event_id="$waiting",
+        state="waiting",
+        generation=0,
+        runtime_generation=None,
+    )
+    failing = MagicMock(
+        approval_id="approval-removed",
+        entity_name="removed",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        response_event_id="$waiting",
+        state="failing",
+        generation=0,
+        runtime_generation=None,
+    )
+    frozen_notice: dict[str, object] = {}
+    notice_turn_id = "approval-unavailable:approval-removed"
+    transaction_id = delivery_transaction_id("router@localhost", notice_turn_id, DeliveryStage.FINAL.value)
+
+    async def enqueue_notice(**kwargs: object) -> str:
+        frozen_notice.update(kwargs)
+        return transaction_id
+
+    async def claim_notice(**_kwargs: object) -> OutboxDelivery:
+        payload = frozen_notice["payload"]
+        assert isinstance(payload, dict)
+        return OutboxDelivery(
+            turn_id=notice_turn_id,
+            stage=DeliveryStage.FINAL,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            transaction_id=transaction_id,
+            payload=payload,
+            edits_event_id=None,
+            acknowledged_event_id=None,
+            created_at_ns=1,
+            attempted=False,
+            sending_device_id=None,
+        )
+
+    principal = MagicMock(
+        approval_continuation=AsyncMock(return_value=continuation),
+        load_delivery=AsyncMock(return_value=None),
+        request_approval_failure=AsyncMock(return_value=failing),
+        principal_id="agent@removed",
+        discard_unavailable_approval_continuation=AsyncMock(return_value=True),
+    )
+    notice_store = MagicMock(
+        principal_id="router@localhost",
+        enqueue_delivery=AsyncMock(side_effect=enqueue_notice),
+        claim_delivery=AsyncMock(side_effect=claim_notice),
+        record_sending_device=AsyncMock(),
+        acknowledge_delivery=AsyncMock(
+            return_value=DeliveryAcknowledgement(settled_event_id="$notice", bound=True),
+        ),
+    )
+    journal = MagicMock(
+        approval_continuations_for_entities=AsyncMock(return_value=(("agent@removed", continuation),)),
+    )
+    journal.principal.return_value = principal
+    client = MagicMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", client.user_id)}
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$notice", room_id="!room:localhost"))
+    router = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+        approval_store=notice_store,
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: router if name == "router" else None,
+        cards_provider=lambda: None,
+        journal_provider=lambda: journal,
+        entity_configured=lambda name: name != "removed",
+    )
+
+    with patch(
+        "mindroom.approval_transport.expire_continuation_approval_cards",
+        new=AsyncMock(return_value=True),
+    ):
+        await transport.reconcile_unavailable_entities({"removed"})
+
+    content = client.room_send.await_args.kwargs["content"]
+    assert content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$waiting"}
+    assert "no longer available" in content["body"]
+    assert client.room_send.await_args.kwargs["tx_id"] == transaction_id
+    principal.discard_unavailable_approval_continuation.assert_awaited_once_with(
+        "approval-removed",
+        notice_principal_id="router@localhost",
+    )
+
+
+@pytest.mark.asyncio
+async def test_removed_owner_cleanup_recovers_frozen_success_through_original_owner(tmp_path: Path) -> None:
+    """Unavailable cleanup must recover and finalize FINAL debt through its original principal."""
+    journal = EventJournalStore.open_sqlite(tmp_path / "approval-frozen-success.db")
+    principal = journal.principal("agent@removed")
+    source_event_id = "$source"
+    approval_id = "approval-frozen-success"
+    await principal.admit(
+        InboundEvent(
+            event_id=source_event_id,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1_000,
+            source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
+        ),
+    )
+    continuation = ApprovalContinuation(
+        approval_id=approval_id,
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="removed",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=(source_event_id,),
+        calls=(),
+        state="claimed",
+        runtime_generation="old-runtime",
+    )
+    assert await principal.create_approval_continuation(continuation) == continuation
+    await principal.enqueue_delivery(
+        turn_id=source_event_id,
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={
+            "msgtype": "m.text",
+            "body": "finished",
+            DURABLE_FINAL_OUTCOME_KEY: {"terminal_status": "completed"},
+        },
+    )
+    assert await principal.claim_delivery(turn_id=source_event_id, stage=DeliveryStage.FINAL) is not None
+
+    recovered: list[tuple[str, str]] = []
+
+    async def recover_final(principal_id: str, observed: ApprovalContinuation) -> bool:
+        recovered.append((principal_id, observed.approval_id))
+        await principal.acknowledge_delivery(
+            turn_id=source_event_id,
+            stage=DeliveryStage.FINAL,
+            event_id="$final-edit",
+        )
+        return await principal.finish_approval_continuation(observed.approval_id)
+
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: None,
+        journal_provider=lambda: journal,
+        entity_configured=lambda name: name != "removed",
+        recover_unavailable_final=recover_final,
+    )
+
+    try:
+        with patch(
+            "mindroom.approval_transport.expire_continuation_approval_cards",
+            new=AsyncMock(),
+        ) as expire_cards:
+            assert await transport._discard_unavailable(
+                "agent@removed",
+                continuation,
+                "Requesting agent 'removed' is no longer available.",
+            )
+
+        expire_cards.assert_not_awaited()
+        assert recovered == [("agent@removed", approval_id)]
+        assert await principal.approval_continuation(approval_id) is None
+        assert not await principal.is_pending(source_event_id)
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_removed_owner_cleanup_adopts_notice_after_matrix_device_change(tmp_path: Path) -> None:
+    """A crash after Matrix acceptance must not duplicate the notice after a re-login."""
+    journal = EventJournalStore.open_sqlite(tmp_path / "approval-notice.db")
+    principal = journal.principal("agent@removed")
+    notice_store = journal.principal("router@localhost")
+    reason = "Requesting agent 'removed' is no longer available."
+    approval_id = "approval-device-change"
+    notice_turn_id = f"approval-unavailable:{approval_id}"
+    notice_marker = "io.mindroom.approval_unavailable_id"
+    source_event_id = "$source"
+    waiting_event_id = "$waiting"
+    await principal.admit(
+        InboundEvent(
+            event_id=source_event_id,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1_000,
+            source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
+        ),
+    )
+    continuation = ApprovalContinuation(
+        approval_id=approval_id,
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="removed",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id=waiting_event_id,
+        source_event_ids=(source_event_id,),
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="shell",
+                invoking_agent="removed",
+                expires_at_ns=9_000_000_000_000_000_000,
+            ),
+        ),
+        state="failing",
+        failure_reason=reason,
+    )
+    assert await principal.create_approval_continuation(continuation) == continuation
+    notice_content = build_message_content(
+        reason,
+        thread_event_id="$thread",
+        reply_to_event_id=waiting_event_id,
+        extra_content={"msgtype": "m.notice", notice_marker: approval_id},
+    )
+    await notice_store.enqueue_delivery(
+        turn_id=notice_turn_id,
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload=notice_content,
+    )
+    assert await notice_store.claim_delivery(turn_id=notice_turn_id, stage=DeliveryStage.FINAL) is not None
+    await notice_store.record_sending_device(
+        turn_id=notice_turn_id,
+        stage=DeliveryStage.FINAL,
+        device_id="OLDDEVICE",
+    )
+
+    prior_notice = nio.Event.parse_event(
+        {
+            "event_id": "$notice-old-device",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 2_000,
+            "type": "m.room.message",
+            "content": notice_content,
+        },
+    )
+    assert isinstance(prior_notice, nio.Event)
+    client = MagicMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.device_id = "NEWDEVICE"
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", client.user_id)}
+    client.room_send = AsyncMock()
+    client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!room:localhost",
+            chunk=[prior_notice],
+            start="start",
+            end=None,
+        ),
+    )
+    router = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+        approval_store=notice_store,
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: router if name == "router" else None,
+        cards_provider=lambda: None,
+        journal_provider=lambda: journal,
+        entity_configured=lambda name: name != "removed",
+    )
+
+    try:
+        with patch(
+            "mindroom.approval_transport.expire_continuation_approval_cards",
+            new=AsyncMock(return_value=True),
+        ):
+            assert await transport._discard_unavailable("agent@removed", continuation, reason)
+
+        client.room_send.assert_not_awaited()
+        client.room_messages.assert_awaited_once()
+        delivered = await notice_store.load_delivery(turn_id=notice_turn_id, stage=DeliveryStage.FINAL)
+        assert delivered is not None
+        assert delivered.acknowledged_event_id == "$notice-old-device"
+        assert await principal.load_delivery(turn_id=notice_turn_id, stage=DeliveryStage.FINAL) is None
+        assert await principal.approval_continuation(approval_id) is None
+        assert not await principal.is_pending(source_event_id)
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp_path: Path) -> None:
+    """A Matrix refusal must leave the fenced owner and its notice queued for retry."""
+    journal = EventJournalStore.open_sqlite(tmp_path / "approval-notice-refusal.db")
+    principal = journal.principal("agent@removed")
+    notice_store = journal.principal("router@localhost")
+    approval_id = "approval-refused-notice"
+    source_event_id = "$refused-source"
+    await principal.admit(
+        InboundEvent(
+            event_id=source_event_id,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1_000,
+            source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
+        ),
+    )
+    continuation = ApprovalContinuation(
+        approval_id=approval_id,
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="removed",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=(source_event_id,),
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="shell",
+                invoking_agent="removed",
+                expires_at_ns=9_000_000_000_000_000_000,
+            ),
+        ),
+        state="failing",
+        failure_reason="Requesting agent 'removed' is no longer available.",
+    )
+    assert await principal.create_approval_continuation(continuation) == continuation
+    client = MagicMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.device_id = "DEVICE"
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", client.user_id)}
+    client.room_send = AsyncMock(return_value=nio.RoomSendError(message="forbidden"))
+    router = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+        approval_store=notice_store,
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: router if name == "router" else None,
+        cards_provider=lambda: None,
+        journal_provider=lambda: journal,
+        entity_configured=lambda name: name != "removed",
+    )
+    transport._startup_cleanup_done = True
+
+    try:
+        with (
+            patch(
+                "mindroom.approval_transport.expire_continuation_approval_cards",
+                new=AsyncMock(return_value=True),
+            ),
+            patch.object(transport, "_schedule_startup_cleanup_retry") as schedule_retry,
+        ):
+            await transport.reconcile_unavailable_entities({"removed"})
+
+        schedule_retry.assert_called_once_with()
+        assert await principal.approval_continuation(approval_id) == continuation
+        assert await principal.is_pending(source_event_id)
+        delivery = await notice_store.load_delivery(
+            turn_id=f"approval-unavailable:{approval_id}",
+            stage=DeliveryStage.FINAL,
+        )
+        assert delivery is not None
+        assert delivery.attempted is True
+        assert delivery.acknowledged_event_id is None
+        assert (
+            await principal.load_delivery(
+                turn_id=f"approval-unavailable:{approval_id}",
+                stage=DeliveryStage.FINAL,
+            )
+            is None
+        )
+    finally:
+        await journal.close()
 
 
 @pytest.mark.parametrize(
@@ -215,1335 +724,289 @@ def _approval_edit(
     }
 
 
-async def _await_claim(cards: FakeApprovalCards, *, count: int = 1) -> None:
-    """Wait until this many claim rows exist, without waiting for their sends."""
-    async with asyncio.timeout(5):
-        while len(cards.rows) < count:  # noqa: ASYNC110 - the store double has nothing to signal on
-            await asyncio.sleep(0)
-
-
-async def _wait_for_pending(
-    store: _ApprovalManager,
-    *,
-    room_id: str = "!room:localhost",
-    approval_id: str | None = None,
-    sender: AsyncMock | None = None,
-    call_index: int | None = None,
-) -> PendingApproval:
-    async with asyncio.timeout(5):
-        while True:
-            resolved_approval_id = approval_id
-            if resolved_approval_id is None and sender is not None:
-                if call_index is None and sender.await_args is not None:
-                    resolved_approval_id = sender.await_args.args[2]["approval_id"]
-                elif call_index is not None and len(sender.await_args_list) > call_index:
-                    resolved_approval_id = sender.await_args_list[call_index].args[2]["approval_id"]
-            if resolved_approval_id is not None:
-                pending = await _live_pending_approval(store, room_id=room_id, approval_id=resolved_approval_id)
-                if pending is not None:
-                    return pending
-            await asyncio.sleep(0)
-
-
-async def _live_pending_approval(
-    store: _ApprovalManager,
-    *,
-    room_id: str,
-    approval_id: str,
-) -> PendingApproval | None:
-    card_event_id = store._live_card_event_id_for_approval(approval_id)
-    if card_event_id is None:
-        return None
-    return store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
-
-
 @pytest.mark.asyncio
-async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) -> None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
+async def test_detached_transport_refusal_forgets_the_unsent_card_row(tmp_path: Path) -> None:
+    """A fail-closed transport refusal must not block every later startup sweep."""
+    cards = FakeApprovalCards()
     store = initialize_approval_store(
-        runtime_paths,
-        sender=sender,
-        editor=editor,
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(side_effect=ToolApprovalTransportError("router does not manage this room")),
+        editor=AsyncMock(return_value=True),
+        cards=cards,
         transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
     )
 
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
+    with pytest.raises(ToolApprovalTransportError, match="router does not manage"):
+        await store.create_detached_approval(
+            approval_id="approval-refused",
+            continuation_id="continuation-refused",
+            continuation_generation=0,
+            tool_call_id="call-refused",
+            tool_name="dangerous",
+            arguments={},
             agent_name="code",
             room_id="!room:localhost",
             thread_id="$thread",
             requester_id="@user:localhost",
             approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
+            expires_at_ns=int((datetime.now(UTC) + timedelta(seconds=30)).timestamp() * 1_000_000_000),
+        )
 
-    assert sender.await_args.args[2]["approver_user_id"] == "@user:localhost"
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = await task
-
-    assert result.resolved is True
-    assert decision.status == "approved"
-    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
-    assert editor.await_args.args[2]["status"] == "approved"
-    assert editor.await_args.args[2]["approver_user_id"] == "@user:localhost"
+    assert cards.rows == {}
 
 
 @pytest.mark.asyncio
-async def test_request_approval_carries_workflow_provenance_through_resolution(tmp_path: Path) -> None:
-    """Dynamic Workflow participant cards must name the workflow and participant, pending and resolved."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        runtime_paths,
-        sender=sender,
-        editor=editor,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
+async def test_cancelled_detached_transport_refusal_forgets_the_unsent_card_row(tmp_path: Path) -> None:
+    """Cancellation transfers cleanup ownership without retaining a definitively unsent card."""
+    send_started = asyncio.Event()
+    finish_send = asyncio.Event()
 
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="run_shell_command",
-            arguments={"command": "ls"},
-            agent_name="general",
+    async def refuse_after_cancellation(*_args: object) -> SentApprovalEvent:
+        send_started.set()
+        await finish_send.wait()
+        message = "router does not manage this room"
+        raise ToolApprovalTransportError(message)
+
+    cards = FakeApprovalCards()
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=refuse_after_cancellation,
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+    )
+    publication = asyncio.create_task(
+        store.create_detached_approval(
+            approval_id="approval-cancelled-refusal",
+            continuation_id="continuation-cancelled-refusal",
+            continuation_generation=0,
+            tool_call_id="call-cancelled-refusal",
+            tool_name="dangerous",
+            arguments={},
+            agent_name="code",
             room_id="!room:localhost",
             thread_id="$thread",
             requester_id="@user:localhost",
             approver_user_id="@user:localhost",
-            timeout_seconds=30,
-            workflow_id="competitor-research-report",
-            participant_id="writer",
+            expires_at_ns=int((datetime.now(UTC) + timedelta(seconds=30)).timestamp() * 1_000_000_000),
         ),
     )
-    pending = await _wait_for_pending(store, sender=sender)
+    await send_started.wait()
+    publication.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await publication
 
-    card_content = sender.await_args.args[2]
-    assert card_content["workflow_id"] == "competitor-research-report"
-    assert card_content["participant_id"] == "writer"
-    assert card_content["body"] == (
-        "🔒 Approval required: run_shell_command — Dynamic Workflow 'competitor-research-report' participant 'writer'"
-    )
-    assert pending.workflow_id == "competitor-research-report"
-    assert pending.participant_id == "writer"
+    finish_send.set()
+    await store._drain_post_cancel_cleanup_tasks()
 
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = await task
-
-    assert result.resolved is True
-    assert decision.status == "approved"
-    edited_content = editor.await_args.args[2]
-    assert edited_content["workflow_id"] == "competitor-research-report"
-    assert edited_content["participant_id"] == "writer"
-    assert edited_content["body"] == (
-        "Approved: run_shell_command — Dynamic Workflow 'competitor-research-report' participant 'writer'"
-    )
+    assert cards.rows == {}
 
 
 @pytest.mark.asyncio
-async def test_live_card_response_ignores_cached_terminal_edit_from_different_sender(tmp_path: Path) -> None:
+async def test_detached_card_uses_the_continuations_absolute_deadline(tmp_path: Path) -> None:
+    """Publication delay must not advertise permission after durable authorization expires."""
     cards = FakeApprovalCards()
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        runtime_paths,
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-    fake_edit = _approval_edit(
-        _approval_card(
-            event_id=pending.card_event_id,
-            room_id=pending.room_id,
-            sender=pending.card_sender_id,
-            approver=pending.approver_user_id,
-        ),
-        sender="@attacker:localhost",
-        status="approved",
-    )
-    await cards.store_card("$fake-edit", "!room:localhost", fake_edit)
-
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = None
-    if result.resolved:
-        decision = await asyncio.wait_for(task, timeout=1)
-    else:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    assert result.resolved is True
-    assert result.consumed is True
-    assert decision is not None
-    assert decision.status == "approved"
-    editor.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_live_card_response_wins_when_approval_card_is_cached(tmp_path: Path) -> None:
-    cards = FakeApprovalCards()
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
+    expires_at = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
     store = initialize_approval_store(
         test_runtime_paths(tmp_path),
-        sender=sender,
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+    )
+
+    await store.create_detached_approval(
+        approval_id="approval-deadline",
+        continuation_id="continuation-deadline",
+        continuation_generation=0,
+        tool_call_id="call-deadline",
+        tool_name="dangerous",
+        arguments={},
+        room_id="!room:localhost",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        expires_at_ns=int(expires_at.timestamp() * 1_000_000_000),
+    )
+
+    stored = next(iter(cards.rows.values()))
+    assert stored.card["content"]["expires_at"] == expires_at.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_detached_action_waits_for_durable_card_binding(tmp_path: Path) -> None:
+    """A click between a failed bind and its retry must become one durable decision."""
+    timeline: list[str] = []
+
+    class RetryOnceNativeCards(FakeApprovalCards):
+        """A native card store whose first event-id bind is transiently unavailable."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_bind_failed = asyncio.Event()
+            self.allow_binding = asyncio.Event()
+            self.decisions: list[str] = []
+
+        async def acknowledge_approval_card(
+            self,
+            *,
+            transaction_id: str,
+            card_event_id: str,
+            card: Mapping[str, Any],
+        ) -> None:
+            if not self.first_bind_failed.is_set():
+                self.first_bind_failed.set()
+                msg = "event-id binding is temporarily unavailable"
+                raise RuntimeError(msg)
+            await self.allow_binding.wait()
+            await super().acknowledge_approval_card(
+                transaction_id=transaction_id,
+                card_event_id=card_event_id,
+                card=card,
+            )
+            timeline.append("bound")
+
+        async def pending_approval_card(
+            self,
+            *,
+            room_id: str,
+            card_event_id: str,
+        ) -> StoredApprovalCard | None:
+            stored = await super().pending_approval_card(room_id=room_id, card_event_id=card_event_id)
+            if stored is None:
+                return None
+            return replace(
+                stored,
+                continuation_id="continuation-1",
+                continuation_generation=0,
+                tool_call_id="call-1",
+            )
+
+        async def resolve_continuation_approval_card(
+            self,
+            *,
+            card_event_id: str,
+            requested_status: Literal["approved", "denied", "expired"],
+            reason: str | None,
+            resolution: Mapping[str, Any],
+        ) -> RecordedApprovalDecision:
+            del reason
+            recorded = await self.resolve_approval_card(card_event_id=card_event_id, resolution=resolution)
+            if recorded.recorded:
+                self.decisions.append(requested_status)
+                timeline.append("decided")
+            return replace(
+                recorded,
+                continuation_ready=recorded.recorded,
+                continuation_entity_name="code" if recorded.recorded else None,
+                source_event_ids=("$source",) if recorded.recorded else (),
+            )
+
+    cards = RetryOnceNativeCards()
+    continuation_ready = AsyncMock()
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
         editor=editor,
         cards=cards,
         transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        continuation_ready=continuation_ready,
     )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
+    publication = asyncio.create_task(
+        store.create_detached_approval(
+            approval_id="approval-1",
+            continuation_id="continuation-1",
+            continuation_generation=0,
+            tool_call_id="call-1",
+            tool_name="dangerous",
+            arguments={},
+            agent_name="code",
             room_id="!room:localhost",
+            thread_id="$thread",
             requester_id="@user:localhost",
             approver_user_id="@user:localhost",
-            timeout_seconds=30,
+            expires_at_ns=int((datetime.now(UTC) + timedelta(seconds=30)).timestamp() * 1_000_000_000),
         ),
     )
-    pending = await _wait_for_pending(store, sender=sender)
-    await cards.store_card(
-        pending.card_event_id,
-        pending.room_id,
-        _approval_card(
-            approval_id=pending.approval_id,
-            event_id=pending.card_event_id,
-            room_id=pending.room_id,
-            sender=pending.card_sender_id,
-            approver=pending.approver_user_id,
-        ),
-    )
+    publication.add_done_callback(lambda _future: timeline.append("published"))
 
-    result = await store.handle_card_response(
-        room_id=pending.room_id,
-        sender_id=pending.approver_user_id,
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = await task
-
-    assert result.resolved is True
-    assert decision.status == "approved"
-    assert editor.await_args.args[2]["status"] == "approved"
-
-
-@pytest.mark.asyncio
-async def test_handle_card_response_wrong_clicker_noops(tmp_path: Path) -> None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@other:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    assert result.resolved is False
-    assert result.consumed is False
-    editor.assert_not_awaited()
-
-    await _resolve_pending_approval(
-        store,
-        pending,
-        status="denied",
-        reason="Denied by approver.",
-    )
-    decision = await task
-    assert decision.status == "denied"
-    assert decision.reason == "Denied by approver."
-
-
-@pytest.mark.asyncio
-async def test_public_tool_approval_facade_resolves_live_matrix_action(tmp_path: Path) -> None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={"code": AgentConfig(display_name="Code", role="Help with coding", rooms=["!room:localhost"])},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
-            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
-        ),
-        runtime_paths,
-    )
-    persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router", "code": "mindroom_code"})
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-
-    approval_task = asyncio.create_task(
-        request_tool_approval_for_call(
-            ToolApprovalCall(
-                config=config,
-                runtime_paths=runtime_paths,
-                tool_name="read_file",
-                arguments={"path": "notes.txt"},
-                agent_name="code",
-                room_id="!room:localhost",
-                thread_id="$thread",
-                requester_id="@user:localhost",
-            ),
-        ),
-    )
-    for _ in range(20):
-        if is_process_approval_card("$approval"):
-            break
-        await asyncio.sleep(0)
-    else:
-        pytest.fail("approval card was not registered")
-
-    action_result = await handle_matrix_approval_action(
-        MatrixApprovalAction(
+    await cards.first_bind_failed.wait()
+    await asyncio.sleep(0)
+    assert publication.done()
+    action = asyncio.create_task(
+        store.handle_card_response(
             room_id="!room:localhost",
             sender_id="@user:localhost",
             card_event_id="$approval",
-            approval_id=None,
             status="approved",
             reason=None,
         ),
     )
-    decision = await asyncio.wait_for(approval_task, timeout=1)
+    await asyncio.sleep(0)
+    action_waited = not action.done()
 
-    assert action_result.consumed is True
-    assert action_result.resolved is True
-    assert decision is not None
-    assert decision.status == "approved"
+    cards.allow_binding.set()
+    sent_event, result = await asyncio.gather(publication, action)
+    await store.shutdown(reason="test complete")
 
-
-@pytest.mark.asyncio
-async def test_public_tool_approval_facade_falls_back_to_live_id_after_terminal_card_match(
-    tmp_path: Path,
-) -> None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(
-        side_effect=[
-            SentApprovalEvent("$first-approval"),
-            SentApprovalEvent("$second-approval"),
-        ],
-    )
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-
-    first_task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "first.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    first_pending = await _wait_for_pending(store, sender=sender)
-    first_result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=first_pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    first_decision = await first_task
-    assert first_result.resolved is True
-    assert first_decision.status == "approved"
-
-    second_task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "second.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    second_pending = await _wait_for_pending(store, sender=sender)
-
-    action_result = await handle_matrix_approval_action(
-        MatrixApprovalAction(
-            room_id="!room:localhost",
-            sender_id="@user:localhost",
-            card_event_id=first_pending.card_event_id,
-            approval_id=second_pending.approval_id,
-            status="denied",
-            reason="Wrong current tool.",
-        ),
-    )
-    second_decision = await asyncio.wait_for(second_task, timeout=1)
-
-    assert action_result.consumed is True
-    assert action_result.resolved is True
-    assert action_result.card_event_id == second_pending.card_event_id
-    assert second_decision.status == "denied"
-    assert second_decision.reason == "Wrong current tool."
-
-
-@pytest.mark.asyncio
-async def test_public_tool_approval_facade_uses_approval_id_over_active_unrelated_card(
-    tmp_path: Path,
-) -> None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(
-        side_effect=[
-            SentApprovalEvent("$first-approval"),
-            SentApprovalEvent("$second-approval"),
-        ],
-    )
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-
-    first_task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "first.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    first_pending = await _wait_for_pending(store, sender=sender, call_index=0)
-    second_task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "second.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    second_pending = await _wait_for_pending(store, sender=sender, call_index=1)
-
-    try:
-        action_result = await handle_matrix_approval_action(
-            MatrixApprovalAction(
-                room_id="!room:localhost",
-                sender_id="@user:localhost",
-                card_event_id=first_pending.card_event_id,
-                approval_id=second_pending.approval_id,
-                status="denied",
-                reason="Wrong current tool.",
-            ),
-        )
-        assert action_result.card_event_id == second_pending.card_event_id
-        second_decision = await asyncio.wait_for(second_task, timeout=1)
-
-        assert action_result.consumed is True
-        assert action_result.resolved is True
-        assert second_decision.status == "denied"
-        assert second_decision.reason == "Wrong current tool."
-        assert not first_task.done()
-    finally:
-        if not first_task.done():
-            await _resolve_pending_approval(
-                store,
-                first_pending,
-                status="denied",
-                reason="cleanup",
-            )
-            await asyncio.wait_for(first_task, timeout=1)
-        if not second_task.done():
-            await _resolve_pending_approval(
-                store,
-                second_pending,
-                status="denied",
-                reason="cleanup",
-            )
-            await asyncio.wait_for(second_task, timeout=1)
-
-
-@pytest.mark.asyncio
-async def test_public_tool_approval_facade_missing_runtime_decision_uses_datetime(tmp_path: Path) -> None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={"code": AgentConfig(display_name="Code", role="Help with coding", rooms=["!room:localhost"])},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
-            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
-        ),
-        runtime_paths,
-    )
-
-    decision = await request_tool_approval_for_call(
-        ToolApprovalCall(
-            config=config,
-            runtime_paths=runtime_paths,
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            agent_name="code",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-        ),
-    )
-
-    assert decision is not None
-    assert decision.status == "expired"
-    assert isinstance(decision.resolved_at, datetime)
-
-
-@pytest.mark.asyncio
-async def test_handle_card_response_rejects_live_card_from_wrong_room(tmp_path: Path) -> None:
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room-a:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender, room_id="!room-a:localhost")
-
-    result = await store.handle_card_response(
-        room_id="!room-b:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-
-    assert result.consumed is False
-    assert result.resolved is False
-    assert not task.done()
-    editor.assert_not_awaited()
-
-    await _resolve_pending_approval(
-        store,
-        pending,
-        status="denied",
-        reason="cleanup",
-    )
-    await task
-
-
-@pytest.mark.asyncio
-async def test_handle_live_approval_id_response_resolves_same_room_waiter(tmp_path: Path) -> None:
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room-a:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender, room_id="!room-a:localhost")
-
-    before_consume = AsyncMock()
-    wrong_room_result = await store.handle_live_approval_id_response(
-        room_id="!room-b:localhost",
-        sender_id="@user:localhost",
-        approval_id=pending.approval_id,
-        status="approved",
-        reason=None,
-        before_consume=before_consume,
-    )
-    assert wrong_room_result.consumed is False
-    before_consume.assert_not_awaited()
-
-    result = await store.handle_live_approval_id_response(
-        room_id="!room-a:localhost",
-        sender_id="@user:localhost",
-        approval_id=pending.approval_id,
-        status="approved",
-        reason=None,
-        before_consume=before_consume,
-    )
-    decision = await task
-
+    assert action_waited
+    assert timeline.index("published") < timeline.index("bound")
+    assert timeline.index("bound") < timeline.index("decided")
+    assert sent_event == SentApprovalEvent("$approval")
+    assert result.consumed is True
     assert result.resolved is True
-    before_consume.assert_awaited_once_with()
-    assert decision.status == "approved"
-    assert editor.await_args.args[:2] == ("!room-a:localhost", "$approval")
+    assert cards.decisions == ["approved"]
+    continuation_ready.assert_awaited_once_with("code", ("$source",))
+    editor.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_handle_live_approval_id_response_rejects_waiter_from_wrong_room(tmp_path: Path) -> None:
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room-a:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender, room_id="!room-a:localhost")
-
-    result = await store.handle_live_approval_id_response(
-        room_id="!room-b:localhost",
-        sender_id="@user:localhost",
-        approval_id=pending.approval_id,
-        status="approved",
-        reason=None,
-    )
-
-    assert result.consumed is False
-    assert result.resolved is False
-    assert not task.done()
-    editor.assert_not_awaited()
-
-    await _resolve_pending_approval(
-        store,
-        pending,
-        status="denied",
-        reason="cleanup",
-    )
-    await task
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("response_status", ["approved", "denied"])
-async def test_public_matrix_action_expires_trusted_pending_orphan_without_approving(
-    tmp_path: Path,
-    response_status: Literal["approved", "denied"],
-) -> None:
+async def test_startup_terminalizes_malformed_continuation_card_without_call_id(tmp_path: Path) -> None:
+    """A malformed current-format card must fail closed instead of retrying forever."""
     cards = FakeApprovalCards()
-    await cards.store_card("$approval", "!room:localhost", _approval_card())
+    card = _approval_card()
+    card["content"]["continuation_id"] = "continuation-1"
+    card["content"].pop("tool_call_id")
+    await cards.store_card("$approval", "!room:localhost", card)
     editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         cards=cards,
         approval_room_ids=lambda: {"!room:localhost"},
         transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
     )
 
-    result = await handle_matrix_approval_action(
-        MatrixApprovalAction(
-            room_id="!room:localhost",
-            sender_id="@user:localhost",
-            card_event_id="$approval",
-            approval_id="approval-1",
-            status=response_status,
-            reason=None,
-        ),
-    )
+    sweep = await store.discard_pending_on_startup()
 
-    assert result.consumed is True
-    assert result.resolved is True
-    assert store.has_live_work() is False
-    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
-    replacement = editor.await_args.args[2]
-    assert replacement["status"] == "expired"
-    assert replacement["resolution_reason"] == "Original tool request is no longer active."
-    assert replacement["resolved_by"] == "@user:localhost"
+    assert sweep.complete is True
+    assert cards.rows == {}
+    assert store._detached_expiry_sweep_task is None
+    assert editor.await_args.args[2]["status"] == "expired"
 
 
-@pytest.mark.asyncio
-async def test_request_approval_truncated_approval_fails_closed(tmp_path: Path) -> None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="write_file",
-            arguments={"content": "x" * 3_000_000},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
+def test_resolution_after_deadline_is_forced_to_expired() -> None:
+    """A click queued before the expiry task runs must not authorize an already-expired request."""
+    event = _approval_card()
+    content = event["content"]
+    assert isinstance(content, dict)
+    content["expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    pending = PendingApproval.from_card_event(event, room_id="!room:localhost")
 
-    card_content = sender.await_args.args[2]
-    assert card_content["arguments_truncated"] is True
-    assert card_content["approvable"] is False
-    assert "full_arguments" not in card_content
-
-    await _resolve_pending_approval(
-        store,
+    status, reason, truncated = _ApprovalManager._normalized_resolution_request(
         pending,
-        status="approved",
-    )
-    decision = await task
-
-    assert decision.status == "denied"
-    assert "too large to show in full" in (decision.reason or "")
-    assert editor.await_args.args[2]["status"] == "denied"
-
-
-@pytest.mark.asyncio
-async def test_request_approval_truncated_preview_with_full_arguments_can_be_approved(tmp_path: Path) -> None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="write_file",
-            arguments={"content": "x" * 10_000},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-
-    card_content = sender.await_args.args[2]
-    assert card_content["arguments_truncated"] is True
-    assert card_content["full_arguments"] == {"content": "x" * 10_000}
-    assert "approvable" not in card_content
-
-    await _resolve_pending_approval(
-        store,
-        pending,
-        status="approved",
-    )
-    decision = await task
-
-    assert decision.status == "approved"
-    assert editor.await_args.args[2]["status"] == "approved"
-
-
-@pytest.mark.asyncio
-async def test_request_approval_propagates_full_arguments_build_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def raise_unexpected(_arguments: dict[str, Any]) -> dict[str, Any] | None:
-        msg = "unexpected redaction failure"
-        raise ValueError(msg)
-
-    monkeypatch.setattr("mindroom.approval_manager._build_full_event_arguments", raise_unexpected)
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-
-    with pytest.raises(ValueError, match="unexpected redaction failure"):
-        await store.request_approval(
-            tool_name="write_file",
-            arguments={"content": "x" * 10_000},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        )
-
-    sender.assert_not_awaited()
-    editor.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_request_approval_honors_transport_stripped_full_arguments(tmp_path: Path) -> None:
-    """When the transport strips full arguments (failed sidecar upload), approve must fail closed."""
-    runtime_paths = test_runtime_paths(tmp_path)
-
-    async def send_without_full_arguments(
-        _room_id: str,
-        _thread_id: str | None,
-        content: dict[str, Any],
-        _transaction_id: str,
-    ) -> SentApprovalEvent:
-        sent_content = {key: value for key, value in content.items() if key != "full_arguments"}
-        sent_content["approvable"] = False
-        return SentApprovalEvent(event_id="$approval", sent_content=sent_content)
-
-    sender = AsyncMock(side_effect=send_without_full_arguments)
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="write_file",
-            arguments={"content": "x" * 10_000},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-
-    assert pending.full_arguments_available is False
-
-    await _resolve_pending_approval(
-        store,
-        pending,
-        status="approved",
-    )
-    decision = await task
-
-    assert decision.status == "denied"
-    assert "too large to show in full" in (decision.reason or "")
-
-
-@pytest.mark.asyncio
-async def test_request_approval_honors_transport_non_approvable_flag_with_stale_full_arguments(
-    tmp_path: Path,
-) -> None:
-    """An explicit transport veto must win over stale full-argument delivery metadata."""
-    runtime_paths = test_runtime_paths(tmp_path)
-
-    async def send_non_approvable(
-        _room_id: str,
-        _thread_id: str | None,
-        content: dict[str, Any],
-        _transaction_id: str,
-    ) -> SentApprovalEvent:
-        return SentApprovalEvent(
-            event_id="$approval",
-            sent_content={**content, "approvable": False},
-        )
-
-    sender = AsyncMock(side_effect=send_non_approvable)
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="write_file",
-            arguments={"content": "x" * 10_000},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-
-    assert pending.approvable is False
-    assert pending.full_arguments_available is True
-
-    await _resolve_pending_approval(
-        store,
-        pending,
-        status="approved",
-    )
-    decision = await task
-
-    assert decision.status == "denied"
-    assert "too large to show in full" in (decision.reason or "")
-
-
-@pytest.mark.asyncio
-async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="write_file",
-            arguments={"content": "x" * 3_000_000},
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-    room = MagicMock(room_id="!room:localhost", canonical_alias=None)
-    config = bind_runtime_paths(
-        Config(
-            agents={"code": AgentConfig(display_name="Code", role="Help with coding", rooms=["!room:localhost"])},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
-            authorization=AuthorizationConfig(global_users=["@user:localhost"]),
-        ),
-        runtime_paths,
-    )
-    persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router", "code": "mindroom_code"})
-    orchestrator = MagicMock()
-    orchestrator.send_approval_notice = AsyncMock(return_value=True)
-
-    handled = await handle_tool_approval_action(
-        room=room,
-        sender_id="@user:localhost",
-        config=config,
-        runtime_paths=runtime_paths,
-        orchestrator=orchestrator,
-        logger=get_logger(__name__),
-        approval_event_id=pending.card_event_id,
         status="approved",
         reason=None,
     )
 
-    decision = await task
-    assert handled is True
-    assert decision.status == "denied"
-    assert editor.await_args.args[2]["status"] == "denied"
-    orchestrator.send_approval_notice.assert_awaited_once()
-    assert orchestrator.send_approval_notice.await_args.kwargs == {
-        "room_id": "!room:localhost",
-        "approval_event_id": pending.card_event_id,
-        "thread_id": "$thread",
-        "reason": editor.await_args.args[2]["resolution_reason"],
-    }
-
-
-@pytest.mark.asyncio
-async def test_request_approval_cleans_up_on_cancellation_after_send(tmp_path: Path) -> None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert editor.await_args.args[2]["status"] == "expired"
-    assert editor.await_args.args[2]["resolution_reason"] == "Tool approval request was cancelled."
-    assert await _live_pending_approval(store, room_id="!room:localhost", approval_id=pending.approval_id) is None
-
-
-@pytest.mark.asyncio
-async def test_a_cancellation_while_acknowledging_the_send_still_expires_the_card(tmp_path: Path) -> None:
-    """A cancelled request must not leave a clickable card nobody settles.
-
-    The card is already in the room by this point, and the row that accounts
-    for it was written before the send. What is still owed is the expiry edit,
-    and the caller's cancellation must not swallow it: without it the card
-    stays clickable until the next startup goes looking.
-    """
-    cards = FakeApprovalCards()
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        runtime_paths,
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-
-    write_started = asyncio.Event()
-    release_write = asyncio.Event()
-    real_acknowledge = cards.acknowledge_approval_card
-    first_call = True
-
-    async def gated_acknowledge(*args: object, **kwargs: object) -> object:
-        nonlocal first_call
-        if first_call:
-            first_call = False
-            write_started.set()
-            await release_write.wait()
-        return await real_acknowledge(*args, **kwargs)
-
-    cards.acknowledge_approval_card = gated_acknowledge  # type: ignore[method-assign]
-
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await asyncio.wait_for(write_started.wait(), timeout=5)
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    release_write.set()
-
-    for _ in range(200):
-        if editor.await_args is not None:
-            break
-        await asyncio.sleep(0.01)
-
-    # Recorded, then expired -- so it is no longer pending, which is the whole
-    # point: a restart has nothing left to recover because the card is settled.
-    assert editor.await_args is not None, "the orphaned card was never taken back"
-    assert editor.await_args.args[2]["status"] == "expired"
-    assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
-
-
-@pytest.mark.asyncio
-async def test_request_approval_cancel_after_event_id_before_sender_return_emits_expired_edit(tmp_path: Path) -> None:
-    event_committed = asyncio.Event()
-    release_sender = asyncio.Event()
-    edit_seen = asyncio.Event()
-    sent_content: dict[str, Any] = {}
-
-    async def sender(
-        _room_id: str,
-        _thread_id: str | None,
-        content: dict[str, Any],
-        _transaction_id: str,
-    ) -> SentApprovalEvent:
-        sent_content.update(content)
-        event_committed.set()
-        await release_sender.wait()
-        return SentApprovalEvent("$approval")
-
-    async def edit_side_effect(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
-        edit_seen.set()
-        return True
-
-    editor = AsyncMock(side_effect=edit_side_effect)
-    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await asyncio.wait_for(event_committed.wait(), timeout=1)
-
-    task.cancel()
-    await asyncio.sleep(0)
-    release_sender.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    await asyncio.wait_for(edit_seen.wait(), timeout=1)
-
-    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
-    replacement = editor.await_args.args[2]
-    assert replacement["status"] == "expired"
-    assert replacement["resolution_reason"] == "Tool approval request was cancelled."
-    assert store._live_card_event_id_for_approval(sent_content["approval_id"]) is None
-
-
-@pytest.mark.asyncio
-async def test_request_approval_cancelled_send_returns_before_event_id_and_cleans_up_later(tmp_path: Path) -> None:
-    event_committed = asyncio.Event()
-    release_sender = asyncio.Event()
-    edit_seen = asyncio.Event()
-    sent_content: dict[str, Any] = {}
-    edits: list[tuple[str, str, dict[str, Any]]] = []
-
-    async def sender(
-        _room_id: str,
-        _thread_id: str | None,
-        content: dict[str, Any],
-        _transaction_id: str,
-    ) -> SentApprovalEvent:
-        sent_content.update(content)
-        event_committed.set()
-        await release_sender.wait()
-        return SentApprovalEvent("$approval")
-
-    async def editor(room_id: str, event_id: str, content: dict[str, Any]) -> bool:
-        edits.append((room_id, event_id, content))
-        edit_seen.set()
-        return True
-
-    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await asyncio.wait_for(event_committed.wait(), timeout=1)
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1)
-    assert edits == []
-    assert store._post_cancel_cleanup_tasks
-
-    release_sender.set()
-    await asyncio.wait_for(edit_seen.wait(), timeout=1)
-
-    assert edits[0][:2] == ("!room:localhost", "$approval")
-    replacement = edits[0][2]
-    assert replacement["status"] == "expired"
-    assert replacement["resolution_reason"] == "Tool approval request was cancelled."
-    assert store._live_card_event_id_for_approval(sent_content["approval_id"]) is None
-    await asyncio.sleep(0)
-    assert not store._post_cancel_cleanup_tasks
-
-
-@pytest.mark.asyncio
-async def test_request_approval_cancelled_slow_send_background_cleanup_removes_waiter(tmp_path: Path) -> None:
-    send_started = asyncio.Event()
-    release_sender = asyncio.Event()
-    edit_seen = asyncio.Event()
-    sent_content: dict[str, Any] = {}
-    edits: list[dict[str, Any]] = []
-
-    async def sender(
-        _room_id: str,
-        _thread_id: str | None,
-        content: dict[str, Any],
-        _transaction_id: str,
-    ) -> SentApprovalEvent:
-        sent_content.update(content)
-        send_started.set()
-        await release_sender.wait()
-        return SentApprovalEvent("$approval")
-
-    async def editor(_room_id: str, _event_id: str, content: dict[str, Any]) -> bool:
-        edits.append(content)
-        edit_seen.set()
-        return True
-
-    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await asyncio.wait_for(send_started.wait(), timeout=1)
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1)
-    assert edits == []
-
-    release_sender.set()
-    await asyncio.wait_for(edit_seen.wait(), timeout=1)
-
-    assert edits[0]["status"] == "expired"
-    assert edits[0]["resolution_reason"] == "Tool approval request was cancelled."
-    assert store._live_card_event_id_for_approval(sent_content["approval_id"]) is None
-
-
-@pytest.mark.asyncio
-async def test_shutdown_waits_for_cancelled_send_background_cleanup(tmp_path: Path) -> None:
-    event_committed = asyncio.Event()
-    release_sender = asyncio.Event()
-    edit_seen = asyncio.Event()
-    edits: list[dict[str, Any]] = []
-
-    async def sender(
-        _room_id: str,
-        _thread_id: str | None,
-        _content: dict[str, Any],
-        _transaction_id: str,
-    ) -> SentApprovalEvent:
-        event_committed.set()
-        await release_sender.wait()
-        return SentApprovalEvent("$approval")
-
-    async def editor(_room_id: str, _event_id: str, content: dict[str, Any]) -> bool:
-        edits.append(content)
-        edit_seen.set()
-        return True
-
-    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await asyncio.wait_for(event_committed.wait(), timeout=1)
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1)
-    assert store._post_cancel_cleanup_tasks
-
-    shutdown_task = asyncio.create_task(_shutdown_approval_store())
-    await asyncio.sleep(0)
-    assert not shutdown_task.done()
-
-    release_sender.set()
-    await asyncio.wait_for(edit_seen.wait(), timeout=1)
-    await asyncio.wait_for(shutdown_task, timeout=1)
-
-    assert edits[0]["status"] == "expired"
-    assert edits[0]["resolution_reason"] == "Tool approval request was cancelled."
-    assert not store._post_cancel_cleanup_tasks
-
-
-@pytest.mark.asyncio
-async def test_shutdown_bounds_cancelled_send_cleanup_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("mindroom.approval_manager._SHUTDOWN_DRAIN_TIMEOUT_SECONDS", 0.01)
-    send_started = asyncio.Event()
-    never_release_sender = asyncio.Event()
-
-    async def sender(
-        _room_id: str,
-        _thread_id: str | None,
-        _content: dict[str, Any],
-        _transaction_id: str,
-    ) -> SentApprovalEvent:
-        send_started.set()
-        await never_release_sender.wait()
-        return SentApprovalEvent("$approval")
-
-    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=AsyncMock())
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await asyncio.wait_for(send_started.wait(), timeout=1)
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1)
-    assert store._post_cancel_cleanup_tasks
-
-    await asyncio.wait_for(_shutdown_approval_store(), timeout=1)
-
-    assert not store._post_cancel_cleanup_tasks
-
-
-@pytest.mark.asyncio
-async def test_request_approval_cancelled_after_a_real_transport_send_leaves_no_card(tmp_path: Path) -> None:
-    """Cancelling a sent approval expires it in the room and clears its debt.
-
-    Runs the real Matrix transport rather than a mock sender, because the card
-    is recorded on the transport's own send path: a card left behind here is
-    one a later startup would expire a second time.
-    """
-    runtime_paths = test_runtime_paths(tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
-    orchestrator._capture_runtime_loop()
-    client = MagicMock()
-    client.user_id = "@mindroom_router:localhost"
-    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
-    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"))
-    bot = MagicMock(
-        agent_name="router",
-        running=True,
-        client=client,
-        approval_room_ids=frozenset({"!room:localhost"}),
-    )
-    orchestrator.agent_bots = {"router": bot}
-    cards = FakeApprovalCards()
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        runtime_paths,
-        sender=orchestrator._approval_transport.send_approval_event,
-        editor=editor,
-        cards=cards,
-    )
-
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    approval_id = await _wait_for_room_send_approval_id(client)
-    pending = await _wait_for_pending(store, room_id="!room:localhost", approval_id=approval_id)
-    assert pending.card_event_id == "$approval"
-    assert await cards.pending_approval_card(room_id="!room:localhost", card_event_id="$approval") is not None
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert editor.await_args.args[2]["status"] == "expired"
-    assert editor.await_args.args[2]["resolution_reason"] == "Tool approval request was cancelled."
-    assert cards.rows == {}
+    assert status == "expired"
+    assert reason == "Tool approval request timed out."
+    assert truncated is False
 
 
 async def _wait_for_room_send_approval_id(client: MagicMock) -> str:
@@ -1559,7 +1022,6 @@ async def test_approval_transport_returns_event_after_successful_send_without_se
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
-    orchestrator._capture_runtime_loop()
 
     client = MagicMock()
     client.user_id = None
@@ -1574,7 +1036,7 @@ async def test_approval_transport_returns_event_after_successful_send_without_se
     orchestrator.agent_bots = {"router": bot}
     orchestrator._approval_transport.cache_approval_event_now = AsyncMock()
 
-    sent = await orchestrator._approval_transport.send_approval_event_now(
+    sent = await orchestrator._approval_transport.send_approval_event(
         "!room:localhost",
         None,
         {
@@ -1601,7 +1063,6 @@ def _approval_transport_orchestrator(tmp_path: Path) -> tuple[_MultiAgentOrchest
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
-    orchestrator._capture_runtime_loop()
 
     client = MagicMock()
     client.user_id = "@mindroom_router:localhost"
@@ -1631,7 +1092,7 @@ async def test_approval_transport_keeps_small_full_arguments_inline(tmp_path: Pa
         "full_arguments": {"content": "x" * 2_000},
         "status": "pending",
     }
-    sent = await orchestrator._approval_transport.send_approval_event_now("!room:localhost", None, content, "txn-1")
+    sent = await orchestrator._approval_transport.send_approval_event("!room:localhost", None, content, "txn-1")
 
     assert sent is not None
     assert sent.sent_content == content
@@ -1644,7 +1105,7 @@ async def test_approval_transport_offloads_oversized_full_arguments_to_sidecar(t
     client.upload = AsyncMock(return_value=(nio.UploadResponse("mxc://localhost/full-args"), None))
 
     full_arguments = {"content": "word " * 20_000}
-    sent = await orchestrator._approval_transport.send_approval_event_now(
+    sent = await orchestrator._approval_transport.send_approval_event(
         "!room:localhost",
         None,
         {
@@ -1689,7 +1150,7 @@ async def test_approval_transport_offloads_encrypted_full_arguments_to_file_side
     upload_sidecar = AsyncMock(return_value=(mxc_uri, file_info))
     monkeypatch.setattr("mindroom.approval_transport.upload_json_sidecar", upload_sidecar)
 
-    sent = await orchestrator._approval_transport.send_approval_event_now(
+    sent = await orchestrator._approval_transport.send_approval_event(
         "!room:localhost",
         None,
         {
@@ -1752,7 +1213,7 @@ async def test_approval_transport_marks_card_non_approvable_when_sidecar_upload_
     orchestrator, client = _approval_transport_orchestrator(tmp_path)
     client.upload = AsyncMock(return_value=(nio.UploadError("boom"), None))
 
-    sent = await orchestrator._approval_transport.send_approval_event_now(
+    sent = await orchestrator._approval_transport.send_approval_event(
         "!room:localhost",
         None,
         {
@@ -1779,7 +1240,6 @@ async def test_approval_notice_replies_to_room_mode_card(tmp_path: Path) -> None
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
-    orchestrator._capture_runtime_loop()
 
     client = MagicMock()
     client.user_id = "@mindroom_router:localhost"
@@ -1811,7 +1271,6 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
-    orchestrator._capture_runtime_loop()
     sent_contents: list[dict[str, Any]] = []
 
     async def room_send(
@@ -1850,7 +1309,7 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
     orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
     orchestrator._approval_transport.cache_approval_event_now = AsyncMock()
 
-    sent = await orchestrator._approval_transport.send_approval_event_now(
+    sent = await orchestrator._approval_transport.send_approval_event(
         "!room:localhost",
         "$thread",
         {
@@ -1862,7 +1321,7 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
         },
         "txn-1",
     )
-    edited = await orchestrator._approval_transport.edit_approval_event_now(
+    edited = await orchestrator._approval_transport.edit_approval_event(
         "!room:localhost",
         "$approval",
         {
@@ -1896,7 +1355,6 @@ async def test_approval_transport_refuses_encrypted_room_without_e2ee(
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
-    orchestrator._capture_runtime_loop()
     monkeypatch.setattr("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False)
 
     room = nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost", encrypted=True)
@@ -1912,7 +1370,7 @@ async def test_approval_transport_refuses_encrypted_room_without_e2ee(
     )
     orchestrator.agent_bots = {"router": router_bot}
 
-    sent = await orchestrator._approval_transport.send_approval_event_now(
+    sent = await orchestrator._approval_transport.send_approval_event(
         "!room:localhost",
         None,
         {
@@ -1923,7 +1381,7 @@ async def test_approval_transport_refuses_encrypted_room_without_e2ee(
         },
         "txn-1",
     )
-    edited = await orchestrator._approval_transport.edit_approval_event_now(
+    edited = await orchestrator._approval_transport.edit_approval_event(
         "!room:localhost",
         "$approval",
         {
@@ -1940,52 +1398,7 @@ async def test_approval_transport_refuses_encrypted_room_without_e2ee(
 
 
 @pytest.mark.asyncio
-async def test_shutdown_expires_approval_send_that_finishes_after_shutdown_starts(tmp_path: Path) -> None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    send_started = asyncio.Event()
-    release_send = asyncio.Event()
-
-    async def sender(
-        _room_id: str,
-        _thread_id: str | None,
-        _content: dict[str, Any],
-        _transaction_id: str,
-    ) -> SentApprovalEvent:
-        send_started.set()
-        await release_send.wait()
-        return SentApprovalEvent("$approval")
-
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await asyncio.wait_for(send_started.wait(), timeout=1)
-
-    shutdown_task = asyncio.create_task(_shutdown_approval_store())
-    await asyncio.sleep(0)
-    assert shutdown_task.done() is False
-
-    release_send.set()
-    await asyncio.wait_for(shutdown_task, timeout=1)
-    decision = await asyncio.wait_for(task, timeout=1)
-
-    assert decision.status == "expired"
-    assert decision.reason == "MindRoom shut down before approval completed."
-    assert editor.await_args.args[2]["status"] == "expired"
-    assert editor.await_args.args[2]["resolution_reason"] == "MindRoom shut down before approval completed."
-    assert get_approval_store() is None
-
-
-@pytest.mark.asyncio
-async def test_shutdown_approval_store_clears_script_cache_when_manager_shutdown_fails(
+async def test_shutdown_approval_runtime_clears_script_cache_when_manager_shutdown_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     approval_module._SCRIPT_CACHE[("approval.py", 1)] = MagicMock()
@@ -2000,316 +1413,11 @@ async def test_shutdown_approval_store_clears_script_cache_when_manager_shutdown
 
     try:
         with pytest.raises(RuntimeError, match="shutdown failed"):
-            await _shutdown_approval_store()
+            await shutdown_approval_runtime()
     finally:
         monkeypatch.setattr(approval_module.approval_manager, "shutdown_approval_manager", original_shutdown)
 
     assert approval_module._SCRIPT_CACHE == {}
-
-
-@pytest.mark.asyncio
-async def test_request_approval_cancel_during_click_resolution_leaves_expired_terminal_edit(tmp_path: Path) -> None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    edit_started = asyncio.Event()
-    release_edit = asyncio.Event()
-    edit_count = 0
-    edits: list[dict[str, Any]] = []
-
-    async def editor(_room_id: str, _event_id: str, content: dict[str, Any]) -> bool:
-        nonlocal edit_count
-        edit_count += 1
-        edits.append(content)
-        if edit_count == 1:
-            edit_started.set()
-            await release_edit.wait()
-        return True
-
-    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-    click_task = asyncio.create_task(
-        store.handle_card_response(
-            room_id="!room:localhost",
-            sender_id="@user:localhost",
-            card_event_id=pending.card_event_id,
-            status="approved",
-            reason=None,
-        ),
-    )
-    await asyncio.wait_for(edit_started.wait(), timeout=1)
-
-    task.cancel()
-    await asyncio.sleep(0)
-    release_edit.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    click_result = await click_task
-
-    assert click_result.resolved is True
-    assert edit_count == 2
-    assert edits[-1]["status"] == "expired"
-    assert edits[-1]["resolution_reason"] == "Tool approval request was cancelled."
-
-
-@pytest.mark.asyncio
-async def test_request_approval_cancel_during_click_resolution_emits_expired_not_approved(tmp_path: Path) -> None:
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    release_edit = asyncio.Event()
-    edits: list[dict[str, Any]] = []
-
-    async def editor(_room_id: str, _event_id: str, content: dict[str, Any]) -> bool:
-        edits.append(content)
-        await release_edit.wait()
-        return True
-
-    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-    click_task = asyncio.create_task(
-        store.handle_card_response(
-            room_id="!room:localhost",
-            sender_id="@user:localhost",
-            card_event_id=pending.card_event_id,
-            status="approved",
-            reason=None,
-        ),
-    )
-    async with asyncio.timeout(1):
-        while True:
-            with store._live_lock:
-                resolving = pending.card_event_id in store._resolving_card_event_ids
-            if resolving:
-                break
-            await asyncio.sleep(0)
-
-    task.cancel()
-    await asyncio.sleep(0)
-    release_edit.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    click_result = await click_task
-
-    assert click_result.resolved is True
-    assert len(edits) == 1
-    assert edits[0]["status"] == "expired"
-    assert edits[0]["resolution_reason"] == "Tool approval request was cancelled."
-
-
-@pytest.mark.asyncio
-async def test_duplicate_live_response_from_approver_is_consumed_while_resolution_in_progress(tmp_path: Path) -> None:
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    edit_started = asyncio.Event()
-    release_edit = asyncio.Event()
-    edit_count = 0
-
-    async def editor(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
-        nonlocal edit_count
-        edit_count += 1
-        edit_started.set()
-        await release_edit.wait()
-        return True
-
-    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-    first = asyncio.create_task(
-        store.handle_card_response(
-            room_id="!room:localhost",
-            sender_id="@user:localhost",
-            card_event_id=pending.card_event_id,
-            status="approved",
-            reason=None,
-        ),
-    )
-    await asyncio.wait_for(edit_started.wait(), timeout=1)
-
-    second_result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="denied",
-        reason="Clicked twice.",
-    )
-
-    release_edit.set()
-    first_result = await first
-    decision = await task
-
-    assert second_result.consumed is True
-    assert second_result.resolved is False
-    assert first_result.resolved is True
-    assert decision.status == "approved"
-    assert edit_count == 1
-
-
-@pytest.mark.asyncio
-async def test_a_sent_card_survives_the_process_that_sent_it(tmp_path: Path) -> None:
-    """The card has to be recorded when it is sent, not when it is answered.
-
-    A restart destroys the live waiter, so the durable card is the only thing
-    that lets the next process recognise a click on it -- or expire it. If the
-    send does not record one, every approval outstanding at a restart becomes
-    a button that answers nobody.
-    """
-    cards = FakeApprovalCards()
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=AsyncMock(return_value=True),
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-
-    stored = await cards.pending_approval_card(room_id="!room:localhost", card_event_id=pending.card_event_id)
-    assert stored is not None
-    assert stored.resolution is None
-    assert stored.card["content"]["approval_id"] == pending.approval_id
-    assert stored.card["sender"] == "@mindroom_router:localhost"
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-
-@pytest.mark.asyncio
-async def test_a_restart_can_answer_a_card_the_previous_process_sent(tmp_path: Path) -> None:
-    """What the sending process recorded is what the next one recovers."""
-    cards = FakeApprovalCards()
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    runtime_paths = test_runtime_paths(tmp_path)
-    store = initialize_approval_store(
-        runtime_paths,
-        sender=sender,
-        # Nothing this process writes to Matrix lands, which is what leaves a
-        # clickable card behind for the next one to deal with.
-        editor=AsyncMock(side_effect=RuntimeError("process died mid-approval")),
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    await _shutdown_approval_store()
-
-    # A new process, with nothing in memory and the same durable cards.
-    editor = AsyncMock(return_value=True)
-    restarted = initialize_approval_store(
-        runtime_paths,
-        sender=AsyncMock(),
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-
-    assert (await restarted.discard_pending_on_startup()).discarded == 1
-    assert editor.await_args.args[:2] == ("!room:localhost", pending.card_event_id)
-
-
-@pytest.mark.asyncio
-async def test_the_row_exists_before_the_card_reaches_matrix(tmp_path: Path) -> None:
-    """The ordering itself, observed from inside the send.
-
-    Everything downstream depends on it: a card the homeserver has accepted
-    while no row accounts for it cannot be expired by a restart, and a click on
-    it finds neither a live waiter nor a stored card. Recording afterwards
-    leaves that window open however small it is, so the check is not "a row
-    exists at the end" but "a row existed before the send was made".
-    """
-    cards = FakeApprovalCards()
-    claimed_when_sent: list[tuple[str, str | None]] = []
-
-    async def sender(
-        _room_id: str,
-        _thread_id: str | None,
-        _content: dict[str, Any],
-        transaction_id: str,
-    ) -> SentApprovalEvent:
-        rows = await cards.pending_approval_cards(room_id="!room:localhost")
-        claimed_when_sent.extend((row.transaction_id, row.card_event_id) for row in rows)
-        # The transaction the row was claimed under is the one being sent, or a
-        # repeat could never converge on this event.
-        assert transaction_id in {claimed for claimed, _ in claimed_when_sent}
-        return SentApprovalEvent("$approval")
-
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=AsyncMock(side_effect=sender),
-        editor=AsyncMock(return_value=True),
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=store._send_event)  # type: ignore[arg-type] - the AsyncMock above
-
-    # Claimed with no event id, because the homeserver had not answered yet.
-    assert claimed_when_sent == [(_approval_transaction_id(pending.approval_id), None)]
-    # And pointed at the event once it had.
-    assert cards.acknowledged == [(_approval_transaction_id(pending.approval_id), "$approval")]
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
 
 
 def _claimed_card_body(approval_id: str) -> dict[str, Any]:
@@ -2524,6 +1632,32 @@ async def test_a_restart_adopts_and_expires_the_card_a_previous_device_left(tmp_
     assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
 
 
+def test_adopted_native_card_keeps_exact_continuation_identity() -> None:
+    """Device-change recovery must not reinterpret a native card as legacy."""
+    stored = StoredApprovalCard(
+        card=_approval_card(),
+        resolution=None,
+        transaction_id="txn-native",
+        card_event_id=None,
+        attempted=True,
+        sending_device_id="OLDDEVICE",
+        created_at_ns=1,
+        continuation_id="continuation-1",
+        continuation_generation=3,
+        tool_call_id="call-7",
+    )
+
+    adopted = _ApprovalManager._adopted_card(
+        stored,
+        card_event_id="$adopted",
+        card={**stored.card, "event_id": "$adopted"},
+    )
+
+    assert adopted.continuation_id == "continuation-1"
+    assert adopted.continuation_generation == 3
+    assert adopted.tool_call_id == "call-7"
+
+
 @pytest.mark.asyncio
 async def test_a_restart_keeps_a_card_whose_room_lookup_could_not_run(tmp_path: Path) -> None:
     """A question that could not be put is not an answer of "no card".
@@ -2636,131 +1770,6 @@ async def test_a_restart_still_expires_an_acknowledged_card_from_another_device(
 
 
 @pytest.mark.asyncio
-async def test_the_sending_device_is_recorded_before_the_card_goes_out(tmp_path: Path) -> None:
-    """The device is committed before the send, and never before that.
-
-    Recording it afterwards would leave exactly the rows that matter -- the
-    ones a crash interrupted around the send -- with no device on them, and a
-    row whose device is unknown is one recovery has to reconcile against the
-    room rather than present again.
-
-    Recording it at claim time is the other way to get it wrong: a re-login
-    between the claim and the send would leave this device's name against a
-    transaction the homeserver never saw from it, and recovery would read that
-    as licence to present the transaction again.
-    """
-    rows_when_claimed: list[tuple[bool, str | None]] = []
-    rows_when_sent: list[tuple[bool, str | None]] = []
-
-    class _WatchedCards(FakeApprovalCards):
-        async def claim_approval_card(
-            self,
-            *,
-            room_id: str,
-            transaction_id: str,
-            card: Mapping[str, Any],
-        ) -> None:
-            await super().claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
-            rows_when_claimed.extend((row.attempted, row.sending_device_id) for row in self.rows.values())
-
-    cards = _WatchedCards()
-
-    async def sender(
-        _room_id: str,
-        _thread_id: str | None,
-        _content: dict[str, Any],
-        _transaction_id: str,
-    ) -> SentApprovalEvent:
-        rows_when_sent.extend((row.attempted, row.sending_device_id) for row in cards.rows.values())
-        return SentApprovalEvent("$approval")
-
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=AsyncMock(side_effect=sender),
-        editor=AsyncMock(return_value=True),
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await _wait_for_pending(store, sender=store._send_event)  # type: ignore[arg-type] - the AsyncMock above
-
-    assert rows_when_claimed == [(False, None)]
-    assert rows_when_sent == [(True, CLAIMING_DEVICE_ID)]
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-
-@pytest.mark.asyncio
-async def test_startup_sweep_leaves_this_process_s_own_live_approval_alone(tmp_path: Path) -> None:
-    """Startup cleanup must not expire an approval this process is waiting on.
-
-    A live waiter reaches the sweep one way only: ``_bind_live_waiter``, from
-    a fresh send. So a card that has one was sent by this process and is still
-    awaiting its human, which is not what startup cleanup is for. Expiring it
-    tells that human their request was cancelled by a restart that already
-    finished before they were asked.
-    """
-    cards = FakeApprovalCards()
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        locate_card=AsyncMock(return_value=None),
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="send_email",
-            arguments={},
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-
-    pending = await _wait_for_pending(store, sender=sender)
-
-    sweep = await store.discard_pending_on_startup()
-
-    assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
-    assert not task.done(), "the sweep expired an approval this process was waiting on"
-    assert editor.await_count == 0
-    assert set(cards.rows) == {_approval_transaction_id(pending.approval_id)}
-
-    # The waiter still owns the card, so the human's answer still lands.
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = await asyncio.wait_for(task, timeout=1)
-
-    assert result.resolved is True
-    assert decision.status == "approved"
-
-
-@pytest.mark.asyncio
 async def test_a_store_failure_while_binding_owes_one_row_not_the_page(tmp_path: Path) -> None:
     """A store that fails mid-recovery must cost one row, not the rest of the scan.
 
@@ -2805,370 +1814,6 @@ async def test_a_store_failure_while_binding_owes_one_row_not_the_page(tmp_path:
 
     assert sweep == ApprovalStartupSweep(discarded=0, failed=1)
     assert cards.rows, "the row is owed, so it must survive for the next pass"
-
-
-@pytest.mark.asyncio
-async def test_startup_sweep_repairs_the_event_id_a_failed_acknowledge_left_unwritten(tmp_path: Path) -> None:
-    """Skipping a live row is not enough when the row cannot name its event.
-
-    Every decision is recorded against the event id the acknowledge was meant
-    to store, so a row still reading unacknowledged strands its answer as
-    surely as deleting it would: the user clicks, nothing matches, and the
-    card stays pending in the room. Recovery used to repair this as a side
-    effect of resending the frozen transaction. Leaving the row alone has to
-    do the repair on purpose, from what the waiter is already holding.
-    """
-
-    class FlakyAcknowledgeCards(FakeApprovalCards):
-        """A card store whose first acknowledge fails and whose second lands."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.fail_next_acknowledge = True
-
-        async def acknowledge_approval_card(
-            self,
-            *,
-            transaction_id: str,
-            card_event_id: str,
-            card: Mapping[str, Any],
-        ) -> None:
-            if self.fail_next_acknowledge:
-                self.fail_next_acknowledge = False
-                msg = "acknowledge is unavailable"
-                raise RuntimeError(msg)
-            await super().acknowledge_approval_card(
-                transaction_id=transaction_id,
-                card_event_id=card_event_id,
-                card=card,
-            )
-
-    cards = FlakyAcknowledgeCards()
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        locate_card=AsyncMock(return_value=None),
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="send_email",
-            arguments={},
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-    assert [row.card_event_id for row in cards.rows.values()] == [None], "the acknowledge must have failed"
-
-    sweep = await store.discard_pending_on_startup()
-
-    assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
-    assert sweep.skipped_live_waiter == 1
-    assert sender.await_count == 1, "the row was repaired by resending, not by writing what the waiter holds"
-    assert [row.card_event_id for row in cards.rows.values()] == ["$approval"]
-
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = await asyncio.wait_for(task, timeout=1)
-
-    assert result.resolved is True
-    assert decision.status == "approved"
-    assert editor.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_a_decision_the_room_never_saw_stays_redeliverable(tmp_path: Path) -> None:
-    """A recorded decision whose edit failed must remain something a sweep retries.
-
-    The resolved set is what stops a card being answered twice, so putting an
-    id in it on a decision the room was never told about retires the only
-    thing that would come back for it. The row survives, every later pass is
-    refused by the cleanup claim and counted owed, and the card stays visibly
-    pending until the process restarts.
-    """
-    cards = FakeApprovalCards()
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=False)
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        locate_card=AsyncMock(return_value=None),
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="send_email",
-            arguments={},
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = await asyncio.wait_for(task, timeout=1)
-
-    # Recorded, so the tool runs; not shown, so the room is still wrong.
-    assert decision.status == "approved"
-    assert result.resolved is False
-    assert cards.rows, "the row is the only remaining trace of a decision the room never saw"
-
-    editor.return_value = True
-    sweep = await store.discard_pending_on_startup()
-
-    assert sweep == ApprovalStartupSweep(discarded=1, failed=0)
-    assert editor.await_count == 2
-    assert cards.rows == {}
-
-
-@pytest.mark.asyncio
-async def test_startup_sweep_leaves_a_live_approval_whose_acknowledge_failed(tmp_path: Path) -> None:
-    """A live waiter over an unacknowledged row must not be resent or expired.
-
-    Reported owed rather than settled, because the repair this sweep tries
-    instead of a resend also failed here, and a row that still cannot name its
-    event has nothing that will come back for it.
-
-    Pointing the row at the event its send produced is best effort: the claim
-    already accounts for the card, so a failure there leaves the event id
-    merely unknown. That row then reads exactly like one a dead process left
-    mid-send -- attempted, no event id -- and recovery answers that state by
-    presenting the transaction again. Presenting it again while its waiter is
-    alive puts a second card in the room as soon as the homeserver stops
-    deduplicating the frozen transaction, and the sweep then expires the copy
-    and drops the row the user's click needs.
-    """
-
-    class UnacknowledgeableCards(FakeApprovalCards):
-        """A card store whose acknowledge write never lands."""
-
-        async def acknowledge_approval_card(
-            self,
-            *,
-            transaction_id: str,  # noqa: ARG002 - signature is the store protocol's
-            card_event_id: str,  # noqa: ARG002
-            card: Mapping[str, Any],  # noqa: ARG002
-        ) -> None:
-            msg = "acknowledge is unavailable"
-            raise RuntimeError(msg)
-
-    cards = UnacknowledgeableCards()
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        locate_card=AsyncMock(return_value=None),
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="send_email",
-            arguments={},
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await _wait_for_pending(store, sender=sender)
-    assert [row.card_event_id for row in cards.rows.values()] == [None], "the row must be unacknowledged for this test"
-
-    sweep = await store.discard_pending_on_startup()
-
-    # Owed, not done with: the repair could not land either, and nothing else
-    # comes back for a row whose event id is still unwritten.
-    assert sweep == ApprovalStartupSweep(discarded=0, failed=1)
-    assert sender.await_count == 1, "the sweep presented the transaction again under a live waiter"
-    assert editor.await_count == 0
-    assert cards.rows, "the sweep dropped the row its waiter still needs"
-    assert not task.done()
-    # The card itself still fails closed, because a decision is recorded
-    # against the event id the acknowledge was meant to store. That is the
-    # documented cost of the best-effort write, and it is not what this test
-    # is about: the point is that the sweep neither resent nor expired it.
-    assert store._live_waiter_for_transaction(next(iter(cards.rows))) is not None
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-
-@pytest.mark.asyncio
-async def test_startup_sweep_does_not_retry_against_a_live_approval(tmp_path: Path) -> None:
-    """A live approval is skipped by every pass, not retried against.
-
-    Retrying an edit is for a decision already committed that the room may not
-    show. A card whose waiter is still live has no decision to redeliver, so
-    repeated passes have nothing to converge on -- they would only expire it
-    on whichever attempt finally got its edit through.
-    """
-    cards = FakeApprovalCards()
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        locate_card=AsyncMock(return_value=None),
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="send_email",
-            arguments={},
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await _wait_for_pending(store, sender=sender)
-
-    first_sweep = await store.discard_pending_on_startup()
-    second_sweep = await store.discard_pending_on_startup()
-
-    # Neither pass touches it, and neither is owed it: the request is alive.
-    assert first_sweep == ApprovalStartupSweep(discarded=0, failed=0)
-    assert second_sweep == ApprovalStartupSweep(discarded=0, failed=0)
-    assert editor.await_count == 0
-    assert not task.done()
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-
-@pytest.mark.asyncio
-async def test_a_sweep_landing_inside_the_attempt_write_leaves_the_send_alone(tmp_path: Path) -> None:
-    """The attempt is committed inside the registered send, never ahead of it.
-
-    Marking the row and registering the send as in flight cannot be two awaited
-    steps. A sweep suspended into the gap between them finds an attempted row
-    this device could present again with nothing saying it is spoken for, and
-    presents it -- a second prompt in the room while the first send is still
-    on its way, then expired out from under the request waiting on it.
-
-    Driven by running the sweep from inside the store write itself, which is
-    the innermost point the ordering has to hold at.
-    """
-    sweeps: list[ApprovalStartupSweep] = []
-
-    class _SweepingCards(FakeApprovalCards):
-        async def mark_approval_card_attempted(
-            self,
-            *,
-            transaction_id: str,
-            sending_device_id: str | None,
-        ) -> bool:
-            marked = await super().mark_approval_card_attempted(
-                transaction_id=transaction_id,
-                sending_device_id=sending_device_id,
-            )
-            sweeps.append(await store.discard_pending_on_startup())
-            return marked
-
-    cards = _SweepingCards()
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        locate_card=AsyncMock(return_value=None),
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-
-    # The sweep saw the row and left it alone: one card sent, none expired, and
-    # the request still waiting on an answer nobody has given.
-    assert sweeps == [ApprovalStartupSweep(discarded=0, failed=0)]
-    assert sender.await_count == 1
-    editor.assert_not_awaited()
-    assert pending.card_event_id == "$approval"
-    assert set(cards.rows) == {_approval_transaction_id(pending.approval_id)}
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-
-@pytest.mark.asyncio
-async def test_card_response_for_resolved_card_is_not_consumed_without_live_waiter(tmp_path: Path) -> None:
-    cards = FakeApprovalCards()
-    await cards.store_card("$approval", "!room:localhost", _approval_card())
-    # The decision landed in the room, which is what drops the card. A user
-    # clicking the answered card afterwards must not resolve it a second time.
-    await cards.forget_approval_card(transaction_id=transaction_id_for("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id="$approval",
-        status="denied",
-        reason="Too late.",
-    )
-
-    assert result.consumed is False
-    assert result.resolved is False
-    editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3272,51 +1917,6 @@ async def test_card_response_for_cached_orphan_rejects_non_approver(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_live_pending_lookup_ignores_cached_card_after_live_waiter_is_gone(tmp_path: Path) -> None:
-    cards = FakeApprovalCards()
-    card = _approval_card()
-    await cards.store_card("$approval", "!room:localhost", card)
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-
-    assert await _live_pending_approval(store, room_id="!room:localhost", approval_id="approval-1") is None
-
-
-@pytest.mark.asyncio
-async def test_live_pending_lookup_does_not_scan_history_when_event_missing(
-    tmp_path: Path,
-) -> None:
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-
-    assert await _live_pending_approval(store, room_id="!room:localhost", approval_id="approval-1") is None
-
-
-@pytest.mark.asyncio
-async def test_live_pending_lookup_returns_none_for_cross_router_cached_pending_without_live_waiter(
-    tmp_path: Path,
-) -> None:
-    cards = FakeApprovalCards()
-    await cards.store_card(
-        "$approval",
-        "!room:localhost",
-        _approval_card(sender="@other_router:localhost"),
-    )
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-
-    assert await _live_pending_approval(store, room_id="!room:localhost", approval_id="approval-1") is None
-
-
-@pytest.mark.asyncio
 async def test_response_for_unknown_card_does_not_emit_terminal_edit(tmp_path: Path) -> None:
     editor = AsyncMock(return_value=True)
     store = _ApprovalManager(
@@ -3335,6 +1935,40 @@ async def test_response_for_unknown_card_does_not_emit_terminal_edit(tmp_path: P
 
     assert result.consumed is False
     assert result.resolved is False
+    editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_response_for_durably_terminal_card_is_consumed_after_restart(tmp_path: Path) -> None:
+    """Other bot principals must not reinterpret a delivered approval reply as AI input."""
+    cards = FakeApprovalCards()
+    card = _approval_card()
+    await cards.store_card("$approval", "!room:localhost", card)
+    assert await cards.finish_approval_card(
+        transaction_id=transaction_id_for("$approval"),
+        card_event_id="$approval",
+    )
+    before_consume = AsyncMock()
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="denied",
+        reason="already handled",
+        before_consume=before_consume,
+    )
+
+    assert result.consumed
+    assert result.resolved is False
+    before_consume.assert_awaited_once_with()
     editor.assert_not_awaited()
 
 
@@ -3527,330 +2161,6 @@ async def test_concurrent_cached_response_events_emit_one_expired_edit(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_a_decision_that_cannot_be_recorded_is_never_shown(tmp_path: Path) -> None:
-    """A store that failed leaves a row still reading as unanswered.
-
-    Showing the decision anyway would release the tool and let the next
-    startup expire a card whose tool has already run, so the edit is not even
-    attempted and the card stays clickable.
-    """
-    cards = UnwritableApprovalCards()
-
-    sender_mock = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=sender_mock,
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender_mock)
-
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = await task
-
-    editor.assert_not_awaited()
-    assert result.resolved is False
-    assert decision.status == "expired"
-    assert decision.reason == "Tool approval request could not be delivered to Matrix."
-    assert cards.resolutions == {}
-    assert cards.stored_event_ids() == {"$approval"}
-
-
-@pytest.mark.asyncio
-async def test_a_decision_no_row_takes_is_never_shown_or_acted_on(tmp_path: Path) -> None:
-    """A guarded update that matches nothing is a failure to record, not a commit.
-
-    The row is what makes a decision accountable: it is what a later startup
-    reads to redeliver an answer the room may never have been shown. Once it
-    is gone, the write updates nothing and raises nothing, and reading that
-    silence as a commit would run the tool on a decision no durable record
-    agrees with and leave nobody able to repair it.
-    """
-    cards = FakeApprovalCards()
-    sender_mock = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=sender_mock,
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender_mock)
-    assert cards.stored_event_ids() == {"$approval"}
-
-    # The row goes away between the card being sent and the human answering.
-    await cards.forget_approval_card(transaction_id=_approval_transaction_id(pending.approval_id))
-
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = await task
-
-    editor.assert_not_awaited()
-    # The click is still this bot's to swallow; what it must not do is resolve.
-    assert result.consumed is True
-    assert result.resolved is False
-    assert decision.status == "expired"
-    assert cards.resolutions == {}
-
-
-@pytest.mark.asyncio
-async def test_a_decision_the_row_already_holds_is_not_replaced_or_reshown(tmp_path: Path) -> None:
-    """The first committed decision is the one the room and the tool both get.
-
-    A row takes one decision and refuses the next, silently. If the refusal
-    read as a commit, the second answer would be shown in the room and acted
-    on while the row still held the first, and the next startup would restore
-    the decision that did not happen over the one that did.
-    """
-    cards = FakeApprovalCards()
-    sender_mock = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=sender_mock,
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender_mock)
-
-    # Something else committed a decision to this card first.
-    committed = await cards.resolve_approval_card(
-        card_event_id="$approval",
-        resolution={"status": "approved", "resolution_reason": "Looks fine."},
-    )
-    assert committed.recorded is True
-
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="denied",
-        reason="Changed my mind.",
-    )
-    decision = await task
-
-    editor.assert_not_awaited()
-    assert result.consumed is True
-    assert result.resolved is False
-    assert decision.status == "expired"
-    assert cards.resolutions["$approval"]["status"] == "approved"
-
-
-@pytest.mark.asyncio
-async def test_a_card_no_row_can_back_is_never_sent(tmp_path: Path) -> None:
-    """A card the store will not take must not reach the room at all.
-
-    Nothing could expire it, nothing could redeliver a decision made on it, and
-    a click on it would sit exactly one step from releasing a tool nothing
-    durable agreed to. Because the claim comes first, that whole class is
-    settled by not sending: the request fails closed at the point the record
-    failed, and the room never learns an approval was contemplated.
-    """
-    cards = UnclaimableApprovalCards()
-    sender_mock = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=sender_mock,
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-
-    # Short, so a card that stayed answerable would show up as a timeout here
-    # rather than as a hang.
-    decision = await store.request_approval(
-        tool_name="read_file",
-        arguments={"path": "notes.txt"},
-        room_id="!room:localhost",
-        requester_id="@user:localhost",
-        approver_user_id="@user:localhost",
-        timeout_seconds=0.05,
-    )
-
-    assert decision.status == "expired"
-    assert decision.reason == "Tool approval request could not be recorded durably, so it cannot be answered."
-    # Nothing was sent, so there is nothing to take back either.
-    sender_mock.assert_not_awaited()
-    editor.assert_not_awaited()
-
-    clicked = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id="$approval",
-        status="approved",
-        reason=None,
-    )
-
-    # No waiter, no row: the click resolves nothing and releases nothing.
-    assert clicked.consumed is False
-    assert clicked.resolved is False
-    assert cards.resolutions == {}
-    assert editor.await_count == 0
-
-
-@pytest.mark.asyncio
-async def test_a_failed_edit_does_not_give_one_decision_two_meanings(tmp_path: Path) -> None:
-    """The tool gets what was written down, because the room will get it too.
-
-    Composed on purpose: a live half that ends in denial and a restart half
-    that shows approval each look correct alone, and only disagree when the
-    same card crosses both. Once ``resolution_json`` commits, the decision is
-    settled -- the edit failing means the room has not been told yet, not that
-    the user decided something else.
-    """
-    cards = FakeApprovalCards()
-
-    sender_mock = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(side_effect=[False, True])
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=sender_mock,
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender_mock)
-
-    first_result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = await task
-    second_result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-
-    # The edit failed, so the room does not show it yet.
-    assert first_result.resolved is False
-    # But the decision is committed, and it is the one the user made.
-    assert decision.status == "approved"
-    assert cards.resolutions["$approval"]["status"] == "approved"
-    # A second click cannot replace a decision already recorded, and does not
-    # spend a second edit trying.
-    assert second_result.resolved is False
-    assert editor.await_count == 1
-
-    # A later process finds the recorded decision and shows the same thing the
-    # live tool acted on -- not the opposite of it.
-    restarted = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-
-    assert (await restarted.discard_pending_on_startup()).discarded == 1
-    assert editor.await_args.args[2]["status"] == "approved"
-    assert cards.rows == {}
-
-
-@pytest.mark.asyncio
-async def test_wrong_clicker_response_is_not_consumed_and_leaves_card_pending(tmp_path: Path) -> None:
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@other:localhost",
-        card_event_id=pending.card_event_id,
-        status="denied",
-        reason="Wrong user.",
-    )
-
-    assert result.consumed is False
-    assert result.resolved is False
-    editor.assert_not_awaited()
-
-    approver_result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = await task
-
-    assert approver_result.resolved is True
-    assert decision.status == "approved"
-
-
-@pytest.mark.asyncio
 async def test_discard_pending_on_startup_emits_replace_for_each_unresolved_card(tmp_path: Path) -> None:
     cards = FakeApprovalCards()
     await cards.store_card("$approval", "!room:localhost", _approval_card())
@@ -3876,6 +2186,31 @@ async def test_discard_pending_on_startup_emits_replace_for_each_unresolved_card
     assert edits[0][1]["status"] == "expired"
     assert edits[0][1]["resolution_reason"] == ("Bot restarted before approval — original request was cancelled.")
     assert cards.rows == {}
+
+
+@pytest.mark.asyncio
+async def test_startup_discovers_pending_rooms_no_longer_in_runtime_config(tmp_path: Path) -> None:
+    """Durable cards must re-arm cleanup even when their room left the configured set."""
+    cards = FakeApprovalCards()
+    await cards.store_card(
+        "$approval",
+        "!former-room:localhost",
+        _approval_card(room_id="!former-room:localhost"),
+    )
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: set(),
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    sweep = await store.discard_pending_on_startup()
+
+    assert sweep.discarded == 1
+    editor.assert_awaited_once()
+    assert editor.await_args.args[:2] == ("!former-room:localhost", "$approval")
 
 
 @pytest.mark.asyncio
@@ -3919,93 +2254,6 @@ async def test_discard_pending_on_startup_expires_card_older_than_approval_timeo
     assert editor.await_args.args[2]["status"] == "expired"
 
 
-@pytest.mark.asyncio
-async def test_a_sweep_leaves_alone_a_card_whose_send_has_not_come_back(tmp_path: Path) -> None:
-    """The row is durable before the send, and the waiter only exists after it.
-
-    In between, the row looks exactly like one a dead process abandoned:
-    claimed, no event id, claimed by a device this process can still present
-    from. Nothing else marks it as spoken for, because the live waiter that
-    would is created out of the send's own return value.
-
-    A sweep landing in that window presents the transaction again -- which
-    posts a second card whenever the homeserver has not yet seen the first --
-    and then expires it. The request that is still inside its send goes on to
-    bind a waiter to a card the room already shows as expired, and blocks
-    until its own timeout for an answer no one can now give.
-
-    This used to be a startup-only window. It stopped being one when the sweep
-    gained a retry that runs during ordinary operation.
-    """
-    cards = FakeApprovalCards()
-    editor = AsyncMock(return_value=True)
-    sending = asyncio.Event()
-    finish_send = asyncio.Event()
-    sends: list[str] = []
-
-    async def sender(
-        room_id: str,  # noqa: ARG001 - matches the transport signature
-        thread_id: str | None,  # noqa: ARG001 - matches the transport signature
-        content: dict[str, Any],  # noqa: ARG001 - matches the transport signature
-        transaction_id: str,
-    ) -> SentApprovalEvent:
-        sends.append(transaction_id)
-        if len(sends) == 1:
-            sending.set()
-            await finish_send.wait()
-        # What the homeserver does with a repeat of a transaction it has
-        # already accepted, which is the kindest case for the sweep.
-        return SentApprovalEvent("$card")
-
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-    )
-
-    request = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            agent_name="code",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    async with asyncio.timeout(5):
-        await sending.wait()
-
-    sweep = await store.discard_pending_on_startup()
-
-    # Not this sweep's row: it belongs to a request that has not finished
-    # sending it. Not a failure either -- nothing is owed, so counting it
-    # would keep the sweep coming back for a card that is doing fine.
-    assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
-    assert sends == [transaction_id_for_approval(cards)]
-    editor.assert_not_awaited()
-
-    finish_send.set()
-    pending = await _wait_for_pending(store, approval_id=_only_claimed_approval_id(cards))
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = await asyncio.wait_for(request, timeout=5)
-
-    assert result.resolved is True
-    assert decision.status == "approved"
-
-
 def _only_claimed_approval_id(cards: FakeApprovalCards) -> str:
     """Return the approval id of the single card the store is holding."""
     (row,) = cards.rows.values()
@@ -4016,150 +2264,6 @@ def transaction_id_for_approval(cards: FakeApprovalCards) -> str:
     """Return the transaction the single claimed card was sent under."""
     (transaction_id,) = cards.rows
     return transaction_id
-
-
-@pytest.mark.asyncio
-async def test_a_sweep_leaves_alone_a_card_a_cancelled_request_is_still_sending(tmp_path: Path) -> None:
-    """Cancelling the requester does not end the send; it hands it to another owner.
-
-    The caller is gone, so the request-side registration goes with it, but the
-    send is shielded and still open behind the cleanup that will bind a waiter
-    to whatever it returns and expire the card properly. From the sweep the row
-    is once again indistinguishable from one a dead process left: claimed, no
-    event id, and attempted by a device this process can still present from.
-
-    Acting on it presents the transaction a second time, expires the card, and
-    deletes the row -- and because that expiry belongs to no waiter, the
-    cleanup then binds one to a card already recorded as decided and waits
-    forever for a decision that was made before it existed.
-    """
-    cards = FakeApprovalCards()
-    editor = AsyncMock(return_value=True)
-    sending = asyncio.Event()
-    finish_send = asyncio.Event()
-    sends: list[str] = []
-
-    async def sender(
-        room_id: str,  # noqa: ARG001 - matches the transport signature
-        thread_id: str | None,  # noqa: ARG001 - matches the transport signature
-        content: dict[str, Any],  # noqa: ARG001 - matches the transport signature
-        transaction_id: str,
-    ) -> SentApprovalEvent:
-        sends.append(transaction_id)
-        if len(sends) == 1:
-            sending.set()
-            await finish_send.wait()
-        return SentApprovalEvent("$card")
-
-    store = _ApprovalManager(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-    )
-
-    request = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            agent_name="code",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    async with asyncio.timeout(5):
-        await sending.wait()
-    request.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        async with asyncio.timeout(5):
-            await request
-    # The owner the cancelled request handed the still-open send to.
-    (cleanup,) = store._post_cancel_cleanup_tasks
-
-    sweep = await store.discard_pending_on_startup()
-
-    # Still not this sweep's row. The request that owned it is gone, but the
-    # send it started is not, and the cleanup standing in for it is the one
-    # thing that can expire the card exactly once.
-    assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
-    assert sends == [transaction_id_for_approval(cards)]
-    editor.assert_not_awaited()
-
-    finish_send.set()
-    await asyncio.wait_for(asyncio.wrap_future(cleanup.cleanup_future), timeout=5)
-    assert not store.has_live_work()
-
-    # One expiry, by the cleanup, against the card the one send produced -- and
-    # the row goes with it rather than outliving the card it accounts for.
-    assert [call.args[1] for call in editor.await_args_list] == ["$card"]
-    assert editor.await_args.args[2]["status"] == "expired"
-    assert editor.await_args.args[2]["resolution_reason"] == "Tool approval request was cancelled."
-    assert not cards.rows
-
-
-@pytest.mark.asyncio
-async def test_shutdown_gives_up_on_a_decision_a_hung_edit_is_still_holding(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Shutdown waits for the owner of a claimed resolution, and owners can stall.
-
-    A click claims the card and only completes the waiter once its edit comes
-    back. Shutdown, finding the claim taken, waits for that decision rather
-    than racing it -- correctly, because it must not hand the caller an answer
-    the owner is about to contradict.
-
-    What it must not do is wait without end. The homeserver is the one thing in
-    this path that may simply never answer during a teardown, which is why the
-    drains below this wait are all bounded -- and every one of them is queued
-    behind it, as is ``orchestrator.stop()``, which has no bound of its own.
-    """
-    monkeypatch.setattr("mindroom.approval_manager._SHUTDOWN_DRAIN_TIMEOUT_SECONDS", 0.05)
-    edit_started = asyncio.Event()
-    never_finishes = asyncio.Event()
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-
-    async def editor(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
-        edit_started.set()
-        await never_finishes.wait()
-        return True
-
-    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
-    request = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-    click = asyncio.create_task(_resolve_pending_approval(store, pending, status="approved"))
-    async with asyncio.timeout(5):
-        await edit_started.wait()
-
-    try:
-        # Bounded by the test as well, because an unbounded stand-down is the
-        # defect: a test that hangs on it reports nothing.
-        await asyncio.wait_for(store.shutdown(reason=DEFAULT_SHUTDOWN_REASON), timeout=5)
-
-        # The claim is still held, so shutdown stood down rather than inventing
-        # a second decision for a card whose first one is still being written.
-        assert not click.done()
-        assert not request.done()
-    finally:
-        never_finishes.set()
-
-    assert (await asyncio.wait_for(click, timeout=5)).resolved is True
-    assert (await asyncio.wait_for(request, timeout=5)).status == "approved"
 
 
 @pytest.mark.asyncio
@@ -4368,11 +2472,12 @@ async def test_a_restart_redelivers_a_decision_instead_of_expiring_it(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_a_click_on_an_already_decided_card_does_not_re_resolve_it(tmp_path: Path) -> None:
-    """A recorded decision closes the card to further answers.
+    """A recorded decision consumes later actions without resolving again.
 
     Its live waiter is gone with the process that made the decision, so the
     click arrives at the recovery path. Treating it as a fresh resolution would
-    replace a decision whose tool may already have run.
+    replace a decision whose tool may already have run; declining it would let
+    another bot reinterpret the same action as ordinary input.
     """
     cards = FakeApprovalCards()
     await cards.store_card("$approval", "!room:localhost", _approval_card())
@@ -4393,7 +2498,7 @@ async def test_a_click_on_an_already_decided_card_does_not_re_resolve_it(tmp_pat
         reason="Changed my mind.",
     )
 
-    assert result.consumed is False
+    assert result.consumed is True
     assert result.resolved is False
     editor.assert_not_awaited()
 
@@ -4455,156 +2560,6 @@ async def test_startup_discard_that_never_reached_matrix_stays_recoverable(
     editor.return_value = True
     assert (await store.discard_pending_on_startup()).discarded == 1
     assert cards.rows == {}
-
-
-@pytest.mark.asyncio
-async def test_startup_sweep_landing_inside_a_live_claim_leaves_it_alone(tmp_path: Path) -> None:
-    """A sweep that runs between a claim's commit and its return must not take the row.
-
-    The claim is committed before the send it belongs to exists, so for that
-    window there is nothing in memory saying the row is spoken for. A sweep
-    reading it then sees exactly what a dead process leaves -- claimed, never
-    attempted -- and used to delete it, stranding the caller on an approval
-    whose durable card no longer existed.
-    """
-    sweeps: list[ApprovalStartupSweep] = []
-
-    class SweepingDuringClaimCards(FakeApprovalCards):
-        """A card store that runs a startup sweep from inside the claim write."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.manager: _ApprovalManager | None = None
-
-        async def claim_approval_card(
-            self,
-            *,
-            room_id: str,
-            transaction_id: str,
-            card: Mapping[str, Any],
-        ) -> None:
-            await super().claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
-            assert self.manager is not None
-            sweeps.append(await self.manager.discard_pending_on_startup())
-
-    cards = SweepingDuringClaimCards()
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    cards.manager = store
-
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="create_event",
-            arguments={"summary": "standup"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    # Checked before awaiting the pending: if the sweep took the row, the send
-    # is refused and no pending ever appears, so waiting first would report
-    # this regression as a five second hang instead of naming it.
-    await _await_claim(cards)
-    assert sweeps, "the sweep never ran inside the claim, so this proves nothing"
-    assert cards.rows, "the sweep deleted the claim it landed inside"
-    pending = await _wait_for_pending(store, sender=sender)
-
-    assert all(sweep == ApprovalStartupSweep(discarded=0, failed=0) for sweep in sweeps)
-    assert cards.rows, "the sweep deleted the claim it landed inside"
-    assert sender.await_count == 1
-    # Skipped because this process owns the transaction while it publishes it.
-    assert [sweep.skipped_in_flight for sweep in sweeps] == [1] * len(sweeps)
-    assert all(sweep.scanned == 1 for sweep in sweeps)
-
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    decision = await task
-
-    assert result.resolved is True
-    assert decision.status == "approved"
-
-
-@pytest.mark.asyncio
-async def test_a_request_publishing_a_claim_counts_as_live_work(tmp_path: Path) -> None:
-    """Runtime replacement must not step over a claim being published.
-
-    ``has_live_work`` is what a fresh runtime asks before it swaps the manager
-    out. A request between its claim write and its send holds a durable row
-    that only it can settle, so a swap there leaves the row owned by nobody --
-    exactly the state the startup sweep is entitled to act on.
-    """
-    live_work: list[bool] = []
-
-    class ObservingCards(FakeApprovalCards):
-        """A card store that asks the manager what it thinks during the claim."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.manager: _ApprovalManager | None = None
-
-        async def claim_approval_card(
-            self,
-            *,
-            room_id: str,
-            transaction_id: str,
-            card: Mapping[str, Any],
-        ) -> None:
-            await super().claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
-            assert self.manager is not None
-            live_work.append(self.manager.has_live_work())
-
-    cards = ObservingCards()
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    cards.manager = store
-    assert store.has_live_work() is False
-
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="create_event",
-            arguments={"summary": "standup"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-
-    assert live_work == [True]
-
-    await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id=pending.card_event_id,
-        status="approved",
-        reason=None,
-    )
-    await task
-
-    assert store.has_live_work() is False
 
 
 @pytest.mark.asyncio
@@ -4782,39 +2737,6 @@ def test_pending_approval_parses_explicit_approvable_flag(value: object, expecte
     assert PendingApproval.from_card_event(card, room_id="!room:localhost").approvable is expected
 
 
-@pytest.mark.asyncio
-async def test_initialize_approval_store_rejects_storage_root_change_with_pending_waiter(tmp_path: Path) -> None:
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    first_runtime_paths = test_runtime_paths(tmp_path / "first")
-    second_runtime_paths = test_runtime_paths(tmp_path / "second")
-    store = initialize_approval_store(first_runtime_paths, sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
-
-    with pytest.raises(RuntimeError, match="Cannot reinitialize approval store"):
-        initialize_approval_store(second_runtime_paths)
-
-    result = await _resolve_pending_approval(
-        store,
-        pending,
-        status="approved",
-    )
-    decision = await task
-
-    assert result.resolved is True
-    assert decision.status == "approved"
-
-
 def test_resolve_tool_approval_approver_rejects_internal_users(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -4836,55 +2758,6 @@ def test_resolve_tool_approval_approver_rejects_internal_users(tmp_path: Path) -
     assert resolve_tool_approval_approver(config, runtime_paths, internal_user_id) is None
     assert resolve_tool_approval_approver(config, runtime_paths, "@bridge_bot:localhost") is None
     assert resolve_tool_approval_approver(config, runtime_paths, "@user:localhost") == "@user:localhost"
-
-
-def test_terminal_approval_card_ids_are_bounded(tmp_path: Path) -> None:
-    store = _ApprovalManager(test_runtime_paths(tmp_path))
-
-    for index in range(_MAX_REMEMBERED_TERMINAL_CARD_IDS + 1):
-        store._remember_resolved_card_event_id(f"$approval-{index}")
-
-    assert store.knows_in_memory_approval_card("$approval-0") is False
-    assert store.knows_in_memory_approval_card("$approval-1") is True
-    assert store.knows_in_memory_approval_card(f"$approval-{_MAX_REMEMBERED_TERMINAL_CARD_IDS}") is True
-
-
-def test_terminal_approval_card_ids_drop_discarded_entries(tmp_path: Path) -> None:
-    store = _ApprovalManager(test_runtime_paths(tmp_path))
-
-    for index in range(_MAX_REMEMBERED_TERMINAL_CARD_IDS + 1):
-        card_event_id = f"$approval-{index}"
-        store._remember_cancelled_card_event_id(card_event_id)
-        store._forget_cancelled_card_event_id(card_event_id)
-
-    assert len(store._cancelled_card_event_ids) == 0
-
-
-@pytest.mark.asyncio
-async def test_cancelled_fast_path_moves_card_to_resolved_memory(tmp_path: Path) -> None:
-    store = _ApprovalManager(test_runtime_paths(tmp_path), editor=AsyncMock())
-    waiter = _LiveApprovalWaiter(
-        approval_id="approval-1",
-        transaction_id="txn-approval-1",
-        card_event_id="$approval",
-        room_id="!room:localhost",
-        card_event=_approval_card(),
-        future=asyncio.get_running_loop().create_future(),
-    )
-    waiter.future.set_result(
-        ApprovalDecision(
-            status="expired",
-            reason="Tool approval request was cancelled.",
-            resolved_by=None,
-            resolved_at=datetime.now(UTC),
-        ),
-    )
-    store._remember_cancelled_card_event_id(waiter.card_event_id)
-
-    await store._settle_bound_waiter_as_cancelled(waiter)
-
-    assert store._cancelled_card_event_ids_contains("$approval") is False
-    assert store.knows_in_memory_approval_card("$approval") is True
 
 
 @pytest.mark.asyncio
@@ -4955,7 +2828,7 @@ async def test_evaluate_tool_approval_honors_tool_approval_exemption(
 
 
 @pytest.mark.asyncio
-async def test_tool_approval_rule_matching_uses_first_matching_action_for_both_callers(tmp_path: Path) -> None:
+async def test_tool_approval_rule_matching_uses_first_matching_action_for_listing(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -4982,7 +2855,7 @@ async def test_tool_approval_rule_matching_uses_first_matching_action_for_both_c
 
     assert requires_approval is False
     assert timeout_seconds == 2 * 24 * 60 * 60
-    assert tool_requires_approval_for_openai_compat(config, "read_file") is False
+    assert tool_may_require_approval(config, "read_file") is False
 
 
 @pytest.mark.asyncio
@@ -5016,7 +2889,7 @@ async def test_tool_approval_script_rule_listing_requires_approval_but_evaluatio
 
     assert requires_approval is False
     assert timeout_seconds == 24 * 60 * 60
-    assert tool_requires_approval_for_openai_compat(config, "write_file") is True
+    assert tool_may_require_approval(config, "write_file") is True
 
 
 @pytest.mark.parametrize(
@@ -5027,7 +2900,7 @@ async def test_tool_approval_script_rule_listing_requires_approval_but_evaluatio
     ],
 )
 @pytest.mark.asyncio
-async def test_tool_approval_rule_matching_falls_back_to_default_for_both_callers(
+async def test_tool_approval_rule_matching_falls_back_to_default_for_listing(
     tmp_path: Path,
     default: str,
     expected: bool,
@@ -5055,7 +2928,7 @@ async def test_tool_approval_rule_matching_falls_back_to_default_for_both_caller
 
     assert requires_approval is expected
     assert timeout_seconds == 7 * 24 * 60 * 60
-    assert tool_requires_approval_for_openai_compat(config, "read_file") is expected
+    assert tool_may_require_approval(config, "read_file") is expected
 
 
 @pytest.mark.asyncio
@@ -5085,258 +2958,3 @@ def test_get_approval_store_returns_initialized_store(tmp_path: Path) -> None:
     store = initialize_approval_store(runtime_paths)
 
     assert get_approval_store() is store
-
-
-@pytest.mark.asyncio
-async def test_shutdown_waits_for_a_cancelled_cards_recovery(tmp_path: Path) -> None:
-    """Shutdown must not return while a card's record-then-expire is in flight.
-
-    That recovery needs the journal store and the Matrix client, and bot
-    shutdown closes both immediately after. Returning early lets the record
-    fail against a closed store and the expiry edit against a closed client,
-    leaving the clickable card with no durable row that detaching the recovery
-    was meant to prevent.
-    """
-    cards = FakeApprovalCards()
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(
-        runtime_paths,
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-
-    write_started = asyncio.Event()
-    recovery_started = asyncio.Event()
-    release_recovery = asyncio.Event()
-    real_acknowledge = cards.acknowledge_approval_card
-    calls = 0
-
-    async def gated_acknowledge(*args: object, **kwargs: object) -> object:
-        # First call is the caller's, and is cancelled out from under it.
-        # Second is the detached recovery -- the one shutdown must wait for.
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            write_started.set()
-            await asyncio.Event().wait()
-        recovery_started.set()
-        await release_recovery.wait()
-        return await real_acknowledge(*args, **kwargs)
-
-    cards.acknowledge_approval_card = gated_acknowledge  # type: ignore[method-assign]
-
-    task = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await asyncio.wait_for(write_started.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    await asyncio.wait_for(recovery_started.wait(), timeout=5)
-
-    shutdown = asyncio.create_task(store.shutdown(reason="test shutdown"))
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert not shutdown.done(), "shutdown returned while the recovery was still blocked"
-
-    release_recovery.set()
-    await asyncio.wait_for(shutdown, timeout=5)
-
-    # Shutdown waited, so the card reached a terminal state while the store and
-    # client were still open.
-    assert editor.await_args is not None
-    assert editor.await_args.args[2]["status"] == "expired"
-
-
-@pytest.mark.asyncio
-async def test_shutdown_bounds_a_cancelled_cards_stalled_recovery(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Shutdown leaves a stalled terminal edit for the next startup sweep."""
-    monkeypatch.setattr("mindroom.approval_manager._SHUTDOWN_DRAIN_TIMEOUT_SECONDS", 0.01)
-    cards = FakeApprovalCards()
-    runtime_paths = test_runtime_paths(tmp_path)
-    write_started = asyncio.Event()
-    detached_edit_started = asyncio.Event()
-    release_detached_edit = asyncio.Event()
-    real_acknowledge = cards.acknowledge_approval_card
-    acknowledge_calls = 0
-
-    async def gated_acknowledge(*args: object, **kwargs: object) -> object:
-        nonlocal acknowledge_calls
-        acknowledge_calls += 1
-        if acknowledge_calls == 1:
-            write_started.set()
-            await asyncio.Event().wait()
-        return await real_acknowledge(*args, **kwargs)
-
-    async def stalled_editor(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
-        detached_edit_started.set()
-        await release_detached_edit.wait()
-        return True
-
-    cards.acknowledge_approval_card = gated_acknowledge  # type: ignore[method-assign]
-    store = initialize_approval_store(
-        runtime_paths,
-        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
-        editor=stalled_editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    request = asyncio.create_task(
-        store.request_approval(
-            tool_name="read_file",
-            arguments={"path": "notes.txt"},
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=30,
-        ),
-    )
-    await asyncio.wait_for(write_started.wait(), timeout=5)
-    request.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await request
-    await asyncio.wait_for(detached_edit_started.wait(), timeout=5)
-
-    shutdown = asyncio.create_task(_shutdown_approval_store())
-    done, _pending = await asyncio.wait({shutdown}, timeout=1)
-    try:
-        assert shutdown in done, "shutdown waited forever for a Matrix edit that startup can retry"
-    finally:
-        release_detached_edit.set()
-        await asyncio.wait_for(shutdown, timeout=5)
-
-    (retained,) = cards.rows.values()
-    assert retained.card_event_id == "$approval"
-    assert retained.resolution is not None
-    assert retained.resolution["status"] == "expired"
-
-    recovered_edits: list[dict[str, Any]] = []
-
-    async def recovery_editor(_room_id: str, _event_id: str, content: dict[str, Any]) -> bool:
-        recovered_edits.append(content)
-        return True
-
-    recovered = initialize_approval_store(
-        runtime_paths,
-        editor=recovery_editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-
-    sweep = await recovered.discard_pending_on_startup()
-
-    assert sweep == ApprovalStartupSweep(discarded=1, failed=0)
-    assert recovered_edits[0]["status"] == "expired"
-    assert cards.rows == {}
-
-
-@pytest.mark.asyncio
-async def test_shutdown_cancels_detached_card_recovery_on_its_owner_loop(  # noqa: PLR0915
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Shutdown cannot leave foreign-loop recovery alive after teardown."""
-    monkeypatch.setattr("mindroom.approval_manager._SHUTDOWN_DRAIN_TIMEOUT_SECONDS", 0.02)
-    cards = FakeApprovalCards()
-    runtime_paths = test_runtime_paths(tmp_path)
-    first_acknowledgement_started = threading.Event()
-    detached_edit_started = threading.Event()
-    detached_edit_finished = threading.Event()
-    real_acknowledge = cards.acknowledge_approval_card
-    acknowledge_calls = 0
-
-    async def gated_acknowledge(*args: object, **kwargs: object) -> object:
-        nonlocal acknowledge_calls
-        acknowledge_calls += 1
-        if acknowledge_calls == 1:
-            first_acknowledgement_started.set()
-            await asyncio.Future()
-        return await real_acknowledge(*args, **kwargs)
-
-    async def stalled_editor(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
-        detached_edit_started.set()
-        try:
-            await asyncio.Future()
-        finally:
-            detached_edit_finished.set()
-
-    cards.acknowledge_approval_card = gated_acknowledge  # type: ignore[method-assign]
-    store = initialize_approval_store(
-        runtime_paths,
-        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
-        editor=stalled_editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-    worker_loop = asyncio.new_event_loop()
-    worker_thread = threading.Thread(target=worker_loop.run_forever, daemon=True)
-    request_tasks: list[asyncio.Task[ApprovalDecision]] = []
-    detached_tasks: list[asyncio.Task[Any]] = []
-    request_created = threading.Event()
-    request_finished = threading.Event()
-
-    def start_request() -> None:
-        request = worker_loop.create_task(
-            store.request_approval(
-                tool_name="read_file",
-                arguments={"path": "notes.txt"},
-                room_id="!room:localhost",
-                requester_id="@user:localhost",
-                approver_user_id="@user:localhost",
-                timeout_seconds=30,
-            ),
-        )
-        request_tasks.append(request)
-        request.add_done_callback(lambda _task: request_finished.set())
-        request_created.set()
-
-    worker_thread.start()
-    worker_loop.call_soon_threadsafe(start_request)
-    try:
-        assert await asyncio.to_thread(request_created.wait, 5)
-        assert await asyncio.to_thread(first_acknowledgement_started.wait, 5)
-        worker_loop.call_soon_threadsafe(request_tasks[0].cancel)
-        assert await asyncio.to_thread(request_finished.wait, 5)
-        assert await asyncio.to_thread(detached_edit_started.wait, 5)
-
-        snapshot_taken = threading.Event()
-
-        def snapshot_tasks() -> None:
-            detached_tasks.extend(task for task in asyncio.all_tasks(worker_loop) if not task.done())
-            snapshot_taken.set()
-
-        worker_loop.call_soon_threadsafe(snapshot_tasks)
-        assert await asyncio.to_thread(snapshot_taken.wait, 5)
-        assert len(detached_tasks) == 1
-
-        await asyncio.wait_for(_shutdown_approval_store(), timeout=5)
-
-        assert detached_tasks[0].done(), "foreign-loop recovery was still running after shutdown returned"
-        assert detached_edit_finished.is_set()
-    finally:
-        for task in [*request_tasks, *detached_tasks]:
-            if not task.done():
-                worker_loop.call_soon_threadsafe(task.cancel)
-        if detached_edit_started.is_set():
-            await asyncio.to_thread(detached_edit_finished.wait, 5)
-        worker_loop.call_soon_threadsafe(worker_loop.stop)
-        await asyncio.to_thread(worker_thread.join, 5)
-        worker_loop.close()

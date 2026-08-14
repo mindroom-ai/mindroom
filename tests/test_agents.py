@@ -23,6 +23,7 @@ from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 
+from mindroom import agents as agents_module
 from mindroom import prompts
 from mindroom.agent_storage import get_agent_runtime_state_dbs
 from mindroom.agents import (
@@ -166,6 +167,7 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
         config,
         runtime_paths_for(config),
         execution_identity=execution_identity,
+        supports_native_tool_approval=True,
         **kwargs,
     )
 
@@ -3200,6 +3202,140 @@ def test_tool_function_filter_prunes_resolved_functions() -> None:
     assert filtered is toolkit
     assert set(toolkit.functions) == {"safe"}
     assert toolkit.async_functions == {}
+
+
+def test_native_approval_capability_marks_only_potentially_gated_calls() -> None:
+    """Continuation-capable runners expose gated calls through Agno confirmation only."""
+
+    async def dangerous_async() -> None:
+        return None
+
+    config = Config.model_validate(
+        {
+            "tool_approval": {
+                "default": "auto_approve",
+                "rules": [
+                    {"match": "dangerous*", "action": "require_approval"},
+                    {"match": "safe", "action": "auto_approve"},
+                ],
+            },
+        },
+    )
+    toolkit = Toolkit(
+        name="approval-test",
+        tools=[
+            Function(name="dangerous", entrypoint=lambda: None),
+            Function(name="dangerous_async", entrypoint=dangerous_async),
+            Function(name="safe", entrypoint=lambda: None),
+        ],
+    )
+
+    filtered = agents_module.apply_tool_approval_capability(
+        toolkit,
+        config,
+        supports_native_tool_approval=True,
+    )
+
+    assert filtered is toolkit
+    assert toolkit.functions["dangerous"].requires_confirmation is True
+    assert toolkit.async_functions["dangerous_async"].requires_confirmation is True
+    assert toolkit.functions["dangerous"].approval_type == "mindroom_policy"
+    assert toolkit.async_functions["dangerous_async"].approval_type == "mindroom_policy"
+    assert toolkit.functions["safe"].requires_confirmation is not True
+
+
+def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
+    """An embedded agent must not receive a gated function it cannot suspend and resume."""
+
+    async def dangerous_async() -> None:
+        return None
+
+    config = Config.model_validate(
+        {
+            "tool_approval": {
+                "default": "auto_approve",
+                "rules": [
+                    {"match": "dangerous*", "action": "require_approval"},
+                    {"match": "safe", "action": "auto_approve"},
+                ],
+            },
+        },
+    )
+    toolkit = Toolkit(
+        name="approval-test",
+        tools=[
+            Function(name="dangerous", entrypoint=lambda: None),
+            Function(name="dangerous_async", entrypoint=dangerous_async),
+            Function(name="safe", entrypoint=lambda: None),
+        ],
+    )
+
+    filtered = agents_module.apply_tool_approval_capability(
+        toolkit,
+        config,
+        supports_native_tool_approval=False,
+    )
+
+    assert filtered is toolkit
+    assert set(toolkit.functions) == {"safe"}
+    assert toolkit.async_functions == {}
+
+
+def test_non_resumable_tool_surface_hides_native_confirmation_calls() -> None:
+    """An authored Agno confirmation must not escape onto a surface with no resume owner."""
+    config = Config.model_validate({"tool_approval": {"default": "auto_approve"}})
+    toolkit = Toolkit(
+        name="approval-test",
+        tools=[
+            Function(name="native_confirmation", entrypoint=lambda: None, requires_confirmation=True),
+            Function(name="safe", entrypoint=lambda: None),
+        ],
+    )
+
+    filtered = agents_module.apply_tool_approval_capability(
+        toolkit,
+        config,
+        supports_native_tool_approval=False,
+    )
+
+    assert filtered is toolkit
+    assert set(toolkit.functions) == {"safe"}
+
+
+def test_native_approval_capability_preserves_tool_authored_confirmation() -> None:
+    """MindRoom marks only policy pauses, leaving an authored confirmation distinguishable."""
+    config = Config.model_validate({"tool_approval": {"default": "require_approval"}})
+    toolkit = Toolkit(
+        name="approval-test",
+        tools=[Function(name="native_confirmation", entrypoint=lambda: None, requires_confirmation=True)],
+    )
+
+    filtered = agents_module.apply_tool_approval_capability(
+        toolkit,
+        config,
+        supports_native_tool_approval=True,
+    )
+
+    assert filtered is toolkit
+    assert toolkit.functions["native_confirmation"].requires_confirmation is True
+    assert toolkit.functions["native_confirmation"].approval_type is None
+
+
+def test_non_resumable_tool_surface_drops_an_empty_toolkit() -> None:
+    """A channel that hides every function must not register an unusable toolkit name."""
+    config = Config.model_validate({"tool_approval": {"default": "require_approval"}})
+    toolkit = Toolkit(
+        name="approval-test",
+        tools=[Function(name="dangerous", entrypoint=lambda: None)],
+    )
+
+    filtered = agents_module.apply_tool_approval_capability(
+        toolkit,
+        config,
+        supports_native_tool_approval=False,
+    )
+
+    assert filtered is None
 
 
 @pytest.mark.asyncio

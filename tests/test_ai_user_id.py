@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.agent import Agent as AgnoAgent
+from agno.db.sqlite import SqliteDb
 from agno.media import File
 from agno.models.message import Message
 from agno.models.metrics import Metrics
@@ -27,6 +29,8 @@ from agno.run.agent import (
     ToolCallStartedEvent,
 )
 from agno.run.base import RunStatus
+from agno.run.requirement import RunRequirement
+from agno.tools.function import Function
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
@@ -73,6 +77,8 @@ from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.response_runner import (
     prepare_memory_and_model_context,
 )
+from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     get_tool_runtime_context,
@@ -680,6 +686,7 @@ class TestUserIdPassthrough:
                 prompt="test",
                 runtime_paths=runtime_paths,
                 config=config,
+                supports_native_tool_approval=True,
             )
 
         agent = prepared_run.agent
@@ -694,6 +701,7 @@ class TestUserIdPassthrough:
         assert prepared_history.replay_plan is not None
         assert prepared_history.replay_plan.mode == "configured"
         assert "runtime_paths" not in mock_create_agent.call_args.kwargs
+        assert mock_create_agent.call_args.kwargs["supports_native_tool_approval"] is True
 
     @pytest.mark.asyncio
     async def test_prepare_agent_and_prompt_uses_raw_prompt_for_memory_and_appends_additional_context(
@@ -1192,6 +1200,49 @@ class TestUserIdPassthrough:
         assert persisted_run.metadata["mindroom_original_status"] == "paused"
         assert persisted_run.messages is not None
         assert "turn paused before completion" in str(persisted_run.messages[-1].content)
+
+    @pytest.mark.asyncio
+    async def test_ai_response_surfaces_native_confirmation_pause_without_replay_settlement(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Converting a confirmation pause to text would keep approval inside the completed turn."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        paused_tool = ToolExecution(
+            tool_call_id="call-1",
+            tool_name="dangerous",
+            tool_args={"value": 1},
+            requires_confirmation=True,
+        )
+        paused_run = RunOutput(
+            run_id="run-paused",
+            agent_id="general",
+            session_id="session1",
+            content="Approval required",
+            tools=[paused_tool],
+            status=RunStatus.paused,
+        )
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai_runtime.cached_agent_run", new_callable=AsyncMock, return_value=paused_run),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            with pytest.raises(ResponsePausedForApproval) as raised:
+                await ai_response(
+                    make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
+                    prompt="Run the action",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                )
+
+        assert raised.value.paused.tools == (paused_tool,)
+        assert storage.session is None
 
     @pytest.mark.asyncio
     async def test_ai_response_cancelled_run_uses_only_latest_assistant_partial_text(
@@ -3580,6 +3631,118 @@ class TestUserIdPassthrough:
         payload = cast("dict[str, object]", run_metadata[AI_RUN_METADATA_KEY])
         assert payload["run_id"] == "run-paused"
         assert payload["status"] == "paused"
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_suspends_for_confirmation_pause(self, tmp_path: Path) -> None:
+        """A streamed confirmation pause must escape to the lifecycle suspension handler."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+        tool = ToolExecution(
+            tool_call_id="call-stream-approval",
+            tool_name="dangerous",
+            tool_args={"value": 1},
+            requires_confirmation=True,
+        )
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunPausedEvent(
+                run_id="run-paused",
+                session_id="session1",
+                content="Approval required",
+                tools=[tool],
+                requirements=[RunRequirement(tool)],
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            with pytest.raises(ResponsePausedForApproval) as raised:
+                async for _chunk in stream_agent_response(
+                    make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
+                    prompt="Run the action",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                ):
+                    pass
+
+        assert raised.value.paused.run_id == "run-paused"
+        assert raised.value.paused.tools == (tool,)
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_keeps_real_agno_confirmation_run_paused(self, tmp_path: Path) -> None:
+        """Consuming Agno's pause event must not close its stream as a cancelled client."""
+        session_db = tmp_path / "streamed-pause.db"
+
+        def run_shell_command(args: list[str]) -> str:
+            return " ".join(args)
+
+        def new_agent() -> AgnoAgent:
+            return AgnoAgent(
+                id="general",
+                model=SyntheticModel(
+                    id="synthetic",
+                    seed=1,
+                    min_response_chars=20,
+                    max_response_chars=20,
+                    chars_per_second=0,
+                    tool_call_probability=1,
+                ),
+                tools=[
+                    Function(
+                        name="run_shell_command",
+                        entrypoint=run_shell_command,
+                        requires_confirmation=True,
+                    ),
+                ],
+                db=SqliteDb(db_file=str(session_db), session_table="sessions"),
+            )
+
+        agent = new_agent()
+        storage = _SessionStorage()
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(agent)
+            with pytest.raises(ResponsePausedForApproval) as raised:
+                async for _chunk in stream_agent_response(
+                    make_turn_context(
+                        "general",
+                        session_id="session1",
+                        requester_id="@user:localhost",
+                        reply_to_event_id="$source",
+                    ),
+                    prompt="Run the action",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    supports_native_tool_approval=True,
+                ):
+                    pass
+
+        # Agno persists a GeneratorExit cancellation on a detached task, so
+        # give that write a chance to expose an incorrectly closed stream.
+        await asyncio.sleep(0.1)
+        reader = new_agent()
+        session = await reader.aget_session(session_id="session1", user_id="@user:localhost")
+        persisted = None if session is None else session.get_run(raised.value.paused.run_id)
+
+        assert persisted is not None
+        assert persisted.status == RunStatus.paused
+        assert len(persisted.requirements or []) == 1
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_persists_hidden_interrupted_tool_state(self, tmp_path: Path) -> None:

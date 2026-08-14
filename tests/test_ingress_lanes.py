@@ -575,6 +575,7 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
         on_room_lifecycle=cast("Callable", noop),
         on_redaction=cast("Callable", noop),
         on_decryption_failure=cast("Callable", noop),
+        on_approval_continuation=AsyncMock(return_value=None),
         source_has_live_owner=gate.has_pending_source_event,
         turn_has_live_claim=lambda _event_id: False,
     )

@@ -117,6 +117,8 @@ Matrix sync callback
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `tool_approval.py` | Tool-call approval rule evaluation and public approval API |
+| `approval_execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
+| `approval_response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |
 | `approval_manager.py` | Matrix-backed tool approval runtime state |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `agents.py` | Agent creation and configuration |

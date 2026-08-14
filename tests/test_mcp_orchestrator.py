@@ -782,6 +782,42 @@ async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_s
 
 
 @pytest.mark.asyncio
+async def test_removed_entity_reconciles_live_approval_continuations(tmp_path: Path) -> None:
+    """Config removal delegates live recovery to the removal owner before outer cleanup."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    new_config = Config.validate_with_runtime({}, _runtime_paths(tmp_path))
+    orchestrator.config = new_config
+    orchestrator.agent_bots = {"code": MagicMock(spec=AgentBot)}
+    plan = ConfigUpdatePlan(
+        new_config=new_config,
+        changed_mcp_servers=set(),
+        configured_entities=set(),
+        entities_to_restart={"code"},
+        new_entities=set(),
+        removed_entities={"code"},
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+
+    with (
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock()),
+        patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock(return_value=EntityStartResults())),
+        patch.object(orchestrator, "_remove_deleted_entities", new=AsyncMock()) as remove_deleted,
+        patch.object(
+            orchestrator._approval_transport,
+            "reconcile_unavailable_entities",
+            new=AsyncMock(),
+        ) as reconcile,
+    ):
+        await orchestrator._restart_changed_entities(plan)
+
+    remove_deleted.assert_awaited_once_with({"code"})
+    reconcile.assert_awaited_once_with(set())
+
+
+@pytest.mark.asyncio
 async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_path: Path) -> None:
     """Restarting a trigger target should make trigger delivery fail closed until rooms are reconciled."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
@@ -1313,12 +1349,22 @@ async def test_router_removal_unbinds_external_trigger_runtime_before_cleanup(tm
         order.append("unbind")
         external_trigger_runtime_bound = False
 
-    with patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime):
+    async def reconcile_before_cleanup(_removed_entities: set[str]) -> None:
+        order.append("reconcile")
+
+    with (
+        patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime),
+        patch.object(
+            orchestrator._approval_transport,
+            "reconcile_unavailable_entities",
+            side_effect=reconcile_before_cleanup,
+        ),
+    ):
         await orchestrator._remove_deleted_entities({ROUTER_AGENT_NAME})
 
     assert ROUTER_AGENT_NAME not in orchestrator.agent_bots
     assert external_trigger_runtime_bound is False
-    assert order == ["unbind", "cleanup"]
+    assert order == ["unbind", "reconcile", "cleanup"]
 
 
 @pytest.mark.asyncio

@@ -995,9 +995,26 @@ def open_bound_scope_session_context(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     team_name: str | None = None,
+    scope: HistoryScope | None = None,
     create_session_if_missing: bool = False,
 ) -> Iterator[ScopeSessionContext | None]:
     """Open the canonical scope-backed session context for one bound team run."""
+    if scope is not None:
+        _owner_agent, owner_agent_name = _resolve_bound_history_owner(agents)
+        if owner_agent_name is None:
+            yield None
+            return
+        with open_resolved_scope_session_context(
+            agent_name=owner_agent_name,
+            scope=scope,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+            create_session_if_missing=create_session_if_missing,
+        ) as scope_context:
+            yield scope_context
+        return
     if not agents and team_name is not None and team_name in config.teams:
         with open_resolved_scope_session_context(
             agent_name=team_name,

@@ -16,7 +16,7 @@ type-check.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -67,6 +67,7 @@ class ReplayView(Protocol):
         *,
         limit: int = ...,
         after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
     ) -> PendingPage:
         """Return actionable events awaiting semantic work, in receipt order."""
         ...
@@ -401,8 +402,27 @@ class ApprovalView(Protocol):
         """
         ...
 
+    async def resolve_continuation_approval_card(
+        self,
+        *,
+        card_event_id: str,
+        requested_status: Literal["approved", "denied", "expired"],
+        reason: str | None,
+        resolution: Mapping[str, Any],
+    ) -> RecordedApprovalDecision:
+        """Atomically record one native card and its exact-call decision."""
+        ...
+
     async def forget_approval_card(self, *, transaction_id: str) -> None:
         """Drop one approval card whose decision the room now shows, or that was never sent."""
+        ...
+
+    async def finish_approval_card(self, *, transaction_id: str, card_event_id: str) -> bool:
+        """Retire delivered payload while preserving durable approval-only classification."""
+        ...
+
+    async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool:
+        """Return whether one delivered approval action is durably terminal."""
         ...
 
     async def pending_approval_card(
@@ -412,6 +432,10 @@ class ApprovalView(Protocol):
         card_event_id: str,
     ) -> StoredApprovalCard | None:
         """Return one card this bot still owes work on under this membership."""
+        ...
+
+    async def pending_approval_room_ids(self) -> tuple[str, ...]:
+        """Return current-membership rooms containing unfinished approval cards."""
         ...
 
     async def pending_approval_cards(

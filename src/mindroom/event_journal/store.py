@@ -10,14 +10,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import batched
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.history_recovery import (
     HistoryRecoveryOutcome,
     RoomHistoryRecovery,
 )
 
-from . import approvals, interactive_questions, journal, outbox, reads, turn_records
+from . import approval_continuations, approvals, interactive_questions, journal, outbox, reads, turn_records
+from .approval_continuations import (  # noqa: TC001 - runtime return and input types
+    ApprovalCall,
+    ApprovalContinuation,
+    ApprovalContinuationState,
+)
 from .approvals import (  # noqa: TC001 - part of this module's runtime return types
     RecordedApprovalDecision,
     StoredApprovalCard,
@@ -53,6 +58,7 @@ if TYPE_CHECKING:
 _DEFAULT_PENDING_LIMIT = 256
 _DEFAULT_UNACKNOWLEDGED_LIMIT = 256
 _DEFAULT_ROOM_CARD_LIMIT = 256
+_DEFAULT_APPROVAL_CONTINUATION_OWNER_LIMIT = 100
 # A strict export can retain one million messages from as many as two million
 # fetched events. Keeping each write to 256 projected events puts a hard ceiling
 # on the work done while SQLite holds its global writer, independently of the
@@ -82,6 +88,7 @@ class PrincipalStore:
         *,
         limit: int = _DEFAULT_PENDING_LIMIT,
         after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
     ) -> PendingPage:
         """Return actionable events awaiting semantic work, in receipt order."""
         return await self._backend.read(
@@ -90,6 +97,7 @@ class PrincipalStore:
                 self._principal_id,
                 limit=limit,
                 after_receipt_order=after_receipt_order,
+                runtime_generation=runtime_generation,
             ),
         )
 
@@ -832,6 +840,26 @@ class PrincipalStore:
             ),
         )
 
+    async def resolve_continuation_approval_card(
+        self,
+        *,
+        card_event_id: str,
+        requested_status: Literal["approved", "denied", "expired"],
+        reason: str | None,
+        resolution: Mapping[str, Any],
+    ) -> RecordedApprovalDecision:
+        """Atomically record one native card and its exact-call decision."""
+        return await self._backend.write(
+            lambda transaction: approvals.resolve_continuation(
+                transaction,
+                self._principal_id,
+                card_event_id=card_event_id,
+                requested_status=requested_status,
+                reason=reason,
+                resolution=resolution,
+            ),
+        )
+
     async def forget_approval_card(self, *, transaction_id: str) -> None:
         """Drop one approval card that has reached a terminal state."""
         await self._backend.write(
@@ -839,6 +867,28 @@ class PrincipalStore:
                 transaction,
                 self._principal_id,
                 transaction_id=transaction_id,
+            ),
+        )
+
+    async def finish_approval_card(self, *, transaction_id: str, card_event_id: str) -> bool:
+        """Retire delivered payload while preserving durable approval-only classification."""
+        return await self._backend.write(
+            lambda transaction: approvals.finish(
+                transaction,
+                self._principal_id,
+                transaction_id=transaction_id,
+                card_event_id=card_event_id,
+            ),
+        )
+
+    async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool:
+        """Return whether one delivered approval action is durably terminal."""
+        return await self._backend.read(
+            lambda transaction: approvals.is_terminal_card(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                card_event_id=card_event_id,
             ),
         )
 
@@ -858,6 +908,12 @@ class PrincipalStore:
             ),
         )
 
+    async def pending_approval_room_ids(self) -> tuple[str, ...]:
+        """Return every current room where this principal still owns a card."""
+        return await self._backend.read(
+            lambda transaction: approvals.pending_room_ids(transaction, self._principal_id),
+        )
+
     async def pending_approval_cards(
         self,
         *,
@@ -875,6 +931,149 @@ class PrincipalStore:
                 after=after,
             ),
         )
+
+    async def create_approval_continuation(
+        self,
+        continuation: ApprovalContinuation,
+    ) -> ApprovalContinuation | None:
+        """Create one paused-run owner while all original sources remain pending."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.create(
+                transaction,
+                self._principal_id,
+                continuation,
+            ),
+        )
+
+    async def approval_continuation_for_source(
+        self,
+        event_id: str,
+    ) -> ApprovalContinuation | None:
+        """Return the paused run that owns one original source event."""
+        return await self._backend.read(
+            lambda transaction: approval_continuations.for_source(
+                transaction,
+                self._principal_id,
+                event_id=event_id,
+            ),
+        )
+
+    async def approval_continuation(self, approval_id: str) -> ApprovalContinuation | None:
+        """Return one principal-owned paused run by its stable identity."""
+        return await self._backend.read(
+            lambda transaction: approval_continuations.get(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+            ),
+        )
+
+    async def claim_approval_continuation(
+        self,
+        approval_id: str,
+        *,
+        runtime_generation: str,
+    ) -> ApprovalContinuation | None:
+        """Claim one ready paused run for exactly one response lifecycle."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.claim(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                runtime_generation=runtime_generation,
+            ),
+        )
+
+    async def advance_approval_continuation(
+        self,
+        approval_id: str,
+        *,
+        claimant_generation: int,
+        run_id: str,
+        session_id: str,
+        calls: tuple[ApprovalCall, ...],
+    ) -> ApprovalContinuation | None:
+        """Replace one claimed generation with the next exact Agno pause."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.advance(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                claimant_generation=claimant_generation,
+                run_id=run_id,
+                session_id=session_id,
+                calls=calls,
+            ),
+        )
+
+    async def activate_approval_continuation(
+        self,
+        approval_id: str,
+        *,
+        expected_generation: int,
+    ) -> ApprovalContinuation | None:
+        """Expose one generation only after every approval card is durable."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.activate(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                expected_generation=expected_generation,
+            ),
+        )
+
+    async def request_approval_failure(
+        self,
+        approval_id: str,
+        reason: str,
+        *,
+        expected_state: ApprovalContinuationState,
+        expected_generation: int = 0,
+        expected_runtime_generation: str | None = None,
+    ) -> ApprovalContinuation | None:
+        """Fence one observed continuation state against any later execution."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.request_failure(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                reason=reason,
+                expected_state=expected_state,
+                expected_generation=expected_generation,
+                expected_runtime_generation=expected_runtime_generation,
+            ),
+        )
+
+    async def finish_approval_continuation(self, approval_id: str) -> bool:
+        """Settle one paused run only after its FINAL delivery is acknowledged."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.finish(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+            ),
+        )
+
+    async def discard_unavailable_approval_continuation(
+        self,
+        approval_id: str,
+        *,
+        notice_principal_id: str,
+    ) -> bool:
+        """Release sources after permanent owner loss and visible card cleanup."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.discard_unavailable(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                notice_principal_id=notice_principal_id,
+            ),
+        )
+
+    @property
+    def principal_id(self) -> str:
+        """Return this view's durable principal identity."""
+        return self._principal_id
 
 
 def _turn_membership_is_current(
@@ -1123,6 +1322,38 @@ class EventJournalStore:
             msg = "An event-journal principal requires an identity"
             raise ValueError(msg)
         return PrincipalStore(_backend=self.backend, _principal_id=principal_id)
+
+    async def approval_continuations_for_entities(
+        self,
+        entity_names: set[str],
+        *,
+        limit: int = _DEFAULT_APPROVAL_CONTINUATION_OWNER_LIMIT,
+        after: tuple[str, str] | None = None,
+    ) -> tuple[tuple[str, ApprovalContinuation], ...]:
+        """Return one bounded page of owners for unavailable entities."""
+        return await self.backend.read(
+            lambda transaction: approval_continuations.for_entities(
+                transaction,
+                entity_names,
+                limit=limit,
+                after=after,
+            ),
+        )
+
+    async def approval_continuations(
+        self,
+        *,
+        limit: int = _DEFAULT_APPROVAL_CONTINUATION_OWNER_LIMIT,
+        after: tuple[str, str] | None = None,
+    ) -> tuple[tuple[str, ApprovalContinuation], ...]:
+        """Return one bounded page with its journal principals."""
+        return await self.backend.read(
+            lambda transaction: approval_continuations.all_owners(
+                transaction,
+                limit=limit,
+                after=after,
+            ),
+        )
 
     async def generation(self, *, new_generation: str) -> str:
         """Return this database's identity, minting it the first time it is opened.

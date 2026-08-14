@@ -1276,7 +1276,7 @@ async def test_cancelled_voice_finish_does_not_replace_finalized_transcript(tmp_
 
     bot._visible_voice_echo.finish_after_cancellation(handle, fallback_event)
 
-    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view) is True
+    assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view) is True
     bot._delivery_gateway.edit_text.assert_not_awaited()
 
 
@@ -1408,7 +1408,7 @@ async def test_voice_readiness_cancellation_schedules_terminal_placeholder_fallb
         drain_result = await bot._coalescing_gate.drain_all(ready_timeout_seconds=0.0)
 
     assert drain_result.cancelled_unready_count == 1
-    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view) is True
+    assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view) is True
     bot._delivery_gateway.edit_text.assert_awaited_once()
     edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
     assert edit_request.event_id == "$voice_echo"

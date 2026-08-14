@@ -161,6 +161,7 @@ class _RecordingResponseRunner:
         name: str,
         recovery_proof_ready: Callable[[], bool],
         on_failure: Callable[[], None] | None = None,
+        source_event_ids: tuple[str, ...] = (),  # noqa: ARG002
     ) -> asyncio.Task[None]:
         self.recovery_proof_checks.append(recovery_proof_ready)
         self.failure_callbacks.append(on_failure)
@@ -679,6 +680,7 @@ def _obligation_runner(
             on_room_lifecycle=cast("Any", noop),
             on_redaction=cast("Any", noop),
             on_decryption_failure=cast("Any", noop),
+            on_approval_continuation=AsyncMock(return_value=None),
             source_has_live_owner=harness.gate.has_pending_source_event,
             turn_has_live_claim=harness.turn_store.has_live_turn_claim,
         ),

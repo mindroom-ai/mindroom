@@ -106,7 +106,6 @@ from .dispatch_callback_outcome import TurnDispatchOutcome
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
-    ApprovalView,
     EventClass,
     EventJournalStore,
     EventKind,
@@ -399,6 +398,7 @@ class AgentBot:
         borrowed store is not closed here, because its owner outlives this bot.
         """
         self._borrowed_journal_store = journal_store
+        self._approval_runtime_generation = uuid4().hex
         # Set when this bot opens its own, which only happens when nothing was
         # handed to it. What this bot opened is what this bot closes.
         self._own_journal: OpenEventJournal | None = None
@@ -669,6 +669,7 @@ class AgentBot:
                 on_room_lifecycle=self._on_room_member,
                 on_redaction=self._on_redaction,
                 on_decryption_failure=self._on_decryption_failure,
+                on_approval_continuation=lambda event_id: self._response_runner.handoff_approval_source(event_id),
                 source_has_live_owner=lambda event_id: (
                     self._coalescing_gate.has_pending_source_event(event_id)
                     or self._response_runner.has_live_inbox_response(event_id)
@@ -680,6 +681,7 @@ class AgentBot:
             room_lifecycle_admission_enabled=lambda: (
                 self.agent_name == ROUTER_AGENT_NAME and self._first_sync_done and self._room_member_join_hooks_armed
             ),
+            runtime_generation=self._approval_runtime_generation,
             on_own_membership_transition=self._membership_fence.observe_reported_transition,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
@@ -715,6 +717,9 @@ class AgentBot:
                 post_response_effects=self._post_response_effects_support,
                 state_writer=self._conversation_state_writer,
                 request_preparer=self._request_payload_preparer,
+                approval_store=self._journal_store.principal(self._journal_principal_id),
+                retry_approval_sources=self.retry_approval_sources,
+                approval_runtime_generation=self._approval_runtime_generation,
             ),
         )
         self._edit_regenerator = EditRegenerator(
@@ -935,8 +940,8 @@ class AgentBot:
         self._runtime_view.orchestrator = value
 
     @property
-    def approval_cards(self) -> ApprovalView:
-        """Return this bot's durable store of approval cards awaiting a decision."""
+    def approval_store(self) -> PrincipalStore:
+        """Return this bot principal's complete event-journal view."""
         return self._journal_store.principal(self._journal_principal_id)
 
     @property
@@ -1010,6 +1015,10 @@ class AgentBot:
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
+
+    def retry_approval_sources(self, source_event_ids: tuple[str, ...]) -> None:
+        """Release continuation-owned sources to the normal journal worker."""
+        self._journal_dispatcher.retry_turn_sources(source_event_ids)
 
     async def _emit_reaction_received_hooks(
         self,
@@ -1950,6 +1959,49 @@ class AgentBot:
                     self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
             raise
 
+    async def _open_approval_recovery_client(self) -> None:
+        """Open only the original Matrix sender needed to recover a frozen FINAL."""
+        if self.client is not None:
+            return
+        client = await login_agent_user(
+            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
+            self.agent_user,
+            runtime_paths=self.runtime_paths,
+            sync_storage=MatrixSyncStorage(store_tokens=False, persist_recovery=False),
+        )
+        self.client = client
+        self._sending_device_id = client.device_id or None
+        try:
+            self._runtime_view.mark_runtime_started()
+            await self._turn_store.warm()
+            await client.sync(timeout=0, full_state=True)
+        except BaseException:
+            self.client = None
+            self._sending_device_id = None
+            await client.close()
+            raise
+
+    async def recover_approval_final(self, approval_id: str) -> bool:
+        """Recover one frozen approval answer, owning any recovery-only client lifetime."""
+        opened_recovery_client = self.client is None
+        try:
+            if opened_recovery_client:
+                await self._open_approval_recovery_client()
+            return await self._response_runner.recover_approval_final(approval_id)
+        finally:
+            if opened_recovery_client:
+                await self._close_approval_recovery_client()
+
+    async def _close_approval_recovery_client(self) -> None:
+        """Close a recovery-only Matrix client without starting normal bot services."""
+        client = self.client
+        if client is not None:
+            await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
+        self.client = None
+        self._sending_device_id = None
+        if client is not None:
+            await client.close()
+
     async def recover_pending_turn_journal_events(self) -> None:
         """Release fleet-dependent turn replay after the responder startup pass."""
         self._journal_dispatcher.release_turn_replay()
@@ -2536,7 +2588,7 @@ class AgentBot:
             self.logger.debug("ignoring_tool_approval_response_without_sender")
             return
         payload = parse_approval_response_event(event)
-        if payload.status is None or (payload.card_event_id is None and payload.approval_id is None):
+        if payload.status is None or payload.card_event_id is None:
             return
         await handle_tool_approval_action(
             room=room,
@@ -2546,7 +2598,6 @@ class AgentBot:
             orchestrator=self.orchestrator,
             logger=self.logger,
             approval_event_id=payload.card_event_id,
-            approval_id=payload.approval_id,
             status=payload.status,
             reason=payload.reason,
         )
