@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
@@ -18,7 +18,12 @@ from mindroom.message_target import MessageTarget
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.service import lookup_oauth_connect_token
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    build_execution_identity_from_runtime_context,
+    tool_runtime_context,
+)
+from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, write_config_yaml
 
 if TYPE_CHECKING:
@@ -26,14 +31,15 @@ if TYPE_CHECKING:
 
     from mindroom.credentials import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
 
 def _tool_and_context(
     tmp_path: Path,
     *,
-    worker_scope: str,
-) -> tuple[OAuthConnectionTools, ToolRuntimeContext]:
+    worker_scope: WorkerScope,
+    context_agent_name: str = "research",
+) -> tuple[OAuthConnectionTools, ToolRuntimeContext, ResolvedWorkerTarget]:
     config = Config(
         agents={
             "research": AgentConfig(
@@ -43,14 +49,20 @@ def _tool_and_context(
                 worker_scope=worker_scope,
             ),
         },
-        models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        teams={
+            "research_team": TeamConfig(
+                display_name="Research Team",
+                role="Research together",
+                agents=["research"],
+            ),
+        },
+        models={"default": {"provider": "openai", "id": "gpt-5.6"}},
     )
     config_path = tmp_path / "config.yaml"
     write_config_yaml(config, config_path)
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path, process_env={})
-    tool = OAuthConnectionTools(runtime_paths)
     context = ToolRuntimeContext(
-        agent_name="research",
+        agent_name=context_agent_name,
         target=MessageTarget.resolve(
             room_id="!room:example.org",
             thread_id="$thread",
@@ -63,7 +75,15 @@ def _tool_and_context(
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )
-    return tool, context
+    worker_target = build_agent_toolkit_worker_target(
+        config.resolve_entity("research").execution_scope,
+        "research",
+        is_private=False,
+        execution_identity=build_execution_identity_from_runtime_context(context),
+        runtime_paths=runtime_paths,
+    )
+    tool = OAuthConnectionTools(runtime_paths, worker_target=worker_target)
+    return tool, context, worker_target
 
 
 def _connect_url_from_result(result: str) -> str:
@@ -74,10 +94,10 @@ def _connect_url_from_result(result: str) -> str:
 
 def _save_test_credentials(
     context: ToolRuntimeContext,
+    worker_target: ResolvedWorkerTarget,
     provider: OAuthProvider,
     refresh_token: str,
 ) -> tuple[CredentialsManager, ResolvedWorkerTarget, dict[str, str]]:
-    worker_target = context.resolve_worker_target()
     credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
     credentials = {"refresh_token": refresh_token}
     save_scoped_credentials(
@@ -91,7 +111,7 @@ def _save_test_credentials(
 
 def test_oauth_connections_exposes_only_approval_gated_reset(tmp_path: Path) -> None:
     """The narrow toolkit should grant no configuration-management functions."""
-    tool, _context = _tool_and_context(tmp_path, worker_scope="user_agent")
+    tool, _context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
 
     assert list(tool.async_functions) == ["reset_oauth_connection"]
     assert tool.functions == {}
@@ -101,8 +121,7 @@ def test_oauth_connections_exposes_only_approval_gated_reset(tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_reset_oauth_connection_deletes_only_current_requester_scope(tmp_path: Path) -> None:
     """An approved reset should delete the caller's scoped grant and return a bound reconnect link."""
-    tool, context = _tool_and_context(tmp_path, worker_scope="user_agent")
-    worker_target = context.resolve_worker_target()
+    tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
     credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
     provider = google_drive_oauth_provider()
     save_scoped_credentials(
@@ -135,9 +154,48 @@ async def test_reset_oauth_connection_deletes_only_current_requester_scope(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_reset_oauth_connection_uses_team_member_ownership(tmp_path: Path) -> None:
+    """A team member toolkit must manage its owning agent scope from a team request context."""
+    tool, context, worker_target = _tool_and_context(
+        tmp_path,
+        worker_scope="user_agent",
+        context_agent_name="research_team",
+    )
+    credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
+    provider = google_drive_oauth_provider()
+    save_scoped_credentials(
+        provider.credential_service,
+        {"refresh_token": "team-member-refresh-token"},
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    with tool_runtime_context(context):
+        result = await tool.reset_oauth_connection(provider.id)
+
+    assert "Error:" not in result
+    assert (
+        load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        is None
+    )
+    query = parse_qs(urlparse(_connect_url_from_result(result)).query)
+    connect_target = lookup_oauth_connect_token(
+        provider,
+        context.runtime_paths,
+        query["connect_token"][0],
+    )
+    assert connect_target.agent_name == "research"
+    assert connect_target.requester_id == "@alice:example.org"
+
+
+@pytest.mark.asyncio
 async def test_reset_oauth_connection_reports_user_scope_blast_radius(tmp_path: Path) -> None:
     """The approval receipt should state when a reset affects this requester across agents."""
-    tool, context = _tool_and_context(tmp_path, worker_scope="user")
+    tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user")
     provider = google_drive_oauth_provider()
 
     with tool_runtime_context(context):
@@ -149,8 +207,7 @@ async def test_reset_oauth_connection_reports_user_scope_blast_radius(tmp_path: 
 @pytest.mark.asyncio
 async def test_reset_oauth_connection_refuses_shared_scope(tmp_path: Path) -> None:
     """The agent-facing tool must not disconnect a credential shared with other requesters."""
-    tool, context = _tool_and_context(tmp_path, worker_scope="shared")
-    worker_target = context.resolve_worker_target()
+    tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="shared")
     credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
     provider = google_drive_oauth_provider()
     save_scoped_credentials(
@@ -180,11 +237,12 @@ async def test_reset_oauth_connection_denies_unauthorized_requester_before_side_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reply permissions must deny reset before credential or MCP state changes."""
-    tool, context = _tool_and_context(tmp_path, worker_scope="user_agent")
+    tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
     context.config.authorization.agent_reply_permissions = {"research": ["@bob:example.org"]}
     provider = google_drive_oauth_provider()
     credentials_manager, worker_target, credentials = _save_test_credentials(
         context,
+        worker_target,
         provider,
         "unauthorized-refresh-token",
     )
@@ -212,10 +270,11 @@ async def test_reset_oauth_connection_denies_provider_not_backing_agent_tool_bef
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only providers backing the current agent's tools may be reset."""
-    tool, context = _tool_and_context(tmp_path, worker_scope="user_agent")
+    tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
     provider = google_calendar_oauth_provider()
     credentials_manager, worker_target, credentials = _save_test_credentials(
         context,
+        worker_target,
         provider,
         "unavailable-refresh-token",
     )
@@ -243,10 +302,11 @@ async def test_reset_oauth_connection_denies_unconfigured_provider_before_side_e
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A catalog-allowed provider must still exist in the active OAuth registry."""
-    tool, context = _tool_and_context(tmp_path, worker_scope="user_agent")
+    tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
     provider = google_drive_oauth_provider()
     credentials_manager, worker_target, credentials = _save_test_credentials(
         context,
+        worker_target,
         provider,
         "unconfigured-refresh-token",
     )

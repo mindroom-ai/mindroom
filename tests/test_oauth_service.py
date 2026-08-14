@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING
 
@@ -10,8 +11,12 @@ import pytest
 import mindroom.oauth.service as oauth_service_module
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
+from mindroom.file_locks import async_exclusive_file_lock, file_lock_is_held
 from mindroom.oauth.providers import OAuthClientConfig, OAuthProviderError, OAuthRefreshRejectedError
-from mindroom.oauth.service import refresh_scoped_oauth_credentials_with_result
+from mindroom.oauth.service import (
+    refresh_scoped_oauth_credentials_with_result,
+    scoped_oauth_credentials_refresh_lock_path,
+)
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
@@ -127,6 +132,100 @@ def _assert_no_token_values_logged(logger: _CapturingLogger) -> None:
     logged_payload = repr(logger.debug_calls + logger.info_calls + logger.warning_calls)
     for token_value in (ACCESS_0, CHAIN_0, CHAIN_1, CHAIN_2, f"access-{CHAIN_1}", f"access-{CHAIN_2}"):
         assert token_value not in logged_payload
+
+
+@pytest.mark.asyncio
+async def test_scoped_oauth_refresh_releases_file_lock_during_provider_io(tmp_path: Path) -> None:
+    """Provider I/O must not retain the file lock needed by synchronous OAuth callers."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target()
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    _save_credentials(runtime_paths, worker_target, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
+        assert credentials["refresh_token"] == CHAIN_0
+        refresh_started.set()
+        await release_refresh.wait()
+        return _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
+
+    refresh_task = asyncio.create_task(
+        refresh_scoped_oauth_credentials_with_result(
+            _FakeOAuthProvider(refresh),
+            runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        ),
+    )
+    await refresh_started.wait()
+
+    lock_path = scoped_oauth_credentials_refresh_lock_path(
+        "demo_oauth",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    assert file_lock_is_held(lock_path) is False
+
+    release_refresh.set()
+    result = await refresh_task
+    assert result.refreshed is True
+
+
+@pytest.mark.asyncio
+async def test_scoped_oauth_refresh_preserves_reconnect_during_successful_provider_io(tmp_path: Path) -> None:
+    """A reconnect committed during provider I/O must supersede its stale successful result."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target()
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    _save_credentials(runtime_paths, worker_target, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
+        assert credentials["refresh_token"] == CHAIN_0
+        refresh_started.set()
+        await release_refresh.wait()
+        return _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
+
+    refresh_task = asyncio.create_task(
+        refresh_scoped_oauth_credentials_with_result(
+            _FakeOAuthProvider(refresh),
+            runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        ),
+    )
+    await refresh_started.wait()
+    reconnected_credentials = _credentials(RECONNECTED_ACCESS, CHAIN_0, expires_at=FUTURE_EXPIRES_AT)
+    lock_path = scoped_oauth_credentials_refresh_lock_path(
+        "demo_oauth",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    async with async_exclusive_file_lock(lock_path):
+        save_scoped_credentials(
+            "demo_oauth",
+            reconnected_credentials,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    release_refresh.set()
+    result = await refresh_task
+
+    assert result == oauth_service_module.OAuthCredentialsRefreshResult(
+        credentials=reconnected_credentials,
+        refreshed=False,
+    )
+    assert (
+        load_scoped_credentials(
+            "demo_oauth",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        == reconnected_credentials
+    )
 
 
 @pytest.mark.asyncio

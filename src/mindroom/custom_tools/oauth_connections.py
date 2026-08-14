@@ -17,14 +17,11 @@ from mindroom.oauth.service import (
     reset_scoped_oauth_credentials,
 )
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
-from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
-    get_tool_runtime_context,
-)
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
 
@@ -32,8 +29,9 @@ logger = get_logger(__name__)
 class OAuthConnectionTools(Toolkit):
     """Reset only the current requester's OAuth connections for the current agent."""
 
-    def __init__(self, runtime_paths: RuntimePaths) -> None:
+    def __init__(self, runtime_paths: RuntimePaths, *, worker_target: ResolvedWorkerTarget | None) -> None:
         self.runtime_paths = runtime_paths
+        self.worker_target = worker_target
         super().__init__(
             name="oauth_connections",
             tools=[self.reset_oauth_connection],
@@ -59,7 +57,7 @@ class OAuthConnectionTools(Toolkit):
         if runtime_context is None:
             return "Error: OAuth reset requires a live agent request context."
         config = runtime_context.config
-        agent_name = runtime_context.agent_name
+        agent_name = self.worker_target.routing_agent_name if self.worker_target is not None else None
         if agent_name not in config.agents:
             return "Error: OAuth reset is available only during an agent request."
         if not is_sender_allowed_for_agent_credential_management(
@@ -86,15 +84,7 @@ class OAuthConnectionTools(Toolkit):
         provider = load_oauth_providers(config, self.runtime_paths).get(provider_id)
         if provider is None:
             return f"Error: OAuth provider {provider_id!r} is not configured."
-        execution_identity = build_execution_identity_from_runtime_context(runtime_context)
-        agent_worker_target = build_agent_toolkit_worker_target(
-            config.resolve_entity(agent_name).execution_scope,
-            agent_name,
-            is_private=config.get_agent(agent_name).private is not None,
-            execution_identity=execution_identity,
-            runtime_paths=self.runtime_paths,
-        )
-        worker_target = oauth_credentials_worker_target(provider, agent_worker_target)
+        worker_target = oauth_credentials_worker_target(provider, self.worker_target)
         if worker_target is None or worker_target.worker_scope not in {"user", "user_agent"}:
             return "Error: Agent-initiated OAuth reset requires a requester-isolated user or user_agent scope."
 
