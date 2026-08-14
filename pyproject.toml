@@ -203,7 +203,8 @@ giphy = [
   "httpx>=0.27",
 ]
 github = [
-  "pygithub>=2.5",
+  # PyGithub 2.9 injects URL metadata into dictionary responses, breaking Agno's numeric language parser.
+  "pygithub>=2.5,<2.9",
 ]
 gmail = [
   "google-api-python-client>=2.178",
