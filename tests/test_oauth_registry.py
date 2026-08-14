@@ -50,6 +50,14 @@ def test_builtin_oauth_registry_includes_google_docs() -> None:
     assert providers["google_drive"].scopes[-1] == "https://www.googleapis.com/auth/drive"
 
 
+def test_builtin_oauth_registry_includes_github() -> None:
+    """GitHub should participate in built-in discovery and service-collision checks."""
+    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
+
+    assert providers["github"].credential_service == "github_oauth"
+    assert providers["github"].tool_config_service == "github"
+
+
 def test_load_oauth_provider_registry_caches_loaded_registry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
