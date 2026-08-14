@@ -25,6 +25,7 @@ from .approvals import (
     ApprovalCardReservation,
     RecordedApprovalDecision,
     StoredApprovalCard,
+    UnreadableApprovalCard,
 )
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership import MembershipFence, MembershipView
@@ -116,6 +117,7 @@ __all__ = [
     "StoredApprovalCard",
     "TerminalTurnWrite",
     "TurnRecordStore",
+    "UnreadableApprovalCard",
     "VisibleMessage",
     "decode_thread_id",
     "delivery_transaction_id",

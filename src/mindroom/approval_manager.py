@@ -12,7 +12,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.approval_events import PendingApproval, PendingApprovalStatus, parse_approval_datetime
-from mindroom.event_journal import ApprovalCardReservation, DeliveryStage, MatrixDelivery, StoredApprovalCard
+from mindroom.event_journal import (
+    ApprovalCardReservation,
+    DeliveryStage,
+    MatrixDelivery,
+    StoredApprovalCard,
+    UnreadableApprovalCard,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.redaction import redact_sensitive_data
@@ -495,7 +501,12 @@ class _ApprovalManager:
                 stage=DeliveryStage.FINAL,
             )
         except Exception:
-            logger.warning("approval_terminal_delivery_deferred", delivery_id=stored.delivery_id, exc_info=True)
+            logger.warning(
+                "approval_terminal_delivery_deferred",
+                delivery_id=stored.delivery_id,
+                room_id=pending.room_id,
+                exc_info=True,
+            )
             return False
         if edit_event_id is None:
             return False
@@ -521,6 +532,10 @@ class _ApprovalManager:
                     break
                 cursor = (page[-1].created_at_ns, page[-1].delivery_id)
                 for stored in page:
+                    if isinstance(stored, UnreadableApprovalCard):
+                        if stored.continuation_id == continuation_id:
+                            complete = False
+                        continue
                     if stored.continuation_id == continuation_id:
                         complete = await self._expire_stored(room_id, stored) and complete
                 if len(page) < _STARTUP_RECOVERY_SCAN_PAGE:
@@ -578,6 +593,30 @@ class _ApprovalManager:
         if wake is not None:
             await wake
 
+    async def _settle_startup_card(
+        self,
+        room_id: str,
+        stored: StoredApprovalCard | UnreadableApprovalCard,
+    ) -> bool | None:
+        """Settle due recovery work, or return None when none is currently due."""
+        if isinstance(stored, UnreadableApprovalCard):
+            return False
+        if stored.resolution is not None:
+            return await self._expire_stored(room_id, stored)
+        try:
+            expires_at = parse_approval_datetime(
+                cast("str | None", stored.card["content"].get("expires_at")),
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                "approval_card_expiry_unreadable",
+                delivery_id=stored.delivery_id,
+            )
+            return False
+        if expires_at is not None and expires_at <= _utcnow():
+            return await self._expire_stored(room_id, stored)
+        return None
+
     async def recover_cards_on_startup(self) -> _ApprovalStartupSweep:
         """Run generic delivery recovery, deadline decisions, and domain retirement."""
         if self.cards is None or self.send_delivery is None:
@@ -599,26 +638,9 @@ class _ApprovalManager:
                 cursor = (page[-1].created_at_ns, page[-1].delivery_id)
                 for stored in page:
                     scanned += 1
-                    if stored.resolution is not None:
-                        settled = await self._expire_stored(room_id, stored)
-                        retired += int(settled)
-                        failed += int(not settled)
-                        continue
-                    try:
-                        expires_at = parse_approval_datetime(
-                            cast("str | None", stored.card["content"].get("expires_at")),
-                        )
-                    except (TypeError, ValueError):
-                        logger.warning(
-                            "approval_card_expiry_unreadable",
-                            delivery_id=stored.delivery_id,
-                        )
-                        failed += 1
-                        continue
-                    if expires_at is not None and expires_at <= _utcnow():
-                        settled = await self._expire_stored(room_id, stored)
-                        retired += int(settled)
-                        failed += int(not settled)
+                    settled = await self._settle_startup_card(room_id, stored)
+                    retired += int(settled is True)
+                    failed += int(settled is False)
                 if len(page) < _STARTUP_RECOVERY_SCAN_PAGE:
                     break
         self._ensure_deadline_sweep()

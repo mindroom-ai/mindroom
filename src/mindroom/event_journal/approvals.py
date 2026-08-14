@@ -65,6 +65,15 @@ class StoredApprovalCard:
 
 
 @dataclass(frozen=True, slots=True)
+class UnreadableApprovalCard:
+    """Durable card debt whose payload cannot safely become actionable."""
+
+    delivery_id: str
+    created_at_ns: int
+    continuation_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalCardReservation:
     """One exact-call approval card and its frozen Matrix payload."""
 
@@ -816,7 +825,7 @@ def pending_cards(
     room_id: str,
     limit: int = _DEFAULT_ROOM_CARD_LIMIT,
     after: tuple[int, str] | None = None,
-) -> tuple[StoredApprovalCard, ...]:
+) -> tuple[StoredApprovalCard | UnreadableApprovalCard, ...]:
     """Return one room's unfinished cards, oldest first.
 
     Includes cards no send has come back from. Those are the ones a crash is
@@ -831,42 +840,38 @@ def pending_cards(
     # the comparison itself. A server whose collation is not byte order would
     # otherwise order the rows differently from the cursor that walks them, and
     # the scan would skip rows or revisit them.
-    cards: list[StoredApprovalCard] = []
-    scan_after = after
-    while len(cards) < limit:
-        cursor_clause = (
-            "" if scan_after is None else " AND (initial.created_at_ns, initial.delivery_id/*bytes*/) > (?, ?)"
+    cursor_clause = "" if after is None else " AND (initial.created_at_ns, initial.delivery_id/*bytes*/) > (?, ?)"
+    cursor_params: tuple[object, ...] = () if after is None else after
+    rows = transaction.fetchall(
+        f"""
+        SELECT {_CARD_COLUMNS}
+        FROM approval_cards AS cards
+        {_CARD_DELIVERY_JOINS}
+        LEFT JOIN room_membership AS membership
+          ON membership.principal_id = cards.principal_id
+         AND membership.room_id = initial.room_id
+        WHERE cards.principal_id = ?
+          AND initial.room_id = ?
+          AND cards.membership_epoch = COALESCE(membership.membership_epoch, 0){cursor_clause}
+          AND COALESCE(membership.departure_fenced, 0) = 0
+        -- Two cards sent in the same nanosecond would otherwise come back in
+        -- whatever order each backend felt like, and the caller expires them
+        -- in the order it reads them.
+        ORDER BY initial.created_at_ns, initial.delivery_id/*bytes*/
+        LIMIT ?
+        """,  # noqa: S608 - a fixed column list and a fixed clause, not input
+        (principal_id, room_id, *cursor_params, limit),
+    )
+    return tuple(
+        card
+        if (card := _card(row)) is not None
+        else UnreadableApprovalCard(
+            delivery_id=str(row["delivery_id"]),
+            created_at_ns=int(row["created_at_ns"]),
+            continuation_id=str(row["continuation_id"]),
         )
-        cursor_params: tuple[object, ...] = () if scan_after is None else scan_after
-        raw_limit = limit - len(cards)
-        rows = transaction.fetchall(
-            f"""
-            SELECT {_CARD_COLUMNS}
-            FROM approval_cards AS cards
-            {_CARD_DELIVERY_JOINS}
-            LEFT JOIN room_membership AS membership
-              ON membership.principal_id = cards.principal_id
-             AND membership.room_id = initial.room_id
-            WHERE cards.principal_id = ?
-              AND initial.room_id = ?
-              AND cards.membership_epoch = COALESCE(membership.membership_epoch, 0){cursor_clause}
-              AND COALESCE(membership.departure_fenced, 0) = 0
-            -- Two cards sent in the same nanosecond would otherwise come back in
-            -- whatever order each backend felt like, and the caller expires them
-            -- in the order it reads them.
-            ORDER BY initial.created_at_ns, initial.delivery_id/*bytes*/
-            LIMIT ?
-            """,  # noqa: S608 - a fixed column list and a fixed clause, not input
-            (principal_id, room_id, *cursor_params, raw_limit),
-        )
-        if not rows:
-            break
-        last = rows[-1]
-        scan_after = (int(last["created_at_ns"]), str(last["delivery_id"]))
-        cards.extend(card for row in rows if (card := _card(row)) is not None)
-        if len(rows) < raw_limit:
-            break
-    return tuple(cards)
+        for row in rows
+    )
 
 
 def _card(row: Row) -> StoredApprovalCard | None:

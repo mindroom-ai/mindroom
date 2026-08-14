@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         ApprovalCardReservation,
         RecordedApprovalDecision,
         StoredApprovalCard,
+        UnreadableApprovalCard,
     )
     from .interactive_questions import InteractiveSelection
     from .models import (
@@ -396,7 +397,7 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         room_id: str,
         limit: int = ...,
         after: tuple[int, str] | None = None,
-    ) -> tuple[StoredApprovalCard, ...]: ...
+    ) -> tuple[StoredApprovalCard | UnreadableApprovalCard, ...]: ...
 
 
 __all__ = [

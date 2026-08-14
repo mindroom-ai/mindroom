@@ -27,6 +27,7 @@ from .approvals import (  # noqa: TC001 - part of this module's runtime return t
     ApprovalCardReservation,
     RecordedApprovalDecision,
     StoredApprovalCard,
+    UnreadableApprovalCard,
 )
 from .models import AdmissionResult, DeliveryAcknowledgement, DeliveryProjectionPendingError
 from .projection import drop_refetched_message, install_refetched_revision, project
@@ -880,7 +881,7 @@ class PrincipalStore:
         room_id: str,
         limit: int = _DEFAULT_ROOM_CARD_LIMIT,
         after: tuple[int, str] | None = None,
-    ) -> tuple[StoredApprovalCard, ...]:
+    ) -> tuple[StoredApprovalCard | UnreadableApprovalCard, ...]:
         """Return one room's unfinished cards, oldest first."""
         return await self._backend.read(
             lambda transaction: approvals.pending_cards(

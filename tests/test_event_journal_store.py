@@ -51,6 +51,7 @@ from mindroom.event_journal import (
     ProjectedEvent,
     SemanticConsumer,
     TerminalTurnWrite,
+    UnreadableApprovalCard,
     delivery_transaction_id,
     reads,
     replacement_target,
@@ -4965,6 +4966,46 @@ class TestApprovalContinuations:
         )
         failing = await alice.pending(runtime_generation="runtime-a")
         assert [event.event_id for event in failing] == ["$source-1"]
+
+    async def test_pending_card_page_exposes_unreadable_durable_debt(self, alice: PrincipalStore) -> None:
+        """A corrupt card stays visible to recovery accounting without becoming actionable."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(
+            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
+        )
+        await self.remember_card(alice)
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                """
+                UPDATE matrix_delivery_outbox SET payload_json = ?
+                WHERE principal_id = ? AND delivery_id = ? AND stage = 'initial'
+                """,
+                (
+                    json.dumps(
+                        {
+                            "approval_id": "approval-card-1",
+                            "continuation_id": "approval-1",
+                            "continuation_generation": 0,
+                            "tool_call_id": "different-call",
+                            "status": "pending",
+                        },
+                    ),
+                    alice.principal_id,
+                    "approval-card-1",
+                ),
+            ),
+        )
+
+        page = await alice.pending_approval_cards(room_id=ROOM)
+
+        assert len(page) == 1
+        unreadable = page[0]
+        assert isinstance(unreadable, UnreadableApprovalCard)
+        assert unreadable.delivery_id == "approval-card-1"
+        assert unreadable.continuation_id == "approval-1"
+        continuation = await alice.approval_continuation("approval-1")
+        assert continuation is not None
+        assert continuation.state == "waiting"
 
     async def test_abandoned_publication_exposes_its_primary_source_for_failure_cleanup(
         self,

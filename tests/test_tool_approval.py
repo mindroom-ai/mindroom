@@ -40,6 +40,7 @@ from mindroom.event_journal import (
     EventKind,
     InboundEvent,
     MatrixDelivery,
+    UnreadableApprovalCard,
     delivery_transaction_id,
     unavailable_notice_delivery_id,
 )
@@ -500,6 +501,78 @@ async def test_startup_recovery_logs_a_deferred_terminal_flush(tmp_path: Path) -
             patch("mindroom.approval_manager.logger.warning") as warning,
         ):
             assert await manager._expire_stored(room_id, stored) is False
+
+        warning.assert_called_once_with(
+            "approval_terminal_delivery_deferred",
+            delivery_id="approval-card-1",
+            room_id=room_id,
+            exc_info=True,
+        )
+    finally:
+        await manager.shutdown(reason="test complete")
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_counts_an_unreadable_card_as_failed_debt(tmp_path: Path) -> None:
+    """A corrupt durable row keeps startup cleanup retryable instead of disappearing."""
+    cards = MagicMock()
+    cards.unacknowledged_matrix_deliveries = AsyncMock(return_value=())
+    cards.pending_approval_room_ids = AsyncMock(return_value=("!room:localhost",))
+    cards.pending_approval_cards = AsyncMock(
+        return_value=(
+            UnreadableApprovalCard(
+                delivery_id="corrupt-card",
+                created_at_ns=1,
+                continuation_id="approval-1",
+            ),
+        ),
+    )
+    manager = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        send_delivery=AsyncMock(),
+    )
+
+    try:
+        sweep = await manager.recover_cards_on_startup()
+
+        assert sweep.scanned == 1
+        assert sweep.failed == 1
+        assert sweep.complete is False
+    finally:
+        await manager.shutdown(reason="test complete")
+
+
+@pytest.mark.asyncio
+async def test_live_resolution_logs_room_context_when_terminal_flush_is_deferred(tmp_path: Path) -> None:
+    """A live decision retains enough context to diagnose its retryable terminal debt."""
+    room_id = "!room:localhost"
+    cards = MagicMock()
+    cards.resolve_continuation_approval_card = AsyncMock(
+        return_value=MagicMock(resolution={"status": "denied"}, recorded=False, continuation_ready=False),
+    )
+    manager = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        send_delivery=AsyncMock(),
+    )
+    worker = MagicMock(flush=AsyncMock(side_effect=RuntimeError("homeserver unavailable")))
+    pending = MagicMock(card_event_id="$approval", room_id=room_id)
+    stored = MagicMock(delivery_id="approval-card-1")
+
+    try:
+        with (
+            patch.object(manager, "_resolved_event_content", return_value={"status": "denied"}),
+            patch.object(manager, "_worker", return_value=worker),
+            patch("mindroom.approval_manager.logger.warning") as warning,
+        ):
+            assert not await manager._record_and_flush_resolution(
+                pending,
+                stored,
+                status="denied",
+                reason=None,
+                resolved_by=None,
+            )
 
         warning.assert_called_once_with(
             "approval_terminal_delivery_deferred",
