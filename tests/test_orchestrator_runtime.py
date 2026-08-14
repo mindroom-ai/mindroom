@@ -101,6 +101,11 @@ def _retry_tasks() -> list[asyncio.Task[Any]]:
     return [task for task in asyncio.all_tasks() if task.get_name() == "approval_startup_cleanup_retry"]
 
 
+def _bind_empty_legacy_approval_store(bot: MagicMock) -> None:
+    bot.approval_store.claim_legacy_approval_delivery = AsyncMock(return_value=None)
+    bot.approval_store.legacy_approval_delivery_pending = AsyncMock(return_value=False)
+
+
 async def _await_until(condition: Callable[[], bool]) -> None:
     """Yield to the loop until a background task has done what is expected of it.
 
@@ -1628,8 +1633,7 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.running = False
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
-        bot.approval_store.claim_legacy_approval_delivery = AsyncMock(return_value=None)
-        bot.approval_store.legacy_approval_delivery_pending = AsyncMock(return_value=False)
+        _bind_empty_legacy_approval_store(bot)
 
         async def _start_bot() -> bool:
             bot.running = True
@@ -1728,6 +1732,7 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.running = True
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        _bind_empty_legacy_approval_store(bot)
         orchestrator.agent_bots = {"router": bot}
 
         with patch(
@@ -1757,6 +1762,7 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.running = True
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        _bind_empty_legacy_approval_store(bot)
         orchestrator.agent_bots = {"router": bot}
 
         with patch(
@@ -1786,6 +1792,7 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.running = True
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        _bind_empty_legacy_approval_store(bot)
         orchestrator.agent_bots = {"router": bot}
 
         with patch(
@@ -1815,6 +1822,7 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.running = True
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        _bind_empty_legacy_approval_store(bot)
         orchestrator.agent_bots = {"router": bot}
 
         with patch(
@@ -1852,6 +1860,7 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.running = True
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        _bind_empty_legacy_approval_store(bot)
         orchestrator.agent_bots = {"router": bot}
 
         sweeps = [
@@ -1897,6 +1906,7 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.running = True
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        _bind_empty_legacy_approval_store(bot)
         orchestrator.agent_bots = {"router": bot}
 
         with (
@@ -1960,6 +1970,7 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.running = True
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        _bind_empty_legacy_approval_store(bot)
         orchestrator.agent_bots = {"router": bot}
 
         transport = orchestrator._approval_transport
@@ -2028,6 +2039,7 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.running = True
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        _bind_empty_legacy_approval_store(bot)
         orchestrator.agent_bots = {"router": bot}
 
         transport = orchestrator._approval_transport
@@ -2090,6 +2102,7 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.running = True
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        _bind_empty_legacy_approval_store(bot)
         orchestrator.agent_bots = {"router": bot}
 
         transport = orchestrator._approval_transport
