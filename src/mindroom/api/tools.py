@@ -118,6 +118,23 @@ def _check_auth_provider_configured(
     return oauth_credentials_usable(provider, runtime_paths, credentials)
 
 
+def _check_manual_oauth_fallback_configured(
+    tool: dict[str, Any],
+    credentials: dict[str, Any] | None,
+) -> bool:
+    """Return whether all declared manual OAuth fallback fields are configured."""
+    fallback_fields = tool.get("oauth_fallback_fields")
+    if not isinstance(fallback_fields, list | tuple) or not fallback_fields or not credentials:
+        return False
+    for field_name in fallback_fields:
+        if not isinstance(field_name, str):
+            return False
+        value = credentials.get(field_name)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return False
+    return True
+
+
 def _append_config_only_presets(tools: list[dict[str, Any]]) -> None:
     """Append config-only tool presets so the dashboard can display them."""
     existing_tool_names = {tool.get("name") for tool in tools}
@@ -294,9 +311,15 @@ def _update_tools_statuses(
 
         auth_provider = tool.get("auth_provider")
         if auth_provider:
+            manual_auth_configured = _check_manual_oauth_fallback_configured(
+                tool,
+                get_credentials(tool_name) if tool.get("oauth_fallback_fields") else None,
+            )
+            if tool.get("oauth_fallback_fields"):
+                tool["manual_auth_configured"] = manual_auth_configured
             credential_service = context.auth_provider_credential_services.get(auth_provider, auth_provider)
             provider_creds = get_credentials(credential_service)
-            if _check_auth_provider_configured(
+            if manual_auth_configured or _check_auth_provider_configured(
                 tool,
                 provider_creds,
                 provider=context.oauth_providers.get(auth_provider),

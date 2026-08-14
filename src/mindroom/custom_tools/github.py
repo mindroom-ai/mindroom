@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from agno.tools.github import GithubTools as AgnoGithubTools
 from github import Auth, Github
 
-from mindroom.credentials import load_scoped_credentials
+from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, oauth_connection_required_payload
@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)

@@ -116,6 +116,7 @@ class ToolMetadata:
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
     dependencies: list[str] | None = None
     auth_provider: str | None = None
+    oauth_fallback_fields: tuple[str, ...] = ()
     docs_url: str | None = None
     helper_text: str | None = None
     function_names: tuple[str, ...] = ()

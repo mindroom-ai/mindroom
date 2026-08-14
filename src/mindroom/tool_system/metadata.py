@@ -1318,6 +1318,10 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value
         tool_dict["default_execution_target"] = metadata.default_execution_target.value
+        if metadata.oauth_fallback_fields:
+            tool_dict["oauth_fallback_fields"] = list(metadata.oauth_fallback_fields)
+        else:
+            tool_dict.pop("oauth_fallback_fields", None)
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("supports_toolkit_filters", None)
