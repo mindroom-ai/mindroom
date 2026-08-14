@@ -11,15 +11,17 @@ _APPROVAL_CARD_NATIVE_IDENTITY_COLUMNS = (
 )
 
 
-def validate_interactive_question_columns(existing_columns: frozenset[str]) -> None:
-    """Refuse the old question-claim schema instead of guessing its ownership."""
-    if "claimed_source_event_id" not in existing_columns:
-        return
-    msg = (
-        "This event journal uses the incompatible pre-selection schema; "
-        "recreate the event journal database before starting MindRoom"
+def pre_schema_migration_statements(
+    *,
+    interactive_question_columns: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
+    """Archive the obsolete derived-prompt table before creating its replacement."""
+    if "claimed_source_event_id" not in interactive_question_columns:
+        return ()
+    return (
+        "CREATE TABLE interactive_questions_pre_selection AS SELECT * FROM interactive_questions",
+        "DROP TABLE interactive_questions",
     )
-    raise RuntimeError(msg)
 
 
 def migration_statements(
