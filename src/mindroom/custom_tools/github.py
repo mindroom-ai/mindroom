@@ -8,10 +8,10 @@ import threading
 from contextvars import copy_context
 from functools import wraps
 from html import unescape
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from agno.tools.github import GithubTools as AgnoGithubTools
-from github import Auth, Github
+from github import Auth, Github, GithubException
 
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.logging_config import get_logger
@@ -34,6 +34,17 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _PENDING_ACCESS_TOKEN = "mindroom-oauth-connection-pending"  # noqa: S105
+
+
+class _ContentWriteResult(Protocol):
+    path: str
+    sha: str
+    html_url: str
+
+
+class _CommitWriteResult(Protocol):
+    sha: str
+    html_url: str
 
 
 def _normalized_access_token(value: object) -> str | None:
@@ -199,6 +210,142 @@ class GithubTools(AgnoGithubTools):
 
             function.entrypoint = oauth_entrypoint
             setattr(self, function.name, oauth_entrypoint)
+
+    @wraps(AgnoGithubTools.update_file)
+    def update_file(
+        self,
+        repo_name: str,
+        path: str,
+        content: str,
+        message: str,
+        sha: str,
+        branch: str | None = None,
+    ) -> str:
+        """Update a file without requiring nested commit details in the response."""
+        try:
+            repo = self.g.get_repo(repo_name)
+            if branch is None:
+                result = repo.update_file(
+                    path=path,
+                    message=message,
+                    content=content.encode("utf-8"),
+                    sha=sha,
+                )
+            else:
+                result = repo.update_file(
+                    path=path,
+                    message=message,
+                    content=content.encode("utf-8"),
+                    sha=sha,
+                    branch=branch,
+                )
+        except GithubException as exc:
+            logger.exception("github_file_update_failed", repo_name=repo_name, path=path)
+            return json.dumps({"error": str(exc)})
+
+        content_result = cast(_ContentWriteResult, result["content"])  # noqa: TC006
+        commit_result = cast(_CommitWriteResult, result["commit"])  # noqa: TC006
+        return json.dumps(
+            {
+                "path": content_result.path,
+                "sha": content_result.sha,
+                "url": content_result.html_url,
+                "commit": {
+                    "sha": commit_result.sha,
+                    "message": message,
+                    "url": commit_result.html_url,
+                },
+            },
+            indent=2,
+        )
+
+    @wraps(AgnoGithubTools.delete_file)
+    def delete_file(
+        self,
+        repo_name: str,
+        path: str,
+        message: str,
+        sha: str,
+        branch: str | None = None,
+    ) -> str:
+        """Delete a file without requiring nested commit details in the response."""
+        try:
+            repo = self.g.get_repo(repo_name)
+            if branch is None:
+                result = repo.delete_file(path=path, message=message, sha=sha)
+            else:
+                result = repo.delete_file(path=path, message=message, sha=sha, branch=branch)
+        except GithubException as exc:
+            logger.exception("github_file_delete_failed", repo_name=repo_name, path=path)
+            return json.dumps({"error": str(exc)})
+
+        commit_result = cast(_CommitWriteResult, result["commit"])  # noqa: TC006
+        return json.dumps(
+            {
+                "message": f"File {path} deleted successfully",
+                "commit": {
+                    "sha": commit_result.sha,
+                    "message": message,
+                    "url": commit_result.html_url,
+                },
+            },
+            indent=2,
+        )
+
+    @wraps(AgnoGithubTools.edit_issue)
+    def edit_issue(
+        self,
+        repo_name: str,
+        issue_number: int,
+        title: str | None = None,
+        body: str | None = None,
+    ) -> str:
+        """Edit only explicitly supplied issue fields."""
+        if title is None and body is None:
+            return json.dumps({"error": f"Provide a title or body to update issue #{issue_number}."})
+
+        try:
+            issue = self.g.get_repo(repo_name).get_issue(number=issue_number)
+            if title is None:
+                assert body is not None
+                issue.edit(body=body)
+            elif body is None:
+                issue.edit(title=title)
+            else:
+                issue.edit(title=title, body=body)
+        except GithubException as exc:
+            logger.exception("github_issue_edit_failed", repo_name=repo_name, issue_number=issue_number)
+            return json.dumps({"error": str(exc)})
+        return json.dumps({"message": f"Issue #{issue_number} updated."}, indent=2)
+
+    @wraps(AgnoGithubTools.get_pull_request_count)
+    def get_pull_request_count(
+        self,
+        repo_name: str,
+        state: str = "all",
+        author: str | None = None,
+        base: str | None = None,
+        head: str | None = None,
+    ) -> str:
+        """Count pull requests even when PyGithub omits the aggregate count."""
+        filters = {"state": state}
+        if base is not None:
+            filters["base"] = base
+        if head is not None:
+            filters["head"] = head
+
+        try:
+            pulls = self.g.get_repo(repo_name).get_pulls(**filters)
+            if author is not None:
+                count = sum(1 for pull in pulls if pull.user.login == author and state in ("all", pull.state))
+            else:
+                count = pulls.totalCount
+                if count is None:
+                    count = sum(1 for _pull in pulls)
+        except GithubException as exc:
+            logger.exception("github_pull_request_count_failed", repo_name=repo_name)
+            return json.dumps({"error": str(exc)})
+        return json.dumps({"count": count}, indent=2)
 
     @wraps(AgnoGithubTools.search_issues_and_prs)
     def search_issues_and_prs(
