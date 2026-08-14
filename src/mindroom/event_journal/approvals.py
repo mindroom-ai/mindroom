@@ -708,7 +708,7 @@ def _delete_unattempted_card_delivery(
     principal_id: str,
     delivery_id: str,
 ) -> None:
-    """Retire a card and every stage that provably never reached Matrix."""
+    """Delete a card and every stage that provably never reached Matrix."""
     transaction.execute(
         "DELETE FROM approval_cards WHERE principal_id = ? AND delivery_id = ?",
         (principal_id, delivery_id),

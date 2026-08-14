@@ -298,7 +298,7 @@ It registers stop tracking, runs the cancellable response task, logs cancellatio
 It deliberately does not send the turn's placeholder.
 The durable `INITIAL` outbox row that `ResponseRunner` writes when it takes the lifecycle lock is the only thing allowed to put a placeholder in the room, so a send whose outcome Matrix never confirmed is resolved by resending that row under its own transaction ID rather than by a second, unowned send.
 When the durable placeholder cannot be delivered, the turn runs without one and the `FINAL` row becomes its first visible message.
-Every Matrix delivery freezes the room membership epoch that authorized it, except when a visible approval card and both delivery stages atomically transfer their already-decided terminal cleanup to a successor membership.
+Every durable outbox-owned Matrix delivery freezes the room membership epoch that authorized it, except when a visible approval card and both delivery stages atomically transfer their already-decided terminal cleanup to a successor membership.
 Departure retires unsent rows as identity tombstones, while acknowledgement always records the physical Matrix result but projects it into conversation history only when that frozen membership is still current.
 
 The ingress-to-execution seam is now one-way.
