@@ -677,20 +677,15 @@ class TestRedactedPendingTurnSources:
         on_redaction = AsyncMock()
         dispatcher = _dispatcher(bot, on_message, on_redaction=on_redaction)
         source = text_event("$source")
+        if not source_first:
+            await admit_redaction(journal(bot), "$redaction", redacts="$source")
+        await dispatcher._ingress._admit(
+            nio.MatrixRoom(ROOM, BOT),
+            source,
+            nio.TimelineEventProvenance.LIVE,
+        )
         if source_first:
-            await dispatcher._ingress._admit(
-                nio.MatrixRoom(ROOM, BOT),
-                source,
-                nio.TimelineEventProvenance.LIVE,
-            )
             await admit_redaction(journal(bot), "$redaction", redacts="$source")
-        else:
-            await admit_redaction(journal(bot), "$redaction", redacts="$source")
-            await dispatcher._ingress._admit(
-                nio.MatrixRoom(ROOM, BOT),
-                source,
-                nio.TimelineEventProvenance.LIVE,
-            )
 
         assert await pending_ids(bot) == ["$redaction"]
         await dispatcher.drain_once()

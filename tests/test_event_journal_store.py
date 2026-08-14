@@ -855,15 +855,17 @@ class TestRedaction:
         source_first: bool,
     ) -> None:
         """Either admission order retires the source without removing its dedup proof."""
-        events = (
-            ("$source", {"content": text("secret")}),
-            ("$redaction", {"ts": 2_000, "redacts": "$source", "kind": EventKind.REDACTION}),
-        )
-        for event_id, kwargs in events if source_first else reversed(events):
-            await admit(alice, event_id, **kwargs)
+        if not source_first:
+            await admit(alice, "$redaction", ts=2_000, redacts="$source", kind=EventKind.REDACTION)
+        await admit(alice, "$source", content=text("secret"))
+        if source_first:
+            await admit(alice, "$redaction", ts=2_000, redacts="$source", kind=EventKind.REDACTION)
 
         assert not await alice.is_pending("$source")
-        assert await alice.load_event("$source") is not None
+        settled_source = await alice.load_event("$source")
+        assert settled_source is not None
+        assert settled_source.source == {}
+        assert settled_source.semantic_consumer is None
         assert [event.event_id for event in await alice.pending()] == ["$redaction"]
         assert await bodies(alice) == []
 
