@@ -29,6 +29,10 @@ from mindroom.tool_approval import (
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
 _USER_STOP_VISIBLE_NOTE = "**[Response cancelled by user]**"
+_APPROVAL_RECEIPT_HEADER = (
+    "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
+    "paused tool calls were authorized. Do not infer approval policy from tool success alone."
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -50,6 +54,26 @@ class _ApprovalPausePlan:
     tools: tuple[ToolExecution, ...]
     calls: tuple[ApprovalCall, ...]
     waiting_text: str | None
+
+
+def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
+    """Render trusted model context for one exact approval generation."""
+    lines = [_APPROVAL_RECEIPT_HEADER]
+    for call in calls:
+        tool = f"`{call.tool_name}`"
+        if call.decision is ContinuationDecision.APPROVED:
+            if call.human_approval_required is True:
+                outcome = "an approval card was shown and approved before execution."
+            elif call.human_approval_required is False:
+                outcome = "human approval was not required; policy approved execution."
+            else:
+                outcome = "approval was granted, but its approval provenance is unavailable."
+        elif call.decision is ContinuationDecision.EXPIRED:
+            outcome = "human approval expired; the tool was not executed."
+        else:
+            outcome = "approval was denied; the tool was not executed."
+        lines.append(f"- {tool}: {outcome}")
+    return "\n".join(lines)
 
 
 def identify_approval_tools(
@@ -132,7 +156,7 @@ class ApprovalResponseCoordinator:
         """Evaluate policy once and normalize exact calls with integer deadlines."""
         config = self.config()
         approver_id = resolve_tool_approval_approver(config, self.runtime_paths, requester_id)
-        decisions: dict[str, tuple[ContinuationDecision | None, float]] = {}
+        decisions: dict[str, tuple[ContinuationDecision | None, float, bool]] = {}
         for tool, tool_call_id, tool_name, invoking_agent in identified:
             requires_approval, timeout_seconds = await evaluate_tool_approval(
                 config,
@@ -152,6 +176,7 @@ class ApprovalResponseCoordinator:
                 if requires_approval
                 else ContinuationDecision.APPROVED,
                 timeout_seconds,
+                requires_approval,
             )
         now = datetime.now(UTC)
         calls = tuple(
@@ -166,6 +191,7 @@ class ApprovalResponseCoordinator:
                     if decisions[tool_call_id][0] is ContinuationDecision.DENIED
                     else None
                 ),
+                human_approval_required=decisions[tool_call_id][2],
             )
             for _tool, tool_call_id, tool_name, invoking_agent in identified
         )

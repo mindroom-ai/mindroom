@@ -45,6 +45,7 @@ class ApprovalCall:
     expires_at_ns: int
     decision: ApprovalDecision | None = None
     reason: str | None = None
+    human_approval_required: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +193,8 @@ def get(
     )
     call_rows = transaction.fetchall(
         """
-        SELECT tool_call_id, tool_name, invoking_agent, expires_at_ns, decision, reason
+        SELECT tool_call_id, tool_name, invoking_agent, expires_at_ns, decision, reason,
+               human_approval_required
         FROM approval_continuation_calls
         WHERE principal_id = ? AND approval_id = ? AND generation = ?
         ORDER BY call_ordinal
@@ -221,6 +223,9 @@ def _from_rows(
             expires_at_ns=int(call["expires_at_ns"]),
             decision=(ApprovalDecision(str(call["decision"])) if call["decision"] is not None else None),
             reason=cast("str | None", call["reason"]),
+            human_approval_required=(
+                bool(call["human_approval_required"]) if call["human_approval_required"] is not None else None
+            ),
         )
         for call in call_rows
     )
@@ -280,8 +285,9 @@ def _insert_calls(
             """
             INSERT INTO approval_continuation_calls (
                 principal_id, approval_id, generation, tool_call_id, call_ordinal,
-                tool_name, invoking_agent, expires_at_ns, decision, reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tool_name, invoking_agent, expires_at_ns, decision, reason,
+                human_approval_required
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 principal_id,
@@ -294,6 +300,7 @@ def _insert_calls(
                 call.expires_at_ns,
                 call.decision.value if call.decision is not None else None,
                 call.reason,
+                call.human_approval_required,
             ),
         )
 
@@ -419,7 +426,8 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
     call_rows = transaction.fetchall(
         f"""
         SELECT calls.approval_id, calls.tool_call_id, calls.tool_name,
-               calls.invoking_agent, calls.expires_at_ns, calls.decision, calls.reason
+               calls.invoking_agent, calls.expires_at_ns, calls.decision, calls.reason,
+               calls.human_approval_required
         FROM approval_continuation_calls AS calls
         JOIN approval_continuations AS continuations
           ON continuations.principal_id = calls.principal_id

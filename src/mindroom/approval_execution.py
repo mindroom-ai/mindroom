@@ -15,6 +15,7 @@ from mindroom import ai_runtime
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
+from mindroom.approval_receipt import install_approval_receipt_hook
 from mindroom.history.runtime import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
@@ -103,6 +104,7 @@ class AgentApprovalExecution:
                     agent.model,
                     notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
                 )
+                install_approval_receipt_hook(agent.model)
             session = await agent.aget_session(
                 session_id=continuation.session_id,
                 user_id=continuation.requester_id,

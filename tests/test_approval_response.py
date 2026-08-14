@@ -5,7 +5,8 @@ from __future__ import annotations
 from agno.models.response import ToolExecution
 from agno.run.requirement import RunRequirement
 
-from mindroom.approval_response import identify_approval_tools
+from mindroom.approval_response import build_approval_receipt, identify_approval_tools
+from mindroom.event_journal import ApprovalCall, ApprovalDecision
 from mindroom.response_turn import PausedAttempt
 
 
@@ -30,3 +31,75 @@ def test_identify_approval_tools_keeps_team_member_owner() -> None:
     )
 
     assert identified == ((tool, "call-1", "dangerous", "researcher"),)
+
+
+def test_approval_receipt_distinguishes_human_and_policy_decisions() -> None:
+    """Model context must report exact approval provenance instead of inferring it from tool success."""
+    receipt = build_approval_receipt(
+        (
+            ApprovalCall(
+                tool_call_id="call-human",
+                tool_name="publish_report",
+                invoking_agent="writer",
+                expires_at_ns=1,
+                decision=ApprovalDecision.APPROVED,
+                human_approval_required=True,
+            ),
+            ApprovalCall(
+                tool_call_id="call-policy",
+                tool_name="read_report",
+                invoking_agent="reader",
+                expires_at_ns=1,
+                decision=ApprovalDecision.APPROVED,
+                human_approval_required=False,
+            ),
+        ),
+    )
+
+    assert "`publish_report`: an approval card was shown and approved before execution." in receipt
+    assert "`read_report`: human approval was not required; policy approved execution." in receipt
+    assert "Do not infer approval policy from tool success alone." in receipt
+
+
+def test_approval_receipt_keeps_legacy_provenance_unknown() -> None:
+    """An upgraded legacy continuation must not be mislabeled as human- or policy-approved."""
+    receipt = build_approval_receipt(
+        (
+            ApprovalCall(
+                tool_call_id="call-legacy",
+                tool_name="legacy_action",
+                invoking_agent="agent",
+                expires_at_ns=1,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        ),
+    )
+
+    assert "`legacy_action`: approval was granted, but its approval provenance is unavailable." in receipt
+
+
+def test_approval_receipt_reports_denied_and_expired_calls_as_unexecuted() -> None:
+    """Rejected calls must not look executed merely because they reached continuation handling."""
+    receipt = build_approval_receipt(
+        (
+            ApprovalCall(
+                tool_call_id="call-denied",
+                tool_name="delete_report",
+                invoking_agent="writer",
+                expires_at_ns=1,
+                decision=ApprovalDecision.DENIED,
+                human_approval_required=True,
+            ),
+            ApprovalCall(
+                tool_call_id="call-expired",
+                tool_name="publish_report",
+                invoking_agent="writer",
+                expires_at_ns=1,
+                decision=ApprovalDecision.EXPIRED,
+                human_approval_required=True,
+            ),
+        ),
+    )
+
+    assert "`delete_report`: approval was denied; the tool was not executed." in receipt
+    assert "`publish_report`: human approval expired; the tool was not executed." in receipt

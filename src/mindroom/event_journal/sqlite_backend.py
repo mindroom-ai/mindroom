@@ -216,9 +216,13 @@ class SqliteBackend:
             approval_card_columns = frozenset(
                 str(row[1]) for row in connection.execute("PRAGMA table_info(approval_cards)")
             )
+            approval_continuation_call_columns = frozenset(
+                str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuation_calls)")
+            )
             for statement in migration_statements(
                 SQLITE_DIALECT,
                 approval_card_columns=approval_card_columns,
+                approval_continuation_call_columns=approval_continuation_call_columns,
             ):
                 connection.execute(statement)
             connection.execute("COMMIT")

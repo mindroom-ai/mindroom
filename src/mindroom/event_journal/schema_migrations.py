@@ -28,15 +28,25 @@ def migration_statements(
     dialect: SchemaDialect,
     *,
     approval_card_columns: frozenset[str] = frozenset(),
+    approval_continuation_call_columns: frozenset[str] = frozenset(),
 ) -> tuple[str, ...]:
-    """Add nullable native-card identity columns without activating old rows."""
+    """Add nullable approval columns without assigning meaning to old rows."""
     if dialect == SQLITE_DIALECT:
-        return tuple(
+        card_statements = tuple(
             f"ALTER TABLE approval_cards ADD COLUMN {name} {column_type}"
             for name, column_type in _APPROVAL_CARD_NATIVE_IDENTITY_COLUMNS
             if name not in approval_card_columns
         )
-    return tuple(
-        f"ALTER TABLE approval_cards ADD COLUMN IF NOT EXISTS {name} {column_type}"
-        for name, column_type in _APPROVAL_CARD_NATIVE_IDENTITY_COLUMNS
+        call_statements = (
+            ("ALTER TABLE approval_continuation_calls ADD COLUMN human_approval_required BOOLEAN",)
+            if "human_approval_required" not in approval_continuation_call_columns
+            else ()
+        )
+        return (*card_statements, *call_statements)
+    return (
+        *tuple(
+            f"ALTER TABLE approval_cards ADD COLUMN IF NOT EXISTS {name} {column_type}"
+            for name, column_type in _APPROVAL_CARD_NATIVE_IDENTITY_COLUMNS
+        ),
+        "ALTER TABLE approval_continuation_calls ADD COLUMN IF NOT EXISTS human_approval_required BOOLEAN",
     )

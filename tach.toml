@@ -617,6 +617,7 @@ depends_on = [
     "mindroom.agents",
     "mindroom.ai_runtime",
     "mindroom.ai_run_metadata",
+    "mindroom.approval_receipt",
     "mindroom.event_journal",
     "mindroom.history.runtime",
     "mindroom.matrix.typing",
@@ -626,6 +627,15 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.response_runner"]
+
+[[modules]]
+path = "mindroom.approval_receipt"
+depends_on = []
+visibility = [
+    "mindroom.approval_execution",
+    "mindroom.response_runner",
+    "mindroom.teams",
+]
 
 [[modules]]
 path = "mindroom.approval_response"
@@ -1596,6 +1606,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.approval_execution",
+    "mindroom.approval_receipt",
     "mindroom.approval_response",
     "mindroom.constants",
     "mindroom.delivery_gateway",
@@ -1706,6 +1717,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
+    "mindroom.approval_receipt",
     "mindroom.authorization",
     "mindroom.constants",
     "mindroom.entity_resolution",

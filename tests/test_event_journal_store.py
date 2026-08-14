@@ -4882,6 +4882,7 @@ class TestApprovalContinuations:
                     invoking_agent="agent",
                     expires_at_ns=time.time_ns() + 60_000_000_000,
                     decision=ApprovalDecision.APPROVED if state == "ready" else None,
+                    human_approval_required=True,
                 ),
             ),
             request_body="run it",
@@ -5851,6 +5852,39 @@ class TestSchemaUpgrades:
     """Opening the journal preserves old rows and enables current writes."""
 
     @staticmethod
+    async def _assert_legacy_approval_call_provenance_is_unknown(backend: Backend) -> None:
+        row = await backend.read(
+            lambda transaction: transaction.fetchone(
+                """
+                SELECT human_approval_required
+                FROM approval_continuation_calls
+                WHERE principal_id = ? AND approval_id = ? AND tool_call_id = ?
+                """,
+                ("agent@alice", "approval-legacy", "call-legacy"),
+            ),
+        )
+        assert row is not None
+        assert row["human_approval_required"] is None
+
+    @staticmethod
+    def _legacy_approval_calls_schema() -> str:
+        return """
+            CREATE TABLE approval_continuation_calls (
+                principal_id TEXT NOT NULL,
+                approval_id TEXT NOT NULL,
+                generation BIGINT NOT NULL,
+                tool_call_id TEXT NOT NULL,
+                call_ordinal BIGINT NOT NULL,
+                tool_name TEXT NOT NULL,
+                invoking_agent TEXT NOT NULL,
+                expires_at_ns BIGINT NOT NULL,
+                decision TEXT,
+                reason TEXT,
+                PRIMARY KEY (principal_id, approval_id, generation, tool_call_id)
+            )
+        """
+
+    @staticmethod
     async def _assert_legacy_questions_are_archived(backend: Backend) -> None:
         archived = await backend.read(
             lambda transaction: transaction.fetchall(
@@ -6108,6 +6142,38 @@ class TestSchemaUpgrades:
         finally:
             await backend.close()
 
+    async def test_sqlite_open_adds_nullable_provenance_to_previous_approval_calls(self, tmp_path: Path) -> None:
+        """SQLite upgrades old calls without inventing approval provenance."""
+        database_path = tmp_path / "previous-approval-calls.db"
+        with sqlite3.connect(database_path) as database:
+            database.execute(self._legacy_approval_calls_schema())
+            database.execute(
+                """
+                INSERT INTO approval_continuation_calls (
+                    principal_id, approval_id, generation, tool_call_id, call_ordinal,
+                    tool_name, invoking_agent, expires_at_ns, decision, reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "agent@alice",
+                    "approval-legacy",
+                    0,
+                    "call-legacy",
+                    0,
+                    "legacy_action",
+                    "agent",
+                    1,
+                    "approved",
+                    None,
+                ),
+            )
+
+        backend = SqliteBackend.open(database_path)
+        try:
+            await self._assert_legacy_approval_call_provenance_is_unknown(backend)
+        finally:
+            await backend.close()
+
     async def test_postgres_open_adds_native_identity_to_the_previous_card_schema(
         self,
         postgres_journal_url: str,
@@ -6149,6 +6215,45 @@ class TestSchemaUpgrades:
         backend = PostgresBackend.open(database_url)
         try:
             await self._assert_old_row_is_inert_and_new_card_works(backend)
+        finally:
+            await backend.close()
+
+    async def test_postgres_open_adds_nullable_provenance_to_previous_approval_calls(
+        self,
+        postgres_journal_url: str,
+    ) -> None:
+        """PostgreSQL upgrades old calls without inventing approval provenance."""
+        import psycopg  # noqa: PLC0415 - optional backend exercised only by this test
+
+        from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        with psycopg.connect(database_url) as database:
+            database.execute(self._legacy_approval_calls_schema())
+            database.execute(
+                """
+                INSERT INTO approval_continuation_calls (
+                    principal_id, approval_id, generation, tool_call_id, call_ordinal,
+                    tool_name, invoking_agent, expires_at_ns, decision, reason
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    "agent@alice",
+                    "approval-legacy",
+                    0,
+                    "call-legacy",
+                    0,
+                    "legacy_action",
+                    "agent",
+                    1,
+                    "approved",
+                    None,
+                ),
+            )
+
+        backend = PostgresBackend.open(database_url)
+        try:
+            await self._assert_legacy_approval_call_provenance_is_unknown(backend)
         finally:
             await backend.close()
 

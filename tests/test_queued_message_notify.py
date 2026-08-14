@@ -23,7 +23,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from structlog.testing import capture_logs
 
-from mindroom import ai_runtime
+from mindroom import ai_runtime, approval_receipt
 from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
@@ -3022,6 +3022,28 @@ def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call()
     assert next_turn_messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
     assert next_notice_context.response_turn_id != notice_context.response_turn_id
     assert _notice_count(stop_after_messages) == 0
+
+
+@pytest.mark.asyncio
+async def test_model_call_hook_appends_one_trusted_approval_receipt_after_tool_results() -> None:
+    """A resumed model must see approval provenance after its protocol-required tool result."""
+    model = RecordingModel(id="approval-receipt", provider="fake")
+    approval_receipt.install_approval_receipt_hook(model)
+    messages = [
+        Message(role="system", content="base rules"),
+        Message(role="assistant", content="calling tool"),
+        Message(role="tool", content="tool result"),
+    ]
+
+    with approval_receipt.approval_receipt_context("trusted approval receipt"):
+        await model.aresponse(messages=messages)
+
+    assert [(message.role, message.content) for message in model.seen_messages] == [
+        ("system", "base rules\n\ntrusted approval receipt"),
+        ("assistant", "calling tool"),
+        ("tool", "tool result"),
+    ]
+    assert model.seen_messages[0].provider_data == {"mindroom_approval_receipt": True}
 
 
 def test_default_queued_notice_requires_pause_handoff() -> None:
