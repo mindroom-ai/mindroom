@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import importlib.util
 import json
@@ -261,6 +262,27 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
     assert stored is not None
     assert stored["token"] == "rotated-access"  # noqa: S105
     assert stored["refresh_token"] == "rotated-refresh"  # noqa: S105
+
+
+def test_oauth_refresh_works_when_agno_calls_sync_tool_on_running_loop(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("oauth-access"),
+        credentials_manager=manager,
+        worker_target=target,
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    tool.g = _FakeGithub()
+
+    async def call_sync_tool_entrypoint() -> str:
+        return tool.list_repositories()
+
+    result = asyncio.run(call_sync_tool_entrypoint())
+
+    assert json.loads(result) == ["example/project"]
 
 
 def test_terminal_refresh_failure_returns_safe_connection_payload(tmp_path: Path) -> None:

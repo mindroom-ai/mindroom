@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+from contextvars import copy_context
 from functools import wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from agno.tools.github import GithubTools as AgnoGithubTools
 from github import Auth, Github
@@ -79,14 +81,34 @@ class GithubTools(AgnoGithubTools):
         )
 
     def _refresh_oauth_credentials(self) -> dict[str, object] | None:
-        return asyncio.run(
-            refresh_scoped_oauth_credentials(
-                self._oauth_provider,
-                self._runtime_paths,
-                credentials_manager=self._credentials_manager,
-                worker_target=self._worker_target,
-            ),
+        refresh = refresh_scoped_oauth_credentials(
+            self._oauth_provider,
+            self._runtime_paths,
+            credentials_manager=self._credentials_manager,
+            worker_target=self._worker_target,
         )
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(refresh)
+
+        result: list[dict[str, object] | None] = []
+        errors: list[BaseException] = []
+        context = copy_context()
+
+        def run_refresh() -> None:
+            try:
+                refreshed = context.run(asyncio.run, refresh)
+                result.append(cast("dict[str, object] | None", refreshed))
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=run_refresh, name="mindroom-github-oauth-refresh")
+        thread.start()
+        thread.join()
+        if errors:
+            raise errors[0]
+        return result[0]
 
     def _ensure_authenticated(self) -> None:
         if self._explicit_access_token:
