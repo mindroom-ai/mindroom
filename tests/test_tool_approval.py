@@ -1566,7 +1566,7 @@ async def test_a_restart_expires_an_unsent_card_it_cannot_prove_the_device_for(
     tmp_path: Path,
     restarted_device: str | None,
 ) -> None:
-    """A transaction belongs to a device, so a repeat from another is a new card.
+    """A history miss cannot prove a previous device never sent the card.
 
     The homeserver deduplicates a transaction ID only against the device that
     used it. Presenting a claimed card again from a device that cannot be
@@ -1574,9 +1574,10 @@ async def test_a_restart_expires_an_unsent_card_it_cannot_prove_the_device_for(
     would add a second one, and a duplicated prompt for a human decision is
     worse than a stale one -- answering the copy resolves nothing.
 
-    So the card dies here. The row goes with it, because the room has said it
-    holds no such card, and keeping it would only re-ask the same unanswerable
-    question on the next startup.
+    A bounded room-history scan is not an absence proof: the event may have
+    fallen outside the window. The recovery owner therefore survives for a
+    later authoritative reconciliation instead of either resending or
+    forgetting a card that may still be clickable.
     """
     cards = FakeApprovalCards()
     await cards.store_unsent_card("txn-stranded", "!room:localhost", _claimed_card_body("stranded-approval"))
@@ -1600,9 +1601,9 @@ async def test_a_restart_expires_an_unsent_card_it_cannot_prove_the_device_for(
     # event id this process is entitled to claim.
     sender.assert_not_awaited()
     editor.assert_not_awaited()
-    # Expired for good rather than left for the next startup to retry, which
-    # would be a retry that can never succeed.
-    assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
+    remaining = await cards.pending_approval_cards(room_id="!room:localhost")
+    assert [card.transaction_id for card in remaining] == ["txn-stranded"]
+    assert remaining[0].card_event_id is None
 
 
 @pytest.mark.asyncio

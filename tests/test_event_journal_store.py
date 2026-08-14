@@ -5087,6 +5087,120 @@ class TestApprovalContinuations:
         assert activated is not None
         assert activated.state == "ready"
 
+    async def test_every_card_is_reserved_before_publication_activates(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """One commit owns every exact call and its frozen Matrix delivery."""
+        from mindroom.event_journal import ApprovalCall, ApprovalCardReservation  # noqa: PLC0415
+
+        responder = journal_store.principal("agent@alice")
+        router = journal_store.principal("router")
+        await self.admit_sources(responder)
+        second_call = ApprovalCall(
+            tool_call_id="call-2",
+            tool_name="write_file",
+            invoking_agent="agent",
+            expires_at_ns=time.time_ns() + 60_000_000_000,
+        )
+        publishing = replace(
+            self.continuation(state="waiting"),
+            calls=(*self.continuation(state="waiting").calls, second_call),
+            runtime_generation="runtime-a",
+        )
+        await responder.create_approval_continuation(publishing)
+
+        reserved = await router.reserve_approval_card_deliveries(
+            continuation_principal_id="agent@alice",
+            continuation_id=publishing.approval_id,
+            expected_generation=0,
+            cards=(
+                ApprovalCardReservation(
+                    delivery_id="approval-card-1",
+                    tool_call_id="call-1",
+                    event_type="io.mindroom.tool_approval",
+                    payload={"approval_id": "approval-card-1", "status": "pending"},
+                ),
+                ApprovalCardReservation(
+                    delivery_id="approval-card-2",
+                    tool_call_id="call-2",
+                    event_type="io.mindroom.tool_approval",
+                    payload={"approval_id": "approval-card-2", "status": "pending"},
+                ),
+            ),
+        )
+
+        assert reserved is True
+        activated = await responder.approval_continuation(publishing.approval_id)
+        assert activated is not None
+        assert activated.state == "waiting"
+        assert activated.runtime_generation is None
+        first = await router.load_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+        )
+        second = await router.load_matrix_delivery(
+            delivery_id="approval-card-2",
+            stage=DeliveryStage.INITIAL,
+        )
+        assert first is not None and first.event_type == "io.mindroom.tool_approval"
+        assert second is not None and second.event_type == "io.mindroom.tool_approval"
+
+    async def test_card_reservation_fails_closed_without_every_exact_call(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A malformed multi-card batch owns no delivery and leaves publication fenced."""
+        from mindroom.event_journal import ApprovalCardReservation  # noqa: PLC0415
+
+        responder = journal_store.principal("agent@alice")
+        router = journal_store.principal("router")
+        await self.admit_sources(responder)
+        publishing = replace(
+            self.continuation(state="waiting"),
+            runtime_generation="runtime-a",
+        )
+        await responder.create_approval_continuation(publishing)
+
+        reserved = await router.reserve_approval_card_deliveries(
+            continuation_principal_id="agent@alice",
+            continuation_id=publishing.approval_id,
+            expected_generation=0,
+            cards=(
+                ApprovalCardReservation(
+                    delivery_id="approval-card-1",
+                    tool_call_id="call-1",
+                    event_type="io.mindroom.tool_approval",
+                    payload={"approval_id": "approval-card-1", "status": "pending"},
+                ),
+                ApprovalCardReservation(
+                    delivery_id="approval-card-2",
+                    tool_call_id="missing-call",
+                    event_type="io.mindroom.tool_approval",
+                    payload={"approval_id": "approval-card-2", "status": "pending"},
+                ),
+            ),
+        )
+
+        assert reserved is False
+        retained = await responder.approval_continuation(publishing.approval_id)
+        assert retained is not None
+        assert retained.runtime_generation == "runtime-a"
+        assert (
+            await router.load_matrix_delivery(
+                delivery_id="approval-card-1",
+                stage=DeliveryStage.INITIAL,
+            )
+            is None
+        )
+        assert (
+            await router.load_matrix_delivery(
+                delivery_id="approval-card-2",
+                stage=DeliveryStage.INITIAL,
+            )
+            is None
+        )
+
     async def test_failure_request_is_guarded_by_observed_state(self, alice: PrincipalStore) -> None:
         """A stale failure observer cannot fence work that already made progress."""
         await self.admit_sources(alice)
