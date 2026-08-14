@@ -93,7 +93,6 @@ def _legacy_delivery_claim(*, attempted: bool, sending_device_id: str | None) ->
     }
     return LegacyApprovalDelivery(
         delivery_id="legacy-transaction",
-        event_type="io.mindroom.tool_approval",
         room_id="!room:localhost",
         thread_id="$thread",
         payload=content,
@@ -570,6 +569,33 @@ async def test_startup_unavailable_cleanup_waits_for_legacy_card_upgrade(tmp_pat
         patch.object(transport, "_schedule_startup_cleanup_retry") as schedule_retry,
     ):
         await transport._run_startup_cleanup_if_ready()
+
+    reconcile.assert_not_awaited()
+    schedule_retry.assert_called_once_with()
+    assert transport._startup_cleanup_done is False
+
+
+@pytest.mark.asyncio
+async def test_live_unavailable_cleanup_waits_for_legacy_card_upgrade(tmp_path: Path) -> None:
+    """A failed entity cannot lose a continuation still owned by staged delivery debt."""
+    cards = MagicMock()
+    cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: cards,
+        journal_provider=lambda: None,
+    )
+
+    with (
+        patch.object(
+            transport,
+            "_reconcile_unavailable_owner_pages",
+            new=AsyncMock(return_value=True),
+        ) as reconcile,
+        patch.object(transport, "_schedule_startup_cleanup_retry") as schedule_retry,
+    ):
+        await transport.reconcile_unavailable_entities({"removed"})
 
     reconcile.assert_not_awaited()
     schedule_retry.assert_called_once_with()

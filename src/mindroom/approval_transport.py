@@ -190,6 +190,11 @@ class ApprovalMatrixTransport:
         names = set(entity_names)
         if not names:
             return
+        cards = self.cards_provider()
+        if cards is not None and await cards.legacy_approval_delivery_pending():
+            self._startup_cleanup_done = False
+            self._schedule_startup_cleanup_retry()
+            return
         if not await self._reconcile_unavailable_owner_pages(names):
             self._startup_cleanup_done = False
             self._schedule_startup_cleanup_retry()
@@ -722,7 +727,7 @@ class ApprovalMatrixTransport:
         response = await send_room_event_result(
             bot.client,
             legacy.room_id,
-            legacy.event_type,
+            "io.mindroom.tool_approval",
             payload,
             transaction_id=legacy.delivery_id,
             operation="migrate_legacy_approval_delivery",

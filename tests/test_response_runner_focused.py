@@ -676,6 +676,30 @@ async def test_user_stop_fences_waiting_approval_before_terminal_turn_record(tmp
         assert not await runner.deps.approval_store.is_pending("$source")
         return True
 
+    blocked_finalize = AsyncMock()
+    with (
+        patch(
+            "mindroom.approval_response.require_approval_delivery_migrated",
+            new=AsyncMock(
+                side_effect=RuntimeError(
+                    "Approval delivery migration has not established the generic card owner yet",
+                ),
+            ),
+            create=True,
+        ),
+        pytest.raises(RuntimeError, match="migration has not established"),
+    ):
+        await runner.finalize_user_stop(
+            "$waiting",
+            "$source",
+            _target(thread_id="$thread"),
+            6,
+            Mock(return_value=True),
+            blocked_finalize,
+        )
+    assert await runner.deps.approval_store.approval_continuation("approval-stop") == waiting
+    blocked_finalize.assert_not_awaited()
+
     with (
         patch("mindroom.approval_response.expire_continuation_approval_cards", new=AsyncMock(return_value=True)),
         patch.object(DeliveryGateway, "edit_text", new=AsyncMock(side_effect=acknowledge_stop_edit)),

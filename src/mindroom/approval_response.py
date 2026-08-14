@@ -24,6 +24,7 @@ from mindroom.tool_approval import (
     expire_continuation_approval_cards,
     prepare_suspended_tool_approval,
     publish_suspended_tool_approvals,
+    require_approval_delivery_migrated,
     resolve_tool_approval_approver,
 )
 
@@ -291,6 +292,7 @@ class ApprovalResponseCoordinator:
         reason: str,
     ) -> ApprovalContinuation | None:
         """Fence exactly the state a failed lifecycle observed and wake settlement."""
+        await require_approval_delivery_migrated()
         failing = await self.store.request_approval_failure(
             continuation.approval_id,
             reason,

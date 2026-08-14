@@ -4629,6 +4629,7 @@ expose = [
     "prepare_suspended_tool_approval",
     "publish_suspended_tool_approvals",
     "recover_approval_cards_on_startup",
+    "require_approval_delivery_migrated",
     "resolve_tool_approval_approver",
     "shutdown_approval_runtime",
     "tool_may_require_approval",

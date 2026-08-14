@@ -69,7 +69,6 @@ class LegacyApprovalDelivery:
     """One unacknowledged #1834 card awaiting one-way wire normalization."""
 
     delivery_id: str
-    event_type: str
     room_id: str
     thread_id: str | None
     payload: dict[str, Any]
@@ -291,11 +290,9 @@ def _legacy_delivery(
     if not isinstance(content, dict):
         msg = "Legacy approval card content is not an object"
         raise TypeError(msg)
-    event_type = card.get("type")
     thread_id = content.get("thread_id")
     return LegacyApprovalDelivery(
         delivery_id=str(row["transaction_id"]),
-        event_type=event_type if isinstance(event_type, str) and event_type else "io.mindroom.tool_approval",
         room_id=str(row["room_id"]),
         thread_id=thread_id if isinstance(thread_id, str) and thread_id else None,
         payload=content,
