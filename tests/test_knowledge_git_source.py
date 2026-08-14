@@ -10,8 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shlex
+import signal
 import subprocess
+from contextlib import suppress
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -22,7 +27,10 @@ from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_url_credentials
 from mindroom.knowledge.refresh_locks import refresh_source_root_lock
-from mindroom.knowledge.refresh_runner import refresh_knowledge_binding
+from mindroom.knowledge.refresh_runner import (
+    refresh_knowledge_binding,
+    refresh_knowledge_binding_in_subprocess,
+)
 from mindroom.knowledge.registry import (
     get_published_index,
     published_index_metadata_path,
@@ -718,6 +726,164 @@ async def test_refresh_recovers_orphaned_git_index_lock(tmp_path: Path) -> None:
     assert [document.content for document in lookup.index.knowledge.search("crash", max_results=5)] == [
         "after crash",
     ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups and POSIX shell filters are required")
+@pytest.mark.asyncio
+async def test_crashed_git_subprocess_recovers_index_lock_on_next_refresh(  # noqa: C901, PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real crashed checkout must not block the next subprocess refresh."""
+    remote_work = tmp_path / "remote-work"
+    remote_work.mkdir()
+
+    async def _git(cwd: Path, *args: str) -> None:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    async def _git_output(cwd: Path, *args: str) -> str:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
+    await _git(remote_work, "init", "-b", "main")
+    await _git(remote_work, "config", "user.email", "tests@example.com")
+    await _git(remote_work, "config", "user.name", "MindRoom Tests")
+    (remote_work / "doc.md").write_text("before crash", encoding="utf-8")
+    await _git(remote_work, "add", "doc.md")
+    await _git(remote_work, "commit", "-m", "before")
+    remote_bare = tmp_path / "remote.git"
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    docs_path = tmp_path / "checkout"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url=str(remote_bare), branch="main")},
+        modes={"docs": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding_in_subprocess("docs", config=config, runtime_paths=runtime_paths)
+
+    lock_path = docs_path / ".git" / "index.lock"
+    ready_path = tmp_path / "filter-ready"
+    release_path = tmp_path / "filter-release"
+    filter_script = tmp_path / "blocking-smudge.sh"
+    filter_script.write_text(
+        """#!/bin/sh
+ready_path=$1
+release_path=$2
+trap '' TERM
+echo $$ > "$ready_path"
+while [ ! -e "$release_path" ]; do
+    sleep 0.05
+done
+cat
+""",
+        encoding="utf-8",
+    )
+    filter_script.chmod(0o755)
+    filter_command = " ".join(shlex.quote(str(path)) for path in (filter_script, ready_path, release_path))
+    await _git(docs_path, "config", "filter.blocking.smudge", filter_command)
+    await _git(docs_path, "config", "filter.blocking.clean", "cat")
+    await _git(docs_path, "config", "filter.blocking.required", "true")
+
+    (remote_work / ".gitattributes").write_text("doc.md filter=blocking\n", encoding="utf-8")
+    (remote_work / "doc.md").write_text("after crash", encoding="utf-8")
+    await _git(remote_work, "add", ".gitattributes", "doc.md")
+    await _git(remote_work, "commit", "-m", "after")
+    await _git(remote_work, "push", str(remote_bare), "main")
+
+    real_create_subprocess_exec = asyncio.create_subprocess_exec
+    refresh_processes: list[asyncio.subprocess.Process] = []
+
+    async def _capture_refresh_process(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await real_create_subprocess_exec(*args, **kwargs)
+        refresh_processes.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _capture_refresh_process)
+    refresh_task = asyncio.create_task(
+        refresh_knowledge_binding_in_subprocess("docs", config=config, runtime_paths=runtime_paths),
+    )
+
+    async def _wait_for_filter() -> int:
+        while True:
+            if ready_path.exists():
+                try:
+                    return int(ready_path.read_text(encoding="utf-8"))
+                except ValueError:
+                    pass
+            if refresh_task.done():
+                await refresh_task
+                pytest.fail("refresh exited before the blocking filter started")
+            await asyncio.sleep(0.01)
+
+    watchdog_stop = Event()
+    watchdog_fired = Event()
+    watchdog: Thread | None = None
+
+    def _release_filter_if_cleanup_stalls() -> None:
+        if not watchdog_stop.wait(timeout=20):
+            watchdog_fired.set()
+            release_path.touch()
+
+    try:
+        filter_pid = await asyncio.wait_for(_wait_for_filter(), timeout=30)
+        assert filter_pid > 0
+        assert len(refresh_processes) == 1
+        watchdog = Thread(target=_release_filter_if_cleanup_stalls, daemon=True)
+        watchdog.start()
+        os.kill(refresh_processes[0].pid, signal.SIGKILL)
+        with pytest.raises(RuntimeError, match=r"failed.*exit code"):
+            await refresh_task
+    finally:
+        release_path.touch()
+        watchdog_stop.set()
+        if watchdog is not None:
+            watchdog.join(timeout=1)
+        if not refresh_task.done():
+            refresh_task.cancel()
+            done, _pending = await asyncio.wait({refresh_task}, timeout=5)
+            if not done and refresh_processes:
+                with suppress(ProcessLookupError):
+                    os.killpg(refresh_processes[0].pid, signal.SIGKILL)
+                done, _pending = await asyncio.wait({refresh_task}, timeout=5)
+            if not done:
+                pytest.fail("refresh task survived test cleanup")
+        with suppress(asyncio.CancelledError, RuntimeError):
+            refresh_task.result()
+
+    assert watchdog is not None
+    assert watchdog.is_alive() is False
+    assert watchdog_fired.is_set() is False
+
+    lock_path.write_text("", encoding="utf-8")
+    await refresh_knowledge_binding_in_subprocess("docs", config=config, runtime_paths=runtime_paths)
+
+    assert lock_path.exists() is False
+    assert (docs_path / "doc.md").read_text(encoding="utf-8") == "after crash"
+    assert await _git_output(docs_path, "rev-parse", "HEAD") == await _git_output(remote_work, "rev-parse", "HEAD")
 
 
 @pytest.mark.asyncio
