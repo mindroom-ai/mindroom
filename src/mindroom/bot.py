@@ -12,6 +12,7 @@ from uuid import uuid4
 import nio
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.approval_inbound import (
     handle_tool_approval_action,
     maybe_handle_tool_approval_reply,
@@ -186,8 +187,23 @@ __all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 _SYNC_TIMEOUT_MS = 30000
 _CLASSIC_SYNC_REBUILD_BACKOFF_INITIAL_SECONDS = 1.0
 _CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS = 30.0
+_REPLY_MEMBERSHIP_REFRESH_BACKOFF_INITIAL_SECONDS = 5.0
+_REPLY_MEMBERSHIP_REFRESH_BACKOFF_MAX_SECONDS = 300.0
 _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
 _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
+
+
+def _sync_response_has_uncertain_membership(
+    response: nio.SyncResponse | nio.SlidingSyncResponse,
+) -> bool:
+    """Return whether a sync response cannot prove a complete membership view."""
+    if response.unrecovered_room_ids:
+        return True
+    if isinstance(response, nio.SyncResponse):
+        return any(join_info.timeline.limited for join_info in response.rooms.join.values())
+    return any(room.limited for room in response.rooms.values())
+
+
 _SYNC_FILTER: dict[str, object] = {
     "room": {"timeline": {"limit": constants.CLASSIC_SYNC_TIMELINE_LIMIT}},
 }
@@ -259,6 +275,7 @@ def create_bot_for_entity(
     storage_path: Path,
     config_path: Path | None = None,
     journal_store: EventJournalStore | None = None,
+    agent_reply_memberships: AgentReplyMembershipIndex | None = None,
 ) -> AgentBot | TeamBot | None:
     """Create appropriate bot instance for an entity (agent, team, or router).
 
@@ -270,6 +287,7 @@ def create_bot_for_entity(
         storage_path: Path for storing agent data
         config_path: Path to the YAML config file used by config-aware tools
         journal_store: Shared event-journal store to borrow, or None to open one
+        agent_reply_memberships: Shared authoritative grant-room membership index
 
     Returns:
         Bot instance or None if entity not found in config
@@ -288,6 +306,7 @@ def create_bot_for_entity(
             config_path=config_path,
             enable_streaming=enable_streaming,
             journal_store=journal_store,
+            agent_reply_memberships=agent_reply_memberships,
         )
 
     if entity_name in config.teams:
@@ -304,6 +323,7 @@ def create_bot_for_entity(
             team_model=team_config.model,
             enable_streaming=enable_streaming,
             journal_store=journal_store,
+            agent_reply_memberships=agent_reply_memberships,
         )
 
     if entity_name in config.agents:
@@ -318,6 +338,7 @@ def create_bot_for_entity(
             config_path=config_path,
             enable_streaming=enable_streaming,
             journal_store=journal_store,
+            agent_reply_memberships=agent_reply_memberships,
         )
 
     msg = f"Entity '{entity_name}' not found in configuration."
@@ -371,6 +392,9 @@ class AgentBot:
     _room_member_callback_registered: bool
     _room_member_join_hooks_armed: bool
     _sliding_sync_startup_warning_emitted: bool
+    _reply_membership_refresh_pending: bool
+    _reply_membership_refresh_attempt: int
+    _reply_membership_refresh_retry_at: float
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
@@ -387,6 +411,7 @@ class AgentBot:
         config_path: Path | None = None,
         enable_streaming: bool = True,
         journal_store: EventJournalStore | None = None,
+        agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     ) -> None:
         """Initialize the bot with canonical runtime-backed config state.
 
@@ -430,10 +455,14 @@ class AgentBot:
         self._room_member_join_hooks_armed = False
         self._room_member_join_lock = asyncio.Lock()
         self._sliding_sync_startup_warning_emitted = False
+        self._reply_membership_refresh_pending = False
+        self._reply_membership_refresh_attempt = 0
+        self._reply_membership_refresh_retry_at = 0.0
         self._runtime_view = BotRuntimeState(
             client=None,
             config=config,
             runtime_paths=self.runtime_paths,
+            agent_reply_memberships=agent_reply_memberships or AgentReplyMembershipIndex(),
             enable_streaming=enable_streaming,
             orchestrator=None,
         )
@@ -684,6 +713,7 @@ class AgentBot:
             ),
             runtime_generation=self._approval_runtime_generation,
             on_own_membership_transition=self._membership_fence.observe_reported_transition,
+            on_live_room_membership_transition=self._apply_live_reply_membership_transition,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -748,6 +778,7 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
+                agent_reply_memberships=self._runtime_view.agent_reply_memberships,
             ),
         )
         self._ingress_validator = IngressValidator(
@@ -919,6 +950,8 @@ class AgentBot:
     def config(self, value: Config) -> None:
         """Update the canonical live config."""
         self._runtime_view.config = value
+        if self._call_manager is not None:
+            self._call_manager.update_config(value)
 
     @property
     def enable_streaming(self) -> bool:
@@ -1246,7 +1279,51 @@ class AgentBot:
         self._sync_shutting_down = False
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
+        if self.agent_name == ROUTER_AGENT_NAME:
+            self._invalidate_agent_reply_memberships(reason="sync_loop_started")
         mark_matrix_sync_loop_started(self.agent_name)
+
+    def _invalidate_agent_reply_memberships(self, *, reason: str) -> None:
+        """Fail closed when the router's view of Matrix membership is uncertain."""
+        if self.agent_name != ROUTER_AGENT_NAME:
+            return
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            self._runtime_view.agent_reply_memberships.invalidate(self.config, reason=reason)
+        else:
+            orchestrator.invalidate_agent_reply_memberships(reason=reason)
+        self._reply_membership_refresh_pending = True
+        self._reply_membership_refresh_attempt = 0
+        self._reply_membership_refresh_retry_at = 0.0
+
+    async def _refresh_agent_reply_memberships_if_needed(self) -> None:
+        """Rebuild router-owned room grants after a receive-generation boundary."""
+        if self.agent_name != ROUTER_AGENT_NAME:
+            return
+        index = self._runtime_view.agent_reply_memberships
+        if not self._reply_membership_refresh_pending and not index.needs_refresh(self.config.authorization):
+            return
+        if time.monotonic() < self._reply_membership_refresh_retry_at:
+            return
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            client = self.client
+            if client is None:
+                return
+            await index.refresh(self.config, self.runtime_paths, client)
+        else:
+            await orchestrator.refresh_agent_reply_memberships()
+        self._reply_membership_refresh_pending = index.needs_refresh(self.config.authorization)
+        if not self._reply_membership_refresh_pending:
+            self._reply_membership_refresh_attempt = 0
+            self._reply_membership_refresh_retry_at = 0.0
+            return
+        self._reply_membership_refresh_attempt += 1
+        backoff_seconds = min(
+            _REPLY_MEMBERSHIP_REFRESH_BACKOFF_INITIAL_SECONDS * (2 ** (self._reply_membership_refresh_attempt - 1)),
+            _REPLY_MEMBERSHIP_REFRESH_BACKOFF_MAX_SECONDS,
+        )
+        self._reply_membership_refresh_retry_at = time.monotonic() + backoff_seconds
 
     def reset_watchdog_clock(self) -> None:
         """Reset the monotonic watchdog clock for a fresh sync iteration."""
@@ -1337,6 +1414,7 @@ class AgentBot:
                 self._classic_sync_rebuild_pending = True
                 self._classic_sync_rebuild_attempt += 1
                 self._room_member_join_hooks_armed = False
+                self._invalidate_agent_reply_memberships(reason="classic_sync_reset")
         return True, retry_token is not None
 
     async def _reconcile_classic_sync_cursor_after_loop_exit(self) -> None:
@@ -1583,6 +1661,7 @@ class AgentBot:
         first_sync_response: bool,
     ) -> None:
         """Run side effects that do not own raw sync checkpoint safety."""
+        await self._refresh_agent_reply_memberships_if_needed()
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
         self._schedule_delivery_recovery()
@@ -1707,6 +1786,9 @@ class AgentBot:
         if self._sync_shutting_down:
             return
 
+        if _sync_response_has_uncertain_membership(_response):
+            self._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+
         if isinstance(_response, nio.SyncResponse):
             (
                 room_member_join_hook_plan,
@@ -1719,6 +1801,7 @@ class AgentBot:
         elif isinstance(_response, nio.SlidingSyncResponse):
             await self._handle_sliding_sync_response(_response)
         if rejected_response:
+            self._invalidate_agent_reply_memberships(reason="rejected_sync_response")
             return
         if isinstance(_response, nio.SyncResponse):
             self._classic_sync_rebuild_pending = False
@@ -1748,11 +1831,14 @@ class AgentBot:
             # transparently, and sliding errors say nothing about the classic
             # sync checkpoint, so classic token rejection must not run here.
             self._warn_if_sliding_sync_never_succeeded(_response)
+            if _response.status_code == "M_UNKNOWN_POS":
+                self._invalidate_agent_reply_memberships(reason="sliding_sync_position_reset")
             return
         if _response.status_code == "M_UNKNOWN_POS":
             decision = await self._sync_checkpoint_trust.reject_unknown_pos()
             await self._apply_client_rewind_decision(decision)
             self._room_member_join_hooks_armed = False
+            self._invalidate_agent_reply_memberships(reason="classic_sync_position_reset")
             self.logger.warning(
                 "matrix_sync_token_rejected",
                 status_code=_response.status_code,
@@ -1795,6 +1881,7 @@ class AgentBot:
             ssl_verify=constants.runtime_matrix_ssl_verify(self.runtime_paths),
             tool_support=self._tool_runtime_support,
             get_invited_rooms_by_agent=self._invited_call_rooms_by_agent,
+            agent_reply_memberships=self._runtime_view.agent_reply_memberships,
         )
 
         client.add_event_callback(
@@ -2450,6 +2537,21 @@ class AgentBot:
             emit=self._emit_room_member_joined_hooks,
         )
 
+    async def _apply_live_reply_membership_transition(
+        self,
+        room_id: str,
+        event: nio.RoomMemberEvent,
+    ) -> None:
+        """Update reply grants from one durably admitted live Matrix transition."""
+        if self.agent_name != ROUTER_AGENT_NAME:
+            return
+        self._runtime_view.agent_reply_memberships.apply_member_event(
+            self.config,
+            room_id,
+            event,
+            control_user_id=self.agent_user.user_id,
+        )
+
     async def _emit_room_member_joined_sync_state_hooks(
         self,
         response: nio.SyncResponse,
@@ -2701,6 +2803,7 @@ class TeamBot(AgentBot):
         team_model: str | None = None,
         enable_streaming: bool = True,
         journal_store: EventJournalStore | None = None,
+        agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     ) -> None:
         """Initialize the team bot and its shared agent runtime."""
         super().__init__(
@@ -2712,6 +2815,7 @@ class TeamBot(AgentBot):
             config_path=config_path,
             enable_streaming=enable_streaming,
             journal_store=journal_store,
+            agent_reply_memberships=agent_reply_memberships,
         )
         self.team_mode = team_mode
         self.team_model = team_model

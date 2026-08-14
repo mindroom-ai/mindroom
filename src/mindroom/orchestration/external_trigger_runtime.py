@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import get_joined_rooms
 
@@ -24,6 +25,7 @@ class ExternalTriggerRuntimeCoordinator:
 
     runtime_paths: RuntimePaths
     api_enabled: bool = True
+    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
 
     def bind_if_ready(
         self,
@@ -49,6 +51,7 @@ class ExternalTriggerRuntimeCoordinator:
             client=router_bot.client,
             conversation_reader=router_bot._conversation_reader,
             is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+            agent_reply_memberships=self.agent_reply_memberships,
         )
 
     def unbind(self) -> None:

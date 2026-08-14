@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import is_sender_allowed_for_agent_reply, responder_candidate_entities_for_room
 from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, ScheduledHistoryBudget
@@ -269,6 +270,7 @@ class TurnPolicyDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     matrix_id: MatrixID
+    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
 
 
 @dataclass(frozen=True)
@@ -296,6 +298,7 @@ class TurnPolicy:
             self.deps.agent_name,
             self.deps.runtime.config,
             self.deps.runtime_paths,
+            self.deps.agent_reply_memberships,
         )
 
     def responder_availability(self) -> _ResponderAvailability:
@@ -353,6 +356,7 @@ class TurnPolicy:
             requester_user_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
+            self.deps.agent_reply_memberships,
         )
         return self._filter_materializable_responders(available_responders, availability)
 
@@ -619,6 +623,7 @@ class TurnPolicy:
                 sender_id=requester_user_id,
                 config=self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
+                membership_index=self.deps.agent_reply_memberships,
                 available_responders_in_room=available_responders,
             ):
                 self.deps.logger.info("Skipping routing: thread already requires explicit responder targeting")
@@ -691,6 +696,7 @@ class TurnPolicy:
             requester_user_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
+            self.deps.agent_reply_memberships,
         )
         available_responders_in_room = self._filter_materializable_responders(
             sender_visible_responders_in_room,
@@ -756,6 +762,7 @@ class TurnPolicy:
             thread_history=planning_thread_history,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
+            membership_index=self.deps.agent_reply_memberships,
             mentioned_agents=context.mentioned_agents,
             has_non_agent_mentions=context.has_non_agent_mentions,
             sender_id=requester_user_id,

@@ -24,6 +24,7 @@ from agno.session.team import TeamSession
 from structlog.testing import capture_logs
 
 from mindroom import ai_runtime
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
@@ -840,6 +841,7 @@ async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(t
         client=client,
         config=config,
         runtime_paths=runtime_paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=False,
         orchestrator=None,
     )
@@ -899,6 +901,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         client=client,
         config=config,
         runtime_paths=runtime_paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=False,
         orchestrator=None,
     )
@@ -1004,6 +1007,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         client=client,
         config=config,
         runtime_paths=runtime_paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=False,
         orchestrator=None,
     )

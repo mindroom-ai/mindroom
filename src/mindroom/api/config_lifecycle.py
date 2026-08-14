@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
@@ -97,6 +98,7 @@ class ExternalTriggerRuntime:
     conversation_reader: object
     config_generation: int
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
+    agent_reply_memberships: AgentReplyMembershipIndex
 
 
 @dataclass

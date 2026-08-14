@@ -6,11 +6,14 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 import mindroom.tools  # noqa: F401
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent, describe_agent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -18,6 +21,7 @@ from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
+from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.metadata import TOOL_METADATA
@@ -208,6 +212,82 @@ class TestDelegateTools:
             assert call_kwargs["delegation_depth"] == 1
             assert call_ctx.session_id.startswith("delegate:leader:code:")
             assert result == "Here is the generated code: print('hello')"
+
+    @pytest.mark.asyncio
+    async def test_delegation_accepts_requester_authorized_by_grant_room(self, tmp_path: Path) -> None:
+        """Direct delegated runs should consume the same shared room-membership reply policy."""
+        config = Config(
+            agents={
+                "leader": AgentConfig(
+                    display_name="Leader",
+                    role="Lead",
+                    rooms=["grant"],
+                    delegate_to=["worker"],
+                ),
+                "worker": AgentConfig(
+                    display_name="Worker",
+                    role="Work",
+                    rooms=["grant"],
+                ),
+            },
+            authorization=AuthorizationConfig(
+                agent_reply_permissions={
+                    "worker": AgentReplyPermission(joined_rooms=["grant"]),
+                },
+            ),
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
+        )
+        config = _bind_runtime_paths(config, tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        grant_room_id = "!grant:example.org"
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
+        state.save(runtime_paths=runtime_paths)
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+        client.joined_members.return_value = nio.JoinedMembersResponse(
+            members=[nio.RoomMember("@alice:example.org", None, None)],
+            room_id=grant_room_id,
+        )
+        memberships = AgentReplyMembershipIndex()
+        await memberships.refresh(config, runtime_paths, client)
+        tools = DelegateTools(
+            agent_name="leader",
+            delegate_to=["worker"],
+            runtime_paths=runtime_paths,
+            config=config,
+            delegation_depth=0,
+        )
+        runtime_context = ToolRuntimeContext(
+            agent_name="leader",
+            target=MessageTarget(
+                room_id="!dm:example.org",
+                source_thread_id=None,
+                resolved_thread_id=None,
+                reply_to_event_id=None,
+                session_id="!dm:example.org",
+            ),
+            requester_id="@alice:example.org",
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            relations=make_relation_lookup(),
+            conversation_reader=make_conversation_reader_mock(),
+            agent_reply_memberships=memberships,
+        )
+
+        with (
+            tool_runtime_context(runtime_context),
+            patch(
+                "mindroom.custom_tools.delegate.ai_response",
+                new_callable=AsyncMock,
+                return_value="done",
+            ) as mock_ai_response,
+        ):
+            result = await tools.delegate_task("worker", "do work")
+
+        assert result == "done"
+        mock_ai_response.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_delegation_with_no_content(self, tools: DelegateTools) -> None:

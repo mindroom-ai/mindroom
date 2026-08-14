@@ -25,6 +25,7 @@ import nio
 import pytest
 
 from mindroom import constants, interactive
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.attachments import register_local_attachment
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError
@@ -377,6 +378,7 @@ def _build_harness(
         client=make_matrix_client_mock(user_id=matrix_id.full_id),
         config=config,
         runtime_paths=runtime_paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=True,
         orchestrator=None,
     )

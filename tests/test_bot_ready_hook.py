@@ -12,6 +12,7 @@ import pytest
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AgentReplyPermission
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -76,6 +77,17 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     )
 
 
+def _router_bot_with_orchestrator(tmp_path: Path) -> tuple[AgentBot, MagicMock]:
+    """Return a router bot wired to a narrow mocked orchestrator lifecycle."""
+    bot = _agent_bot(tmp_path, agent_name="router")
+    orchestrator = MagicMock()
+    orchestrator.invalidate_agent_reply_memberships = MagicMock()
+    orchestrator.refresh_agent_reply_memberships = AsyncMock()
+    orchestrator.handle_bot_ready = AsyncMock()
+    bot.orchestrator = orchestrator
+    return bot, orchestrator
+
+
 def _thread_root_event(
     event_id: str,
     *,
@@ -108,6 +120,31 @@ def _empty_classic_sync_response(next_batch: str) -> nio.SyncResponse:
             "to_device": {"events": []},
             "presence": {"events": []},
             "account_data": {"events": []},
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    return response
+
+
+def _limited_classic_sync_response(next_batch: str) -> nio.SyncResponse:
+    """Return a Classic response whose room timeline cannot prove full membership continuity."""
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": next_batch,
+            "rooms": {
+                "invite": {},
+                "leave": {},
+                "join": {
+                    "!project:localhost": {
+                        "state": {"events": []},
+                        "timeline": {
+                            "events": [],
+                            "limited": True,
+                            "prev_batch": "s-before-gap",
+                        },
+                    },
+                },
+            },
         },
     )
     assert isinstance(response, nio.SyncResponse)
@@ -242,6 +279,67 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
     assert call_manager.reconcile_joined_rooms.await_count == 2
 
 
+def test_router_sync_loop_start_revokes_room_backed_grants(tmp_path: Path) -> None:
+    """A reconnect generation must fail closed before its first response arrives."""
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+
+    bot.mark_sync_loop_started()
+
+    orchestrator.invalidate_agent_reply_memberships.assert_called_once_with(reason="sync_loop_started")
+
+
+@pytest.mark.asyncio
+async def test_router_first_response_refreshes_room_backed_grants(tmp_path: Path) -> None:
+    """The first successful response in each receive generation rebuilds grants."""
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.mark_sync_loop_started()
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+    ):
+        await bot._on_sync_response(MagicMock())
+
+    orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(tmp_path: Path) -> None:
+    """A limited timeline must discard its uncertain baseline before taking a new authoritative snapshot."""
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.mark_sync_loop_started()
+    orchestrator.invalidate_agent_reply_memberships.reset_mock()
+    orchestrator.refresh_agent_reply_memberships.reset_mock()
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+    ):
+        await bot._on_sync_response(_limited_classic_sync_response("s-after-gap"))
+
+    orchestrator.invalidate_agent_reply_memberships.assert_called_once_with(reason="uncertain_sync_response")
+    orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_failed_membership_refresh_is_backed_off_between_sync_responses(tmp_path: Path) -> None:
+    """An unavailable grant room must not cause one Matrix API refresh for every incoming message."""
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot.config.authorization.agent_reply_permissions = {
+        "router": AgentReplyPermission(joined_rooms=["grant"]),
+    }
+    bot._runtime_view.agent_reply_memberships.invalidate(bot.config, reason="test")
+
+    with patch("mindroom.bot.time.monotonic", return_value=100.0):
+        await bot._refresh_agent_reply_memberships_if_needed()
+        await bot._refresh_agent_reply_memberships_if_needed()
+
+    orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
+    assert bot._reply_membership_refresh_pending
+
+
 def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Path) -> None:
     """Call admission is rechecked for call-state and underlying room-member changes."""
     bot = _agent_bot(tmp_path)
@@ -257,6 +355,18 @@ def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Pat
         nio.UnknownEvent,
     ]
     client.add_to_device_callback.assert_called_once_with(ANY, AuthenticatedToDeviceEvent)
+
+
+def test_bot_config_setter_updates_existing_call_manager(tmp_path: Path) -> None:
+    """An unchanged call bot should observe authorization-only hot reloads."""
+    bot = _agent_bot(tmp_path)
+    call_manager = MagicMock()
+    install_call_manager_mock(bot, call_manager)
+    new_config = _config(tmp_path)
+
+    bot.config = new_config
+
+    call_manager.update_config.assert_called_once_with(new_config)
 
 
 @pytest.mark.asyncio
@@ -803,9 +913,7 @@ async def test_bot_ready_fires_after_agent_started(tmp_path: Path) -> None:
 async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
     """Hooks on bot:ready should be able to send messages through the bound sender."""
     bot = _agent_bot(tmp_path, agent_name="router")
-    bot.client = AsyncMock()
-    bot.client.add_event_admission_callback = MagicMock()
-    bot.client.add_event_callback = MagicMock()
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.agent_bots = {"router": bot}
     bot.orchestrator = orchestrator
@@ -826,7 +934,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
         patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send),
     ):
-        await bot._on_sync_response(MagicMock())
+        await bot._on_sync_response(_empty_classic_sync_response("s-ready-hook"))
 
     assert captured_content[SOURCE_KIND_KEY] == "hook"
     assert captured_content["com.mindroom.hook_source"] == "test-plugin:bot:ready"

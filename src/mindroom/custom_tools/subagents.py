@@ -299,6 +299,7 @@ async def _available_subagent_names(context: ToolRuntimeContext, *, room_id: str
             context.requester_id,
             context.config,
             context.runtime_paths,
+            context.agent_reply_memberships,
         )
     elif target_room_id == context.room_id:
         candidates = await responder_candidate_entities_for_room(
@@ -307,6 +308,7 @@ async def _available_subagent_names(context: ToolRuntimeContext, *, room_id: str
             context.requester_id,
             context.config,
             context.runtime_paths,
+            context.agent_reply_memberships,
         )
     else:
         candidates = responder_candidate_entities_from_cached_room(
@@ -314,6 +316,7 @@ async def _available_subagent_names(context: ToolRuntimeContext, *, room_id: str
             context.requester_id,
             context.config,
             context.runtime_paths,
+            context.agent_reply_memberships,
         )
     materializable_agent_names = materializable_agent_names_for_orchestrator(
         context.orchestrator,

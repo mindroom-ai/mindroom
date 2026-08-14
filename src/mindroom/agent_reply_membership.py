@@ -49,11 +49,7 @@ def _referenced_room_keys(authorization: AuthorizationConfig) -> tuple[str, ...]
     """Return distinct managed grant-room keys in deterministic order."""
     return tuple(
         sorted(
-            {
-                room_key
-                for policy in authorization.agent_reply_permissions.values()
-                for room_key in policy.joined_rooms
-            },
+            {room_key for policy in authorization.agent_reply_permissions.values() for room_key in policy.joined_rooms},
         ),
     )
 
@@ -114,9 +110,7 @@ class AgentReplyMembershipIndex:
         resolved_sender = authorization.resolve_alias(sender_id)
         allowed_room_keys = frozenset(joined_rooms)
         return any(
-            room.ready
-            and room.room_key in allowed_room_keys
-            and resolved_sender in room.joined_user_ids
+            room.ready and room.room_key in allowed_room_keys and resolved_sender in room.joined_user_ids
             for room in snapshot.rooms
         )
 
@@ -132,7 +126,7 @@ class AgentReplyMembershipIndex:
             rooms=tuple(
                 GrantRoomMembership(
                     room_key=room_key,
-                    room_id=(previous_rooms.get(room_key).room_id if room_key in previous_rooms else None),
+                    room_id=previous_rooms[room_key].room_id if room_key in previous_rooms else None,
                     ready=False,
                 )
                 for room_key in room_keys
@@ -192,44 +186,24 @@ class AgentReplyMembershipIndex:
             return
         self._epoch += 1
 
-        changed_room_keys: list[str] = []
-        updated_rooms: list[GrantRoomMembership] = []
-        for room in snapshot.rooms:
-            if room.room_id != room_id:
-                updated_rooms.append(room)
-                continue
-            if event.state_key == control_user_id and event.membership != "join":
-                updated_room = replace(
-                    room,
-                    ready=False,
-                    raw_joined_user_ids=frozenset(),
-                    joined_user_ids=frozenset(),
-                )
-                updated_rooms.append(updated_room)
-                if updated_room != room:
-                    changed_room_keys.append(room.room_key)
-                continue
-            if not room.ready:
-                updated_rooms.append(room)
-                continue
-            raw_joined_user_ids = set(room.raw_joined_user_ids)
-            if event.membership == "join":
-                raw_joined_user_ids.add(event.state_key)
-            else:
-                raw_joined_user_ids.discard(event.state_key)
-            frozen_raw_user_ids = frozenset(raw_joined_user_ids)
-            updated_room = replace(
+        updated_rooms_tuple = tuple(
+            _apply_transition_to_room(
                 room,
-                raw_joined_user_ids=frozen_raw_user_ids,
-                joined_user_ids=_canonical_user_ids(frozen_raw_user_ids, config.authorization),
+                room_id=room_id,
+                event=event,
+                control_user_id=control_user_id,
+                authorization=config.authorization,
             )
-            updated_rooms.append(updated_room)
-            if updated_room != room:
-                changed_room_keys.append(room.room_key)
+            for room in snapshot.rooms
+        )
+        changed_room_keys = [
+            previous.room_key
+            for previous, updated in zip(snapshot.rooms, updated_rooms_tuple, strict=True)
+            if previous != updated
+        ]
 
         if not changed_room_keys:
             return
-        updated_rooms_tuple = tuple(updated_rooms)
         self._snapshot = replace(
             snapshot,
             rooms=updated_rooms_tuple,
@@ -244,6 +218,39 @@ class AgentReplyMembershipIndex:
                 transition=("grant" if event.membership == "join" else "revoke"),
                 authorization_source="joined_room",
             )
+
+
+def _apply_transition_to_room(
+    room: GrantRoomMembership,
+    *,
+    room_id: str,
+    event: nio.RoomMemberEvent,
+    control_user_id: str,
+    authorization: AuthorizationConfig,
+) -> GrantRoomMembership:
+    """Return one grant-room value after applying a matching live transition."""
+    if room.room_id != room_id:
+        return room
+    if event.state_key == control_user_id and event.membership != "join":
+        return replace(
+            room,
+            ready=False,
+            raw_joined_user_ids=frozenset(),
+            joined_user_ids=frozenset(),
+        )
+    if not room.ready:
+        return room
+    raw_joined_user_ids = set(room.raw_joined_user_ids)
+    if event.membership == "join":
+        raw_joined_user_ids.add(event.state_key)
+    else:
+        raw_joined_user_ids.discard(event.state_key)
+    frozen_raw_user_ids = frozenset(raw_joined_user_ids)
+    return replace(
+        room,
+        raw_joined_user_ids=frozen_raw_user_ids,
+        joined_user_ids=_canonical_user_ids(frozen_raw_user_ids, authorization),
+    )
 
 
 async def _build_authoritative_snapshot(

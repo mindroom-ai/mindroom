@@ -44,6 +44,7 @@ from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 import mindroom.approval_manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.handled_turns as handled_turns_module
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
@@ -588,6 +589,7 @@ def agent_response_should_respond(
         thread_history,
         config,
         runtime_paths,
+        AgentReplyMembershipIndex(),
         mentioned_agents,
         has_non_agent_mentions,
         sender_id=sender_id,

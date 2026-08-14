@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_reply_membership_policy_signature
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
@@ -36,6 +37,7 @@ def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMo
         client=None,
         config=config,
         runtime_paths=orchestrator_runtime_paths(Path(tempfile.mkdtemp())),
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=enable_streaming,
         orchestrator=None,
     )
@@ -477,7 +479,12 @@ class TestDynamicConfigUpdate:
                 },
             },
             models={"default": {"provider": "test", "id": "test-model"}},
-            authorization={"global_users": ["@alice:example.com"]},
+            authorization={
+                "global_users": ["@alice:example.com"],
+                "agent_reply_permissions": {
+                    "general": {"joined_rooms": ["lobby"]},
+                },
+            },
         )
 
         orchestrator = orchestrator_factory()
@@ -499,6 +506,10 @@ class TestDynamicConfigUpdate:
         assert general_bot.config == updated_config
         assert router_bot.config == updated_config
         mock_setup.assert_awaited_once_with([])
+        assert orchestrator.agent_reply_memberships.snapshot.policy_signature == (
+            agent_reply_membership_policy_signature(updated_config.authorization)
+        )
+        assert orchestrator.agent_reply_memberships.needs_refresh(updated_config.authorization)
 
     @pytest.mark.asyncio
     async def test_mindroom_user_display_name_change_updates_user_account(

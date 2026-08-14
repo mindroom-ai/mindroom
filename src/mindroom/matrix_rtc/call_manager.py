@@ -20,6 +20,7 @@ import aiohttp
 import httpx
 import nio
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_agent_reply
 from mindroom.config.voice import normalize_speech_base_url
 from mindroom.credentials_sync import get_api_key_for_service
@@ -127,6 +128,7 @@ def maybe_build_call_manager(
     ssl_verify: bool,
     tool_support: ToolRuntimeSupport,
     get_invited_rooms_by_agent: Callable[[], Mapping[str, AbstractSet[str]]],
+    agent_reply_memberships: AgentReplyMembershipIndex | None = None,
 ) -> CallManager | None:
     """Build a call manager when this agent is configured for voice calls."""
     if not config.calls.enabled or agent_name not in config.calls.agents:
@@ -148,6 +150,7 @@ def maybe_build_call_manager(
         ssl_verify=ssl_verify,
         tool_support=tool_support,
         get_invited_rooms_by_agent=get_invited_rooms_by_agent,
+        agent_reply_memberships=agent_reply_memberships,
     )
 
 
@@ -166,6 +169,7 @@ class CallManager:
         tool_support: ToolRuntimeSupport,
         get_invited_rooms_by_agent: Callable[[], Mapping[str, AbstractSet[str]]],
         clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+        agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     ) -> None:
         self._agent_name = agent_name
         self._config = config
@@ -179,6 +183,7 @@ class CallManager:
         self._tool_support = tool_support
         self._get_invited_rooms_by_agent = get_invited_rooms_by_agent
         self._clock_ms = clock_ms
+        self._agent_reply_memberships = agent_reply_memberships or AgentReplyMembershipIndex()
         self._key_transport = ToDeviceFrameKeyTransport(client)
         self._sessions: dict[str, CallSession] = {}
         self._pending_keys: dict[str, dict[tuple[str, str, int], ReceivedFrameKey]] = {}
@@ -191,6 +196,11 @@ class CallManager:
         self._expiry_handles: dict[str, asyncio.TimerHandle] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._shutting_down = False
+
+    def update_config(self, config: Config) -> None:
+        """Replace the live config used by authorization-only hot reloads."""
+        self._config = config
+        self._call_config = config.calls.resolve_agent_config(self._agent_name)
 
     async def on_room_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Sync callback for custom room events (call membership, ring)."""
@@ -521,6 +531,7 @@ class CallManager:
             self._agent_name,
             self._config,
             self._runtime_paths,
+            self._agent_reply_memberships,
         )
 
     def _members_are_authorized(self, members: list[CallMember], room_id: str) -> bool:

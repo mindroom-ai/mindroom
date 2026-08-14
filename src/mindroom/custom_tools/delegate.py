@@ -16,6 +16,7 @@ from agno.tools import Toolkit
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import ResponseTurnContext, ai_response
+from mindroom.authorization import is_sender_allowed_for_agent_reply
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
@@ -105,6 +106,16 @@ class DelegateTools(Toolkit):
         if not task or not task.strip():
             return "Cannot delegate an empty task. Please provide a task description."
 
+        runtime_context = get_tool_runtime_context()
+        if runtime_context is not None and not is_sender_allowed_for_agent_reply(
+            runtime_context.requester_id,
+            agent_name,
+            self._config,
+            self._runtime_paths,
+            runtime_context.agent_reply_memberships,
+        ):
+            return f"Cannot delegate to '{agent_name}': that agent is not allowed to reply to you."
+
         try:
             session_id = f"delegate:{self._agent_name}:{agent_name}:{uuid4()}"
             execution_identity = (
@@ -131,7 +142,6 @@ class DelegateTools(Toolkit):
                 depth=self._delegation_depth + 1,
                 task_preview=task[:100],
             )
-            runtime_context = get_tool_runtime_context()
             room_id = _resolve_delegated_room_id(
                 runtime_context=runtime_context,
                 execution_identity=execution_identity,

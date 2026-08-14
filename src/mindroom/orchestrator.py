@@ -15,6 +15,7 @@ from uuid import uuid4
 import uvicorn
 
 from mindroom import constants
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.attachments import wait_for_attachment_cleanup_tasks
@@ -263,6 +264,11 @@ class _MultiAgentOrchestrator:
     _external_trigger_runtime: ExternalTriggerRuntimeCoordinator = field(init=False, repr=False)
     _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
     _startup_maintenance: StartupMaintenanceController = field(init=False, repr=False)
+    agent_reply_memberships: AgentReplyMembershipIndex = field(
+        default_factory=AgentReplyMembershipIndex,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         """Store canonical derived paths from the explicit runtime context."""
@@ -274,6 +280,7 @@ class _MultiAgentOrchestrator:
         self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             api_enabled=self.api_enabled,
+            agent_reply_memberships=self.agent_reply_memberships,
         )
         self._todo_poke_runtime = TodoPokeRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
@@ -858,6 +865,7 @@ class _MultiAgentOrchestrator:
                 self.storage_path,
                 config_path=self.config_path,
                 journal_store=self._shared_journal_store(),
+                agent_reply_memberships=self.agent_reply_memberships,
             ),
         )
         bot.orchestrator = self
@@ -964,6 +972,7 @@ class _MultiAgentOrchestrator:
             changed_server_ids,
         )
         self.config = new_config
+        self.agent_reply_memberships.invalidate(new_config, reason="config_reload")
         new_hook_registry = apply_prepared_plugin_reload(
             prepared_plugin_reload,
             cancel_existing_tasks=True,
@@ -1052,6 +1061,7 @@ class _MultiAgentOrchestrator:
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
         self.config = config
+        self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)
@@ -1253,6 +1263,20 @@ class _MultiAgentOrchestrator:
         await self._approval_transport.handle_bot_ready(bot)
         self._schedule_ready_turn_dispatch_recovery()
 
+    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
+        """Synchronously revoke every room-backed reply grant."""
+        if self.config is not None:
+            self.agent_reply_memberships.invalidate(self.config, reason=reason)
+
+    async def refresh_agent_reply_memberships(self) -> None:
+        """Refresh room-backed reply grants through the router's Matrix client."""
+        config = self._require_config()
+        router_bot = self._router_bot()
+        if router_bot is None or router_bot.client is None:
+            self.agent_reply_memberships.invalidate(config, reason="router_unavailable")
+            return
+        await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_bot.client)
+
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
@@ -1329,6 +1353,7 @@ class _MultiAgentOrchestrator:
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
         await self._prepare_entity_accounts(new_config, entity_names)
         self.config = new_config
+        self.agent_reply_memberships.invalidate(new_config, reason="initial_config_reload")
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(new_config)
         await self._sync_runtime_support_services(new_config, start_watcher=self.running)
@@ -1639,6 +1664,7 @@ class _MultiAgentOrchestrator:
                 )
                 # Only apply the new config after validation and account checks succeed.
                 self.config = new_config
+                self.agent_reply_memberships.invalidate(new_config, reason="config_reload")
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
                 clear_worker_validation_snapshot_cache()
@@ -1758,6 +1784,8 @@ class _MultiAgentOrchestrator:
         follow_up_bots = [bot for bot in bots if bot.agent_name != ROUTER_AGENT_NAME]
         if follow_up_bots:
             await asyncio.gather(*(bot.ensure_rooms() for bot in follow_up_bots))
+
+        await self.refresh_agent_reply_memberships()
 
         logger.info("All agents have joined their configured rooms")
 
@@ -1994,6 +2022,7 @@ class _MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
+        self.invalidate_agent_reply_memberships(reason="shutdown")
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()

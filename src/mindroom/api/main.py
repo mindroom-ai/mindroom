@@ -61,6 +61,7 @@ if TYPE_CHECKING:
 
     from starlette.types import ASGIApp, Receive, Scope, Send
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
 
@@ -541,6 +542,7 @@ def bind_external_trigger_runtime(
     conversation_reader: object,
     *,
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
+    agent_reply_memberships: AgentReplyMembershipIndex,
 ) -> None:
     """Attach router Matrix delivery runtime to one API app."""
     api_state = config_lifecycle.require_api_state(api_app)
@@ -549,6 +551,7 @@ def bind_external_trigger_runtime(
         conversation_reader=conversation_reader,
         config_generation=api_state.snapshot.generation,
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+        agent_reply_memberships=agent_reply_memberships,
     )
 
 

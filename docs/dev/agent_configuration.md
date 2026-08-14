@@ -316,12 +316,17 @@ authorization:
   agent_reply_permissions:
     "*":
       - "@owner:example.com"
+    code:
+      users:
+        - "@operator:example.com"
+      joined_rooms:
+        - dev
 ```
 
 - **global_users**: Users with access to all rooms
 - **room_permissions**: Per-room user allowlists
 - **aliases**: Map canonical Matrix user IDs to bridge aliases
-- **agent_reply_permissions**: Per-agent/team reply allowlists (`*` key applies to all entities)
+- **agent_reply_permissions**: Per-agent/team reply policies using the user-list shorthand or structured `users` and managed-room `joined_rooms` grants (`*` applies only when no explicit entity policy exists)
 
 ## Matrix Room Access Configuration
 

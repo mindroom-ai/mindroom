@@ -607,6 +607,7 @@ def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:
         context.requester_id,
         context.config,
         context.runtime_paths,
+        context.agent_reply_memberships,
     )
     registry = entity_identity_registry(context.config, context.runtime_paths)
     names: set[str] = {context.agent_name}

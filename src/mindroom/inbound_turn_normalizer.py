@@ -33,7 +33,7 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.media_inputs import MediaInputs
-from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
 from mindroom.timing import emit_elapsed_timing
 from mindroom.voice_handler import prepare_raw_voice_fallback_message, prepare_voice_message
 
@@ -118,7 +118,7 @@ class DispatchPayloadWithAttachmentsRequest:
 class InboundTurnNormalizerDeps:
     """Explicit collaborators for inbound normalization."""
 
-    runtime: SupportsClientConfig
+    runtime: SupportsClientConfigMemberships
     logger: structlog.stdlib.BoundLogger
     storage_path: Path
     runtime_paths: RuntimePaths
@@ -171,6 +171,7 @@ class InboundTurnNormalizer:
                 self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
                 thread_id=effective_thread_id,
+                membership_index=self.deps.runtime.agent_reply_memberships,
             )
             if prepared_voice is None:
                 return None

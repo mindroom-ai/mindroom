@@ -17,6 +17,7 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, _classic_sync_rebuild_backoff_seconds
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -1288,6 +1289,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
         client=bot.client,
         config=MagicMock(spec=Config),
         runtime_paths=MagicMock(),
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=True,
         orchestrator=None,
     )
@@ -2161,6 +2163,7 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
         client=None,
         config=MagicMock(spec=Config),
         runtime_paths=_fake_runtime_paths(),
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=True,
         orchestrator=None,
     )

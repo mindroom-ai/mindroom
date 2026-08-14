@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.attachment_ids import unique_attachment_ids
 from mindroom.hooks import (
     CustomEventContext,
@@ -91,6 +92,7 @@ class ToolRuntimeContext:
     tool_function_filter: Callable[[Function], bool] | None = None
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
+    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
 
     @property
     def room_id(self) -> str:
@@ -256,6 +258,7 @@ class ToolRuntimeSupport:
             orchestrator=self.runtime.orchestrator,
             membership=self.membership,
             membership_turn_id=source_envelope.source_event_id if source_envelope is not None else None,
+            agent_reply_memberships=self.runtime.agent_reply_memberships,
         )
 
     def build_dispatch_context(
@@ -437,6 +440,7 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         room=context.room,
         conversation_reader=context.conversation_reader,
         matrix_admin=context.matrix_admin,
+        agent_reply_memberships=context.agent_reply_memberships,
     )
 
 

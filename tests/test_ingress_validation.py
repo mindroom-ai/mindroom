@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import nio
 import pytest
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
@@ -43,6 +44,7 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
         client=None,
         config=config,
         runtime_paths=runtime_paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=False,
         orchestrator=None,
     )

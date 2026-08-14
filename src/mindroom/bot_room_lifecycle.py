@@ -23,7 +23,7 @@ from mindroom.matrix.invited_rooms_store import (
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.message_target import MessageTarget
-from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -56,7 +56,7 @@ class BotRoomLifecycleDeps:
 
     agent_name: str
     agent_user: AgentMatrixUser
-    runtime: SupportsClientConfig
+    runtime: SupportsClientConfigMemberships
     runtime_paths: RuntimePaths
     continuity_store: SyncContinuityStore
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
@@ -324,6 +324,7 @@ class BotRoomLifecycle:
                     visible_to_sender_id,
                     self._config(),
                     self.deps.runtime_paths,
+                    self.deps.runtime.agent_reply_memberships,
                 )
                 target = MessageTarget.resolve(
                     room_id=room_id,

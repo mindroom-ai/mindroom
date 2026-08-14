@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -18,7 +19,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "OrchestratorRuntime",
+    "SupportsAgentReplyMemberships",
     "SupportsClientConfig",
+    "SupportsClientConfigMemberships",
     "SupportsClientConfigOrchestrator",
     "SupportsConfig",
     "SupportsConfigOrchestrator",
@@ -47,6 +50,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     @property
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler: ...  # noqa: D102
 
+    @property
+    def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102
+
     def hook_message_sender(self) -> HookMessageSender | None: ...  # noqa: D102
 
     def hook_room_state_querier(self) -> HookRoomStateQuerier | None: ...  # noqa: D102
@@ -69,6 +75,14 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Handle a managed bot completing its first sync."""
         ...
 
+    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
+        """Revoke room-backed reply grants until the router refreshes them."""
+        ...
+
+    def refresh_agent_reply_memberships(self) -> Awaitable[None]:
+        """Rebuild room-backed reply grants from the router client."""
+        ...
+
     def send_approval_notice(
         self,
         *,
@@ -88,6 +102,13 @@ class SupportsConfig(Protocol):
     def config(self) -> Config: ...  # noqa: D102
 
 
+class SupportsAgentReplyMemberships(Protocol):
+    """Expose the shared room-membership reply grant index."""
+
+    @property
+    def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102
+
+
 class SupportsClientConfig(Protocol):
     """Expose the Matrix client plus runtime config."""
 
@@ -98,14 +119,18 @@ class SupportsClientConfig(Protocol):
     def config(self) -> Config: ...  # noqa: D102
 
 
-class SupportsConfigOrchestrator(SupportsConfig, Protocol):
+class SupportsClientConfigMemberships(SupportsClientConfig, SupportsAgentReplyMemberships, Protocol):
+    """Expose Matrix client/config state plus shared reply membership grants."""
+
+
+class SupportsConfigOrchestrator(SupportsConfig, SupportsAgentReplyMemberships, Protocol):
     """Expose the config plus optional orchestrator handle."""
 
     @property
     def orchestrator(self) -> OrchestratorRuntime | None: ...  # noqa: D102
 
 
-class SupportsClientConfigOrchestrator(SupportsClientConfig, Protocol):
+class SupportsClientConfigOrchestrator(SupportsClientConfig, SupportsAgentReplyMemberships, Protocol):
     """Expose client/config access, orchestrator access, and runtime freshness."""
 
     @property

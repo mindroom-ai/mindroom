@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, VISIBLE_ROUTER_VOICE_ECHO_KEY
@@ -134,6 +135,7 @@ def _echo_harness(
         client=None,
         config=config,
         runtime_paths=runtime_paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=True,
         orchestrator=cast("OrchestratorRuntime", _RouterReadiness(router_ready)),
     )

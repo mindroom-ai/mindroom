@@ -12,6 +12,7 @@ import nio
 import pytest_asyncio
 from nio.api import RelationshipType
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
@@ -503,6 +504,7 @@ def _conversation_runtime(*, client: nio.AsyncClient | None = None) -> BotRuntim
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=True,
         orchestrator=None,
     )

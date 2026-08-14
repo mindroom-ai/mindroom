@@ -668,6 +668,7 @@ class TurnController:
             sender_id=requester_user_id,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
+            membership_index=self.deps.turn_policy.deps.agent_reply_memberships,
             available_responders_in_room=available_responders,
         )
 

@@ -14,6 +14,7 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.agent_descriptions import describe_agent
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -86,8 +87,7 @@ def _make_config(
     config.get_entity_thread_mode = MagicMock(return_value=thread_mode)
     config.get_agent_tools = MagicMock(side_effect=lambda agent_name: config.agents[agent_name].tool_names)
     config.render_prompt = MagicMock(return_value="Delegate only to listed agents.")
-    config.authorization.agent_reply_permissions = {}
-    config.authorization.resolve_alias.side_effect = lambda sender_id: sender_id
+    config.authorization = AuthorizationConfig()
     return config
 
 

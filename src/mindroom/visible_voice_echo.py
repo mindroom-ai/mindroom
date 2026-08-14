@@ -290,6 +290,7 @@ class VisibleVoiceEchoLifecycle:
             ROUTER_AGENT_NAME,
             config,
             self.deps.runtime.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
         )
 
     async def finish(

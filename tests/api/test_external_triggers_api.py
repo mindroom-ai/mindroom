@@ -7,7 +7,9 @@ import json
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
+from unittest.mock import AsyncMock
 
+import nio
 import pytest
 import yaml
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -16,12 +18,14 @@ from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
 from mindroom.api import external_triggers as external_triggers_api
 from mindroom.api import main as api_main
 from mindroom.config.main import Config
 from mindroom.external_triggers.auth import mint_trigger_capability, sign_trigger_request
 from mindroom.external_triggers.store import ExternalTriggerStore, ExternalTriggerTarget, TriggerDeliverySnapshot
+from mindroom.matrix.state import MatrixState
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -194,6 +198,7 @@ def _bind_runtime(ready_snapshots: list[TriggerDeliverySnapshot]) -> object:
         client=client,
         conversation_reader=object(),
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
     )
     return client
 
@@ -228,6 +233,48 @@ async def test_runtime_config_type_error_is_not_masked(monkeypatch: pytest.Monke
 
     with pytest.raises(TypeError, match="programming bug"):
         await external_triggers_api._request_config_and_trigger_snapshot("campground", cast("Request", object()))
+
+
+@pytest.mark.asyncio
+async def test_external_trigger_target_accepts_grant_room_member(tmp_path: Path) -> None:
+    """External trigger owners should pass target reply auth through the shared membership index."""
+    payload = _config_payload()
+    authorization = cast("dict[str, object]", payload["authorization"])
+    authorization["agent_reply_permissions"] = {
+        "research": {"joined_rooms": ["campground"]},
+    }
+    config = Config.model_validate(payload)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MATRIX_HOMESERVER": "https://example.org"},
+    )
+    grant_room_id = "!campground:example.org"
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("campground", grant_room_id, "#campground:example.org", "Campground")
+    state.save(runtime_paths=runtime_paths)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(_OWNER, None, None)],
+        room_id=grant_room_id,
+    )
+    memberships = AgentReplyMembershipIndex()
+    await memberships.refresh(config, runtime_paths, client)
+    _create_record(runtime_paths, config, _public_key_b64(Ed25519PrivateKey.generate()))
+    snapshot = ExternalTriggerStore(runtime_paths).delivery_snapshot(
+        "campground",
+        config=config,
+        config_generation=1,
+    )
+    assert snapshot is not None
+
+    external_triggers_api._validate_snapshot_policy_and_auth(
+        snapshot,
+        config,
+        runtime_paths,
+        memberships,
+    )
 
 
 async def _owner_joined(*_args: object, **_kwargs: object) -> bool:

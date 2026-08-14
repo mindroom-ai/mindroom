@@ -1241,6 +1241,11 @@ class TestMultiAgentOrchestrator:
         with (
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
+            patch.object(
+                orchestrator,
+                "refresh_agent_reply_memberships",
+                new=AsyncMock(),
+            ) as mock_refresh_agent_reply_memberships,
             patch("mindroom.orchestrator.get_rooms_for_entity", return_value=["lobby"]),
             patch("mindroom.orchestrator.resolve_room_aliases", return_value=["!room1:localhost"]),
             patch("mindroom.orchestrator.load_rooms", return_value={"lobby": MagicMock(room_id="!room1:localhost")}),
@@ -1251,6 +1256,7 @@ class TestMultiAgentOrchestrator:
         assert bot.rooms == ["!room1:localhost"]
         mock_ensure_user_in_rooms.assert_not_awaited()
         assert bot.ensure_rooms.await_count == 2
+        mock_refresh_agent_reply_memberships.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_setup_rooms_and_memberships_retries_invites_after_router_joins(self, tmp_path: Path) -> None:

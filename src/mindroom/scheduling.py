@@ -7,7 +7,7 @@ import json
 import typing
 import uuid
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, NamedTuple
 from zoneinfo import ZoneInfo
@@ -20,6 +20,7 @@ from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field, field_validator
 
 from mindroom import model_loading, scheduling_executor
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import build_hook_matrix_admin
@@ -178,6 +179,7 @@ class SchedulingRuntime:
     room: nio.MatrixRoom
     conversation_reader: ConversationReader
     matrix_admin: HookMatrixAdmin | None = None
+    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
 
 
 @dataclass
@@ -1372,6 +1374,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         scheduled_by,
         config,
         runtime_paths,
+        runtime.agent_reply_memberships,
     )
 
     available_responders: list[MatrixID] = []
@@ -1387,6 +1390,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 scheduled_by,
                 config,
                 runtime_paths,
+                runtime.agent_reply_memberships,
                 available_responders_in_room=sender_visible_room_responders,
             )
 

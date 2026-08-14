@@ -13,8 +13,9 @@ import httpx
 import nio
 import pytest
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
@@ -322,6 +323,7 @@ def _manager(
     tool_support: object = object(),
     clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     invited_rooms_by_agent: dict[str, set[str]] | None = None,
+    agent_reply_memberships: AgentReplyMembershipIndex | None = None,
 ) -> CallManager:
     return CallManager(
         agent_name="helper",
@@ -333,6 +335,7 @@ def _manager(
         tool_support=tool_support,  # type: ignore[arg-type]
         get_invited_rooms_by_agent=lambda: invited_rooms_by_agent or {},
         clock_ms=clock_ms,
+        agent_reply_memberships=agent_reply_memberships,
     )
 
 
@@ -1070,12 +1073,71 @@ async def test_manager_rejects_members_denied_by_agent_reply_permissions(tmp_pat
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
     config = _config()
-    config.authorization.agent_reply_permissions = {"helper": ["@other:example.org"]}
+    config.authorization.agent_reply_permissions = {
+        "helper": AgentReplyPermission(users=["@other:example.org"]),
+    }
     manager = _manager(client, bridge, tmp_path, config)
 
     await manager.on_room_event(_room(), _member_unknown_event())
 
     assert bridge.connected_grant is None
+
+
+@pytest.mark.asyncio
+async def test_manager_accepts_call_member_authorized_by_grant_room(tmp_path: Path) -> None:
+    """Conversation membership grants should apply to the central call admission gate."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    config.agents["helper"].rooms = ["grant"]
+    config.authorization = AuthorizationConfig(
+        global_users=["@alice:example.org"],
+        agent_reply_permissions={
+            "helper": AgentReplyPermission(joined_rooms=["grant"]),
+        },
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("grant", ROOM_ID, "#grant:example.org", "Grant")
+    state.save(runtime_paths=runtime_paths)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[ROOM_ID])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@alice:example.org", None, None)],
+        room_id=ROOM_ID,
+    )
+    memberships = AgentReplyMembershipIndex()
+    await memberships.refresh(config, runtime_paths, client)
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        agent_reply_memberships=memberships,
+    )
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert bridge.connected_grant is not None
+
+
+@pytest.mark.asyncio
+async def test_manager_uses_reloaded_reply_policy(tmp_path: Path) -> None:
+    """Authorization-only reloads must replace the call manager's live config."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    initial_config = _config()
+    initial_config.authorization.agent_reply_permissions = {
+        "helper": AgentReplyPermission(users=["@other:example.org"]),
+    }
+    manager = _manager(client, bridge, tmp_path, initial_config)
+    reloaded_config = _config()
+
+    manager.update_config(reloaded_config)
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert bridge.connected_grant is not None
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import nio
@@ -13,6 +13,9 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_rep
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.state import MatrixState
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _runtime_config(

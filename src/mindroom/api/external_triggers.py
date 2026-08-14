@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_reads import ConversationReader
@@ -69,9 +70,14 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
     payload = _parse_payload(body)
     if trigger_snapshot.allowed_kinds and payload.kind not in trigger_snapshot.allowed_kinds:
         raise HTTPException(status_code=422, detail="External trigger kind is not allowed")
-    _validate_snapshot_policy_and_auth(trigger_snapshot, config, runtime_paths)
-
-    runtime = await _require_external_trigger_runtime(request, trigger_snapshot)
+    runtime = _require_external_trigger_runtime_binding(request, trigger_snapshot)
+    _validate_snapshot_policy_and_auth(
+        trigger_snapshot,
+        config,
+        runtime_paths,
+        runtime.agent_reply_memberships,
+    )
+    await _require_external_trigger_runtime_ready(runtime, trigger_snapshot)
     await _require_owner_joined_target_room(runtime, trigger_snapshot)
 
     return await _claim_and_execute_trigger(
@@ -216,6 +222,7 @@ def _validate_snapshot_policy_and_auth(
     snapshot: TriggerDeliverySnapshot,
     config: Config,
     runtime_paths: RuntimePaths,
+    agent_reply_memberships: AgentReplyMembershipIndex,
 ) -> None:
     if not is_authorized_sender(snapshot.owner_user_id, config, snapshot.resolved_room_id, runtime_paths):
         raise HTTPException(status_code=403, detail="External trigger owner is not authorized for this room")
@@ -224,6 +231,7 @@ def _validate_snapshot_policy_and_auth(
         snapshot.target.agent,
         config,
         runtime_paths,
+        agent_reply_memberships,
     ):
         raise HTTPException(status_code=403, detail="External trigger owner is not authorized for this target")
 
@@ -335,20 +343,27 @@ async def _release_event_id_best_effort(
         )
 
 
-async def _require_external_trigger_runtime(
+def _require_external_trigger_runtime_binding(
     request: Request,
     snapshot: TriggerDeliverySnapshot,
 ) -> config_lifecycle.ExternalTriggerRuntime:
     runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
     if runtime is None or runtime.config_generation != snapshot.config_generation:
         raise HTTPException(status_code=503, detail="External trigger runtime is not available")
+    return runtime
+
+
+async def _require_external_trigger_runtime_ready(
+    runtime: config_lifecycle.ExternalTriggerRuntime,
+    snapshot: TriggerDeliverySnapshot,
+) -> None:
+    """Require current router and target delivery readiness for one trigger."""
     try:
         is_trigger_ready = await runtime.is_trigger_snapshot_ready(snapshot)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="External trigger target runtime is not available") from exc
     if not is_trigger_ready:
         raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
-    return runtime
 
 
 async def _require_owner_joined_target_room(

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
@@ -70,6 +71,7 @@ def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) ->
         room=room,
         conversation_reader=context.conversation_reader,
         matrix_admin=context.matrix_admin,
+        agent_reply_memberships=context.agent_reply_memberships,
     )
 
 
@@ -110,6 +112,7 @@ class CommandHandlerContext:
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]] | None = None
+    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:
@@ -198,12 +201,20 @@ async def generate_welcome_message_for_room(
     sender_id: str | None,
     config: Config,
     runtime_paths: RuntimePaths,
+    agent_reply_memberships: AgentReplyMembershipIndex | None = None,
 ) -> str:
     """Generate a welcome message for callers without a live turn-policy candidate source."""
     if sender_id is None:
         candidate_entities = configured_routable_entity_ids_for_room(config, room.room_id, runtime_paths)
     else:
-        candidate_entities = await responder_candidate_entities_for_room(client, room, sender_id, config, runtime_paths)
+        candidate_entities = await responder_candidate_entities_for_room(
+            client,
+            room,
+            sender_id,
+            config,
+            runtime_paths,
+            agent_reply_memberships or AgentReplyMembershipIndex(),
+        )
     return _format_welcome_message(candidate_entities, config, runtime_paths)
 
 
@@ -256,6 +267,7 @@ async def _desktop_agent_for_room(
             requester_user_id,
             context.config,
             context.runtime_paths,
+            context.agent_reply_memberships,
         )
     else:
         candidates = await context.responder_candidates_for_room(room, requester_user_id)
@@ -316,6 +328,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 requester_user_id,
                 context.config,
                 context.runtime_paths,
+                context.agent_reply_memberships,
             )
         else:
             candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)
