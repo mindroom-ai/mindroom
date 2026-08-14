@@ -201,6 +201,14 @@ class CallManager:
         """Replace the live config used by authorization-only hot reloads."""
         self._config = config
         self._call_config = config.calls.resolve_agent_config(self._agent_name)
+        if self._shutting_down or not (self._logical_calls or self._sessions):
+            return
+        task = asyncio.create_task(self.reconcile_reply_authorization())
+        self._track_background_task(
+            task,
+            event="call_config_authorization_reconcile_failed",
+            room_id="*",
+        )
 
     async def on_room_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Sync callback for custom room events (call membership, ring)."""

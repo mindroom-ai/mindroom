@@ -1200,6 +1200,31 @@ async def test_manager_uses_reloaded_reply_policy(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_manager_rechecks_active_call_after_reply_policy_reload(tmp_path: Path) -> None:
+    """Removing a static reply grant must end an already active call immediately."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    initial_config = _config()
+    manager = _manager(client, bridge, tmp_path, initial_config)
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.connected_grant is not None
+
+    reloaded_config = _config()
+    reloaded_config.authorization.agent_reply_permissions = {
+        "helper": AgentReplyPermission(users=["@other:example.org"]),
+    }
+    manager.update_config(reloaded_config)
+    for _ in range(10):
+        if bridge.closed:
+            break
+        await asyncio.sleep(0)
+
+    assert bridge.closed
+    assert not manager._sessions
+
+
+@pytest.mark.asyncio
 async def test_manager_leaves_call_when_room_call_empties(tmp_path: Path) -> None:
     """Manager leaves call when room call empties."""
     client = _client()

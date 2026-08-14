@@ -299,7 +299,7 @@ async def test_router_first_response_refreshes_room_backed_grants(tmp_path: Path
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
         patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
     ):
-        await bot._on_sync_response(MagicMock())
+        await bot._on_sync_response(_empty_classic_sync_response("s-first-membership-refresh"))
 
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
 
@@ -338,6 +338,19 @@ async def test_failed_membership_refresh_is_backed_off_between_sync_responses(tm
 
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
     assert bot._reply_membership_refresh_pending
+
+
+def test_repeated_membership_invalidation_preserves_refresh_backoff(tmp_path: Path) -> None:
+    """Repeated uncertain responses must not bypass the bounded refresh retry delay."""
+    bot, _orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot._reply_membership_refresh_pending = True
+    bot._reply_membership_refresh_attempt = 3
+    bot._reply_membership_refresh_retry_at = 123.0
+
+    bot._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+
+    assert bot._reply_membership_refresh_attempt == 3
+    assert bot._reply_membership_refresh_retry_at == 123.0
 
 
 def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Path) -> None:

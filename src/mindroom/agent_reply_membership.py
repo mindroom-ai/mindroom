@@ -150,8 +150,8 @@ class AgentReplyMembershipIndex:
         signature = _agent_reply_membership_policy_signature(authorization)
         if self._desired_signature is None:
             self._desired_signature = signature
-        if self._desired_signature != signature:
-            return
+        elif self._desired_signature != signature:
+            self.invalidate(config, reason="policy_changed_before_refresh")
         async with self._refresh_lock:
             expected_epoch = self._epoch
             candidate = await _build_authoritative_snapshot(

@@ -322,6 +322,31 @@ async def test_policy_signature_change_invalidates_old_snapshot(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_refresh_adopts_changed_policy_without_external_invalidation(tmp_path: Path) -> None:
+    """A direct config replacement must not leave refresh permanently fail closed."""
+    config, runtime_paths = _runtime_config(tmp_path, joined_rooms=["project"])
+    changed_config, _ = _runtime_config(tmp_path, joined_rooms=["secondary"])
+    _persist_room(runtime_paths, "project", "!project:example.com")
+    _persist_room(runtime_paths, "secondary", "!secondary:example.com")
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(
+        rooms=["!project:example.com", "!secondary:example.com"],
+    )
+    client.joined_members.side_effect = [
+        _joined_members("!project:example.com", "@alice:example.com"),
+        _joined_members("!secondary:example.com", "@bob:example.com"),
+    ]
+    index = AgentReplyMembershipIndex()
+    await index.refresh(config, runtime_paths, client)
+
+    await index.refresh(changed_config, runtime_paths, client)
+
+    assert not index.needs_refresh(changed_config.authorization)
+    assert index.is_allowed("@bob:example.com", ["secondary"], changed_config.authorization)
+    assert not index.is_allowed("@alice:example.com", ["secondary"], changed_config.authorization)
+
+
+@pytest.mark.asyncio
 async def test_invalidation_revokes_ready_members_until_refresh(tmp_path: Path) -> None:
     """A router reconnect must not retain grants from an uncertain prior connection."""
     room_id = "!project:example.com"

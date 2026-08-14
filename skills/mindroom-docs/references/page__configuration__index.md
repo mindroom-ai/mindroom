@@ -593,7 +593,7 @@ authorization:
   agent_reply_permissions: {}      # Reply policies: user-list shorthand or {users, joined_rooms} with managed room keys
 
 # Managed room metadata (optional)
-# Keys are managed room aliases.
+# Keys are managed room keys.
 # Rooms listed here are created even before agents or teams are assigned.
 rooms:
   lobby:

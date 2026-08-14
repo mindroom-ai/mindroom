@@ -189,6 +189,35 @@ class TestDelegateTools:
         assert "Cannot delegate an empty task" in result
 
     @pytest.mark.asyncio
+    async def test_restricted_delegation_fails_closed_without_runtime_context(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """A restricted target cannot be delegated without requester authorization state."""
+        config.authorization = AuthorizationConfig(
+            agent_reply_permissions={
+                "code": AgentReplyPermission(users=["@alice:example.org"]),
+            },
+        )
+        tools = DelegateTools(
+            agent_name="leader",
+            delegate_to=["code"],
+            runtime_paths=resolve_runtime_paths(
+                config_path=storage_path / "config.yaml",
+                storage_path=storage_path,
+            ),
+            config=config,
+            delegation_depth=0,
+        )
+
+        with patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as mock_ai_response:
+            result = await tools.delegate_task("code", "Write a hello world program")
+
+        assert "requester authorization is unavailable" in result
+        mock_ai_response.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_successful_delegation(self, tools: DelegateTools) -> None:
         """Test that a successful delegation returns the agent's response content."""
         with patch(

@@ -184,7 +184,7 @@ Use `authorization.agent_reply_permissions` to restrict which users each respond
 - `users` contains canonical Matrix user IDs or glob patterns such as `*:example.com`.
 - `joined_rooms` contains managed room keys, not display names, aliases, or raw room IDs.
 - A `*` user entry means "allow any sender" for that specific entity.
-- If an entity is not present in the map, it has no extra reply restriction.
+- If neither an explicit entity policy nor the `*` fallback exists, the entity has no extra reply restriction.
 - An explicit entity policy completely overrides the `*` policy, including when one of its lists is empty.
 - A structured policy allows replies when the sender matches `users` or is currently joined to any listed `joined_rooms` room.
 - An invite does not grant access, and a leave, kick, or ban revokes access.

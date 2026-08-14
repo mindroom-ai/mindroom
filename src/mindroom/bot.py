@@ -1287,11 +1287,14 @@ class AgentBot:
         """Fail closed when the router's view of Matrix membership is uncertain."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
+        refresh_already_pending = self._reply_membership_refresh_pending
         orchestrator = self.orchestrator
         if orchestrator is None:
             self._runtime_view.agent_reply_memberships.invalidate(self.config, reason=reason)
         else:
             orchestrator.invalidate_agent_reply_memberships(reason=reason)
+        if refresh_already_pending:
+            return
         self._reply_membership_refresh_pending = True
         self._reply_membership_refresh_attempt = 0
         self._reply_membership_refresh_retry_at = 0.0
@@ -2569,7 +2572,7 @@ class AgentBot:
             self.config,
             room_id,
             event,
-            control_user_id=self.agent_user.user_id,
+            control_user_id=self.matrix_id.full_id,
         )
         if not changed:
             return

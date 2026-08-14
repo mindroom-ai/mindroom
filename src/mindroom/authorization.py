@@ -141,8 +141,7 @@ def is_sender_allowed_for_agent_reply(
 
     # Internal MindRoom participants are not restricted by per-user reply lists.
     # Bridge bot accounts are intentionally not exempt.
-    resolved_sender = config.authorization.resolve_alias(sender_id)
-    return resolved_sender in _current_internal_sender_ids_for_auth(config, runtime_paths)
+    return sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
 
 
 def _current_internal_sender_ids_for_auth(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:

@@ -301,7 +301,7 @@ async def test_responder_candidates_refresh_empty_cached_ad_hoc_room() -> None:
             },
         },
     )
-    client = AsyncMock()
+    client = AsyncMock(spec=nio.AsyncClient)
     room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
     room.add_member("@mindroom_router:example.com", "Router", None)
     client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
@@ -1286,7 +1286,7 @@ async def _ready_reply_membership_index(
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("project", room_id, "#project:example.com", "Project")
     state.save(runtime_paths=runtime_paths)
-    client = AsyncMock()
+    client = AsyncMock(spec=nio.AsyncClient)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
         members=[nio.RoomMember(user_id, None, None) for user_id in joined_user_ids],
@@ -1408,6 +1408,37 @@ def test_internal_identity_bypasses_unready_membership_policy(tmp_path: Path) ->
 
     assert is_sender_allowed_for_agent_reply(
         assistant_user_id,
+        "assistant",
+        config,
+        AgentReplyMembershipIndex(),
+    )
+
+
+def test_alias_of_internal_identity_does_not_inherit_internal_bypass(tmp_path: Path) -> None:
+    """Alias normalization must not turn an external sender into a runtime-owned identity."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["project"],
+            },
+        },
+        authorization={
+            "agent_reply_permissions": {
+                "assistant": {"joined_rooms": ["project"]},
+            },
+        },
+    )
+    runtime_paths = _runtime_paths_for(config)
+    assistant_user_id = entity_ids(config, runtime_paths)["assistant"].full_id
+    config.authorization.aliases = {
+        assistant_user_id: ["@external_bridge_user:example.com"],
+    }
+
+    assert not is_sender_allowed_for_agent_reply(
+        "@external_bridge_user:example.com",
         "assistant",
         config,
         AgentReplyMembershipIndex(),
