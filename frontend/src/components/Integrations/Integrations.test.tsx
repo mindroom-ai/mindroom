@@ -152,6 +152,7 @@ vi.mock("@/hooks/useTools", () => ({
     docs_url: tool.docs_url,
     oauth_fallback_fields: tool.oauth_fallback_fields,
     manual_auth_configured: tool.manual_auth_configured,
+    environment_auth_configured: tool.environment_auth_configured,
   }),
 }));
 
@@ -1106,6 +1107,9 @@ describe("Integrations", () => {
         screen.getByText(/Requester-scoped tool status is preview only/i),
       ).toBeInTheDocument();
     });
+    expect(
+      screen.getByText(/OAuth-backed integrations can be connected/i),
+    ).toBeInTheDocument();
   });
 
   it("hides shared-only integrations for isolating worker scopes", async () => {
@@ -1590,6 +1594,67 @@ describe("Integrations", () => {
       expect(refetch).toHaveBeenCalledTimes(1);
     });
     expect(mockGenericOAuthOnDisconnect).not.toHaveBeenCalled();
+  });
+
+  it("reports an environment OAuth fallback without offering to remove it", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        {
+          name: "github",
+          display_name: "GitHub",
+          description: "Manage GitHub repositories",
+          icon: "SiGithub",
+          icon_color: null,
+          category: "developer",
+          status: "available",
+          setup_type: "oauth",
+          auth_provider: "github",
+          config_fields: [
+            {
+              name: "access_token",
+              label: "Access Token",
+              type: "password",
+              required: false,
+            },
+            {
+              name: "base_url",
+              label: "Base URL",
+              type: "url",
+              required: false,
+            },
+          ],
+          oauth_fallback_fields: ["access_token"],
+          manual_auth_configured: false,
+          environment_auth_configured: true,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+
+    render(<Integrations />);
+
+    const githubCard = await waitFor(() => {
+      const card = screen.getByText("GitHub").closest(".h-full");
+      expect(card).toBeInstanceOf(HTMLElement);
+      return card as HTMLElement;
+    });
+    expect(
+      within(githubCard).getByText("Environment Access Token"),
+    ).toBeInTheDocument();
+    expect(
+      within(githubCard).getByRole("button", { name: "Configure" }),
+    ).toBeInTheDocument();
+    expect(
+      within(githubCard).queryByRole("button", { name: "Connect with GitHub" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(githubCard).queryByRole("button", { name: "Remove access token" }),
+    ).not.toBeInTheDocument();
   });
 
   it("ignores stale shared-scope reloads after switching scope mid-action", async () => {

@@ -39,6 +39,7 @@ class OAuthCredentialServiceMatch:
     token_service: bool
     tool_config_service: bool
     client_config_service: bool
+    oauth_fallback_fields: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,9 @@ class OAuthCredentialServices:
                     token_service=token_service,
                     tool_config_service=tool_config_service,
                     client_config_service=client_config_service,
+                    oauth_fallback_fields=(
+                        frozenset(provider.tool_config_oauth_fallback_fields) if tool_config_service else frozenset()
+                    ),
                 )
         return None
 
@@ -187,11 +191,19 @@ def dashboard_credentials_for_save(
     config_values: dict[str, Any],
     *,
     strip_oauth_fields: bool,
+    oauth_fallback_fields: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Return user-submitted credentials normalized for dashboard storage."""
     credentials = dict(config_values)
     if strip_oauth_fields:
         credentials = filter_oauth_credential_fields(credentials)
+        credentials.update(
+            {
+                field_name: config_values[field_name]
+                for field_name in oauth_fallback_fields
+                if field_name in config_values
+            },
+        )
     credentials["_source"] = "ui"
     return credentials
 

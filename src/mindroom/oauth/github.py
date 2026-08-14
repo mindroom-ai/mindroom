@@ -19,4 +19,7 @@ def github_oauth_provider() -> OAuthProvider:
         client_config_services=("github_oauth_client",),
         default_redirect_path="/api/oauth/github/callback",
         pkce_code_challenge_method="S256",
+        requester_scoped_credentials=True,
+        tool_config_oauth_fallback_fields=("access_token",),
+        tool_config_oauth_fallback_env_vars=("GITHUB_ACCESS_TOKEN",),
     )

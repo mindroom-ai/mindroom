@@ -77,6 +77,13 @@ const hasManualOAuthFallback = (integration: Integration) =>
   integration.setup_type === "oauth" &&
   Boolean(integration.oauth_fallback_fields?.length);
 
+const hasConfiguredOAuthFallback = (integration?: {
+  manual_auth_configured?: boolean;
+  environment_auth_configured?: boolean;
+}) =>
+  integration?.manual_auth_configured === true ||
+  integration?.environment_auth_configured === true;
+
 const manualOAuthFallbackLabel = (integration: Integration) => {
   const fallbackFields = integration.oauth_fallback_fields ?? [];
   if (fallbackFields.length !== 1) {
@@ -251,6 +258,7 @@ export function Integrations() {
         const status = provider.loadStatus
           ? await provider.loadStatus(scope)
           : {};
+        const fallbackConfigured = hasConfiguredOAuthFallback(providerTool);
         loadedIntegrations.push({
           ...config.integration,
           config_fields:
@@ -267,24 +275,19 @@ export function Integrations() {
             config.integration.execution_scope_supported,
           oauth_fallback_fields: providerTool?.oauth_fallback_fields,
           manual_auth_configured: providerTool?.manual_auth_configured,
+          environment_auth_configured:
+            providerTool?.environment_auth_configured,
           ...status,
-          status:
-            providerTool?.manual_auth_configured === true
-              ? "connected"
-              : (status.status ?? config.integration.status),
-          connected:
-            providerTool?.manual_auth_configured === true ||
-            status.connected === true,
-          status_error:
-            providerTool?.manual_auth_configured === true
-              ? undefined
-              : status.status_error,
-          helper_text:
-            providerTool?.manual_auth_configured === true
-              ? providerTool.helper_text
-              : (status.helper_text ??
-                providerTool?.helper_text ??
-                config.integration.helper_text),
+          status: fallbackConfigured
+            ? "connected"
+            : (status.status ?? config.integration.status),
+          connected: fallbackConfigured || status.connected === true,
+          status_error: fallbackConfigured ? undefined : status.status_error,
+          helper_text: fallbackConfigured
+            ? providerTool?.helper_text
+            : (status.helper_text ??
+              providerTool?.helper_text ??
+              config.integration.helper_text),
           config_service:
             providerTool?.name ??
             status.config_service ??
@@ -334,30 +337,26 @@ export function Integrations() {
           execution_scope_supported: providerTool?.execution_scope_supported,
           oauth_fallback_fields: providerTool?.oauth_fallback_fields,
           manual_auth_configured: providerTool?.manual_auth_configured,
+          environment_auth_configured:
+            providerTool?.environment_auth_configured,
         };
         const provider = new GenericOAuthIntegrationProvider(
           integration,
           providerId,
         );
         const status = await provider.loadStatus?.(scope);
+        const fallbackConfigured = hasConfiguredOAuthFallback(providerTool);
         loadedIntegrations.push({
           ...integration,
           ...status,
-          status:
-            providerTool?.manual_auth_configured === true
-              ? "connected"
-              : (status?.status ?? integration.status),
-          connected:
-            providerTool?.manual_auth_configured === true ||
-            status?.connected === true,
-          status_error:
-            providerTool?.manual_auth_configured === true
-              ? undefined
-              : status?.status_error,
-          helper_text:
-            providerTool?.manual_auth_configured === true
-              ? providerTool.helper_text
-              : (status?.helper_text ?? integration.helper_text),
+          status: fallbackConfigured
+            ? "connected"
+            : (status?.status ?? integration.status),
+          connected: fallbackConfigured || status?.connected === true,
+          status_error: fallbackConfigured ? undefined : status?.status_error,
+          helper_text: fallbackConfigured
+            ? providerTool?.helper_text
+            : (status?.helper_text ?? integration.helper_text),
           config_service:
             providerTool?.name ??
             status?.config_service ??
@@ -709,7 +708,7 @@ export function Integrations() {
     const manualFallbackLabel = manualOAuthFallbackLabel(integration);
     const manualFallbackActionLabel = manualFallbackLabel.toLocaleLowerCase();
     const manualFallbackButton =
-      manualFallbackAvailable && integration.manual_auth_configured !== true ? (
+      manualFallbackAvailable && !hasConfiguredOAuthFallback(integration) ? (
         <Button
           onClick={() => openToolConfigDialog(integration)}
           disabled={loading}
@@ -850,6 +849,30 @@ export function Integrations() {
           </Badge>
         );
       }
+    }
+
+    if (
+      manualFallbackAvailable &&
+      integration.environment_auth_configured === true &&
+      integration.manual_auth_configured !== true
+    ) {
+      return (
+        <div className="flex gap-2 items-center">
+          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+            <Key className="h-3 w-3 mr-1" />
+            Environment {manualFallbackLabel}
+          </Badge>
+          <Button
+            onClick={() => openToolConfigDialog(integration)}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+          >
+            Configure
+          </Button>
+          {oauthClientConfigButton}
+        </div>
+      );
     }
 
     if (
@@ -1294,8 +1317,8 @@ export function Integrations() {
               <AlertDescription className="mt-2">
                 Home Assistant and Spotify remain shared-only unless the agent
                 has an effective shared runtime scope (
-                <code>worker_scope=shared</code>). OAuth-backed Google
-                integrations can be connected for this selected agent.
+                <code>worker_scope=shared</code>). OAuth-backed integrations can
+                be connected for this selected agent.
               </AlertDescription>
             </Alert>
           )}

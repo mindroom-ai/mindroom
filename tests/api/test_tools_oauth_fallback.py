@@ -115,3 +115,22 @@ def test_blank_manual_oauth_fallback_does_not_mark_tool_available(tmp_path: Path
 
     assert tool["status"] == "requires_config"
     assert tool["manual_auth_configured"] is False
+
+
+def test_environment_oauth_fallback_status_is_available_and_secret_free(tmp_path: Path) -> None:
+    environment_secret = "github-environment-secret"  # noqa: S105
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"GITHUB_ACCESS_TOKEN": f"  {environment_secret}  "},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    tool = _github_tool()
+
+    tools_api._update_tools_statuses([tool], _context(runtime_paths, manager, target))
+
+    assert tool["status"] == "available"
+    assert tool["manual_auth_configured"] is False
+    assert tool["environment_auth_configured"] is True
+    assert environment_secret not in repr(tool)

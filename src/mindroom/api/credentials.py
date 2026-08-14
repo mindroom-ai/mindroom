@@ -160,11 +160,13 @@ class _DashboardCredentialAccess:
 
     def response_credentials(self, service: str, credentials: dict[str, Any]) -> dict[str, Any]:
         """Return credentials filtered for dashboard responses."""
-        if is_client_config_service(service, self.match(service)):
+        match = self.match(service)
+        if is_client_config_service(service, match):
             return filter_oauth_client_config_for_response(credentials)
         return filter_credentials_for_response(
             credentials,
-            is_oauth_service=dashboard_may_edit_oauth_match(self.match(service)),
+            is_oauth_service=dashboard_may_edit_oauth_match(match),
+            oauth_fallback_fields=match.oauth_fallback_fields if match is not None else frozenset(),
         )
 
     def credentials_for_save(self, service: str, config_values: dict[str, Any]) -> dict[str, Any]:
@@ -173,6 +175,7 @@ class _DashboardCredentialAccess:
         credentials = dashboard_credentials_for_save(
             config_values,
             strip_oauth_fields=dashboard_may_edit_oauth_match(match) and not is_client_config_service(service, match),
+            oauth_fallback_fields=match.oauth_fallback_fields if match is not None else frozenset(),
         )
         if is_client_config_service(service, match):
             validate_oauth_client_config_fields(credentials)

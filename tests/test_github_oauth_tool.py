@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
+import pytest
+from github import BadCredentialsException
+
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
     CredentialsManager,
@@ -20,12 +23,12 @@ from mindroom.credentials import (
     save_scoped_credentials,
 )
 from mindroom.oauth.providers import OAuthRefreshRejectedError
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
 DEFAULT_REFRESH_TOKEN = "github-refresh"  # noqa: S105
 MANUAL_ACCESS_TOKEN = "manual-access"  # noqa: S105
@@ -49,6 +52,11 @@ class _FakeGithub:
         return _FakeUser()
 
 
+class _RevokedTokenGithub:
+    def get_user(self) -> _FakeUser:
+        raise BadCredentialsException(401, {"message": "Bad credentials"})
+
+
 class _CapturingLogger:
     def __init__(self) -> None:
         self.warning_calls: list[tuple[str, dict[str, object]]] = []
@@ -68,7 +76,10 @@ def _runtime_paths(tmp_path: Path, extra_env: dict[str, str] | None = None) -> R
     )
 
 
-def _worker_target(requester_id: str) -> ResolvedWorkerTarget:
+def _worker_target_for_scope(
+    requester_id: str,
+    worker_scope: WorkerScope | None,
+) -> ResolvedWorkerTarget:
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="code",
@@ -78,7 +89,15 @@ def _worker_target(requester_id: str) -> ResolvedWorkerTarget:
         resolved_thread_id="$thread",
         session_id=None,
     )
-    return resolve_worker_target("user_agent", "code", execution_identity=identity)
+    return resolve_worker_target(worker_scope, "code", execution_identity=identity)
+
+
+def _worker_target(requester_id: str) -> ResolvedWorkerTarget:
+    return _worker_target_for_scope(requester_id, "user_agent")
+
+
+def _oauth_target(requester_id: str) -> ResolvedWorkerTarget:
+    return _worker_target_for_scope(requester_id, "user")
 
 
 def _tool_class() -> type[Any]:
@@ -160,7 +179,7 @@ def test_requesters_cannot_use_each_others_github_oauth_credentials(tmp_path: Pa
         "github_oauth",
         _oauth_credentials("alice-access"),
         credentials_manager=manager,
-        worker_target=alice_target,
+        worker_target=_oauth_target("@alice:example.test"),
     )
     alice = _build_tool(runtime_paths, manager, alice_target)
     alice.g = _FakeGithub()
@@ -168,6 +187,73 @@ def test_requesters_cannot_use_each_others_github_oauth_credentials(tmp_path: Pa
 
     assert json.loads(alice.list_repositories()) == ["example/project"]
     assert json.loads(bob.list_repositories())["oauth_connection_required"] is True
+
+
+def test_active_requester_overrides_tool_construction_identity(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    alice_target = _worker_target("@alice:example.test")
+    bob_target = _worker_target("@bob:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("alice-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, alice_target)
+    tool.g = _FakeGithub()
+
+    with tool_execution_identity(bob_target.execution_identity):
+        result = json.loads(tool.list_repositories())
+
+    assert result["oauth_connection_required"] is True
+    assert result["provider"] == "github"
+
+
+@pytest.mark.parametrize("worker_scope", [None, "shared", "user_agent"])
+def test_github_oauth_is_requester_scoped_when_agent_runtime_is_not(
+    tmp_path: Path,
+    worker_scope: WorkerScope | None,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    alice_target = _worker_target_for_scope("@alice:example.test", worker_scope)
+    bob_target = _worker_target_for_scope("@bob:example.test", worker_scope)
+    alice_oauth_target = _oauth_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("alice-access"),
+        credentials_manager=manager,
+        worker_target=alice_oauth_target,
+    )
+    alice = _build_tool(runtime_paths, manager, alice_target)
+    alice.g = _FakeGithub()
+    bob = _build_tool(runtime_paths, manager, bob_target)
+    bob.g = _FakeGithub()
+
+    assert json.loads(alice.list_repositories()) == ["example/project"]
+    assert json.loads(bob.list_repositories())["oauth_connection_required"] is True
+
+
+def test_unscoped_agent_connection_links_are_requester_bound(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    alice = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target_for_scope("@alice:example.test", None),
+    )
+    bob = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target_for_scope("@bob:example.test", None),
+    )
+
+    alice_result = json.loads(alice.list_repositories())
+    bob_result = json.loads(bob.list_repositories())
+
+    assert "/api/oauth/github/authorize?connect_token=" in alice_result["connect_url"]
+    assert bob_result["connect_url"] != alice_result["connect_url"]
 
 
 def test_explicit_access_token_takes_precedence_over_scoped_oauth(tmp_path: Path) -> None:
@@ -178,7 +264,7 @@ def test_explicit_access_token_takes_precedence_over_scoped_oauth(tmp_path: Path
         "github_oauth",
         _oauth_credentials("oauth-access", expires_at=1.0),
         credentials_manager=manager,
-        worker_target=target,
+        worker_target=_oauth_target("@alice:example.test"),
     )
     tool = _build_tool(runtime_paths, manager, target, access_token=MANUAL_ACCESS_TOKEN)
     tool.g = _FakeGithub()
@@ -195,6 +281,52 @@ def test_environment_access_token_remains_an_explicit_fallback(tmp_path: Path) -
 
     assert json.loads(tool.list_repositories()) == ["example/project"]
     assert tool.access_token == ENV_ACCESS_TOKEN
+
+
+@pytest.mark.parametrize(
+    ("access_token", "extra_env"),
+    [
+        ("   ", None),
+        (None, {"GITHUB_ACCESS_TOKEN": "   "}),
+    ],
+)
+def test_whitespace_explicit_tokens_fall_back_to_scoped_oauth(
+    tmp_path: Path,
+    access_token: str | None,
+    extra_env: dict[str, str] | None,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path, extra_env)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("oauth-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+
+    tool = _build_tool(runtime_paths, manager, target, access_token=access_token)
+    tool.g = _FakeGithub()
+
+    assert json.loads(tool.list_repositories()) == ["example/project"]
+    assert tool.access_token == "oauth-access"  # noqa: S105
+
+
+def test_whitespace_stored_oauth_token_requires_connection(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("   ", refresh_token=""),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+
+    result = json.loads(_build_tool(runtime_paths, manager, target).list_repositories())
+
+    assert result["oauth_connection_required"] is True
+    assert result["provider"] == "github"
 
 
 def test_base_url_is_forwarded_to_pygithub(tmp_path: Path) -> None:
@@ -225,11 +357,12 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
     manager = _save_client_config(runtime_paths)
     tool_class = _tool_class()
     target = _worker_target("@alice:example.test")
+    oauth_target = _oauth_target("@alice:example.test")
     save_scoped_credentials(
         "github_oauth",
         _oauth_credentials("old-access", refresh_token=OLD_REFRESH_TOKEN, expires_at=1.0),
         credentials_manager=manager,
-        worker_target=target,
+        worker_target=oauth_target,
     )
     refreshed = _oauth_credentials("rotated-access", refresh_token=ROTATED_REFRESH_TOKEN)
 
@@ -238,7 +371,7 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
             "github_oauth",
             refreshed,
             credentials_manager=manager,
-            worker_target=target,
+            worker_target=oauth_target,
         )
         return refreshed
 
@@ -256,7 +389,7 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
     stored = load_scoped_credentials(
         "github_oauth",
         credentials_manager=manager,
-        worker_target=target,
+        worker_target=oauth_target,
     )
     assert result == ["example/project"]
     assert stored is not None
@@ -272,7 +405,7 @@ def test_oauth_refresh_works_when_agno_calls_sync_tool_on_running_loop(tmp_path:
         "github_oauth",
         _oauth_credentials("oauth-access"),
         credentials_manager=manager,
-        worker_target=target,
+        worker_target=_oauth_target("@alice:example.test"),
     )
     tool = _build_tool(runtime_paths, manager, target)
     tool.g = _FakeGithub()
@@ -295,7 +428,7 @@ def test_terminal_refresh_failure_returns_safe_connection_payload(tmp_path: Path
         "github_oauth",
         _oauth_credentials("old-access", refresh_token=leaked_secret, expires_at=1.0),
         credentials_manager=manager,
-        worker_target=target,
+        worker_target=_oauth_target("@alice:example.test"),
     )
     logger = _CapturingLogger()
 
@@ -318,6 +451,29 @@ def test_terminal_refresh_failure_returns_safe_connection_payload(tmp_path: Path
     assert payload["provider"] == "github"
     assert leaked_secret not in result
     assert leaked_secret not in repr(logger.warning_calls)
+
+
+def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    revoked_token = "revoked-access-that-must-not-leak"  # noqa: S105
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials(revoked_token),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    tool.g = _RevokedTokenGithub()
+
+    result = tool.list_repositories()
+    payload = json.loads(result)
+
+    assert payload["oauth_connection_required"] is True
+    assert payload["provider"] == "github"
+    assert "/api/oauth/github/authorize?connect_token=" in payload["connect_url"]
+    assert revoked_token not in result
 
 
 def test_wrapper_preserves_all_registered_github_function_names(tmp_path: Path) -> None:

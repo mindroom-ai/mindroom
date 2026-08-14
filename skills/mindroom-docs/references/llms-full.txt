@@ -2035,7 +2035,7 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Some local-only tools stay in the primary runtime even when listed: `attachments`, `desktop`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some local-only tools stay in the primary runtime even when listed: `attachments`, `desktop`, `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
 Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
 Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
 Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
@@ -2046,7 +2046,7 @@ Some integrations require `worker_scope` unset or `shared` because their credent
 That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
 OAuth-backed remote MCP tools use requester-scoped OAuth credentials and can be used with `worker_scope: user` or `worker_scope: user_agent`.
 Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
-`gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` also always stay local.
+`github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` also always stay local.
 `spotify` can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
@@ -2094,8 +2094,9 @@ Workers mount those canonical private-instance roots.
 They do not own them.
 
 The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
-OAuth providers that support scoped dashboard flows, such as the Google Drive, Docs, Gmail, Calendar, and Sheets providers, are the exception.
-For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime.
+OAuth providers that support scoped dashboard flows, such as GitHub and the Google Drive, Docs, Gmail, Calendar, and Sheets providers, are the exception.
+For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the tools still execute in the primary MindRoom runtime.
+GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
 Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
@@ -8613,6 +8614,7 @@ The file-management surface includes `create_file()`, `get_file_content()`, `upd
 Choose **Connect with GitHub** on the Tools dashboard to use requester-scoped GitHub App user OAuth.
 For a self-hosted installation, configure the GitHub App client ID and client secret under the `github_oauth_client` credential service and register `/api/oauth/github/callback` on the installation's public URL as the callback URL.
 MindRoom requests no classic OAuth scopes because GitHub App user tokens use the app's fine-grained permissions.
+Managed GitHub credentials follow the requester independently of the agent's worker scope and stay in the primary MindRoom runtime.
 When a requester has not connected GitHub, tool calls return a structured `OAuthConnectionRequired` result containing that requester's connect URL.
 MindRoom refreshes expiring access tokens through the existing scoped OAuth refresh flow and persists rotated access and refresh tokens.
 
@@ -12977,7 +12979,7 @@ To adopt hooks:
 # OAuth Integration Framework
 
 MindRoom owns OAuth state, callback handling, credential scoping, and token persistence because those steps decide which human and agent scope receive access to an external account.
-Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, optional PKCE requirements, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
+Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, optional PKCE requirements, requester-only credential placement, explicitly permitted manual fallback fields and runtime environment names, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
 
 The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
@@ -13002,16 +13004,16 @@ Plugins can use `OAuthDiscoveryConfig` with `oauth_runtime_bootstrapper()` to re
 Automatic discovery first checks protected-resource metadata at the resource origin and path, then uses the advertised authorization server or falls back to authorization-server metadata at the resource origin.
 Dynamic client registration requires a provider-specific `client_config_services` entry and stores generated client configuration only in the primary runtime.
 
-OAuth token writes always go through `resolve_request_credentials_target()` and `save_scoped_credentials()`.
-For private agents, the target worker key is derived from the authenticated requester and the agent's saved `worker_scope`, so a user-owned OAuth token lands under the same scope normal tools will read at runtime.
-For shared-scope agents, OAuth tokens land in a per-agent primary-runtime store, so a connection made for one agent never becomes visible to other agents.
-Only agents without any worker scope share OAuth tokens through the global credential store.
+OAuth token writes always go through the provider's credential-target resolver and `save_scoped_credentials()`.
+Providers can declare that credentials follow the requester independently of agent worker reuse.
+GitHub uses that policy, so its managed token always lands in the requester's `user` scope and can never fall back to a shared or global token store.
+For providers without that policy, private-agent tokens follow the authenticated requester and the agent's saved `worker_scope`, shared-scope agent tokens use a per-agent primary-runtime store, and unscoped agents use the global credential store.
 If MindRoom cannot resolve the authenticated dashboard user to the requester carried by a conversation-issued link, the link fails closed and no credential is saved.
 Credential placement and visibility policy is centralized in `src/mindroom/credential_policy.py`.
 That module owns service classification, OAuth token field filtering, local-only credential service names, and worker-grantable rejections.
 Storage, API routing, OAuth provider loading, and worker identity derivation stay in their existing modules.
 Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent.
-Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need Google OAuth client config or user refresh tokens.
+GitHub and Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need OAuth client config or user refresh tokens.
 OAuth token documents and editable tool setting documents should be separate services.
 The OAuth callback writes only the provider's `credential_service`, while dashboard configuration reads and writes the provider's `tool_config_service` when one is declared.
 OAuth app client config is stored separately from both of those services.
@@ -13036,6 +13038,7 @@ Identity restrictions are provider settings, not MindRoom policy.
 Providers can enforce allowed email domains, allowed hosted-domain claims, and custom claim validators.
 If a configured restriction cannot be checked from verified provider claims, the callback fails closed and no credential is saved.
 
+The built-in GitHub provider uses the generic framework for GitHub App user tokens, requests no classic OAuth scopes, and requires S256 PKCE.
 Built-in Google providers use the generic framework for Drive, Docs, Calendar, Sheets, and Gmail.
 Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
 Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service.
@@ -18385,8 +18388,9 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, M
 - `worker_scope` does **not** change where agent data is stored.
   All scopes read and write the same agent storage directory (`agents/<name>/`).
 - The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
-  OAuth providers that support scoped dashboard flows, such as the Google Drive, Docs, Gmail, Calendar, and Sheets providers, are the exception.
-  For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime.
+  OAuth providers that support scoped dashboard flows, such as GitHub and the Google Drive, Docs, Gmail, Calendar, and Sheets providers, are the exception.
+  For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the tools still execute in the primary MindRoom runtime.
+  GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
   Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime.
 - `user` mode shares one runtime across multiple agents for a single user, so agents in that runtime can access each other's files.
   Use `user_agent` for per-agent isolation.

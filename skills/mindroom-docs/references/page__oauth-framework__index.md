@@ -1,7 +1,7 @@
 # OAuth Integration Framework
 
 MindRoom owns OAuth state, callback handling, credential scoping, and token persistence because those steps decide which human and agent scope receive access to an external account.
-Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, optional PKCE requirements, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
+Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, optional PKCE requirements, requester-only credential placement, explicitly permitted manual fallback fields and runtime environment names, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
 
 The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
@@ -26,16 +26,16 @@ Plugins can use `OAuthDiscoveryConfig` with `oauth_runtime_bootstrapper()` to re
 Automatic discovery first checks protected-resource metadata at the resource origin and path, then uses the advertised authorization server or falls back to authorization-server metadata at the resource origin.
 Dynamic client registration requires a provider-specific `client_config_services` entry and stores generated client configuration only in the primary runtime.
 
-OAuth token writes always go through `resolve_request_credentials_target()` and `save_scoped_credentials()`.
-For private agents, the target worker key is derived from the authenticated requester and the agent's saved `worker_scope`, so a user-owned OAuth token lands under the same scope normal tools will read at runtime.
-For shared-scope agents, OAuth tokens land in a per-agent primary-runtime store, so a connection made for one agent never becomes visible to other agents.
-Only agents without any worker scope share OAuth tokens through the global credential store.
+OAuth token writes always go through the provider's credential-target resolver and `save_scoped_credentials()`.
+Providers can declare that credentials follow the requester independently of agent worker reuse.
+GitHub uses that policy, so its managed token always lands in the requester's `user` scope and can never fall back to a shared or global token store.
+For providers without that policy, private-agent tokens follow the authenticated requester and the agent's saved `worker_scope`, shared-scope agent tokens use a per-agent primary-runtime store, and unscoped agents use the global credential store.
 If MindRoom cannot resolve the authenticated dashboard user to the requester carried by a conversation-issued link, the link fails closed and no credential is saved.
 Credential placement and visibility policy is centralized in `src/mindroom/credential_policy.py`.
 That module owns service classification, OAuth token field filtering, local-only credential service names, and worker-grantable rejections.
 Storage, API routing, OAuth provider loading, and worker identity derivation stay in their existing modules.
 Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent.
-Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need Google OAuth client config or user refresh tokens.
+GitHub and Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need OAuth client config or user refresh tokens.
 OAuth token documents and editable tool setting documents should be separate services.
 The OAuth callback writes only the provider's `credential_service`, while dashboard configuration reads and writes the provider's `tool_config_service` when one is declared.
 OAuth app client config is stored separately from both of those services.
@@ -60,6 +60,7 @@ Identity restrictions are provider settings, not MindRoom policy.
 Providers can enforce allowed email domains, allowed hosted-domain claims, and custom claim validators.
 If a configured restriction cannot be checked from verified provider claims, the callback fails closed and no credential is saved.
 
+The built-in GitHub provider uses the generic framework for GitHub App user tokens, requests no classic OAuth scopes, and requires S256 PKCE.
 Built-in Google providers use the generic framework for Drive, Docs, Calendar, Sheets, and Gmail.
 Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
 Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service.

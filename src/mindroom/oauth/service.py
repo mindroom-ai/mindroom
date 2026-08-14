@@ -18,6 +18,7 @@ from mindroom.oauth.providers import (
     oauth_connect_url_requires_host_browser,
 )
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
+from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.oauth.providers import OAuthClientConfig, OAuthProvider
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = 600
 _OAUTH_CONNECT_TOKEN_KIND = "conversation_oauth_connect"  # noqa: S105
@@ -83,6 +84,7 @@ __all__ = [
     "oauth_credentials_match_client_id",
     "oauth_credentials_satisfy_identity_policy",
     "oauth_credentials_usable",
+    "oauth_credentials_worker_target",
     "oauth_provider_service_account_configured",
     "oauth_success_redirect_url",
     "refresh_scoped_oauth_credentials",
@@ -111,6 +113,28 @@ class OAuthCredentialsRefreshResult:
     credentials: dict[str, Any] | None
     refreshed: bool
     stale_retry_used: bool = False
+
+
+def oauth_credentials_worker_target(
+    provider: OAuthProvider,
+    worker_target: ResolvedWorkerTarget | None,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> ResolvedWorkerTarget | None:
+    """Return the credential target required by one provider's identity policy."""
+    if not provider.requester_scoped_credentials:
+        return worker_target
+    identity = execution_identity or (worker_target.execution_identity if worker_target is not None else None)
+    if identity is None or not identity.requester_id:
+        return None
+    return resolve_worker_target(
+        "user",
+        worker_target.routing_agent_name if worker_target is not None else identity.agent_name,
+        execution_identity=identity,
+        tenant_id=worker_target.tenant_id if worker_target is not None else None,
+        account_id=worker_target.account_id if worker_target is not None else None,
+        private_agent_names=worker_target.private_agent_names if worker_target is not None else None,
+    )
 
 
 def scoped_oauth_credentials_refresh_lock_path(

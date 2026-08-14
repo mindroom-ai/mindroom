@@ -34,6 +34,7 @@ export interface Integration {
   config_service?: string;
   oauth_fallback_fields?: string[];
   manual_auth_configured?: boolean;
+  environment_auth_configured?: boolean;
 }
 
 export interface IntegrationScope {

@@ -24,7 +24,11 @@ from mindroom.credentials import (
     load_worker_grantable_shared_credentials,
 )
 from mindroom.oauth.registry import load_oauth_providers
-from mindroom.oauth.service import oauth_credentials_usable, oauth_provider_service_account_configured
+from mindroom.oauth.service import (
+    oauth_credentials_usable,
+    oauth_credentials_worker_target,
+    oauth_provider_service_account_configured,
+)
 from mindroom.tool_system.catalog import export_tools_metadata, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
@@ -133,6 +137,19 @@ def _check_manual_oauth_fallback_configured(
         if value is None or (isinstance(value, str) and not value.strip()):
             return False
     return True
+
+
+def _check_environment_oauth_fallback_configured(
+    provider: OAuthProvider | None,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether a provider's complete runtime fallback is present without exposing values."""
+    if provider is None:
+        return False
+    env_vars = provider.tool_config_oauth_fallback_env_vars
+    return bool(env_vars) and all(
+        isinstance(value := runtime_paths.env_value(env_var), str) and bool(value.strip()) for env_var in env_vars
+    )
 
 
 def _append_config_only_presets(tools: list[dict[str, Any]]) -> None:
@@ -244,9 +261,7 @@ def _resolve_tool_availability_context(
         else None
     )
     execution_identity = (
-        authorized_identity
-        if status_authoritative and scope_request.agent_name is not None and execution_scope is not None
-        else None
+        authorized_identity if not scope_request.draft_scope_preview and scope_request.agent_name is not None else None
     )
     worker_target = (
         build_worker_target_from_runtime_env(
@@ -255,7 +270,8 @@ def _resolve_tool_availability_context(
             execution_identity=execution_identity,
             runtime_paths=runtime_paths,
         )
-        if status_authoritative and (scope_request.agent_name is not None or execution_scope is not None)
+        if not scope_request.draft_scope_preview
+        and (scope_request.agent_name is not None or execution_scope is not None)
         else None
     )
     oauth_providers = load_oauth_providers(config, runtime_paths)
@@ -284,25 +300,31 @@ def _update_tools_statuses(
     context: _ResolvedToolAvailabilityContext,
 ) -> None:
     """Update tool runtime availability using the resolved credential context."""
-    credentials_cache: dict[str, dict[str, Any] | None] = {}
+    credentials_cache: dict[tuple[str, str | None, bool], dict[str, Any] | None] = {}
 
-    def get_credentials(service: str) -> dict[str, Any] | None:
-        if service not in credentials_cache:
+    def get_credentials(
+        service: str,
+        *,
+        worker_target: ResolvedWorkerTarget | None = context.worker_target,
+        use_request_target: bool = False,
+    ) -> dict[str, Any] | None:
+        cache_key = (service, worker_target.worker_key if worker_target is not None else None, use_request_target)
+        if cache_key not in credentials_cache:
             allowed_shared_services = _effective_allowed_shared_services(service, context)
-            if context.status_authoritative:
-                credentials_cache[service] = load_scoped_credentials(
+            if context.status_authoritative or use_request_target:
+                credentials_cache[cache_key] = load_scoped_credentials(
                     service,
                     credentials_manager=context.credentials_manager,
-                    worker_target=context.worker_target,
+                    worker_target=worker_target,
                     allowed_shared_services=allowed_shared_services,
                 )
             else:
-                credentials_cache[service] = _load_shared_preview_credentials(
+                credentials_cache[cache_key] = _load_shared_preview_credentials(
                     service,
                     credentials_manager=context.credentials_manager,
                     allowed_shared_services=allowed_shared_services,
                 )
-        return credentials_cache[service]
+        return credentials_cache[cache_key]
 
     for tool in tools:
         tool_name = tool["name"]
@@ -311,19 +333,47 @@ def _update_tools_statuses(
 
         auth_provider = tool.get("auth_provider")
         if auth_provider:
+            provider = context.oauth_providers.get(auth_provider)
+            use_request_target = provider is not None and context.worker_target is not None
             manual_auth_configured = _check_manual_oauth_fallback_configured(
                 tool,
-                get_credentials(tool_name) if tool.get("oauth_fallback_fields") else None,
+                (
+                    get_credentials(tool_name, use_request_target=use_request_target)
+                    if tool.get("oauth_fallback_fields")
+                    else None
+                ),
             )
             if tool.get("oauth_fallback_fields"):
                 tool["manual_auth_configured"] = manual_auth_configured
+            environment_auth_configured = _check_environment_oauth_fallback_configured(
+                provider,
+                context.runtime_paths,
+            )
+            tool["environment_auth_configured"] = environment_auth_configured
             credential_service = context.auth_provider_credential_services.get(auth_provider, auth_provider)
-            provider_creds = get_credentials(credential_service)
-            if manual_auth_configured or _check_auth_provider_configured(
-                tool,
-                provider_creds,
-                provider=context.oauth_providers.get(auth_provider),
-                runtime_paths=context.runtime_paths,
+            provider_target = (
+                oauth_credentials_worker_target(provider, context.worker_target)
+                if provider is not None
+                else context.worker_target
+            )
+            provider_creds = (
+                get_credentials(
+                    credential_service,
+                    worker_target=provider_target,
+                    use_request_target=use_request_target,
+                )
+                if provider is None or not provider.requester_scoped_credentials or provider_target is not None
+                else None
+            )
+            if (
+                manual_auth_configured
+                or environment_auth_configured
+                or _check_auth_provider_configured(
+                    tool,
+                    provider_creds,
+                    provider=provider,
+                    runtime_paths=context.runtime_paths,
+                )
             ):
                 tool["status"] = "available"
             continue

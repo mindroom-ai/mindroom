@@ -54,6 +54,7 @@ The file-management surface includes `create_file()`, `get_file_content()`, `upd
 Choose **Connect with GitHub** on the Tools dashboard to use requester-scoped GitHub App user OAuth.
 For a self-hosted installation, configure the GitHub App client ID and client secret under the `github_oauth_client` credential service and register `/api/oauth/github/callback` on the installation's public URL as the callback URL.
 MindRoom requests no classic OAuth scopes because GitHub App user tokens use the app's fine-grained permissions.
+Managed GitHub credentials follow the requester independently of the agent's worker scope and stay in the primary MindRoom runtime.
 When a requester has not connected GitHub, tool calls return a structured `OAuthConnectionRequired` result containing that requester's connect URL.
 MindRoom refreshes expiring access tokens through the existing scoped OAuth refresh flow and persists rotated access and refresh tokens.
 
