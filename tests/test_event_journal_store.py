@@ -5855,6 +5855,122 @@ class TestConnectionSecretsStayOutOfLogs:
         assert "db.example" not in rendered
 
 
+class TestSchemaUpgrades:
+    """Opening the journal preserves old rows and enables current writes."""
+
+    @staticmethod
+    async def _assert_old_row_is_inert_and_new_card_works(backend: Backend) -> None:
+        old = await backend.read(
+            lambda transaction: transaction.fetchone(
+                """
+                SELECT card_event_id, continuation_id, continuation_generation, tool_call_id
+                FROM approval_cards WHERE principal_id = ? AND transaction_id = ?
+                """,
+                ("agent@alice", "legacy"),
+            ),
+        )
+        assert old is not None
+        assert old["card_event_id"] == "$legacy"
+        assert old["continuation_id"] is None
+        assert old["continuation_generation"] is None
+        assert old["tool_call_id"] is None
+
+        cards = EventJournalStore(backend).principal("agent@alice")
+        await cards.claim_approval_card(
+            room_id=ROOM,
+            transaction_id="native",
+            card=TestApprovalCards.card("$native"),
+        )
+
+        stored = await cards.pending_approval_cards(room_id=ROOM)
+        assert len(stored) == 1
+        assert stored[0].transaction_id == "native"
+        assert stored[0].continuation_id == "continuation-native"
+        assert stored[0].continuation_generation == 0
+        assert stored[0].tool_call_id == "native"
+
+    async def test_sqlite_open_adds_native_identity_to_the_previous_card_schema(self, tmp_path: Path) -> None:
+        """SQLite upgrades the previous table without activating its old row."""
+        database_path = tmp_path / "previous-schema.db"
+        with sqlite3.connect(database_path) as database:
+            database.execute(
+                """
+                CREATE TABLE approval_cards (
+                    principal_id TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    transaction_id TEXT NOT NULL,
+                    card_event_id TEXT,
+                    attempted INTEGER NOT NULL,
+                    sending_device_id TEXT,
+                    card_json TEXT NOT NULL,
+                    resolution_json TEXT,
+                    membership_epoch BIGINT NOT NULL,
+                    created_at_ns BIGINT NOT NULL,
+                    PRIMARY KEY (principal_id, transaction_id)
+                )
+                """,
+            )
+            database.execute(
+                """
+                INSERT INTO approval_cards (
+                    principal_id, room_id, transaction_id, card_event_id, attempted,
+                    sending_device_id, card_json, resolution_json, membership_epoch, created_at_ns
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("agent@alice", ROOM, "legacy", "$legacy", 1, DEVICE, '{"body":"old"}', None, 1, 1),
+            )
+
+        backend = SqliteBackend.open(database_path)
+        try:
+            await self._assert_old_row_is_inert_and_new_card_works(backend)
+        finally:
+            await backend.close()
+
+    async def test_postgres_open_adds_native_identity_to_the_previous_card_schema(
+        self,
+        postgres_journal_url: str,
+    ) -> None:
+        """PostgreSQL upgrades the previous table without activating its old row."""
+        import psycopg  # noqa: PLC0415 - optional backend exercised only by this test
+
+        from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        with psycopg.connect(database_url) as database:
+            database.execute(
+                """
+                CREATE TABLE approval_cards (
+                    principal_id TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    transaction_id TEXT NOT NULL,
+                    card_event_id TEXT,
+                    attempted INTEGER NOT NULL,
+                    sending_device_id TEXT,
+                    card_json TEXT NOT NULL,
+                    resolution_json TEXT,
+                    membership_epoch BIGINT NOT NULL,
+                    created_at_ns BIGINT NOT NULL,
+                    PRIMARY KEY (principal_id, transaction_id)
+                )
+                """,
+            )
+            database.execute(
+                """
+                INSERT INTO approval_cards (
+                    principal_id, room_id, transaction_id, card_event_id, attempted,
+                    sending_device_id, card_json, resolution_json, membership_epoch, created_at_ns
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                ("agent@alice", ROOM, "legacy", "$legacy", 1, DEVICE, '{"body":"old"}', None, 1, 1),
+            )
+
+        backend = PostgresBackend.open(database_url)
+        try:
+            await self._assert_old_row_is_inert_and_new_card_works(backend)
+        finally:
+            await backend.close()
+
+
 class TestHotQueriesAreIndexCovered:
     """Every scan a running bot repeats must come from an index, ordering included."""
 
