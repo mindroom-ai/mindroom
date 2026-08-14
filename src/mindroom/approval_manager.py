@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import ApprovalDeliveryView
+    from mindroom.event_journal import ApprovalDeliveryView, RecordedApprovalDecision
 
 _ApprovalStatus = Literal["approved", "denied", "expired"]
 _ResolutionStatus = Literal["approved", "denied"]
@@ -364,6 +364,10 @@ class _ApprovalManager:
                 card_event_id=card_event_id,
             )
             if stored is None:
+                if await cards.is_terminal_approval_card(room_id=room_id, card_event_id=card_event_id):
+                    if before_consume is not None:
+                        await before_consume()
+                    return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
                 if await cards.legacy_approval_delivery_pending():
                     raise RuntimeError(DELIVERY_MIGRATION_PENDING_REASON)
                 return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
@@ -435,14 +439,9 @@ class _ApprovalManager:
         if recorded.resolution is None:
             return False
         if (
-            recorded.recorded
-            and recorded.continuation_ready
-            and recorded.continuation_entity_name is not None
-            and self.continuation_ready is not None
+            recorded.recorded and recorded.continuation_ready
         ):
-            wake = self.continuation_ready(recorded.continuation_entity_name, recorded.source_event_ids)
-            if wake is not None:
-                await wake
+            await self._wake_continuation(recorded)
         try:
             edit_event_id = await self._worker().flush(
                 delivery_id=stored.delivery_id,
@@ -482,7 +481,14 @@ class _ApprovalManager:
         return complete
 
     async def _expire_stored(self, room_id: str, stored: StoredApprovalCard) -> bool:
-        if self.cards is None or stored.card_event_id is None:
+        if self.cards is None:
+            return False
+        if stored.card_event_id is None:
+            if stored.resolution is not None:
+                return False
+            recorded = await self.cards.expire_unacknowledged_approval_card(delivery_id=stored.delivery_id)
+            if recorded.recorded and recorded.continuation_ready:
+                await self._wake_continuation(recorded)
             return False
         transport_sender = None if self.transport_sender is None else self.transport_sender()
         pending = (
@@ -513,6 +519,13 @@ class _ApprovalManager:
             reason=_DEFAULT_TIMEOUT_REASON,
             resolved_by=None,
         )
+
+    async def _wake_continuation(self, recorded: RecordedApprovalDecision) -> None:
+        if recorded.continuation_entity_name is None or self.continuation_ready is None:
+            return
+        wake = self.continuation_ready(recorded.continuation_entity_name, recorded.source_event_ids)
+        if wake is not None:
+            await wake
 
     async def recover_cards_on_startup(self) -> ApprovalStartupSweep:
         """Run generic delivery recovery, deadline decisions, and domain retirement."""

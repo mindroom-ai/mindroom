@@ -577,6 +577,35 @@ async def test_startup_recovery_skips_a_malformed_expiry_without_starving_later_
 
 
 @pytest.mark.asyncio
+async def test_deadline_sweep_expires_an_unacknowledged_card_and_wakes_its_continuation(tmp_path: Path) -> None:
+    """An unknown Matrix outcome remains delivery debt without hiding the expired run."""
+    recorded = MagicMock(
+        recorded=True,
+        continuation_ready=True,
+        continuation_entity_name="code",
+        source_event_ids=("$source",),
+    )
+    cards = MagicMock()
+    cards.expire_unacknowledged_approval_card = AsyncMock(return_value=recorded)
+    wake = AsyncMock()
+    manager = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        continuation_ready=wake,
+    )
+    stored = MagicMock(
+        delivery_id="approval-card-1",
+        card_event_id=None,
+        resolution=None,
+    )
+
+    assert await manager._expire_stored("!room:localhost", stored) is False
+
+    cards.expire_unacknowledged_approval_card.assert_awaited_once_with(delivery_id="approval-card-1")
+    wake.assert_awaited_once_with("code", ("$source",))
+
+
+@pytest.mark.asyncio
 async def test_transient_removed_owner_cleanup_rearms_startup_retry(tmp_path: Path) -> None:
     """A failed card edit cannot abandon a removed entity's fenced journal work."""
     continuation = MagicMock(

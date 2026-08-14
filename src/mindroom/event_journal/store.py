@@ -813,6 +813,24 @@ class PrincipalStore:
             ),
         )
 
+    async def expire_unacknowledged_approval_card(
+        self,
+        *,
+        delivery_id: str,
+    ) -> RecordedApprovalDecision:
+        """Atomically expire a due call whose attempted card still lacks an event ID."""
+        return await self._backend.write(
+            lambda transaction: approvals.resolve_continuation(
+                transaction,
+                self._principal_id,
+                card_event_id=None,
+                requested_status="expired",
+                reason=None,
+                resolution=None,
+                delivery_id=delivery_id,
+            ),
+        )
+
     async def retire_approval_card(self, *, delivery_id: str, card_event_id: str) -> bool:
         """Retire delivered payload while preserving durable approval-only classification."""
         return await self._backend.write(

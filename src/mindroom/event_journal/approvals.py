@@ -442,24 +442,33 @@ def resolve_continuation(
     transaction: Transaction,
     principal_id: str,
     *,
-    card_event_id: str,
+    card_event_id: str | None,
     requested_status: Literal["approved", "denied", "expired"],
     reason: str | None,
-    resolution: Mapping[str, Any],
+    resolution: Mapping[str, Any] | None,
+    delivery_id: str | None = None,
 ) -> RecordedApprovalDecision:
     """Commit one current-format card and exact-call decision atomically."""
+    unacknowledged = card_event_id is None
+    selector = (
+        "cards.delivery_id = ? AND initial.acknowledged_event_id IS NULL"
+        if unacknowledged
+        else "initial.acknowledged_event_id = ?"
+    )
+    selector_value = delivery_id if unacknowledged else card_event_id
     card = transaction.fetchone(
-        """
+        f"""
         SELECT cards.delivery_id, cards.continuation_id, cards.continuation_generation,
-               cards.tool_call_id, initial.event_type, initial.room_id, initial.thread_id
+               cards.tool_call_id, initial.event_type, initial.room_id, initial.thread_id,
+               initial.payload_json, initial.acknowledged_event_id
         FROM approval_cards AS cards
         JOIN matrix_delivery_outbox AS initial
           ON initial.principal_id = cards.principal_id
          AND initial.delivery_id = cards.delivery_id
          AND initial.stage = 'initial'
-        WHERE cards.principal_id = ? AND initial.acknowledged_event_id = ?
-        """,
-        (principal_id, card_event_id),
+        WHERE cards.principal_id = ? AND {selector}
+        """,  # noqa: S608 - selector is chosen from two fixed clauses above
+        (principal_id, selector_value),
     )
     if card is None:
         return RecordedApprovalDecision(resolution=None, recorded=False)
@@ -513,19 +522,30 @@ def resolve_continuation(
     if call is None:
         return RecordedApprovalDecision(resolution=None, recorded=False)
     failure_reason = cast("str | None", continuation["failure_reason"])
+    expired = time.time_ns() >= int(call["expires_at_ns"])
+    if resolution is None and not expired:
+        return RecordedApprovalDecision(resolution=None, recorded=False)
     decision, decision_reason = _effective_continuation_decision(
         requested_status=requested_status,
         requested_reason=reason,
-        expired=time.time_ns() >= int(call["expires_at_ns"]),
+        expired=expired,
         failure_reason=(failure_reason or "Tool approval continuation failed safely.")
         if continuation["state"] == "failing"
         else None,
     )
-    stored_resolution = _resolved_continuation_content(
-        resolution,
-        requested_status=requested_status,
-        decision=decision,
-        reason=decision_reason,
+    stored_resolution = (
+        _terminal_content(
+            _object_json(card["payload_json"], description="approval payload"),
+            status="expired",
+            reason=decision_reason or _TIMEOUT_REASON,
+        )
+        if resolution is None
+        else _resolved_continuation_content(
+            resolution,
+            requested_status=requested_status,
+            decision=decision,
+            reason=decision_reason,
+        )
     )
     decided = transaction.fetchone(
         """
@@ -549,7 +569,10 @@ def resolve_continuation(
         room_id=str(card["room_id"]),
         thread_id=decode_thread_id(str(card["thread_id"])),
         payload=stored_resolution,
-        edits_event_id=card_event_id,
+        edits_event_id=(
+            None if card["acknowledged_event_id"] is None else str(card["acknowledged_event_id"])
+        ),
+        edit_target_pending=card["acknowledged_event_id"] is None,
     )
     transaction.execute(
         """

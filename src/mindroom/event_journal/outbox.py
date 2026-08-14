@@ -71,6 +71,17 @@ def enqueue(
 ) -> str:
     """Record delivery intent, refusing to change an already attempted row."""
     _lock_delivery_stages(transaction, principal_id, delivery_id)
+    if stage is DeliveryStage.FINAL and edit_target_pending:
+        initial = transaction.fetchone(
+            """
+            SELECT acknowledged_event_id FROM matrix_delivery_outbox
+            WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+            """,
+            (principal_id, delivery_id, DeliveryStage.INITIAL.value),
+        )
+        if initial is not None and initial["acknowledged_event_id"] is not None:
+            edits_event_id = str(initial["acknowledged_event_id"])
+            edit_target_pending = False
     transaction_id = delivery_transaction_id(principal_id, delivery_id, stage.value)
     transaction.execute(
         """
