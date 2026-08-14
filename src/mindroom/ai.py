@@ -1766,7 +1766,11 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
                 state.paused_run_event = event
                 if state_updated is not None:
                     state_updated()
-                return
+                # Agno persists the pause before yielding this event, then
+                # finishes its generator on the next iteration. Draining that
+                # final step is load-bearing: closing the generator here sends
+                # it GeneratorExit, which Agno persists as a cancelled run.
+                continue
 
             if isinstance(event, RunErrorEvent):
                 error_text = _run_error_event_text(event)
