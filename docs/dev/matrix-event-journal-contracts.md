@@ -106,8 +106,8 @@ The point refetch, and nothing else.
 Exactly-once is the substance of this contract, and it is durable rather than in-process: `fence_departure(room_id, source=LOCAL|REPORTED)` returns a `DepartureOutcome`, and `rooms_owing_departure_reports` / `retire_owed_departure_reports` carry the owed-report set across a restart.
 An in-process marker was not enough — an advance that raised left the marker set and swallowed the echo, a restart lost it, and two leaves before one echo needed two markers.
 
-An epoch advance drops conversation projections, reconciles approval cards and continuations across their distinct principals, and removes only delivery rows proven unattempted.
-**Attempted** rows survive deliberately: their outcome is unknown, so keeping the frozen payload and its transaction ID means a retry collapses onto the same event instead of posting a second answer.
+An epoch advance drops conversation projections, reconciles approval cards and continuations across their distinct principals, removes delivery rows proven unattempted, and retires fully acknowledged approval deliveries after tombstoning their card event IDs.
+**Attempted but unacknowledged** rows survive deliberately: their outcome is unknown, so keeping the frozen payload and its transaction ID means a retry collapses onto the same event instead of posting a second answer.
 
 The same transaction also **force-settles pending turn-backed events** for that room, clearing `source_json` and `semantic_consumer` while keeping the rows.
 This is what makes the enqueue refusal below *final* rather than permanent: left pending, the worker would offer the source again on every replay, the model would run again, and enqueue would refuse again, forever.
