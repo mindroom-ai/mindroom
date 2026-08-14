@@ -36,6 +36,18 @@ Each row will retain its generic #1837 identity and transport facts and add the 
 
 Response and approval callers will both use `MatrixDeliveryWorker` and `MatrixDeliveryView` without response-specific transport methods or approval-specific send state machines.
 
+### Logical obligations and physical attempts
+
+An approval continuation owns the logical obligation to show one unavailable-owner notice before its sources are released.
+
+One outbox row owns only one physical attempt under one immutable room-membership epoch.
+
+If that attempt becomes stale, its row remains an identity tombstone and the still-live continuation creates a distinct delivery ID for the current membership epoch.
+
+The current membership epoch must be claimed in the same transaction that derives the delivery ID and enqueues the row, so departure cannot put a new epoch behind an old generation name.
+
+Unavailable-owner cleanup receives the exact delivery ID that completed and releases sources only when that generation is acknowledged and still belongs to the router's current membership.
+
 ## Membership and Delivery Transitions
 
 The enqueue transaction will claim the room membership row and freeze the active epoch onto the first delivery stage.
@@ -120,6 +132,7 @@ It will not merge PR #1837 or PR #1836.
 - PR #1836 is based on the latest exact PR #1837 head and its GitHub base names the #1837 branch.
 - No `response_outbox`, `ResponseDelivery`, or approval-specific steady-state send protocol remains in the stacked diff.
 - Responses and approvals share one membership-owned generic delivery state machine.
+- A stale unavailable-owner notice cannot release sources or prevent a current-membership notice generation from completing the logical obligation.
 - Every useful #1836 test is ported or has an explicitly identified generic equivalent.
 - Focused SQLite and PostgreSQL delivery, approval, projection, hydration, recovery, and migration suites pass.
 - Ruff, formatting, Tach, pre-commit, and `git diff --check` pass.

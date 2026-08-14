@@ -73,3 +73,13 @@ The three history-scan tests are retained under exact-delivery names, matching t
 4. Force-push with lease to `fix/fence-delayed-delivery-projection`.
 5. Change PR #1836's base to `refactor/unify-approval-delivery-outbox`.
 6. Verify GitHub reports #1836 open with the intended head/base and no merge action taken.
+
+## Task 8: Preserve retryable unavailable-notice ownership across membership changes
+
+1. Add a failing real-store regression in `tests/test_event_journal_store.py` that acknowledges an unavailable notice under a stale router membership, retries after rejoin, and proves the continuation remains pending until a distinct current-membership notice is acknowledged.
+2. Add a failing transport regression in `tests/test_tool_approval.py` that exercises the same stale-attempt-to-current-generation transition through `ApprovalMatrixTransport`.
+3. Extend `MatrixDeliveryView` and `PrincipalStore` with one enqueue operation that claims the current membership and derives the delivery ID from that epoch in the same transaction.
+4. Make `unavailable_notice_delivery_id` include the membership epoch, and return the exact delivered generation from `_deliver_unavailable_notice` to `discard_unavailable_approval_continuation`.
+5. Keep stale and retired attempts immutable so late echoes remain fenced while the current generation may complete the logical notice obligation.
+6. Port the existing direct unavailable-notice store and recovery tests to the membership-scoped identity without weakening their stale-settlement assertions.
+7. Run the focused SQLite and PostgreSQL store, delivery-worker, and approval-transport suites before the broad affected suite.
