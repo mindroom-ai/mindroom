@@ -512,6 +512,35 @@ class TestRecoveryIsComplete:
         assert recovered == 1
         assert runtime.homeserver.visible_messages == 1
 
+    async def test_one_unreadable_delivery_does_not_block_the_rest(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """Malformed durable payload debt remains owed without starving later rows."""
+        for delivery_id in ("bad", "good"):
+            await runtime.store.enqueue_matrix_delivery(
+                delivery_id=delivery_id,
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": delivery_id},
+            )
+        await runtime.store._backend.write(
+            lambda transaction: transaction.execute(
+                """
+                UPDATE matrix_delivery_outbox SET payload_json = ?
+                WHERE principal_id = ? AND delivery_id = ? AND stage = 'final'
+                """,
+                ("{broken", runtime.store.principal_id, "bad"),
+            ),
+        )
+
+        outcome = await runtime.delivery.recover()
+
+        assert outcome.recovered == 1
+        assert outcome.failed == 1
+        assert runtime.homeserver.room_events == [("good", "$sent0")]
+
 
 class TestModelIsNotRerun:
     """Boundaries five through nine must not spend the model again."""

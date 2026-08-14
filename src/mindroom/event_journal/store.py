@@ -55,6 +55,7 @@ if TYPE_CHECKING:
         RefreshRequest,
         SemanticConsumer,
         TerminalTurnWrite,
+        UnreadableMatrixDelivery,
     )
     from .projection import ProjectedEvent
 
@@ -761,7 +762,7 @@ class PrincipalStore:
         event_type: str = "m.room.message",
         limit: int = _DEFAULT_UNACKNOWLEDGED_LIMIT,
         after: tuple[int, str, str] | None = None,
-    ) -> tuple[MatrixDelivery, ...]:
+    ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first."""
         return await self._backend.read(
             lambda transaction: outbox.unacknowledged(

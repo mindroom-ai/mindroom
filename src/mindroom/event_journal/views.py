@@ -49,6 +49,7 @@ if TYPE_CHECKING:
         RefreshRequest,
         SemanticConsumer,
         TerminalTurnWrite,
+        UnreadableMatrixDelivery,
     )
     from .projection import ProjectedEvent
 
@@ -351,7 +352,7 @@ class MatrixDeliveryView(Protocol):
         event_type: str = "m.room.message",
         limit: int = ...,
         after: tuple[int, str, str] | None = None,
-    ) -> tuple[MatrixDelivery, ...]:
+    ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first."""
         ...
 

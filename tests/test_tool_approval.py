@@ -544,6 +544,48 @@ async def test_startup_recovery_counts_an_unreadable_card_as_failed_debt(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_startup_recovery_drops_a_transport_failure_settled_by_the_same_pass(tmp_path: Path) -> None:
+    """A successful immediate retry must not report delivery debt that is gone."""
+    delivery_id = "approval-card-1"
+    cards = MagicMock()
+    cards.pending_approval_room_ids = AsyncMock(return_value=("!room:localhost",))
+    cards.pending_approval_cards = AsyncMock(
+        return_value=(
+            MagicMock(
+                resolution={"status": "denied"},
+                created_at_ns=1,
+                delivery_id=delivery_id,
+            ),
+        ),
+    )
+    worker = MagicMock()
+    worker.recover = AsyncMock(
+        return_value=MagicMock(
+            failed=1,
+            failed_deliveries=frozenset({(delivery_id, DeliveryStage.FINAL)}),
+        ),
+    )
+    manager = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        send_delivery=AsyncMock(),
+    )
+
+    try:
+        with (
+            patch.object(manager, "_worker", return_value=worker),
+            patch.object(manager, "_expire_stored", new=AsyncMock(return_value=True)),
+        ):
+            sweep = await manager.recover_cards_on_startup()
+
+        assert sweep.discarded == 1
+        assert sweep.failed == 0
+        assert sweep.complete is True
+    finally:
+        await manager.shutdown(reason="test complete")
+
+
+@pytest.mark.asyncio
 async def test_live_resolution_logs_room_context_when_terminal_flush_is_deferred(tmp_path: Path) -> None:
     """A live decision retains enough context to diagnose its retryable terminal debt."""
     room_id = "!room:localhost"

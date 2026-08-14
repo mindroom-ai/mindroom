@@ -906,6 +906,31 @@ async def test_approval_card_scan_reports_absence_only_after_seeing_all_history(
 
 
 @pytest.mark.asyncio
+async def test_approval_card_scan_continues_after_a_filtered_empty_page() -> None:
+    """A continuation token proves an empty filtered page is not exhaustion."""
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response([], end="page-2"),
+            _messages_response(
+                [_approval_card_event("$card:localhost", approval_id="wanted", timestamp=2000)],
+                end=None,
+            ),
+        ],
+    )
+
+    found = await find_approval_card_event_id_via_room_messages(
+        client,
+        _ROOM_ID,
+        card_sender="@router:localhost",
+        approval_id="wanted",
+    )
+
+    assert found == "$card:localhost"
+    assert client.room_messages.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_approval_card_scan_ignores_a_card_another_sender_wrote() -> None:
     """Only this bot's own cards are its to expire."""
     client = AsyncMock()

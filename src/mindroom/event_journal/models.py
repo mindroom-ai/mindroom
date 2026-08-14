@@ -350,6 +350,17 @@ class MatrixDelivery:
 
 
 @dataclass(frozen=True, slots=True)
+class UnreadableMatrixDelivery:
+    """Durable delivery debt whose frozen payload cannot be decoded."""
+
+    delivery_id: str
+    stage: DeliveryStage
+    room_id: str
+    created_at_ns: int
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
 class DeliveryAcknowledgement:
     """What one delivery's row names afterwards, and who put it there.
 

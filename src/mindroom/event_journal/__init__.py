@@ -51,6 +51,7 @@ from .models import (
     RefreshRequest,
     SemanticConsumer,
     TerminalTurnWrite,
+    UnreadableMatrixDelivery,
     VisibleMessage,
 )
 from .projection import ProjectedEvent, replacement_target, thread_root, visible_content
@@ -118,6 +119,7 @@ __all__ = [
     "TerminalTurnWrite",
     "TurnRecordStore",
     "UnreadableApprovalCard",
+    "UnreadableMatrixDelivery",
     "VisibleMessage",
     "decode_thread_id",
     "delivery_transaction_id",

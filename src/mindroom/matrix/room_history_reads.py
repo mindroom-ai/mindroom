@@ -364,7 +364,7 @@ async def find_approval_card_event_id_via_room_messages(
             event_source = event.source if isinstance(event.source, dict) else {}
             if _is_approval_card_for(event_source, card_sender=card_sender, approval_id=approval_id):
                 return event.event_id
-        if not response.chunk or not response.end:
+        if not response.end:
             return None
         if response.end in seen_pagination_tokens:
             msg = f"approval card room scan repeated pagination token for {room_id}"

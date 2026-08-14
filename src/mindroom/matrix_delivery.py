@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.event_journal.models import DeliveryStage
+from mindroom.event_journal.models import DeliveryStage, UnreadableMatrixDelivery
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -73,6 +73,7 @@ class RecoveryOutcome:
 
     recovered: int
     failed: int
+    failed_deliveries: frozenset[tuple[str, DeliveryStage]] = field(default_factory=frozenset, compare=False)
 
     @property
     def complete(self) -> bool:
@@ -493,7 +494,7 @@ class MatrixDeliveryWorker:
         answers a user is waiting for.
         """
         recovered = 0
-        failed = 0
+        failed_deliveries: set[tuple[str, DeliveryStage]] = set()
         # A failure leaves the row unacknowledged, so it stays in the query's
         # window. Filtering it in memory is not enough: a whole page of
         # failures would be re-read forever and everything behind it starved.
@@ -502,9 +503,23 @@ class MatrixDeliveryWorker:
         while True:
             batch = await self.store.unacknowledged_matrix_deliveries(event_type=self.event_type, after=cursor)
             if not batch:
-                return RecoveryOutcome(recovered=recovered, failed=failed)
+                return RecoveryOutcome(
+                    recovered=recovered,
+                    failed=len(failed_deliveries),
+                    failed_deliveries=frozenset(failed_deliveries),
+                )
             cursor = (batch[-1].created_at_ns, batch[-1].delivery_id, batch[-1].stage.value)
             for delivery in batch:
+                if isinstance(delivery, UnreadableMatrixDelivery):
+                    logger.error(
+                        "matrix_delivery_row_unreadable",
+                        delivery_id=delivery.delivery_id,
+                        stage=delivery.stage.value,
+                        room_id=delivery.room_id,
+                        error=delivery.error,
+                    )
+                    failed_deliveries.add((delivery.delivery_id, delivery.stage))
+                    continue
                 try:
                     async with self._delivery_lock(delivery.delivery_id):
                         outcome = await self._flush(delivery_id=delivery.delivery_id, stage=delivery.stage)
@@ -518,11 +533,11 @@ class MatrixDeliveryWorker:
                     )
                     # Left unacknowledged deliberately: a later recovery pass
                     # picks it up again, while this pass moves on to the rest.
-                    failed += 1
+                    failed_deliveries.add((delivery.delivery_id, delivery.stage))
                     continue
                 if sent is None:
                     if outcome.retry_required:
-                        failed += 1
+                        failed_deliveries.add((delivery.delivery_id, delivery.stage))
                         continue
                     # The row went away behind a membership fence, or a
                     # FINAL superseded this INITIAL. Nothing is owed and

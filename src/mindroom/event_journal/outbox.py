@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
 
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
-from .models import DeliveryStage, MatrixDelivery
+from .models import DeliveryStage, MatrixDelivery, UnreadableMatrixDelivery
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -328,7 +328,7 @@ def unacknowledged(
     limit: int,
     event_type: str,
     after: tuple[int, str, str] | None = None,
-) -> tuple[MatrixDelivery, ...]:
+) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
     """Return deliveries that may or may not have reached Matrix, oldest first.
 
     ``after`` resumes past a row already visited, in the same order the scan
@@ -352,7 +352,7 @@ def unacknowledged(
         """,  # noqa: S608 - a fixed column list and a fixed clause, not input
         (principal_id, event_type, *cursor_params, limit),
     )
-    return tuple(_delivery(row) for row in rows)
+    return tuple(_recovery_delivery(row) for row in rows)
 
 
 def has_attempted_unacknowledged_prompt_delivery(
@@ -416,3 +416,17 @@ def _delivery(row: Row) -> MatrixDelivery:
         attempted=bool(row["attempted"]),
         sending_device_id=row["sending_device_id"],
     )
+
+
+def _recovery_delivery(row: Row) -> MatrixDelivery | UnreadableMatrixDelivery:
+    """Decode one recovery row without hiding later durable debt behind it."""
+    try:
+        return _delivery(row)
+    except (json.JSONDecodeError, TypeError) as exc:
+        return UnreadableMatrixDelivery(
+            delivery_id=str(row["delivery_id"]),
+            stage=DeliveryStage(row["stage"]),
+            room_id=str(row["room_id"]),
+            created_at_ns=int(row["created_at_ns"]),
+            error=str(exc),
+        )

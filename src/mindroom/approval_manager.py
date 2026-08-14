@@ -622,9 +622,10 @@ class _ApprovalManager:
         if self.cards is None or self.send_delivery is None:
             return _ApprovalStartupSweep(discarded=0, failed=1)
         outcome = await self._worker().recover()
+        transport_failures = set(outcome.failed_deliveries)
         scanned = 0
         retired = 0
-        failed = outcome.failed
+        failed = outcome.failed - len(transport_failures)
         for room_id in await self.cards.pending_approval_room_ids():
             cursor: tuple[int, str] | None = None
             while True:
@@ -639,12 +640,24 @@ class _ApprovalManager:
                 for stored in page:
                     scanned += 1
                     settled = await self._settle_startup_card(room_id, stored)
-                    retired += int(settled is True)
-                    failed += int(settled is False)
+                    had_transport_failure = any(
+                        delivery_id == stored.delivery_id for delivery_id, _stage in transport_failures
+                    )
+                    if settled is True:
+                        transport_failures = {
+                            delivery for delivery in transport_failures if delivery[0] != stored.delivery_id
+                        }
+                        retired += 1
+                    elif settled is False and not had_transport_failure:
+                        failed += 1
                 if len(page) < _STARTUP_RECOVERY_SCAN_PAGE:
                     break
         self._ensure_deadline_sweep()
-        return _ApprovalStartupSweep(discarded=retired, failed=failed, scanned=scanned)
+        return _ApprovalStartupSweep(
+            discarded=retired,
+            failed=failed + len(transport_failures),
+            scanned=scanned,
+        )
 
     def _ensure_deadline_sweep(self) -> None:
         if self._deadline_task is None or self._deadline_task.done():
