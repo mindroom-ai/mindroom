@@ -4299,3 +4299,11 @@ def test_required_scope_check_accepts_refresh_token_for_offline_access() -> None
         provider,
         {"scopes": ["scope.read"]},
     )
+    assert not oauth_service.oauth_credentials_have_required_scopes(
+        provider,
+        {"refresh_token": "refresh-token"},
+    )
+    assert not oauth_service.oauth_credentials_have_required_scopes(
+        provider,
+        {"scopes": ["scope.read"], "refresh_token": ""},
+    )

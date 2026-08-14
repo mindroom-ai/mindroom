@@ -576,8 +576,7 @@ def oauth_credentials_have_scopes(
 def oauth_credentials_have_required_scopes(provider: OAuthProvider, credentials: dict[str, object]) -> bool:
     """Return whether stored credentials include every provider-required scope."""
     required_scopes = set(provider.scopes)
-    refresh_token = credentials.get("refresh_token")
-    if isinstance(refresh_token, str) and refresh_token:
+    if _refresh_token_value(credentials) is not None:
         required_scopes.discard("offline_access")
     return oauth_credentials_have_scopes(credentials, required_scopes)
 
