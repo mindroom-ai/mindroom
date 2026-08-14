@@ -847,6 +847,38 @@ class TestEditReduction:
 class TestRedaction:
     """Deleted content stops being readable in the transaction that admits it."""
 
+    @pytest.mark.parametrize("source_first", [True, False], ids=["source-first", "redaction-first"])
+    async def test_tombstoned_pending_turn_source_is_terminal(
+        self,
+        alice: PrincipalStore,
+        *,
+        source_first: bool,
+    ) -> None:
+        """Either admission order retires the source without removing its dedup proof."""
+        if not source_first:
+            await admit(alice, "$redaction", ts=2_000, redacts="$source", kind=EventKind.REDACTION)
+        await admit(alice, "$source", content=text("secret"))
+        if source_first:
+            await admit(alice, "$redaction", ts=2_000, redacts="$source", kind=EventKind.REDACTION)
+
+        assert not await alice.is_pending("$source")
+        settled_source = await alice.load_event("$source")
+        assert settled_source is not None
+        assert settled_source.source == {}
+        assert settled_source.semantic_consumer is None
+        assert [event.event_id for event in await alice.pending()] == ["$redaction"]
+        assert await bodies(alice) == []
+
+    async def test_redaction_settlement_leaves_other_pending_work_unchanged(self, alice: PrincipalStore) -> None:
+        """Only a matching turn-backed source becomes terminal."""
+        await admit(alice, "$unrelated")
+        reaction, _ = message("$reaction", kind=EventKind.REACTION)
+        await alice.admit(reaction, None)
+
+        await admit(alice, "$redaction", ts=2_000, redacts="$reaction", kind=EventKind.REDACTION)
+
+        assert [event.event_id for event in await alice.pending()] == ["$unrelated", "$reaction", "$redaction"]
+
     async def test_redacting_the_original_removes_the_message(self, alice: PrincipalStore) -> None:
         """Redacting the original removes the message."""
         await admit(alice, "$original", content=text("secret"))
