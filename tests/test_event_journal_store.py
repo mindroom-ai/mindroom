@@ -165,8 +165,8 @@ def _install_legacy_delivery_state(connection: object, *, postgres: bool) -> Non
             "response-txn",
             json.dumps({"body": "frozen response", "msgtype": "m.text"}),
             None,
-            1,
-            DEVICE,
+            0,
+            None,
             None,
             10,
         ),
@@ -188,8 +188,8 @@ def _install_legacy_delivery_state(connection: object, *, postgres: bool) -> Non
                 f"unavailable-txn-{approval_id}",
                 json.dumps({"body": f"{approval_id} unavailable", "msgtype": "m.notice"}),
                 None,
-                1,
-                DEVICE,
+                int(event_id is not None),
+                DEVICE if event_id is not None else None,
                 event_id,
                 created_at_ns,
             ),
@@ -336,18 +336,12 @@ def _install_legacy_delivery_state(connection: object, *, postgres: bool) -> Non
 
 
 async def _assert_legacy_delivery_state_migrated(store: EventJournalStore) -> None:
-    """Assert response debt survives while legacy approval debt expires closed."""
+    """Assert ambiguous unsent debt is dropped while exact approval debt expires closed."""
     response = await store.principal("agent@alice").load_matrix_delivery(
         delivery_id="$response",
         stage=DeliveryStage.FINAL,
     )
-    assert response is not None
-    assert response.event_type == "m.room.message"
-    assert response.transaction_id == "response-txn"
-    assert response.payload["body"] == "frozen response"
-    assert response.attempted is True
-    assert response.sending_device_id == DEVICE
-    assert response.acknowledged_event_id is None
+    assert response is None
 
     await _assert_legacy_unavailable_notices_migrated(store)
 
@@ -391,8 +385,12 @@ async def _assert_legacy_delivery_state_migrated(store: EventJournalStore) -> No
 
 async def _assert_legacy_unavailable_notices_migrated(store: EventJournalStore) -> None:
     """Legacy unavailable-owner notice IDs remain valid generic delivery IDs."""
+    missing = await store.principal("router@shared").load_matrix_delivery(
+        delivery_id="approval-unavailable:approval-1",
+        stage=DeliveryStage.FINAL,
+    )
+    assert missing is None
     for response_event_id, delivery_id, event_id in (
-        ("$waiting", "approval-unavailable:approval-1", None),
         ("$waiting-acknowledged", "approval-unavailable:approval-2", "$unavailable-notice"),
     ):
         notice = await store.principal("router@shared").load_matrix_delivery(
@@ -402,6 +400,7 @@ async def _assert_legacy_unavailable_notices_migrated(store: EventJournalStore) 
         assert notice is not None
         assert notice.transaction_id == f"unavailable-txn-{delivery_id.removeprefix('approval-unavailable:')}"
         assert notice.attempted is True
+        assert notice.retired is True
         assert notice.sending_device_id == DEVICE
         assert notice.acknowledged_event_id == event_id
         assert (
@@ -411,6 +410,43 @@ async def _assert_legacy_unavailable_notices_migrated(store: EventJournalStore) 
             )
             is None
         )
+
+
+async def _create_pre_membership_delivery(store: EventJournalStore, *, attempted: bool) -> None:
+    """Create one #1837-style row before membership ownership became required."""
+    alice = store.principal("agent@alice")
+    await admit(alice, "$migration-source")
+    assert (
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$migration-source",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("migrated answer"),
+        )
+        is not None
+    )
+    if attempted:
+        assert (
+            await alice.claim_matrix_delivery(
+                delivery_id="$migration-source",
+                stage=DeliveryStage.FINAL,
+            )
+            is not None
+        )
+
+
+def _downgrade_delivery_membership(connection: object, *, postgres: bool) -> None:
+    """Remove the stacked columns and marker, yielding the exact #1837 schema."""
+    execute = cast("Any", connection).execute
+    execute("DROP INDEX IF EXISTS matrix_delivery_outbox_unacknowledged_scan")
+    placeholder = "%s" if postgres else "?"
+    execute(
+        f"UPDATE matrix_delivery_outbox SET payload_json = {placeholder}",  # noqa: S608 - backend placeholder only
+        (json.dumps(text("migrated answer")),),
+    )
+    execute("ALTER TABLE matrix_delivery_outbox DROP COLUMN retired")
+    execute("ALTER TABLE matrix_delivery_outbox DROP COLUMN membership_epoch")
 
 
 # How long a claimer that is already inside its transaction waits for a second
@@ -1380,6 +1416,7 @@ class TestRedaction:
             request,
             revision_event_id="$original",
             revision_ts=1_000,
+            revision_sender="alice",
             content=text("first"),
         )
 
@@ -1415,6 +1452,7 @@ class TestRedaction:
             request,
             revision_event_id="$e1",
             revision_ts=2_000,
+            revision_sender="alice",
             content=text("first edit"),
         )
 
@@ -1434,6 +1472,7 @@ class TestRedaction:
             stale_request,
             revision_event_id="$original",
             revision_ts=1_000,
+            revision_sender="alice",
             content=text("first"),
         )
 
@@ -2064,6 +2103,293 @@ class TestProjectedInteractivePrompts:
             thread_id="$thread",
         )
 
+    async def test_delivery_acknowledgement_after_departure_does_not_restore_old_projection(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """An attempted old-membership delivery may settle without repopulating history."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        content = text("Old membership answer")
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=content,
+        )
+        await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+
+        acknowledgement = await alice.acknowledge_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            event_id="$answer",
+            delivered_projections=(
+                projection("$answer", thread_id="$thread", sender="alice", ts=2_000, content=content),
+            ),
+            terminal_turn=TerminalTurnWrite(
+                agent_name="general",
+                index_event_ids=("$turn",),
+                anchor_event_id="$turn",
+                record_json=json.dumps({"response_event_id": "$answer"}),
+            ),
+        )
+        await alice.note_membership_restarted(ROOM)
+
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$answer", bound=True)
+        assert await bodies(alice, thread_id="$thread") == []
+        records = await journal_store.turn_records("general").load_all()
+        assert [json.loads(record_json)["response_event_id"] for _, _, record_json in records] == ["$answer"]
+
+    async def test_source_less_delivery_keeps_the_membership_epoch_it_was_enqueued_under(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A scheduled or hook-authored delivery cannot adopt a later membership at ACK."""
+        content = text("Source-less old answer")
+        await alice.enqueue_matrix_delivery(
+            delivery_id="scheduled-turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=content,
+        )
+        await alice.claim_matrix_delivery(delivery_id="scheduled-turn", stage=DeliveryStage.FINAL)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        acknowledgement = await alice.acknowledge_matrix_delivery(
+            delivery_id="scheduled-turn",
+            stage=DeliveryStage.FINAL,
+            event_id="$answer",
+            delivered_projections=(projection("$answer", sender="alice", ts=2_000, content=content),),
+        )
+
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$answer", bound=True)
+        assert await bodies(alice) == []
+
+    async def test_delivery_marker_fences_an_old_device_echo_without_a_transaction_id(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The frozen payload identifies a stale echo after Matrix loses device-local proof."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="scheduled-turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("scheduled"),
+        )
+        stored = await alice.load_matrix_delivery(delivery_id="scheduled-turn", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        await alice.claim_matrix_delivery(delivery_id="scheduled-turn", stage=DeliveryStage.FINAL)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        await admit(
+            alice,
+            "$old-device-event",
+            sender="alice",
+            content=stored.payload,
+            event_class=EventClass.CONTEXT_ONLY,
+        )
+
+        assert await bodies(alice) == []
+
+    async def test_a_retired_delivery_still_fences_its_late_echo_and_ack(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Retirement stops recovery without deleting the old membership's identity."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="scheduled-turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("scheduled"),
+        )
+        stored = await alice.load_matrix_delivery(delivery_id="scheduled-turn", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        await alice.claim_matrix_delivery(delivery_id="scheduled-turn", stage=DeliveryStage.FINAL)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        assert (
+            await alice.retire_matrix_delivery(
+                delivery_id="scheduled-turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                membership_epoch=0,
+            )
+            is None
+        )
+        retired = await alice.load_matrix_delivery(delivery_id="scheduled-turn", stage=DeliveryStage.FINAL)
+        assert retired is not None
+        assert retired.retired
+
+        await admit(
+            alice,
+            "$late-echo",
+            sender="alice",
+            content=stored.payload,
+            event_class=EventClass.CONTEXT_ONLY,
+        )
+        acknowledgement = await alice.acknowledge_matrix_delivery(
+            delivery_id="scheduled-turn",
+            stage=DeliveryStage.FINAL,
+            event_id="$late-echo",
+            delivered_projections=(projection("$late-echo", sender="alice", ts=2_000, content=stored.payload),),
+        )
+
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$late-echo", bound=True)
+        assert await bodies(alice) == []
+
+    async def test_retiring_an_edit_removes_an_echo_that_won_the_race(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Retirement reconciles an edit projected after its absence scan."""
+        await admit(alice, "$target", sender="alice", content=text("Thinking..."), ts=1_000)
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=edit("$target", "old answer"),
+            edits_event_id="$target",
+        )
+        stored = await alice.load_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+
+        await admit(
+            alice,
+            "$physical-edit",
+            sender="alice",
+            content=stored.payload,
+            event_class=EventClass.CONTEXT_ONLY,
+            ts=2_000,
+        )
+        assert await bodies(alice) == ["old answer"]
+
+        assert (
+            await alice.retire_matrix_delivery(
+                delivery_id="$turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                membership_epoch=0,
+            )
+            is None
+        )
+        assert await bodies(alice) == []
+
+    async def test_delivery_marker_does_not_claim_another_matrix_senders_copy(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only this principal's Matrix sender can assert its delivery identity."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="scheduled-turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("copied answer"),
+        )
+        stored = await alice.load_matrix_delivery(delivery_id="scheduled-turn", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        await alice.claim_matrix_delivery(delivery_id="scheduled-turn", stage=DeliveryStage.FINAL)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        await admit(
+            alice,
+            "$foreign-copy",
+            sender=BOB,
+            content=stored.payload,
+            event_class=EventClass.CONTEXT_ONLY,
+        )
+
+        assert await bodies(alice) == ["copied answer"]
+
+    async def test_delivery_marker_does_not_claim_a_same_sender_copy_in_another_room(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A room-local delivery owner says nothing about the bot's event elsewhere."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="scheduled-turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("copied answer"),
+        )
+        stored = await alice.load_matrix_delivery(delivery_id="scheduled-turn", stage=DeliveryStage.FINAL)
+        assert stored is not None
+
+        await admit(
+            alice,
+            "$other-room-copy",
+            room_id=OTHER_ROOM,
+            sender="alice",
+            content=stored.payload,
+            event_class=EventClass.CONTEXT_ONLY,
+        )
+
+        page = await alice.read_conversation(room_id=OTHER_ROOM, thread_id=None, limit=50)
+        assert [message.content["body"] for message in page.messages] == ["copied answer"]
+
+    @pytest.mark.parametrize("echo_before_ack", [False, True])
+    async def test_stale_delivery_echo_cannot_restore_a_rejoined_membership(
+        self,
+        alice: PrincipalStore,
+        *,
+        echo_before_ack: bool,
+    ) -> None:
+        """ACK and sync-echo ordering cannot revive an old-membership prompt."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        content = interactive_prompt("Old?", "old", source_event_id="$turn")
+        assert (
+            await alice.enqueue_matrix_delivery(
+                delivery_id="$turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id="$thread",
+                payload=content,
+            )
+            is not None
+        )
+        stored = await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        async def admit_echo() -> None:
+            inbound, projected = message(
+                "$prompt",
+                sender="alice",
+                thread_id="$thread",
+                ts=2_000,
+                content=stored.payload,
+                event_class=EventClass.CONTEXT_ONLY,
+            )
+            await alice.admit(inbound, replace(projected, transaction_id=stored.transaction_id))
+
+        if echo_before_ack:
+            await admit_echo()
+            assert await bodies(alice, thread_id="$thread") == []
+        acknowledgement = await alice.acknowledge_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            event_id="$prompt",
+            delivered_projections=(),
+        )
+        if not echo_before_ack:
+            await admit_echo()
+
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$prompt", bound=True)
+        assert await bodies(alice, thread_id="$thread") == []
+
     async def test_interactive_source_waits_for_an_attempted_delivery_to_be_projected(
         self,
         alice: PrincipalStore,
@@ -2091,6 +2417,53 @@ class TestProjectedInteractivePrompts:
             await alice.admit(reaction)
 
         assert await alice.load_event("$reaction") is None
+
+    async def test_old_prompt_delivery_does_not_park_a_current_reaction(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only unprojected prompts from the source's membership can delay its claim."""
+        await admit(alice, "$old-turn", sender=BOB, thread_id="$thread")
+        assert (
+            await alice.enqueue_matrix_delivery(
+                delivery_id="$old-turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id="$thread",
+                payload=interactive_prompt("Old?", "old", source_event_id="$old-turn"),
+            )
+            is not None
+        )
+        assert (
+            await alice.claim_matrix_delivery(
+                delivery_id="$old-turn",
+                stage=DeliveryStage.FINAL,
+            )
+            is not None
+        )
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        await admit(alice, "$current-turn", sender=BOB, thread_id="$thread")
+        await admit(
+            alice,
+            "$current-prompt",
+            sender="alice",
+            thread_id="$thread",
+            content=interactive_prompt("Current?", "current", source_event_id="$current-turn"),
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$current-prompt", "1"),
+            thread_id="$thread",
+        )
+
+        selection = await alice.claim_interactive_reaction(source_event_id="$reaction")
+        assert selection is not None
+        assert (selection.question_text, selection.selected_value) == ("Current?", "current")
 
     async def test_approval_edit_debt_does_not_block_interactive_source_admission(
         self,
@@ -2622,6 +2995,7 @@ class TestProjectedInteractivePrompts:
             request,
             revision_event_id="$target",
             revision_ts=1_000,
+            revision_sender="alice",
             content=original,
         )
         await admit(
@@ -2668,6 +3042,7 @@ class TestProjectedInteractivePrompts:
             request,
             revision_event_id="$target",
             revision_ts=1_000,
+            revision_sender="alice",
             content=original,
         )
         await admit(
@@ -2685,6 +3060,247 @@ class TestProjectedInteractivePrompts:
             )
             is None
         )
+
+    @pytest.mark.parametrize("ack_before_refetch", [False, True])
+    async def test_refetch_discards_a_delivery_from_an_older_membership(
+        self,
+        alice: PrincipalStore,
+        *,
+        ack_before_refetch: bool,
+    ) -> None:
+        """Server fallback cannot restore an edit owned by an old membership."""
+        await admit(alice, "$turn", sender=BOB)
+        old_edit = edit("$target", "Old membership")
+        assert (
+            await alice.enqueue_matrix_delivery(
+                delivery_id="$turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload=old_edit,
+                edits_event_id="$target",
+            )
+            is not None
+        )
+        stored = await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        await admit(alice, "$target", sender="alice", content=text("Current membership"))
+        await admit(alice, "$new-edit", sender="alice", ts=3_000, content=edit("$target", "New edit"))
+        epoch = await alice.membership_epoch(ROOM)
+        assert await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(),
+            complete=True,
+            expected_membership_epoch=epoch,
+        )
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+        if ack_before_refetch:
+            await alice.acknowledge_matrix_delivery(
+                delivery_id="$turn",
+                stage=DeliveryStage.FINAL,
+                event_id="$old-edit",
+                delivered_projections=(),
+            )
+        await admit(alice, "$redaction", ts=4_000, kind=EventKind.REDACTION, redacts="$new-edit")
+        request = (await refreshes(alice))[0]
+
+        installed = await alice.install_refetched_revision(
+            request,
+            revision_event_id="$old-edit",
+            revision_ts=2_000,
+            revision_sender="alice",
+            revision_transaction_id=stored.transaction_id,
+            content=text("Old membership"),
+        )
+
+        assert installed
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+        assert page.messages == ()
+        assert page.refresh_pending == ()
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+    async def test_marker_fences_a_refetched_edit_without_a_device_transaction(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The stable marker survives reduction to an edit's replacement content."""
+        await admit(alice, "$turn", sender=BOB)
+        old_edit = edit("$target", "Old membership")
+        assert (
+            await alice.enqueue_matrix_delivery(
+                delivery_id="$turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload=old_edit,
+                edits_event_id="$target",
+            )
+            is not None
+        )
+        stored = await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        replacement = cast("dict[str, object]", stored.payload["m.new_content"])
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        await admit(alice, "$target", sender="alice", content=text("Current membership"))
+        await admit(alice, "$new-edit", sender="alice", ts=3_000, content=edit("$target", "New edit"))
+        await admit(alice, "$redaction", ts=4_000, kind=EventKind.REDACTION, redacts="$new-edit")
+        request = (await refreshes(alice))[0]
+
+        installed = await alice.install_refetched_revision(
+            request,
+            revision_event_id="$old-edit",
+            revision_ts=2_000,
+            revision_sender="alice",
+            content=replacement,
+        )
+
+        assert installed
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+        assert page.messages == ()
+        assert page.refresh_pending == ()
+
+    async def test_stale_ack_invalidates_hydration_after_discarding_an_edit(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Deleting a stale revision also revokes its reconstruction proof."""
+        await admit(alice, "$turn", sender=BOB)
+        old_edit = edit("$target", "Old membership")
+        assert (
+            await alice.enqueue_matrix_delivery(
+                delivery_id="$turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload=old_edit,
+                edits_event_id="$target",
+            )
+            is not None
+        )
+        assert await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL) is not None
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+        epoch = await alice.membership_epoch(ROOM)
+        assert await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(
+                projection("$target", sender="alice", content=text("Base message")),
+                projection("$old-edit", sender="alice", ts=2_000, content=old_edit),
+            ),
+            complete=True,
+            expected_membership_epoch=epoch,
+        )
+        assert await bodies(alice) == ["Old membership"]
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+        await alice.acknowledge_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            event_id="$old-edit",
+            delivered_projections=(),
+        )
+
+        assert await bodies(alice) == []
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+    async def test_refetch_and_stale_ack_serialize_before_reinstalling_a_revision(
+        self,
+        rival_stores: RivalStores,
+    ) -> None:
+        """A refetch cannot publish after an ACK has already discarded its owner."""
+        principal_id = "agent@alice"
+        refetch_store = rival_stores.first.principal(principal_id)
+        ack_store = rival_stores.second.principal(principal_id)
+        await admit(refetch_store, "$turn", sender=BOB)
+        old_edit = edit("$target", "Old membership")
+        assert (
+            await refetch_store.enqueue_matrix_delivery(
+                delivery_id="$turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload=old_edit,
+                edits_event_id="$target",
+            )
+            is not None
+        )
+        assert (
+            await refetch_store.claim_matrix_delivery(
+                delivery_id="$turn",
+                stage=DeliveryStage.FINAL,
+            )
+            is not None
+        )
+        await refetch_store.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await refetch_store.note_membership_restarted(ROOM)
+        await admit(refetch_store, "$target", sender="alice", content=text("Current membership"))
+        await admit(refetch_store, "$new-edit", sender="alice", ts=3_000, content=edit("$target", "New edit"))
+        await admit(refetch_store, "$redaction", ts=4_000, kind=EventKind.REDACTION, redacts="$new-edit")
+        request = (await refreshes(refetch_store))[0]
+
+        ownership_claimed = threading.Event()
+        release_refetch = threading.Event()
+
+        def pause_after_membership_claim() -> None:
+            ownership_claimed.set()
+            assert release_refetch.wait(_WORKER_WAIT_SECONDS), "the refetch transaction was never released"
+
+        racing_refetch = EventJournalStore(
+            backend=_PausingBackend(
+                rival_stores.first.backend,
+                pause_after_membership_claim,
+                statement_matches=lambda sql: "INSERT INTO room_membership" in sql,
+            ),
+        ).principal(principal_id)
+        refetch = asyncio.create_task(
+            racing_refetch.install_refetched_revision(
+                request,
+                revision_event_id="$old-edit",
+                revision_ts=2_000,
+                revision_sender="alice",
+                content=text("Old membership"),
+            ),
+        )
+        await asyncio.to_thread(ownership_claimed.wait, _WORKER_WAIT_SECONDS)
+        assert ownership_claimed.is_set(), "the refetch never claimed the membership row"
+
+        acknowledgement = asyncio.create_task(
+            ack_store.acknowledge_matrix_delivery(
+                delivery_id="$turn",
+                stage=DeliveryStage.FINAL,
+                event_id="$old-edit",
+                delivered_projections=(),
+            ),
+        )
+        queued = asyncio.create_task(
+            _await_queued_racers(
+                rival_stores.database_url,
+                application_name=rival_stores.racer_application_name,
+                expected=1,
+            ),
+        )
+        done, _pending = await asyncio.wait((acknowledgement, queued), return_when=asyncio.FIRST_COMPLETED)
+        acknowledgement_waited = queued in done and queued.exception() is None
+        release_refetch.set()
+        if not queued.done():
+            queued.cancel()
+            with suppress(asyncio.CancelledError):
+                await queued
+        installed, acknowledged = await asyncio.gather(refetch, acknowledgement)
+
+        assert acknowledgement_waited, "acknowledgement bypassed the refetch membership claim"
+        assert installed
+        assert acknowledged == DeliveryAcknowledgement(settled_event_id="$old-edit", bound=True)
+        page = await refetch_store.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+        assert page.messages == ()
+        assert page.refresh_pending == ()
 
     async def test_dropping_a_refetched_message_removes_its_prompt_from_discovery(
         self,
@@ -3113,10 +3729,9 @@ class TestInteractiveQuestionConsumption:
 class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
     """A turn that outlived its membership must not answer into the next one.
 
-    The fence deletes what the previous membership derived. Without this it
-    would then write some of it straight back: a turn still running when the
-    fence committed reaches enqueue afterwards, and the fence has been and
-    gone.
+    The fence retires what the previous membership derived. Without this a
+    turn still running when the fence committed could write some of it straight
+    back after the fence had been and gone.
     """
 
     async def test_a_turn_admitted_under_an_ended_membership_cannot_enqueue(
@@ -3133,6 +3748,25 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
             room_id=ROOM,
             thread_id=None,
             payload=text("answer"),
+        )
+
+        assert transaction_id is None
+        assert await alice.load_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL) is None
+
+    async def test_an_admitted_turn_cannot_borrow_another_rooms_equal_epoch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Membership epochs are room-local and cannot prove the target room."""
+        await admit(alice, "$turn", room_id=ROOM)
+
+        assert not await alice.turn_membership_is_current(turn_id="$turn", room_id=OTHER_ROOM)
+        transaction_id = await alice.enqueue_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=OTHER_ROOM,
+            thread_id=None,
+            payload=text("misrouted answer"),
         )
 
         assert transaction_id is None
@@ -3168,11 +3802,11 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
         assert claimed is None
         assert await alice.pending() == ()
 
-    async def test_an_unattempted_row_enqueued_before_the_fence_is_deleted_by_it(
+    async def test_an_unattempted_row_enqueued_before_the_fence_is_retired_by_it(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """Enqueue first, then fence: the row goes with the membership."""
+        """Enqueue first, then fence: the row remains only as its old owner."""
         await admit(alice, "$turn")
         assert (
             await alice.enqueue_matrix_delivery(
@@ -3187,7 +3821,9 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
 
         await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
-        assert await alice.load_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL) is None
+        retired = await alice.load_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+        assert retired is not None
+        assert retired.retired
 
     async def test_an_attempted_row_still_retries_after_a_fence_under_its_first_transaction(
         self,
@@ -3227,16 +3863,19 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
         assert claimed.transaction_id == first
         assert claimed.payload["body"] == "answer"
 
-    async def test_a_turn_the_journal_never_admitted_still_enqueues(self, alice: PrincipalStore) -> None:
-        """A scheduled task is not a turn a membership authorized.
-
-        There is no admission behind it and so no previous membership for its
-        work to belong to. Refusing it would silence scheduled delivery in
-        every room the bot has ever left and rejoined.
-        """
+    async def test_source_less_delivery_waits_for_an_active_membership(self, alice: PrincipalStore) -> None:
+        """A schedule may deliver after rejoin, but not while no membership owns it."""
         await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
-        transaction_id = await alice.enqueue_matrix_delivery(
+        while_departed = await alice.enqueue_matrix_delivery(
+            delivery_id="scheduled-task-7",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("reminder"),
+        )
+        await alice.note_membership_restarted(ROOM)
+        after_rejoin = await alice.enqueue_matrix_delivery(
             delivery_id="scheduled-task-7",
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
@@ -3244,7 +3883,36 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
             payload=text("reminder"),
         )
 
-        assert transaction_id is not None
+        assert while_departed is None
+        assert after_rejoin is not None
+
+    async def test_source_less_delivery_stages_share_one_membership(self, alice: PrincipalStore) -> None:
+        """A final edit cannot adopt a later membership than its placeholder."""
+        assert (
+            await alice.enqueue_matrix_delivery(
+                delivery_id="scheduled-task-7",
+                stage=DeliveryStage.INITIAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload=text("Thinking..."),
+            )
+            is not None
+        )
+        await alice.claim_matrix_delivery(delivery_id="scheduled-task-7", stage=DeliveryStage.INITIAL)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        final = await alice.enqueue_matrix_delivery(
+            delivery_id="scheduled-task-7",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("reminder"),
+            edits_event_id="$placeholder",
+        )
+
+        assert final is None
+        assert await alice.load_matrix_delivery(delivery_id="scheduled-task-7", stage=DeliveryStage.FINAL) is None
 
     async def test_a_turn_under_the_current_membership_enqueues(self, alice: PrincipalStore) -> None:
         """The ordinary case still delivers."""
@@ -3259,6 +3927,57 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
         )
 
         assert transaction_id == delivery_transaction_id("agent@alice", "$turn", "final")
+
+    async def test_source_less_transport_keeps_its_outbox_membership_after_rejoin(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A stream without a journal source still stops with its frozen owner."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="scheduled-stream",
+            stage=DeliveryStage.INITIAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("Thinking..."),
+        )
+        assert await alice.turn_membership_is_current(turn_id="scheduled-stream", room_id=ROOM)
+
+        await alice.claim_matrix_delivery(delivery_id="scheduled-stream", stage=DeliveryStage.INITIAL)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        assert not await alice.turn_membership_is_current(turn_id="scheduled-stream", room_id=ROOM)
+
+    async def test_departure_retires_an_unclaimed_source_less_stream_owner(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A fence cannot erase the INITIAL owner before transport claims it."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="scheduled-stream",
+            stage=DeliveryStage.INITIAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("Thinking..."),
+        )
+
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        initial = await alice.load_matrix_delivery(delivery_id="scheduled-stream", stage=DeliveryStage.INITIAL)
+        assert initial is not None
+        assert initial.retired
+        assert not await alice.turn_membership_is_current(turn_id="scheduled-stream", room_id=ROOM)
+        assert (
+            await alice.enqueue_matrix_delivery(
+                delivery_id="scheduled-stream",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload=text("Done"),
+            )
+            is None
+        )
 
     async def test_in_flight_transport_learns_the_membership_ended(self, alice: PrincipalStore) -> None:
         """Streaming edits never reach the outbox, so they ask this directly."""
@@ -3342,7 +4061,7 @@ class TestDepartureBookkeeping:
 class TestByteOrderPinning:
     """Ordering that a cursor depends on must not vary with the server locale."""
 
-    def test_the_cursor_comparison_is_pinned_to_byte_order(self) -> None:
+    async def test_the_cursor_comparison_is_pinned_to_byte_order(self) -> None:
         """delivery_id and stage are pinned to byte ordering on both backends.
 
         A PostgreSQL locale whose collation is not byte order would sort them
@@ -3358,7 +4077,7 @@ class TestByteOrderPinning:
             'ORDER BY created_at_ns, delivery_id COLLATE "C", stage COLLATE "C"'
         )
 
-    def test_a_marker_inside_a_literal_is_refused(self) -> None:
+    async def test_a_marker_inside_a_literal_is_refused(self) -> None:
         """Substitution is a plain rewrite and cannot tell a literal from an identifier.
 
         No statement embeds one today, and values are bound separately by both
@@ -3368,7 +4087,7 @@ class TestByteOrderPinning:
         with pytest.raises(ValueError, match="byte-order marker"):
             render("SELECT '/*bytes*/'", SQLITE_DIALECT)
 
-    def test_a_statement_without_the_marker_is_untouched(self) -> None:
+    async def test_a_statement_without_the_marker_is_untouched(self) -> None:
         """The rewrite must not perturb the statements that do not opt in."""
         assert render("SELECT 1", SQLITE_DIALECT) == "SELECT 1"
         assert render("SELECT 1", POSTGRES_DIALECT) == "SELECT 1"
@@ -3554,7 +4273,9 @@ class TestMembershipEpoch:
         await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         assert await alice.unacknowledged_matrix_deliveries() == ()
-        assert await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL) is None
+        retired = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert retired is not None
+        assert retired.retired is True
 
     async def test_rejoining_keeps_an_answer_that_may_already_be_visible(
         self,
@@ -4264,6 +4985,82 @@ def _watch_until_queued_or_finished(
                 msg = "the second writer neither queued behind the first nor ran to completion"
                 raise AssertionError(msg)
             time.sleep(_QUEUE_POLL_SECONDS)
+
+
+class TestDeliveryRetirementAndEchoAreCrossProcessOrdered:
+    """Retirement and projection share the room-membership row lock."""
+
+    async def test_retirement_blocks_a_late_echo_until_the_tombstone_commits(
+        self,
+        rival_stores: RivalStores,
+    ) -> None:
+        """An echo queued behind retirement observes the tombstone and stays hidden."""
+        principal_id = "agent@alice"
+        first = rival_stores.first.principal(principal_id)
+        second = rival_stores.second.principal(principal_id)
+        await admit(first, "$target", sender="alice", content=text("Thinking..."), ts=1_000)
+        assert (
+            await first.enqueue_matrix_delivery(
+                delivery_id="$turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload=edit("$target", "old answer"),
+                edits_event_id="$target",
+            )
+            is not None
+        )
+        stored = await first.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        retirement_claimed = threading.Event()
+        release_retirement = threading.Event()
+
+        def pause_after_claim() -> None:
+            retirement_claimed.set()
+            assert release_retirement.wait(_WORKER_WAIT_SECONDS), "retirement was never released"
+
+        retiring = EventJournalStore(
+            backend=_PausingBackend(
+                rival_stores.first.backend,
+                pause_after_claim,
+                statement_matches=lambda sql: "INSERT INTO room_membership" in sql,
+            ),
+        ).principal(principal_id)
+        retirement = asyncio.create_task(
+            retiring.retire_matrix_delivery(
+                delivery_id="$turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                membership_epoch=0,
+            ),
+        )
+        await asyncio.to_thread(retirement_claimed.wait, _WORKER_WAIT_SECONDS)
+        assert retirement_claimed.is_set(), "retirement never claimed the membership row"
+
+        inbound, projected = message(
+            "$physical-edit",
+            sender="alice",
+            content=stored.payload,
+            event_class=EventClass.CONTEXT_ONLY,
+            ts=2_000,
+        )
+        echo = asyncio.create_task(second.admit(inbound, projected))
+        try:
+            await _await_queued_racers(
+                rival_stores.database_url,
+                application_name=rival_stores.racer_application_name,
+                expected=1,
+            )
+            assert not echo.done()
+            release_retirement.set()
+            retired, accepted = await asyncio.gather(retirement, echo)
+        finally:
+            release_retirement.set()
+            await asyncio.gather(retirement, echo, return_exceptions=True)
+
+        assert retired is None
+        assert accepted is AdmissionResult.ADMITTED
+        assert await bodies(first) == []
 
 
 class TestInteractiveActivationAndDepartureAreCrossProcessOrdered:
@@ -5590,7 +6387,15 @@ class TestApprovalContinuations:
         assert terminal is not None
         assert terminal.event_type == "io.mindroom.tool_approval"
         assert terminal.edits_event_id == "$approval"
-        assert terminal.payload == {"status": "approved", "resolution_reason": "Looks safe."}
+        assert terminal.payload == {
+            "status": "approved",
+            "resolution_reason": "Looks safe.",
+            "io.mindroom.delivery_id": {
+                "principal": "agent@alice",
+                "delivery_id": "approval-card-1",
+                "stage": "final",
+            },
+        }
         assert terminal.attempted is False
 
     async def test_terminal_edit_acknowledgement_retires_card_and_completed_delivery(
@@ -6003,6 +6808,62 @@ class TestApprovalContinuations:
         assert await alice.approval_continuation("approval-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
+
+    async def test_stale_unavailable_notice_cannot_discard_sources(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """An acknowledged notice must still belong to the router's active membership."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        assert (
+            await alice.request_approval_failure(
+                "approval-1",
+                "agent removed",
+                expected_state="waiting",
+            )
+            is not None
+        )
+
+        router = journal_store.principal("router@alice")
+        delivery_id = unavailable_notice_delivery_id("approval-1")
+        assert (
+            await router.enqueue_matrix_delivery(
+                delivery_id=delivery_id,
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id="$thread",
+                payload=text("agent removed"),
+            )
+            is not None
+        )
+        assert (
+            await router.claim_matrix_delivery(
+                delivery_id=delivery_id,
+                stage=DeliveryStage.FINAL,
+            )
+            is not None
+        )
+        await router.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await router.note_membership_restarted(ROOM)
+        await router.acknowledge_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=DeliveryStage.FINAL,
+            event_id="$stale-unavailable",
+            delivered_projections=(),
+        )
+
+        assert (
+            await alice.discard_unavailable_approval_continuation(
+                "approval-1",
+                notice_principal_id="router@alice",
+            )
+            is False
+        )
+        assert await alice.approval_continuation("approval-1") is not None
+        assert await alice.is_pending("$source-1")
+        assert await alice.is_pending("$source-2")
 
     async def test_continuation_owner_scans_are_cursor_paginated(
         self,
@@ -6798,9 +7659,9 @@ class TestTheJournalIsAtLeastAsDurableAsWhatCertifiesIt:
 
 
 class TestMatrixDeliveryMigration:
-    """Opening current code preserves responses and expires old approval debt."""
+    """Opening current code drops unsent responses and expires old approval debt."""
 
-    async def test_sqlite_preserves_responses_and_expires_legacy_approvals(self, tmp_path: Path) -> None:
+    async def test_sqlite_drops_unsent_responses_and_expires_legacy_approvals(self, tmp_path: Path) -> None:
         """SQLite replaces legacy approval transport with fail-closed decisions."""
         database_path = tmp_path / "legacy-delivery.db"
         connection = sqlite3.connect(database_path)
@@ -6828,7 +7689,7 @@ class TestMatrixDeliveryMigration:
         assert "approval_cards_legacy_delivery" not in tables
         assert "response_outbox_unacknowledged_scan" not in indexes
 
-    async def test_postgres_preserves_responses_and_expires_legacy_approvals(
+    async def test_postgres_drops_unsent_responses_and_expires_legacy_approvals(
         self,
         postgres_journal_url: str,
     ) -> None:
@@ -6859,6 +7720,109 @@ class TestMatrixDeliveryMigration:
         assert legacy_response == (None,)
         assert legacy_cards == (None,)
         assert legacy_index == (None,)
+
+    async def test_sqlite_backfills_an_exact_unattempted_delivery(self, tmp_path: Path) -> None:
+        """An exact admitted source gains its epoch and stable marker atomically."""
+        database_path = tmp_path / "pre-membership-delivery.db"
+        store = EventJournalStore.open_sqlite(database_path)
+        await _create_pre_membership_delivery(store, attempted=False)
+        await store.close()
+        with sqlite3.connect(database_path) as connection:
+            _downgrade_delivery_membership(connection, postgres=False)
+
+        reopened = EventJournalStore.open_sqlite(database_path)
+        try:
+            delivery = await reopened.principal("agent@alice").load_matrix_delivery(
+                delivery_id="$migration-source",
+                stage=DeliveryStage.FINAL,
+            )
+        finally:
+            await reopened.close()
+
+        assert delivery is not None
+        assert delivery.membership_epoch == 0
+        assert delivery.retired is False
+        assert delivery.payload["io.mindroom.delivery_id"] == {
+            "principal": "agent@alice",
+            "delivery_id": "$migration-source",
+            "stage": "final",
+        }
+        with sqlite3.connect(database_path) as connection:
+            columns = {
+                str(row[1]): int(row[3]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")
+            }
+        assert columns["membership_epoch"] == 1
+
+    async def test_postgres_backfills_an_exact_unattempted_delivery(
+        self,
+        postgres_journal_url: str,
+    ) -> None:
+        """PostgreSQL applies the same exact backfill and non-null constraint."""
+        import psycopg  # noqa: PLC0415 - optional backend exercised explicitly
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        store = EventJournalStore.open_postgres(database_url)
+        await _create_pre_membership_delivery(store, attempted=False)
+        await store.close()
+        with psycopg.connect(database_url) as connection:
+            _downgrade_delivery_membership(connection, postgres=True)
+
+        reopened = EventJournalStore.open_postgres(database_url)
+        try:
+            delivery = await reopened.principal("agent@alice").load_matrix_delivery(
+                delivery_id="$migration-source",
+                stage=DeliveryStage.FINAL,
+            )
+        finally:
+            await reopened.close()
+
+        assert delivery is not None
+        assert delivery.membership_epoch == 0
+        assert delivery.retired is False
+        assert delivery.payload["io.mindroom.delivery_id"] == {
+            "principal": "agent@alice",
+            "delivery_id": "$migration-source",
+            "stage": "final",
+        }
+        with psycopg.connect(database_url) as connection:
+            nullable = connection.execute(
+                """
+                SELECT is_nullable FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'matrix_delivery_outbox'
+                  AND column_name = 'membership_epoch'
+                """,
+            ).fetchone()
+        assert nullable == ("NO",)
+
+    async def test_sqlite_refuses_an_attempted_unmarked_delivery(self, tmp_path: Path) -> None:
+        """An unknown physical event is not guessed into the new ownership protocol."""
+        database_path = tmp_path / "attempted-pre-membership-delivery.db"
+        store = EventJournalStore.open_sqlite(database_path)
+        await _create_pre_membership_delivery(store, attempted=True)
+        await store.close()
+        with sqlite3.connect(database_path) as connection:
+            _downgrade_delivery_membership(connection, postgres=False)
+
+        with pytest.raises(RuntimeError, match="legacy payload has no stable delivery marker"):
+            EventJournalStore.open_sqlite(database_path)
+
+    async def test_postgres_refuses_an_attempted_unmarked_delivery(
+        self,
+        postgres_journal_url: str,
+    ) -> None:
+        """PostgreSQL refuses the same irreconcilable physical-send state."""
+        import psycopg  # noqa: PLC0415 - optional backend exercised explicitly
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        store = EventJournalStore.open_postgres(database_url)
+        await _create_pre_membership_delivery(store, attempted=True)
+        await store.close()
+        with psycopg.connect(database_url) as connection:
+            _downgrade_delivery_membership(connection, postgres=True)
+
+        with pytest.raises(RuntimeError, match="legacy payload has no stable delivery marker"):
+            EventJournalStore.open_postgres(database_url)
 
 
 class TestConnectionSecretsStayOutOfLogs:
@@ -7222,7 +8186,7 @@ class TestHotQueriesAreIndexCovered:
         ),
         "outbox recovery scan": (
             "SELECT * FROM matrix_delivery_outbox WHERE principal_id=? AND event_type=? "
-            "AND acknowledged_event_id IS NULL "
+            "AND acknowledged_event_id IS NULL AND retired=0 "
             "ORDER BY created_at_ns, delivery_id, stage LIMIT 50"
         ),
         "approval card scan": (

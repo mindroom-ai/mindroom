@@ -114,9 +114,13 @@ Journal rows survive the fence on purpose, because they are the proof that an ev
 
 Turn-backed rows still pending are settled as intentionally ignored, since their answers would be refused by the epoch check forever and leaving them pending would replay the model run on every recovery pass.
 
-Unattempted outbox rows for the room are deleted, because they answer a conversation the bot has left and nothing outside the process has seen them.
+Unattempted outbox rows for the room are retired, because they answer a conversation the bot has left and must never be sent after rejoin.
+
+The retired row remains as the delivery identity tombstone, so a source-less multi-stage turn cannot enqueue `INITIAL` before departure and let `FINAL` adopt the later membership.
 
 An attempted row is kept instead: its outcome is unknown, and only presenting the same frozen transaction again can converge on one visible answer rather than posting a second.
+
+Every outbox row freezes the membership epoch that authorized it, and acknowledgement projects its Matrix event only while that exact membership remains current.
 
 One departure reaches the bot twice, locally and again in the sync response that reports it, and both must fence exactly once.
 

@@ -25,24 +25,85 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
 
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
-from .models import DeliveryStage, MatrixDelivery, UnreadableMatrixDelivery
+from .membership_state import claim_membership_epoch
+from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage, MatrixDelivery, UnreadableMatrixDelivery
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from .backend import Row, Transaction
 
 _OUTBOX_COLUMNS = """
-    delivery_id, stage, event_type, room_id, thread_id, transaction_id,
+    delivery_id, stage, event_type, room_id, membership_epoch, thread_id, transaction_id,
     payload_json, edits_event_id, acknowledged_event_id, created_at_ns,
-    attempted, sending_device_id
+    attempted, retired, sending_device_id
 """
+_DELIVERY_STAGE_VALUES = frozenset(item.value for item in DeliveryStage)
+
+
+def _delivery_payload(
+    principal_id: str,
+    delivery_id: str,
+    stage: DeliveryStage,
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    """Return one frozen payload carrying its stable journal identity."""
+    identity = {
+        "principal": principal_id,
+        "delivery_id": delivery_id,
+        "stage": stage.value,
+    }
+    frozen = {
+        **payload,
+        DURABLE_DELIVERY_ID_KEY: identity,
+    }
+    replacement = payload.get("m.new_content")
+    if isinstance(replacement, Mapping):
+        frozen["m.new_content"] = {**replacement, DURABLE_DELIVERY_ID_KEY: identity}
+    return frozen
+
+
+def delivery_payload_json(
+    principal_id: str,
+    delivery_id: str,
+    stage: DeliveryStage,
+    payload: Mapping[str, object],
+) -> str:
+    """Return the canonical stored Matrix payload, including its identity."""
+    return json.dumps(
+        _delivery_payload(principal_id, delivery_id, stage, payload),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _delivery_identity(content: Mapping[str, object] | None) -> tuple[str, str, DeliveryStage] | None:
+    """Return the stable outbox identity carried by one Matrix payload."""
+    if content is None:
+        return None
+    raw_identity = content.get(DURABLE_DELIVERY_ID_KEY)
+    if not isinstance(raw_identity, dict):
+        return None
+    identity = cast("dict[str, object]", raw_identity)
+    principal_id = identity.get("principal")
+    delivery_id = identity.get("delivery_id")
+    stage = identity.get("stage")
+    if (
+        not isinstance(principal_id, str)
+        or not principal_id
+        or not isinstance(delivery_id, str)
+        or not delivery_id
+        or not isinstance(stage, str)
+        or stage not in _DELIVERY_STAGE_VALUES
+    ):
+        return None
+    return principal_id, delivery_id, DeliveryStage(stage)
 
 
 def _lock_delivery_stages(transaction: Transaction, principal_id: str, delivery_id: str) -> None:
@@ -64,13 +125,28 @@ def enqueue(
     stage: DeliveryStage,
     event_type: str,
     room_id: str,
+    membership_epoch: int,
     thread_id: str | None,
     payload: Mapping[str, object],
     edits_event_id: str | None,
     edit_target_pending: bool = False,
-) -> str:
-    """Record delivery intent, refusing to change an already attempted row."""
+) -> str | None:
+    """Record delivery intent without changing its durable membership owner."""
     _lock_delivery_stages(transaction, principal_id, delivery_id)
+    existing_owner = transaction.fetchone(
+        """
+        SELECT room_id, membership_epoch, retired FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND delivery_id = ?
+        LIMIT 1
+        """,
+        (principal_id, delivery_id),
+    )
+    if existing_owner is not None and (
+        bool(existing_owner["retired"])
+        or str(existing_owner["room_id"]) != room_id
+        or int(existing_owner["membership_epoch"]) != membership_epoch
+    ):
+        return None
     if stage is DeliveryStage.FINAL and edit_target_pending:
         initial = transaction.fetchone(
             """
@@ -86,11 +162,13 @@ def enqueue(
     transaction.execute(
         """
         INSERT INTO matrix_delivery_outbox (
-            principal_id, delivery_id, stage, event_type, room_id, thread_id, transaction_id,
-            payload_json, edits_event_id, edit_target_pending, attempted, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            principal_id, delivery_id, stage, event_type, room_id, membership_epoch,
+            thread_id, transaction_id, payload_json, edits_event_id,
+            edit_target_pending, attempted, created_at_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
         ON CONFLICT (principal_id, delivery_id, stage) DO UPDATE SET
             room_id = excluded.room_id,
+            membership_epoch = excluded.membership_epoch,
             thread_id = excluded.thread_id,
             event_type = excluded.event_type,
             payload_json = excluded.payload_json,
@@ -104,9 +182,10 @@ def enqueue(
             stage.value,
             event_type,
             room_id,
+            membership_epoch,
             encode_thread_id(thread_id),
             transaction_id,
-            json.dumps(dict(payload), ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+            delivery_payload_json(principal_id, delivery_id, stage, payload),
             edits_event_id,
             int(edit_target_pending),
             time.time_ns(),
@@ -165,12 +244,12 @@ def claim(
     _lock_delivery_stages(transaction, principal_id, delivery_id)
     current = transaction.fetchone(
         """
-        SELECT attempted, edits_event_id, edit_target_pending FROM matrix_delivery_outbox
+        SELECT attempted, retired, edits_event_id, edit_target_pending FROM matrix_delivery_outbox
         WHERE principal_id = ? AND delivery_id = ? AND stage = ?
         """,
         (principal_id, delivery_id, stage.value),
     )
-    if current is None:
+    if current is None or bool(current["retired"]):
         return None
     if stage is DeliveryStage.INITIAL and not bool(current["attempted"]):
         final = transaction.fetchone(
@@ -215,6 +294,7 @@ def claim(
             SELECT 1 AS present FROM matrix_delivery_outbox
             WHERE principal_id = ? AND delivery_id = ? AND stage = ?
               AND attempted = 1 AND acknowledged_event_id IS NULL
+              AND retired = 0
             """,
             (principal_id, delivery_id, DeliveryStage.INITIAL.value),
         )
@@ -321,6 +401,159 @@ def acknowledge(
     return bound is not None
 
 
+def delivery_ownership(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    delivery_id: str,
+    stage: DeliveryStage,
+) -> tuple[str, int] | None:
+    """Return one delivery's room and frozen membership, if the row exists."""
+    row = transaction.fetchone(
+        """
+        SELECT room_id, membership_epoch FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+        """,
+        (principal_id, delivery_id, stage.value),
+    )
+    if row is None:
+        return None
+    return str(row["room_id"]), int(row["membership_epoch"])
+
+
+def turn_ownership(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    delivery_id: str,
+) -> tuple[str, int] | None:
+    """Return the room and membership shared by one delivery's stages."""
+    row = transaction.fetchone(
+        """
+        SELECT room_id, membership_epoch FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND delivery_id = ?
+        LIMIT 1
+        """,
+        (principal_id, delivery_id),
+    )
+    if row is None:
+        return None
+    return str(row["room_id"]), int(row["membership_epoch"])
+
+
+def _projection_ownership(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    delivery_id: str,
+    stage: DeliveryStage,
+) -> tuple[str, int] | None:
+    """Lock one delivery and return its projection owner unless it was retired."""
+    row = transaction.fetchone(
+        """
+        UPDATE matrix_delivery_outbox SET retired = retired
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+        RETURNING room_id, membership_epoch, retired
+        """,
+        (principal_id, delivery_id, stage.value),
+    )
+    if row is None or bool(row["retired"]):
+        return None
+    return str(row["room_id"]), int(row["membership_epoch"])
+
+
+def claim_active_delivery_ownership(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    delivery_id: str,
+    stage: DeliveryStage,
+    expected_room_id: str | None = None,
+) -> tuple[str, int] | None:
+    """Claim one delivery's membership and row while both remain current."""
+    ownership = delivery_ownership(
+        transaction,
+        principal_id,
+        delivery_id=delivery_id,
+        stage=stage,
+    )
+    if ownership is None:
+        return None
+    room_id, membership_epoch = ownership
+    if expected_room_id is not None and room_id != expected_room_id:
+        return None
+    membership_is_current = claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        expected_membership_epoch=membership_epoch,
+    )
+    locked_ownership = _projection_ownership(
+        transaction,
+        principal_id,
+        delivery_id=delivery_id,
+        stage=stage,
+    )
+    return ownership if membership_is_current and locked_ownership == ownership else None
+
+
+def event_belongs_to_membership(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    event_id: str,
+    membership_epoch: int,
+    sender: str,
+    transaction_id: str | None = None,
+    content: Mapping[str, object] | None = None,
+) -> bool:
+    """Return whether a delivery event belongs to this room membership."""
+    delivery: Row | None = None
+    delivery_identity = _delivery_identity(content)
+    sender_owns_principal = principal_id.endswith(f"@{sender}")
+    if delivery_identity is not None and sender_owns_principal:
+        marked_principal, delivery_id, stage = delivery_identity
+        if marked_principal == principal_id:
+            delivery = transaction.fetchone(
+                """
+                SELECT delivery_id, stage, room_id, membership_epoch FROM matrix_delivery_outbox
+                WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+                """,
+                (principal_id, delivery_id, stage.value),
+            )
+            if delivery is not None and str(delivery["room_id"]) != room_id:
+                delivery = None
+    if delivery is None and sender_owns_principal:
+        delivery = transaction.fetchone(
+            """
+            SELECT delivery_id, stage, room_id, membership_epoch FROM matrix_delivery_outbox
+            WHERE principal_id = ? AND room_id = ? AND acknowledged_event_id = ?
+            LIMIT 1
+            """,
+            (principal_id, room_id, event_id),
+        )
+    if delivery is None and sender_owns_principal and transaction_id is not None:
+        delivery = transaction.fetchone(
+            """
+            SELECT delivery_id, stage, room_id, membership_epoch FROM matrix_delivery_outbox
+            WHERE principal_id = ? AND room_id = ? AND transaction_id = ?
+            LIMIT 1
+            """,
+            (principal_id, room_id, transaction_id),
+        )
+    if delivery is None:
+        return True
+    owner = claim_active_delivery_ownership(
+        transaction,
+        principal_id,
+        delivery_id=str(delivery["delivery_id"]),
+        stage=DeliveryStage(str(delivery["stage"])),
+        expected_room_id=room_id,
+    )
+    return owner == (room_id, membership_epoch)
+
+
 def unacknowledged(
     transaction: Transaction,
     principal_id: str,
@@ -346,7 +579,8 @@ def unacknowledged(
     rows = transaction.fetchall(
         f"""
         SELECT {_OUTBOX_COLUMNS} FROM matrix_delivery_outbox
-        WHERE principal_id = ? AND event_type = ? AND acknowledged_event_id IS NULL{cursor_clause}
+        WHERE principal_id = ? AND event_type = ?
+          AND acknowledged_event_id IS NULL AND retired = 0{cursor_clause}
         ORDER BY created_at_ns, delivery_id/*bytes*/, stage/*bytes*/
         LIMIT ?
         """,  # noqa: S608 - a fixed column list and a fixed clause, not input
@@ -360,21 +594,22 @@ def has_attempted_unacknowledged_prompt_delivery(
     principal_id: str,
     *,
     room_id: str,
+    membership_epoch: int,
 ) -> bool:
-    """Return whether Matrix may show an unprojected prompt or prompt edit."""
+    """Return whether this membership may show an unprojected prompt or edit."""
     row = transaction.fetchone(
         """
         SELECT 1 AS present FROM matrix_delivery_outbox
-        WHERE principal_id = ? AND room_id = ?
+        WHERE principal_id = ? AND room_id = ? AND membership_epoch = ?
           AND event_type = 'm.room.message'
-          AND attempted = 1 AND acknowledged_event_id IS NULL
+          AND attempted = 1 AND retired = 0 AND acknowledged_event_id IS NULL
           AND (
               edits_event_id IS NOT NULL
               OR payload_json LIKE ?
           )
         LIMIT 1
         """,
-        (principal_id, room_id, f'%"{INTERACTIVE_PROMPT_KEY}"%'),
+        (principal_id, room_id, membership_epoch, f'%"{INTERACTIVE_PROMPT_KEY}"%'),
     )
     return row is not None
 
@@ -397,6 +632,42 @@ def load(
     return None if row is None else _delivery(row)
 
 
+def retire(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    delivery_id: str,
+    stage: DeliveryStage,
+    room_id: str,
+    membership_epoch: int,
+) -> MatrixDelivery | None:
+    """Retire one obsolete delivery and return its concurrent durable outcome."""
+    row = transaction.fetchone(
+        f"""
+        UPDATE matrix_delivery_outbox SET attempted = attempted
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+        RETURNING {_OUTBOX_COLUMNS}
+        """,  # noqa: S608 - a fixed column list, not interpolated input
+        (principal_id, delivery_id, stage.value),
+    )
+    if row is None:
+        return None
+    delivery = _delivery(row)
+    if delivery.room_id != room_id or delivery.membership_epoch != membership_epoch:
+        msg = f"Delivery owner changed while retiring {delivery_id!r}/{stage.value!r}"
+        raise RuntimeError(msg)
+    if delivery.acknowledged_event_id is not None:
+        return delivery
+    transaction.execute(
+        """
+        UPDATE matrix_delivery_outbox SET retired = 1
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+        """,
+        (principal_id, delivery_id, stage.value),
+    )
+    return replace(delivery, retired=True)
+
+
 def _delivery(row: Row) -> MatrixDelivery:
     payload = json.loads(row["payload_json"])
     if not isinstance(payload, dict):
@@ -407,6 +678,7 @@ def _delivery(row: Row) -> MatrixDelivery:
         stage=DeliveryStage(row["stage"]),
         event_type=row["event_type"],
         room_id=row["room_id"],
+        membership_epoch=int(row["membership_epoch"]),
         thread_id=decode_thread_id(row["thread_id"]),
         transaction_id=row["transaction_id"],
         payload=payload,
@@ -414,6 +686,7 @@ def _delivery(row: Row) -> MatrixDelivery:
         acknowledged_event_id=row["acknowledged_event_id"],
         created_at_ns=int(row["created_at_ns"]),
         attempted=bool(row["attempted"]),
+        retired=bool(row["retired"]),
         sending_device_id=row["sending_device_id"],
     )
 

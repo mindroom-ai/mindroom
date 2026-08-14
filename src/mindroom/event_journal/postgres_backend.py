@@ -132,10 +132,10 @@ class PostgresBackend:
             ):
                 cursor.execute(cast("LiteralString", statement))
             transaction = _PostgresTransaction(cursor)
-            migrate_approvals = prepare_matrix_delivery_migration(transaction, postgres=True)
+            migration = prepare_matrix_delivery_migration(transaction, postgres=True)
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
-            finish_matrix_delivery_migration(transaction, migrate_approvals=migrate_approvals)
+            finish_matrix_delivery_migration(transaction, migration=migration)
         self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:

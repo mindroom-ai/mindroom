@@ -213,10 +213,10 @@ class SqliteBackend:
             ):
                 connection.execute(statement)
             transaction = _SqliteTransaction(connection)
-            migrate_approvals = prepare_matrix_delivery_migration(transaction, postgres=False)
+            migration = prepare_matrix_delivery_migration(transaction, postgres=False)
             for statement in schema_statements(SQLITE_DIALECT):
                 connection.execute(statement)
-            finish_matrix_delivery_migration(transaction, migrate_approvals=migrate_approvals)
+            finish_matrix_delivery_migration(transaction, migration=migration)
             connection.execute("COMMIT")
         except BaseException:
             connection.close()

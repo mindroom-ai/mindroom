@@ -49,8 +49,8 @@ Force-push only the rebuilt #1836 branch after complete verification, then retar
 2. Extend `event_journal/migrations.py`; do not create another migration framework.
 3. Backfill approval deliveries from exact approval-card facts.
 4. Backfill response deliveries only from exact same-room admitted-source facts.
-5. Delete never-attempted unverifiable rows and reject attempted unacknowledged rows whose membership cannot be proven.
-6. Preserve acknowledged legacy event IDs as stale-event tombstones where required.
+5. Delete never-attempted unverifiable rows and reject every attempted unacknowledged legacy row whose physical payload lacks the stable marker required for exact reconciliation.
+6. Preserve acknowledged legacy event IDs with unverifiable membership as retired stale-event tombstones.
 7. Verify the final schema enforces the non-null steady-state invariant on SQLite and PostgreSQL.
 
 ## Task 6: Complete the test-port audit and simplify the combined design
@@ -60,6 +60,10 @@ Force-push only the rebuilt #1836 branch after complete verification, then retar
 3. Search for `response_outbox`, `ResponseDelivery`, approval-specific recovery loops, old marker helpers, and stale migration names.
 4. Remove duplicate branches, wrappers, and tests made obsolete by the generic boundary.
 5. Run the full affected suites on SQLite and PostgreSQL.
+
+The final port keeps every behavioral invariant from old #1836.
+The refetch-consumption and unsent-departure cases already exist on the #1837 base, while the old response-outbox migration cases are replaced by stricter generic tests for exact backfill, non-null enforcement, and refusal of attempted unmarked deliveries on both backends.
+The three history-scan tests are retained under exact-delivery names, matching the generic marker contract rather than the deleted response facade.
 
 ## Task 7: Verify and publish the stacked PR
 

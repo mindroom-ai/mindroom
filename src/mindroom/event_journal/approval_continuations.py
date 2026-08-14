@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from mindroom.history.types import HistoryScope
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
-from . import journal
+from . import journal, outbox
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
@@ -657,13 +657,23 @@ def discard_unavailable(
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None or continuation.state != "failing":
         return False
+    delivery_id = unavailable_notice_delivery_id(approval_id)
+    ownership = outbox.claim_active_delivery_ownership(
+        transaction,
+        notice_principal_id,
+        delivery_id=delivery_id,
+        stage=DeliveryStage.FINAL,
+        expected_room_id=continuation.room_id,
+    )
+    if ownership is None:
+        return False
     delivered = transaction.fetchone(
         """
         SELECT 1 AS present FROM matrix_delivery_outbox
         WHERE principal_id = ? AND delivery_id = ? AND stage = ?
           AND acknowledged_event_id IS NOT NULL
         """,
-        (notice_principal_id, unavailable_notice_delivery_id(approval_id), DeliveryStage.FINAL.value),
+        (notice_principal_id, delivery_id, DeliveryStage.FINAL.value),
     )
     if delivered is None:
         return False

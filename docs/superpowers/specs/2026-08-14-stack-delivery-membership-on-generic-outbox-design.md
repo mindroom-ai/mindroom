@@ -74,7 +74,11 @@ Existing approval deliveries may derive their epoch only from their exact `appro
 
 Existing response deliveries may derive their epoch only from an exact admitted journal source in the same room.
 
-Any nonempty delivery row whose membership cannot be proven will make startup fail with a clear journal-recreation error rather than receive a guessed epoch or a legacy runtime branch.
+Never-attempted rows whose membership cannot be proven will be deleted because they never reached Matrix.
+
+Acknowledged rows with no provable membership will remain as retired event-ID tombstones.
+
+Attempted, unacknowledged legacy rows will make startup fail with a clear journal-recreation error even when their epoch is derivable, because their old physical payload has no stable delivery marker and cannot be reconciled safely after a device change.
 
 The migration will commit atomically on both backends and leave the steady-state worker free of compatibility conditionals.
 

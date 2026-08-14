@@ -158,6 +158,7 @@ async def test_action_binds_its_exact_visible_card_after_changed_device_recovery
         delivery_id="approval-card-1",
         stage=DeliveryStage.INITIAL,
         room_id="!room:localhost",
+        membership_epoch=0,
         thread_id="$thread",
         transaction_id="approval-transaction",
         payload={"approval_id": "approval-card-1"},
@@ -785,6 +786,7 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
             delivery_id=notice_turn_id,
             stage=DeliveryStage.FINAL,
             room_id="!room:localhost",
+            membership_epoch=0,
             thread_id="$thread",
             transaction_id=transaction_id,
             payload=payload,
@@ -804,6 +806,7 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
     )
     notice_store = MagicMock(
         principal_id="router@localhost",
+        membership_epoch=AsyncMock(return_value=0),
         enqueue_matrix_delivery=AsyncMock(side_effect=enqueue_notice),
         claim_matrix_delivery=AsyncMock(side_effect=claim_notice),
         record_matrix_delivery_device=AsyncMock(),
@@ -999,7 +1002,11 @@ async def test_removed_owner_cleanup_adopts_notice_after_matrix_device_change(tm
         thread_id="$thread",
         payload=notice_content,
     )
-    assert await notice_store.claim_matrix_delivery(delivery_id=notice_turn_id, stage=DeliveryStage.FINAL) is not None
+    claimed_notice = await notice_store.claim_matrix_delivery(
+        delivery_id=notice_turn_id,
+        stage=DeliveryStage.FINAL,
+    )
+    assert claimed_notice is not None
     await notice_store.record_matrix_delivery_device(
         delivery_id=notice_turn_id,
         stage=DeliveryStage.FINAL,
@@ -1012,7 +1019,7 @@ async def test_removed_owner_cleanup_adopts_notice_after_matrix_device_change(tm
             "sender": "@mindroom_router:localhost",
             "origin_server_ts": 2_000,
             "type": "m.room.message",
-            "content": notice_content,
+            "content": dict(claimed_notice.payload),
         },
     )
     assert isinstance(prior_notice, nio.Event)
