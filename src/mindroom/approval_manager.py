@@ -49,7 +49,6 @@ DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
     "In ad-hoc invited rooms accepted via accept_invites, approval only works if the router "
     "is already joined there; otherwise retry from a managed room."
 )
-DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the tool arguments are too large to show in full, so a human cannot review "
@@ -371,19 +370,6 @@ class _ApprovalManager:
                     room_id=room_id,
                     card_event_id=card_event_id,
                 )
-            if stored is None and not terminal and cards is not None and self.send_delivery is not None:
-                # Matrix can expose a card whose send response died with its
-                # process. Let the shared delivery owner recover that event ID
-                # before deciding this reaction targets nothing durable.
-                await self._worker().recover()
-                stored = await cards.pending_approval_card(
-                    room_id=room_id,
-                    card_event_id=card_event_id,
-                )
-                terminal = stored is None and await cards.is_terminal_approval_card(
-                    room_id=room_id,
-                    card_event_id=card_event_id,
-                )
             if stored is None:
                 if terminal and before_consume is not None:
                     await before_consume()
@@ -674,9 +660,8 @@ class _ApprovalManager:
             except Exception:
                 logger.warning("approval_deadline_sweep_failed", exc_info=True)
 
-    async def shutdown(self, *, reason: str) -> None:
+    async def shutdown(self) -> None:
         """Stop the domain deadline scanner; durable delivery debt remains in the outbox."""
-        del reason
         task = self._deadline_task
         self._deadline_task = None
         if task is not None:
@@ -868,10 +853,10 @@ def initialize_approval_store(
     return _MANAGER
 
 
-async def shutdown_approval_manager(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
+async def shutdown_approval_manager() -> None:
     """Stop deadline scanning and release the process-local domain facade."""
     global _MANAGER
     manager = _MANAGER
     if manager is not None:
-        await manager.shutdown(reason=reason)
+        await manager.shutdown()
         _MANAGER = None

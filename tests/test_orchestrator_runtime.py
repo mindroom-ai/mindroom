@@ -1871,7 +1871,7 @@ class TestMultiAgentOrchestrator:
             # The second pass settled everything, so nothing schedules a third.
             await orchestrator._approval_transport.mark_startup_runtime_support_ready()
 
-        await orchestrator._approval_transport.cancel_startup_cleanup_retry()
+        await orchestrator._approval_transport.close()
         assert recover_approval_cards_on_startup.await_count == 2
 
     @pytest.mark.asyncio
@@ -1908,7 +1908,7 @@ class TestMultiAgentOrchestrator:
             await orchestrator.handle_bot_ready(bot)
 
             await _await_until(lambda: recover_approval_cards_on_startup.await_count >= 4)
-            await orchestrator._approval_transport.cancel_startup_cleanup_retry()
+            await orchestrator._approval_transport.close()
 
         incomplete = [entry for entry in logs if entry["event"] == "tool_approval_startup_recovery_incomplete"]
         assert [entry["log_level"] for entry in incomplete[:4]] == ["warning", "warning", "error", "error"]
@@ -1982,7 +1982,7 @@ class TestMultiAgentOrchestrator:
             waiting = _retry_tasks()
             assert len(waiting) == 1
             if stop_retrying == "cancel":
-                await transport.cancel_startup_cleanup_retry()
+                await transport.close()
             else:
                 transport.reset_startup_cleanup_gate()
             await _await_until(waiting[0].done)
@@ -2052,7 +2052,7 @@ class TestMultiAgentOrchestrator:
             await _await_until(retry_is_sweeping.is_set)
             assert sweeps_started == 2
 
-            await transport.cancel_startup_cleanup_retry()
+            await transport.close()
 
         assert waiting[0].cancelled()
         assert not _retry_tasks()
@@ -2847,15 +2847,12 @@ class TestMultiAgentOrchestrator:
         self,
         tmp_path: Path,
     ) -> None:
-        """Pending approvals should expire even if MCP shutdown fails."""
+        """Approval tasks stop before later subsystem shutdown can fail."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         calls: list[str] = []
 
         async def _shutdown_approvals() -> None:
             calls.append("approvals")
-
-        async def _cancel_approval_tasks() -> None:
-            calls.append("cancel")
 
         async def _close_approval_transport() -> None:
             calls.append("transport")
@@ -2875,11 +2872,6 @@ class TestMultiAgentOrchestrator:
             ) as mock_shutdown_approvals,
             patch.object(
                 orchestrator._approval_transport,
-                "cancel_startup_cleanup_retry",
-                new=AsyncMock(side_effect=_cancel_approval_tasks),
-            ),
-            patch.object(
-                orchestrator._approval_transport,
                 "close",
                 new=AsyncMock(side_effect=_close_approval_transport),
                 create=True,
@@ -2893,7 +2885,7 @@ class TestMultiAgentOrchestrator:
         ):
             await orchestrator.stop()
 
-        assert calls == ["cancel", "approvals", "transport", "mcp"]
+        assert calls == ["transport", "approvals", "mcp"]
         mock_shutdown_approvals.assert_awaited_once()
 
     @pytest.mark.asyncio

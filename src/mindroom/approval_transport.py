@@ -19,10 +19,7 @@ from mindroom.matrix.client_delivery import (
 )
 from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_upload_is_usable, upload_json_sidecar
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
-from mindroom.matrix.room_history_reads import (
-    find_approval_card_event_id_via_room_messages,
-    find_outbox_delivery_event_id_via_room_messages,
-)
+from mindroom.matrix.room_history_reads import find_outbox_delivery_event_id_via_room_messages
 from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.tool_approval import DEFAULT_ROUTER_MANAGED_ROOM_REASON, ToolApprovalTransportError
 
@@ -252,6 +249,7 @@ class ApprovalMatrixTransport:
                 delivery_sender=response_sender,
                 source_event_ids=(continuation.response_event_id,),
                 delivery_content=claimed.payload,
+                delivery_event_type=claimed.event_type,
             )
 
         try:
@@ -389,11 +387,20 @@ class ApprovalMatrixTransport:
         """Adopt a card found after device change; edit misses remain safely replayable."""
         if claimed.edits_event_id is not None:
             return None
-        approval_id = claimed.payload.get("approval_id")
-        sender = self.transport_sender_id()
-        if not isinstance(approval_id, str) or sender is None:
+        bot = self.transport_bot(claimed.room_id)
+        if bot is None or bot.client is None:
             return None
-        return await self.locate_approval_card(claimed.room_id, sender, approval_id)
+        sender = bot.client.user_id
+        if not isinstance(sender, str) or not sender:
+            return None
+        return await find_outbox_delivery_event_id_via_room_messages(
+            bot.client,
+            claimed.room_id,
+            delivery_sender=sender,
+            source_event_ids=(),
+            delivery_content=claimed.payload,
+            delivery_event_type=claimed.event_type,
+        )
 
     async def resolve_approval_action_delivery(self, room_id: str, card_event_id: str) -> str | None:
         """Return the generic delivery ID carried by one exact visible card."""
@@ -425,24 +432,6 @@ class ApprovalMatrixTransport:
             return None
         approval_id = content.get("approval_id")
         return approval_id if isinstance(approval_id, str) and approval_id else None
-
-    async def locate_approval_card(
-        self,
-        room_id: str,
-        card_sender: str,
-        approval_id: str,
-    ) -> str | None:
-        """Find the Matrix event one unacknowledged card became."""
-        bot = self.transport_bot(room_id)
-        if bot is None or bot.client is None:
-            msg = f"Router approval transport cannot read {room_id} to locate a card"
-            raise ToolApprovalTransportError(msg)
-        return await find_approval_card_event_id_via_room_messages(
-            bot.client,
-            room_id,
-            card_sender=card_sender,
-            approval_id=approval_id,
-        )
 
     def _bot_has_approval_room(self, bot: _ApprovalTransportBot, room_id: str) -> bool:
         """Return whether one bot can safely post into an approval room."""
@@ -514,17 +503,13 @@ class ApprovalMatrixTransport:
         if retry is not None:
             retry.cancel()
 
-    async def cancel_startup_cleanup_retry(self) -> None:
-        """Cancel and await a delayed cleanup pass."""
+    async def close(self) -> None:
+        """Release transport-owned tasks; the orchestrator owns the journal."""
         retry = self._startup_cleanup_retry
         self._startup_cleanup_retry = None
         if retry is not None and not retry.done():
             retry.cancel()
             await asyncio.gather(retry, return_exceptions=True)
-
-    async def close(self) -> None:
-        """Release transport-owned tasks; the orchestrator owns the journal."""
-        await self.cancel_startup_cleanup_retry()
 
     async def mark_startup_runtime_support_ready(self) -> None:
         """Record that startup cleanup may use runtime services."""

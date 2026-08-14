@@ -38,7 +38,7 @@ from mindroom.logging_config import get_logger
 from .migrations import finish_matrix_delivery_migration, prepare_matrix_delivery_migration
 from .offloading import ThreadOffload, settled
 from .schema import SQLITE_DIALECT, render, schema_statements
-from .schema_migrations import migration_statements, pre_schema_migration_statements
+from .schema_migrations import pre_schema_migration_statements
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -215,14 +215,6 @@ class SqliteBackend:
             transaction = _SqliteTransaction(connection)
             migrate_approvals = prepare_matrix_delivery_migration(transaction, postgres=False)
             for statement in schema_statements(SQLITE_DIALECT):
-                connection.execute(statement)
-            approval_card_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(approval_cards)")
-            )
-            for statement in migration_statements(
-                SQLITE_DIALECT,
-                approval_card_columns=approval_card_columns,
-            ):
                 connection.execute(statement)
             finish_matrix_delivery_migration(transaction, migrate_approvals=migrate_approvals)
             connection.execute("COMMIT")

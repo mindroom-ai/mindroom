@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 from .migrations import finish_matrix_delivery_migration, prepare_matrix_delivery_migration
 from .offloading import ThreadOffload
 from .schema import POSTGRES_DIALECT, render, schema_statements
-from .schema_migrations import migration_statements, pre_schema_migration_statements
+from .schema_migrations import pre_schema_migration_statements
 
 # An arbitrary constant that only this schema setup uses, so the lock it
 # takes cannot collide with an application advisory lock.
@@ -134,8 +134,6 @@ class PostgresBackend:
             transaction = _PostgresTransaction(cursor)
             migrate_approvals = prepare_matrix_delivery_migration(transaction, postgres=True)
             for statement in schema_statements(POSTGRES_DIALECT):
-                cursor.execute(cast("LiteralString", statement))
-            for statement in migration_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
             finish_matrix_delivery_migration(transaction, migrate_approvals=migrate_approvals)
         self._writer.commit()

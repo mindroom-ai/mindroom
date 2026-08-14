@@ -830,6 +830,7 @@ class DeliveryGateway:
                 delivery_sender=response_sender,
                 source_event_ids=(reply_to_event_id,),
                 delivery_content=claimed.payload,
+                delivery_event_type=claimed.event_type,
             )
             if delivered is None:
                 msg = f"Exact Matrix delivery {claimed.delivery_id!r} was not found, so its absence is unproven"

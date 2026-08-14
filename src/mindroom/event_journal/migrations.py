@@ -24,12 +24,6 @@ def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: boo
         transaction.execute(
             "ALTER TABLE matrix_delivery_outbox ADD COLUMN event_type TEXT NOT NULL DEFAULT 'm.room.message'",
         )
-    if _table_exists(transaction, "matrix_delivery_outbox", postgres=postgres) and not _column_exists(
-        transaction,
-        "matrix_delivery_outbox",
-        "edit_target_pending",
-        postgres=postgres,
-    ):
         transaction.execute(
             "ALTER TABLE matrix_delivery_outbox ADD COLUMN edit_target_pending INTEGER NOT NULL DEFAULT 0",
         )
@@ -56,13 +50,6 @@ def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approv
         UPDATE approval_continuations
         SET state = 'ready', runtime_generation = NULL
         WHERE state = 'waiting'
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_continuation_calls AS calls
-              WHERE calls.principal_id = approval_continuations.principal_id
-                AND calls.approval_id = approval_continuations.approval_id
-                AND calls.generation = approval_continuations.generation
-                AND calls.decision IS NULL
-          )
         """,
     )
     transaction.execute(

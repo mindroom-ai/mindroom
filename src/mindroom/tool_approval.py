@@ -13,7 +13,6 @@ from uuid import uuid4
 from mindroom import approval_manager
 from mindroom.approval_manager import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
-    DEFAULT_SHUTDOWN_REASON,
     ApprovalActionResult,
     ToolApprovalTransportError,
 )
@@ -219,9 +218,9 @@ def is_process_active_approval_card(card_event_id: str) -> bool:
     return manager is not None and manager.has_active_in_memory_approval_card(card_event_id)
 
 
-async def shutdown_approval_runtime(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
+async def shutdown_approval_runtime() -> None:
     """Stop approval transport work, drop runtime state, and clear script state."""
     try:
-        await approval_manager.shutdown_approval_manager(reason=reason)
+        await approval_manager.shutdown_approval_manager()
     finally:
         _clear_script_cache()

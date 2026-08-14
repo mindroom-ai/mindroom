@@ -108,34 +108,6 @@ async def test_terminal_approval_action_is_consumed_without_delivery_recovery(tm
 
 
 @pytest.mark.asyncio
-async def test_action_consumes_tombstone_created_during_delivery_recovery(tmp_path: Path) -> None:
-    """Retirement racing recovery cannot leak a duplicate action into ordinary routing."""
-    cards = MagicMock()
-    cards.pending_approval_card = AsyncMock(side_effect=(None, None))
-    cards.is_terminal_approval_card = AsyncMock(side_effect=(False, True))
-    manager = initialize_approval_store(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
-    worker = MagicMock(recover=AsyncMock())
-    before_consume = AsyncMock()
-
-    with patch.object(manager, "_worker", return_value=worker):
-        result = await handle_matrix_approval_action(
-            MatrixApprovalAction(
-                room_id="!room:localhost",
-                sender_id="@approver:localhost",
-                card_event_id="$approval",
-                status="approved",
-                reason=None,
-            ),
-            before_consume=before_consume,
-        )
-
-    assert result.consumed is True
-    assert result.resolved is False
-    assert cards.is_terminal_approval_card.await_count == 2
-    before_consume.assert_awaited_once_with()
-
-
-@pytest.mark.asyncio
 async def test_decided_card_action_is_consumed_before_transport_or_approver_validation(tmp_path: Path) -> None:
     """A duplicate click cannot escape while its deterministic terminal edit is still owed."""
     cards = MagicMock()
@@ -156,7 +128,7 @@ async def test_decided_card_action_is_consumed_before_transport_or_approver_vali
             before_consume=before_consume,
         )
     finally:
-        await manager.shutdown(reason="test complete")
+        await manager.shutdown()
 
     assert result.consumed is True
     assert result.resolved is False
@@ -225,7 +197,7 @@ async def test_action_binds_its_exact_visible_card_after_changed_device_recovery
             before_consume=before_consume,
         )
     finally:
-        await manager.shutdown(reason="test complete")
+        await manager.shutdown()
 
     assert result.consumed is True
     assert result.resolved is False
@@ -296,8 +268,8 @@ async def test_action_delivery_resolver_retries_an_unreadable_exact_card(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_click_recovers_a_card_accepted_before_its_acknowledgement(tmp_path: Path) -> None:
-    """The first post-crash click must bind through generic delivery recovery."""
+async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: Path) -> None:
+    """The first post-crash click binds its exact generic delivery before deciding."""
     journal = EventJournalStore.open_sqlite(tmp_path / "approval-click-before-ack.db")
     responder = journal.principal("agent@code")
     router = journal.principal("router@shared")
@@ -394,6 +366,7 @@ async def test_click_recovers_a_card_accepted_before_its_acknowledgement(tmp_pat
         test_runtime_paths(tmp_path),
         send_delivery=send,
         cards=cards,
+        resolve_action_delivery=AsyncMock(return_value=card_delivery_id),
         transport_sender=lambda: "@mindroom_router:localhost",
         sending_device=lambda: "DEVICE",
     )
@@ -408,13 +381,13 @@ async def test_click_recovers_a_card_accepted_before_its_acknowledgement(tmp_pat
 
         assert result.consumed is True
         assert result.resolved is True
-        assert sent == [DeliveryStage.INITIAL, DeliveryStage.FINAL]
+        assert sent == [DeliveryStage.FINAL]
         decided = await responder.approval_continuation(approval_id)
         assert decided is not None
         assert decided.calls[0].decision.value == "approved"
         assert await router.is_terminal_approval_card(room_id=room_id, card_event_id=card_event_id)
     finally:
-        await manager.shutdown(reason="test complete")
+        await manager.shutdown()
         await journal.close()
 
 
@@ -472,7 +445,7 @@ async def test_startup_recovery_skips_a_malformed_expiry_without_starving_later_
         expire.assert_awaited_once()
         assert expire.await_args.args[1].delivery_id == "recoverable-card"
     finally:
-        await manager.shutdown(reason="test complete")
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -509,7 +482,7 @@ async def test_startup_recovery_logs_a_deferred_terminal_flush(tmp_path: Path) -
             exc_info=True,
         )
     finally:
-        await manager.shutdown(reason="test complete")
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -540,7 +513,7 @@ async def test_startup_recovery_counts_an_unreadable_card_as_failed_debt(tmp_pat
         assert sweep.failed == 1
         assert sweep.complete is False
     finally:
-        await manager.shutdown(reason="test complete")
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -582,7 +555,7 @@ async def test_startup_recovery_drops_a_transport_failure_settled_by_the_same_pa
         assert sweep.failed == 0
         assert sweep.complete is True
     finally:
-        await manager.shutdown(reason="test complete")
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -623,7 +596,7 @@ async def test_live_resolution_logs_room_context_when_terminal_flush_is_deferred
             exc_info=True,
         )
     finally:
-        await manager.shutdown(reason="test complete")
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio
