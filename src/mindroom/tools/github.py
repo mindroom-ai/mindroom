@@ -12,7 +12,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.github import GithubTools
+    from mindroom.custom_tools.github import GithubTools
 
 
 @register_tool_with_metadata(
@@ -86,6 +86,6 @@ if TYPE_CHECKING:
 )
 def github_tools() -> type[GithubTools]:
     """Return GitHub tools for repository management."""
-    from agno.tools.github import GithubTools
+    from mindroom.custom_tools.github import GithubTools
 
     return GithubTools
