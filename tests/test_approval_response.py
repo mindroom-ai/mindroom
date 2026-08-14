@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from agno.models.response import ToolExecution
 from agno.run.requirement import RunRequirement
 
@@ -103,3 +104,19 @@ def test_approval_receipt_reports_denied_and_expired_calls_as_unexecuted() -> No
 
     assert "`delete_report`: approval was denied; the tool was not executed." in receipt
     assert "`publish_report`: human approval expired; the tool was not executed." in receipt
+
+
+def test_approval_receipt_rejects_unsettled_calls() -> None:
+    """Continuation execution must fail closed before rendering pending state as trusted provenance."""
+    with pytest.raises(ValueError, match="pending approval call"):
+        build_approval_receipt(
+            (
+                ApprovalCall(
+                    tool_call_id="call-pending",
+                    tool_name="publish_report",
+                    invoking_agent="writer",
+                    expires_at_ns=1,
+                    human_approval_required=True,
+                ),
+            ),
+        )

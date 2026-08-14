@@ -60,6 +60,9 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
     """Render trusted model context for one exact approval generation."""
     lines = [_APPROVAL_RECEIPT_HEADER]
     for call in calls:
+        if call.decision is None:
+            msg = f"Cannot build trusted receipt for pending approval call {call.tool_call_id!r}"
+            raise ValueError(msg)
         tool = f"`{call.tool_name}`"
         if call.decision is ContinuationDecision.APPROVED:
             if call.human_approval_required is True:
