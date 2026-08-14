@@ -2,9 +2,42 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.config.validation import duplicate_items
+
+
+class AgentReplyPermission(BaseModel):
+    """Static users and managed-room memberships that may use one entity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    users: list[str] = Field(
+        default_factory=list,
+        description="Canonical Matrix user IDs or glob patterns allowed to use the entity.",
+    )
+    joined_rooms: list[str] = Field(
+        default_factory=list,
+        description="Managed room keys whose joined members may use the entity.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_list_shorthand(cls, value: object) -> object:
+        """Normalize the legacy user-list syntax into a structured policy."""
+        if isinstance(value, list):
+            return {"users": value}
+        return value
+
+    @field_validator("joined_rooms")
+    @classmethod
+    def validate_unique_joined_rooms(cls, room_keys: list[str]) -> list[str]:
+        """Reject duplicate managed-room grants within one policy."""
+        duplicates = duplicate_items(room_keys)
+        if duplicates:
+            msg = f"Duplicate joined_rooms are not allowed: {', '.join(duplicates)}"
+            raise ValueError(msg)
+        return room_keys
 
 
 class AuthorizationConfig(BaseModel):
@@ -37,14 +70,13 @@ class AuthorizationConfig(BaseModel):
             "E.g., {'@alice:example.com': ['@telegram_123:example.com']}"
         ),
     )
-    agent_reply_permissions: dict[str, list[str]] = Field(
+    agent_reply_permissions: dict[str, AgentReplyPermission] = Field(
         default_factory=dict,
         description=(
-            "Per-agent reply allowlists keyed by agent/team name. "
+            "Per-agent reply policies keyed by agent/team name. "
             "A '*' key applies to all entities without an explicit override. "
-            "A '*' user entry allows all senders for that entity. "
-            "When set for an entity, it only replies to these user IDs "
-            "(after alias resolution)."
+            "Values may use the legacy user-list shorthand or structured users and joined_rooms. "
+            "A '*' user entry allows all senders for that entity."
         ),
     )
 
@@ -64,3 +96,10 @@ class AuthorizationConfig(BaseModel):
             if sender_id in alias_list:
                 return canonical
         return sender_id
+
+    def agent_reply_policy(self, entity_name: str) -> AgentReplyPermission | None:
+        """Return the explicit entity policy or wildcard fallback."""
+        policy = self.agent_reply_permissions.get(entity_name)
+        if policy is not None:
+            return policy
+        return self.agent_reply_permissions.get("*")

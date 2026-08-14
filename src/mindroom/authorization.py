@@ -145,17 +145,14 @@ def _current_internal_sender_ids_for_auth(config: Config, runtime_paths: Runtime
 
 def _is_sender_allowed_by_agent_reply_allowlist(sender_id: str, agent_name: str, config: Config) -> bool:
     """Check only the configured per-agent reply allowlist for one sender."""
-    agent_reply_permissions = config.authorization.agent_reply_permissions
-    allowed_users = agent_reply_permissions.get(agent_name)
-    if allowed_users is None:
-        allowed_users = agent_reply_permissions.get("*")
-    if allowed_users is None:
+    policy = config.authorization.agent_reply_policy(agent_name)
+    if policy is None:
         return True
-    if "*" in allowed_users:
+    if "*" in policy.users:
         return True
 
     resolved_sender = config.authorization.resolve_alias(sender_id)
-    return any(fnmatchcase(resolved_sender, allowed_user) for allowed_user in allowed_users)
+    return any(fnmatchcase(resolved_sender, allowed_user) for allowed_user in policy.users)
 
 
 def is_sender_allowed_for_agent_credential_management(

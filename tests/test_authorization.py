@@ -1159,6 +1159,114 @@ def test_agent_reply_permissions_domain_pattern_after_alias_resolution() -> None
     assert is_sender_allowed_for_agent_reply("@telegram_111:example.com", "assistant", config)
 
 
+def test_agent_reply_permissions_normalize_legacy_list() -> None:
+    """Legacy list policies should expose the same typed static-user policy as structured config."""
+    authorization = AuthorizationConfig(
+        agent_reply_permissions={
+            "assistant": ["@alice:example.com"],
+        },
+    )
+
+    policy = authorization.agent_reply_permissions["assistant"]
+    assert policy.users == ["@alice:example.com"]
+    assert policy.joined_rooms == []
+
+
+def test_agent_reply_permissions_accept_structured_users() -> None:
+    """Structured users-only policies should preserve legacy reply behavior."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "agent_reply_permissions": {
+                "assistant": {"users": ["@alice:example.com"]},
+            },
+        },
+    )
+
+    assert is_sender_allowed_for_agent_reply("@alice:example.com", "assistant", config)
+    assert not is_sender_allowed_for_agent_reply("@bob:example.com", "assistant", config)
+
+
+def test_agent_reply_permissions_reject_duplicate_joined_rooms() -> None:
+    """A duplicated grant-room key should not create ambiguous policy state."""
+    with pytest.raises(ValueError, match="Duplicate joined_rooms are not allowed: project"):
+        AuthorizationConfig(
+            agent_reply_permissions={
+                "assistant": {"joined_rooms": ["project", "project"]},
+            },
+        )
+
+
+@pytest.mark.parametrize("joined_room", ["missing", "!raw:example.com", "#alias:example.com"])
+def test_agent_reply_permissions_reject_non_managed_room_keys(joined_room: str) -> None:
+    """Grant rooms must be configured managed keys rather than unresolved names or Matrix identifiers."""
+    with pytest.raises(ValueError, match="configured managed room keys"):
+        Config(
+            agents={
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Test assistant",
+                    "rooms": ["project"],
+                },
+            },
+            authorization={
+                "agent_reply_permissions": {
+                    "assistant": {"joined_rooms": [joined_room]},
+                },
+            },
+        )
+
+
+def test_agent_reply_permissions_accept_configured_managed_room_key() -> None:
+    """A configured managed key should be valid even without separate room metadata."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["project"],
+            },
+        },
+        authorization={
+            "agent_reply_permissions": {
+                "assistant": {"joined_rooms": ["project"]},
+            },
+        },
+    )
+
+    assert config.authorization.agent_reply_permissions["assistant"].joined_rooms == ["project"]
+
+
+def test_membership_only_reply_policy_grants_no_credential_management() -> None:
+    """Room membership must never become credential or OAuth management authority."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["project"],
+            },
+        },
+        authorization={
+            "agent_reply_permissions": {
+                "assistant": {"joined_rooms": ["project"]},
+            },
+        },
+    )
+
+    assert not is_sender_allowed_for_agent_credential_management(
+        "@alice:example.com",
+        "assistant",
+        config,
+    )
+
+
 def test_agent_reply_permissions_reject_unknown_entity() -> None:
     """Unknown keys in agent_reply_permissions should fail config validation."""
     with pytest.raises(ValueError, match=r"authorization\.agent_reply_permissions contains unknown entities"):
