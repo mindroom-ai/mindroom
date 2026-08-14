@@ -20,15 +20,15 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-type AgentReplyMembershipPolicySignature = tuple[
+type _AgentReplyMembershipPolicySignature = tuple[
     tuple[tuple[str, tuple[str, ...]], ...],
     tuple[tuple[str, tuple[str, ...]], ...],
 ]
 
 
-def agent_reply_membership_policy_signature(
+def _agent_reply_membership_policy_signature(
     authorization: AuthorizationConfig,
-) -> AgentReplyMembershipPolicySignature:
+) -> _AgentReplyMembershipPolicySignature:
     """Return the policy inputs that determine canonical membership grants."""
     room_grants = tuple(
         sorted(
@@ -55,7 +55,7 @@ def _referenced_room_keys(authorization: AuthorizationConfig) -> tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class GrantRoomMembership:
+class _GrantRoomMembership:
     """One managed grant room's stable identity and joined-user snapshot."""
 
     room_key: str
@@ -66,11 +66,11 @@ class GrantRoomMembership:
 
 
 @dataclass(frozen=True, slots=True)
-class AgentReplyMembershipSnapshot:
+class _AgentReplyMembershipSnapshot:
     """One atomically published view of every configured grant room."""
 
-    policy_signature: AgentReplyMembershipPolicySignature | None = None
-    rooms: tuple[GrantRoomMembership, ...] = ()
+    policy_signature: _AgentReplyMembershipPolicySignature | None = None
+    rooms: tuple[_GrantRoomMembership, ...] = ()
     refresh_required: bool = True
 
 
@@ -78,13 +78,13 @@ class AgentReplyMembershipIndex:
     """Own the process-local membership state used by reply authorization."""
 
     def __init__(self) -> None:
-        self._snapshot = AgentReplyMembershipSnapshot()
-        self._desired_signature: AgentReplyMembershipPolicySignature | None = None
+        self._snapshot = _AgentReplyMembershipSnapshot()
+        self._desired_signature: _AgentReplyMembershipPolicySignature | None = None
         self._epoch = 0
         self._refresh_lock = asyncio.Lock()
 
     @property
-    def snapshot(self) -> AgentReplyMembershipSnapshot:
+    def snapshot(self) -> _AgentReplyMembershipSnapshot:
         """Return the current immutable snapshot."""
         return self._snapshot
 
@@ -93,7 +93,7 @@ class AgentReplyMembershipIndex:
         if not _referenced_room_keys(authorization):
             return False
         return (
-            self._snapshot.policy_signature != agent_reply_membership_policy_signature(authorization)
+            self._snapshot.policy_signature != _agent_reply_membership_policy_signature(authorization)
             or self._snapshot.refresh_required
         )
 
@@ -105,7 +105,7 @@ class AgentReplyMembershipIndex:
     ) -> bool:
         """Return whether a sender is joined to any ready configured grant room."""
         snapshot = self._snapshot
-        if snapshot.policy_signature != agent_reply_membership_policy_signature(authorization):
+        if snapshot.policy_signature != _agent_reply_membership_policy_signature(authorization):
             return False
         resolved_sender = authorization.resolve_alias(sender_id)
         allowed_room_keys = frozenset(joined_rooms)
@@ -118,13 +118,13 @@ class AgentReplyMembershipIndex:
         """Revoke every room-backed grant until an authoritative refresh succeeds."""
         previous_rooms = {room.room_key: room for room in self._snapshot.rooms}
         room_keys = _referenced_room_keys(config.authorization)
-        signature = agent_reply_membership_policy_signature(config.authorization)
+        signature = _agent_reply_membership_policy_signature(config.authorization)
         self._desired_signature = signature
         self._epoch += 1
-        self._snapshot = AgentReplyMembershipSnapshot(
+        self._snapshot = _AgentReplyMembershipSnapshot(
             policy_signature=signature,
             rooms=tuple(
-                GrantRoomMembership(
+                _GrantRoomMembership(
                     room_key=room_key,
                     room_id=previous_rooms[room_key].room_id if room_key in previous_rooms else None,
                     ready=False,
@@ -147,7 +147,7 @@ class AgentReplyMembershipIndex:
     ) -> None:
         """Atomically replace membership state from authoritative Matrix queries."""
         authorization = config.authorization
-        signature = agent_reply_membership_policy_signature(authorization)
+        signature = _agent_reply_membership_policy_signature(authorization)
         if self._desired_signature is None:
             self._desired_signature = signature
         if self._desired_signature != signature:
@@ -178,7 +178,7 @@ class AgentReplyMembershipIndex:
     ) -> None:
         """Apply one live membership transition to every matching ready grant room."""
         snapshot = self._snapshot
-        if snapshot.policy_signature != agent_reply_membership_policy_signature(config.authorization):
+        if snapshot.policy_signature != _agent_reply_membership_policy_signature(config.authorization):
             return
 
         matching_room_keys = tuple(room.room_key for room in snapshot.rooms if room.room_id == room_id)
@@ -221,13 +221,13 @@ class AgentReplyMembershipIndex:
 
 
 def _apply_transition_to_room(
-    room: GrantRoomMembership,
+    room: _GrantRoomMembership,
     *,
     room_id: str,
     event: nio.RoomMemberEvent,
     control_user_id: str,
     authorization: AuthorizationConfig,
-) -> GrantRoomMembership:
+) -> _GrantRoomMembership:
     """Return one grant-room value after applying a matching live transition."""
     if room.room_id != room_id:
         return room
@@ -258,18 +258,18 @@ async def _build_authoritative_snapshot(
     runtime_paths: RuntimePaths,
     client: nio.AsyncClient,
     *,
-    signature: AgentReplyMembershipPolicySignature,
-) -> AgentReplyMembershipSnapshot:
+    signature: _AgentReplyMembershipPolicySignature,
+) -> _AgentReplyMembershipSnapshot:
     """Build one complete candidate without exposing partially refreshed rooms."""
     authorization = config.authorization
     room_keys = _referenced_room_keys(authorization)
     if not room_keys:
-        return AgentReplyMembershipSnapshot(policy_signature=signature, refresh_required=False)
+        return _AgentReplyMembershipSnapshot(policy_signature=signature, refresh_required=False)
 
     state = matrix_state_for_runtime(runtime_paths)
     joined_room_ids = await _authoritative_joined_room_ids(client)
     memberships_by_room_id: dict[str, frozenset[str] | None] = {}
-    rooms: list[GrantRoomMembership] = []
+    rooms: list[_GrantRoomMembership] = []
     for room_key in room_keys:
         managed_room = state.rooms.get(room_key)
         if managed_room is None:
@@ -294,7 +294,7 @@ async def _build_authoritative_snapshot(
             continue
         joined_user_ids = _canonical_user_ids(raw_joined_user_ids, authorization)
         rooms.append(
-            GrantRoomMembership(
+            _GrantRoomMembership(
                 room_key=room_key,
                 room_id=room_id,
                 ready=True,
@@ -310,7 +310,7 @@ async def _build_authoritative_snapshot(
             member_count=len(joined_user_ids),
         )
     frozen_rooms = tuple(rooms)
-    return AgentReplyMembershipSnapshot(
+    return _AgentReplyMembershipSnapshot(
         policy_signature=signature,
         rooms=frozen_rooms,
         refresh_required=any(not room.ready for room in frozen_rooms),
@@ -380,7 +380,7 @@ def _canonical_user_ids(
     return frozenset(authorization.resolve_alias(user_id) for user_id in raw_user_ids)
 
 
-def _unready_room(room_key: str, room_id: str | None, *, reason: str) -> GrantRoomMembership:
+def _unready_room(room_key: str, room_id: str | None, *, reason: str) -> _GrantRoomMembership:
     """Build and log one fail-closed grant-room snapshot."""
     logger.warning(
         "agent_reply_grant_room_unready",
@@ -389,4 +389,4 @@ def _unready_room(room_key: str, room_id: str | None, *, reason: str) -> GrantRo
         readiness="unready",
         reason=reason,
     )
-    return GrantRoomMembership(room_key=room_key, room_id=room_id, ready=False)
+    return _GrantRoomMembership(room_key=room_key, room_id=room_id, ready=False)

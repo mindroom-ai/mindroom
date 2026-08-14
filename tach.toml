@@ -3992,7 +3992,9 @@ from = ["mindroom.memory"]
 [[interfaces]]
 expose = [
     "OrchestratorRuntime",
+    "SupportsAgentReplyMemberships",
     "SupportsClientConfig",
+    "SupportsClientConfigMemberships",
     "SupportsClientConfigOrchestrator",
     "SupportsConfig",
     "SupportsConfigOrchestrator",

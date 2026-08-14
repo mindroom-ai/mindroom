@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_reply_membership_policy_signature
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex, _agent_reply_membership_policy_signature
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.state import MatrixState
@@ -398,6 +398,6 @@ async def test_old_policy_refresh_cannot_publish_after_policy_replacement(tmp_pa
     release_query.set()
     await refresh_task
 
-    assert index.snapshot.policy_signature == agent_reply_membership_policy_signature(changed_config.authorization)
+    assert index.snapshot.policy_signature == _agent_reply_membership_policy_signature(changed_config.authorization)
     assert index.needs_refresh(changed_config.authorization)
     assert not index.is_allowed("@alice:example.com", ["secondary"], changed_config.authorization)

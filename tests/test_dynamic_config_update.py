@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_reply_membership_policy_signature
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex, _agent_reply_membership_policy_signature
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
@@ -507,7 +507,7 @@ class TestDynamicConfigUpdate:
         assert router_bot.config == updated_config
         mock_setup.assert_awaited_once_with([])
         assert orchestrator.agent_reply_memberships.snapshot.policy_signature == (
-            agent_reply_membership_policy_signature(updated_config.authorization)
+            _agent_reply_membership_policy_signature(updated_config.authorization)
         )
         assert orchestrator.agent_reply_memberships.needs_refresh(updated_config.authorization)
 

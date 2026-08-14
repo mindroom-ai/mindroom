@@ -590,7 +590,7 @@ authorization:
   default_room_access: false       # Default: false
   config_command_enabled: false    # Enable !config for global admin users; default: false
   aliases: {}                      # Map canonical Matrix user IDs to bridge aliases (see authorization docs)
-  agent_reply_permissions: {}      # Per-agent/team/router (or '*') reply allowlists; supports globs like '*:example.com'
+  agent_reply_permissions: {}      # Reply policies: user-list shorthand or {users, joined_rooms} with managed room keys
 
 # Managed room metadata (optional)
 # Keys are managed room aliases.
@@ -799,7 +799,8 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.config_command_enabled` defaults to `false`; when set to `true`, `!config` still requires `global_users`
-- `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
+- `authorization.agent_reply_permissions` can restrict replies by static user/glob matches or current membership in configured managed rooms
+- `authorization.agent_reply_permissions.<entity>.joined_rooms` grants conversation access only and never dashboard credential or OAuth management
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
 - `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
