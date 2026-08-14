@@ -19,9 +19,14 @@ from .approval_continuations import (
     ApprovalContinuation,
     ApprovalDecision,
     ApprovalMemoryTurn,
-    unavailable_notice_turn_id,
+    unavailable_notice_delivery_id,
 )
-from .approvals import RecordedApprovalDecision, StoredApprovalCard
+from .approvals import (
+    ApprovalCardReservation,
+    RecordedApprovalDecision,
+    StoredApprovalCard,
+    UnreadableApprovalCard,
+)
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership import MembershipFence, MembershipView
 from .models import (
@@ -41,23 +46,24 @@ from .models import (
     HydrationPolicy,
     InboundEvent,
     JournalEvent,
-    OutboxDelivery,
+    MatrixDelivery,
     PendingPage,
     RefreshRequest,
     SemanticConsumer,
     TerminalTurnWrite,
+    UnreadableMatrixDelivery,
     VisibleMessage,
 )
 from .projection import ProjectedEvent, replacement_target, thread_root, visible_content
 from .store import EventJournalStore, PrincipalStore, TurnRecordStore
 from .views import (
     AdmissionView,
-    ApprovalView,
+    ApprovalDeliveryView,
     ConversationReadView,
     DispatchView,
     HistoryRecoveryRecordView,
     HydrationView,
-    OutboxView,
+    MatrixDeliveryView,
     PendingTurnView,
     RelationView,
     ReplayView,
@@ -68,10 +74,11 @@ __all__ = [
     "AdmissionResult",
     "AdmissionView",
     "ApprovalCall",
+    "ApprovalCardReservation",
     "ApprovalContinuation",
     "ApprovalDecision",
+    "ApprovalDeliveryView",
     "ApprovalMemoryTurn",
-    "ApprovalView",
     "ConversationCursor",
     "ConversationPage",
     "ConversationReadView",
@@ -94,10 +101,10 @@ __all__ = [
     "InboundEvent",
     "InteractiveSelection",
     "JournalEvent",
+    "MatrixDelivery",
+    "MatrixDeliveryView",
     "MembershipFence",
     "MembershipView",
-    "OutboxDelivery",
-    "OutboxView",
     "PendingPage",
     "PendingTurnView",
     "PrincipalStore",
@@ -111,12 +118,14 @@ __all__ = [
     "StoredApprovalCard",
     "TerminalTurnWrite",
     "TurnRecordStore",
+    "UnreadableApprovalCard",
+    "UnreadableMatrixDelivery",
     "VisibleMessage",
     "decode_thread_id",
     "delivery_transaction_id",
     "encode_thread_id",
     "replacement_target",
     "thread_root",
-    "unavailable_notice_turn_id",
+    "unavailable_notice_delivery_id",
     "visible_content",
 ]

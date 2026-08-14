@@ -485,8 +485,8 @@ async def test_a_rejoin_before_the_echo_keeps_its_queued_answer(
 
     await membership.fence_local_departure(ROOM)
     await membership.note_membership_restarted(ROOM)
-    await principal.enqueue_delivery(
-        turn_id="$after-rejoin",
+    await principal.enqueue_matrix_delivery(
+        delivery_id="$after-rejoin",
         stage=DeliveryStage.FINAL,
         room_id=ROOM,
         thread_id=None,
@@ -496,7 +496,7 @@ async def test_a_rejoin_before_the_echo_keeps_its_queued_answer(
     await membership.fence_reported_departures([reported_departure()])
 
     assert store.advanced == [ROOM]
-    delivery = await principal.load_delivery(turn_id="$after-rejoin", stage=DeliveryStage.FINAL)
+    delivery = await principal.load_matrix_delivery(delivery_id="$after-rejoin", stage=DeliveryStage.FINAL)
     assert delivery is not None
 
 
