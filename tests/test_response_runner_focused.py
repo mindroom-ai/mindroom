@@ -666,6 +666,7 @@ async def test_user_stop_fences_waiting_approval_before_terminal_turn_record(tmp
             turn_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$waiting",
+            delivered_projections=(),
         )
         return True
 
@@ -737,6 +738,7 @@ async def test_user_stop_preserves_a_claimed_frozen_final_until_success_recovery
                 turn_id="$source",
                 stage=DeliveryStage.FINAL,
                 event_id="$final",
+                delivered_projections=(),
             )
 
     lifecycle = MagicMock(finalize=AsyncMock())
@@ -832,6 +834,7 @@ async def test_user_stop_retry_preserves_success_completed_by_source_worker(tmp_
             turn_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$final",
+            delivered_projections=(),
         )
         assert (
             await runner._recover_claimed_approval_lifecycle(
@@ -926,6 +929,7 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
             turn_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$final-edit",
+            delivered_projections=(),
         )
         recovered_response_event_id = await runner._recover_claimed_approval_lifecycle(
             claimed,
@@ -1007,6 +1011,7 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
         turn_id="$source",
         stage=DeliveryStage.FINAL,
         event_id="$final-edit",
+        delivered_projections=(),
     )
     lifecycle = MagicMock(finalize=AsyncMock())
 
@@ -1923,6 +1928,7 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
             turn_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$final",
+            delivered_projections=(),
         )
 
     with (
@@ -1990,7 +1996,12 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
         edits_event_id="$waiting",
     )
     assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-    await store.acknowledge_delivery(turn_id="$source", stage=DeliveryStage.FINAL, event_id="$final")
+    await store.acknowledge_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        event_id="$final",
+        delivered_projections=(),
+    )
     lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
 
     with patch.object(runner, "_build_lifecycle", return_value=lifecycle):
@@ -2039,7 +2050,12 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
         edits_event_id="$waiting",
     )
     assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-    await store.acknowledge_delivery(turn_id="$source", stage=DeliveryStage.FINAL, event_id="$failure-edit")
+    await store.acknowledge_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        event_id="$failure-edit",
+        delivered_projections=(),
+    )
 
     with patch.object(runner, "_build_lifecycle", return_value=MagicMock(finalize=AsyncMock())) as build_lifecycle:
         assert await runner.recover_approval_final(continuation.approval_id)
@@ -2090,7 +2106,12 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
             edits_event_id="$waiting",
         )
         assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-        await store.acknowledge_delivery(turn_id="$source", stage=DeliveryStage.FINAL, event_id="$final")
+        await store.acknowledge_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$final",
+            delivered_projections=(),
+        )
         raise asyncio.CancelledError
 
     lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
@@ -2149,7 +2170,12 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
         )
         assert claimed.state == "claimed"
         assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-        await store.acknowledge_delivery(turn_id="$source", stage=DeliveryStage.FINAL, event_id="$final")
+        await store.acknowledge_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$final",
+            delivered_projections=(),
+        )
         raise asyncio.CancelledError
 
     lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))

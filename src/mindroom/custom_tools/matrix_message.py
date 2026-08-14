@@ -228,16 +228,18 @@ class MatrixMessageTools(Toolkit):
         - `thread-reply`: Alias of `reply` with the same thread behavior.
         - `react`: React to `target` with `message`, defaulting to 👍.
         - `read`: Read the active thread, or the room timeline without one.
-        - `room-threads`: Page through room thread roots with `page_token`.
-        - `thread-list`: List current/explicit thread messages and edit options.
+        - `room-threads`: Page room thread roots.
+        - `thread-list`: List thread messages and edit options.
         - `edit`: Edit the `target` event, inheriting the current thread.
         - `context`: Return targeting, requester, and agent metadata.
 
-        Threading: `send` is room-level even inside a thread; an explicit thread ID targets that thread. `reply` and `thread-reply` inherit the current thread. `thread_id="room"` forces room scope and prevents thread inheritance.
+        Threading: `send` is room-level even inside a thread unless given a thread. `reply` and `thread-reply` inherit the current thread. `thread_id="room"` forces room scope.
 
         Mention safety for text send/reply/thread-reply: default `ignore_mentions=True` sets `com.mindroom.skip_mentions` and suppresses dispatch to prevent loops. Set `False` ONLY for an intentional handoff or self-trigger; then human requesters use `com.mindroom.original_sender` for authorization.
 
         Attachments: only `send`, `reply`, and `thread-reply` accept context-scoped `att_*` IDs or local file paths, combined maximum 5. Include text, attachments, or both, but not neither. Relative paths resolve from the agent workspace.
+
+        `interactive` blocks require normal response delivery and are rejected here.
 
         `message_extras` adds collapsible sections to send/reply/thread-reply/edit. Each uses `title`, `content`, optional `collapsed`, and `content_type`: `text/plain`, `text/markdown` (default), or `text/html`; basic fragments only: no scripts/styles/images/forms/media/SVG/math/interactive elements; links only `http`/`https`/`mailto`.
 

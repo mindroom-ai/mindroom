@@ -252,7 +252,6 @@ def _advance_membership_epoch(
         "unresolved_edits",
         "redaction_tombstones",
         "room_history_recovery",
-        "interactive_questions",
     ):
         transaction.execute(
             f"DELETE FROM {table} WHERE principal_id = ? AND room_id = ?",  # noqa: S608 - a fixed table list
@@ -1143,9 +1142,10 @@ def settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
     that this event already produced its one turn, and it has to outlive the
     work it authorized.
 
-    Settled is the whole fact. Why the work ended -- answered, or deliberately
-    not answered -- was recorded for a while and never once read back, and a
-    durable column nothing consults is a claim nothing keeps honest.
+    Settled is the whole source fact. Why ordinary work ended -- answered, or
+    deliberately not answered -- was recorded for a while and never once read
+    back. An interactive prompt revision is different: its consumed-by source
+    remains on that immutable revision so projection repair cannot revive it.
     """
     transaction.execute(
         """
@@ -1156,7 +1156,7 @@ def settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
         (SETTLED_STATE, principal_id, event_id),
     )
     transaction.execute(
-        "DELETE FROM interactive_questions WHERE principal_id = ? AND claimed_source_event_id = ?",
+        "DELETE FROM interactive_selections WHERE principal_id = ? AND source_event_id = ?",
         (principal_id, event_id),
     )
 

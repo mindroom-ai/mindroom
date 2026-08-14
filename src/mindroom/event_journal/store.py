@@ -27,17 +27,18 @@ from .approvals import (  # noqa: TC001 - part of this module's runtime return t
     RecordedApprovalDecision,
     StoredApprovalCard,
 )
-from .models import DeliveryAcknowledgement
+from .models import AdmissionResult, DeliveryAcknowledgement, DeliveryProjectionPendingError
 from .projection import drop_refetched_message, install_refetched_revision, project
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
+    from mindroom.interactive_models import InteractivePrompt
+
     from .backend import Backend, Transaction
-    from .interactive_questions import InteractiveQuestion, InteractiveSelection
+    from .interactive_questions import InteractiveSelection
     from .models import (
-        AdmissionResult,
         ConversationCursor,
         ConversationPage,
         DeliveryStage,
@@ -80,7 +81,7 @@ class PrincipalStore:
     ) -> AdmissionResult:
         """Admit one event and update the projection in a single transaction."""
         return await self._backend.write(
-            lambda transaction: journal.admit(transaction, self._principal_id, event, projected),
+            lambda transaction: _admit(transaction, self._principal_id, event, projected),
         )
 
     async def pending(
@@ -205,6 +206,24 @@ class PrincipalStore:
             lambda transaction: journal.current_membership_epoch(transaction, self._principal_id, room_id),
         )
 
+    async def interactive_prompt_is_current(
+        self,
+        *,
+        room_id: str,
+        question_event_id: str,
+        expected: InteractivePrompt,
+    ) -> bool:
+        """Return whether projection still exposes one prompt in its active membership."""
+        return await self._backend.write(
+            lambda transaction: interactive_questions.prompt_is_current(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                question_event_id=question_event_id,
+                expected=expected,
+            ),
+        )
+
     async def fence_departure(
         self,
         room_id: str,
@@ -223,66 +242,17 @@ class PrincipalStore:
             ),
         )
 
-    async def register_interactive_question_for_turn(
-        self,
-        turn_id: str,
-        question: InteractiveQuestion,
-        *,
-        fallback_membership_epoch: int | None = None,
-    ) -> bool:
-        """Register a question only under the membership that admitted its turn."""
-        return await self._backend.write(
-            lambda transaction: _register_interactive_question_for_turn(
-                transaction,
-                self._principal_id,
-                turn_id=turn_id,
-                question=question,
-                fallback_membership_epoch=fallback_membership_epoch,
-            ),
-        )
-
-    async def register_interactive_question_for_epoch(
-        self,
-        expected_membership_epoch: int,
-        question: InteractiveQuestion,
-    ) -> bool:
-        """Register a direct Matrix question under one captured membership."""
-        return await self._backend.write(
-            lambda transaction: interactive_questions.register_if_current(
-                transaction,
-                self._principal_id,
-                expected_membership_epoch=expected_membership_epoch,
-                question=question,
-            ),
-        )
-
-    async def forget_interactive_question(self, question_event_id: str) -> None:
-        """Forget one delivered question that no longer offers its options."""
-        await self._backend.write(
-            lambda transaction: interactive_questions.forget(
-                transaction,
-                self._principal_id,
-                question_event_id,
-            ),
-        )
-
     async def claim_interactive_reaction(
         self,
         *,
         source_event_id: str,
-        question_event_id: str,
-        selection_key: str,
-        creator_agent: str,
     ) -> InteractiveSelection | None:
-        """Atomically claim one question with its durable reaction source."""
+        """Atomically transfer one question selection to its reaction source."""
         return await self._backend.write(
             lambda transaction: interactive_questions.claim_reaction(
                 transaction,
                 self._principal_id,
                 source_event_id=source_event_id,
-                question_event_id=question_event_id,
-                selection_key=selection_key,
-                creator_agent=creator_agent,
             ),
         )
 
@@ -290,17 +260,13 @@ class PrincipalStore:
         self,
         *,
         source_event_id: str,
-        selection_key: str,
-        creator_agent: str,
     ) -> InteractiveSelection | None:
-        """Atomically claim the oldest eligible question for one text source."""
+        """Atomically transfer the oldest eligible selection to one text source."""
         return await self._backend.write(
             lambda transaction: interactive_questions.claim_text(
                 transaction,
                 self._principal_id,
                 source_event_id=source_event_id,
-                selection_key=selection_key,
-                creator_agent=creator_agent,
             ),
         )
 
@@ -570,6 +536,7 @@ class PrincipalStore:
                 revision_event_id=revision_event_id,
                 revision_ts=revision_ts,
                 content=content,
+                expected_revision_event_id=request.revision_event_id,
                 expected_refresh_token=request.refresh_token,
                 expected_membership_epoch=request.membership_epoch,
             ),
@@ -583,6 +550,7 @@ class PrincipalStore:
                 self._principal_id,
                 room_id=request.room_id,
                 logical_event_id=request.logical_event_id,
+                expected_revision_event_id=request.revision_event_id,
                 expected_refresh_token=request.refresh_token,
                 expected_membership_epoch=request.membership_epoch,
             ),
@@ -685,6 +653,7 @@ class PrincipalStore:
         turn_id: str,
         stage: DeliveryStage,
         event_id: str,
+        delivered_projections: tuple[ProjectedEvent, ...],
         terminal_turn: TerminalTurnWrite | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, if nothing else has.
@@ -713,6 +682,12 @@ class PrincipalStore:
         The two rows are scoped differently, one to this principal and one to
         an agent, and they still share a transaction because they share a
         database. That is the whole reason turn records were moved here.
+
+        ``delivered_projections`` is the server-ordered Matrix content this row
+        depends on and made visible. The winner projects it in this transaction
+        before any reaction or numeric answer can become durable. An empty
+        tuple means the server already redacted the event, so frozen plaintext
+        must not be resurrected.
         """
 
         def acknowledge(transaction: Transaction) -> DeliveryAcknowledgement:
@@ -735,6 +710,19 @@ class PrincipalStore:
                     anchor_event_id=terminal_turn.anchor_event_id,
                     record_json=terminal_turn.record_json,
                 )
+            if bound:
+                for delivered_projection in delivered_projections:
+                    project(
+                        transaction,
+                        self._principal_id,
+                        delivered_projection,
+                        receipt_order=0,
+                        membership_epoch=journal.current_membership_epoch(
+                            transaction,
+                            self._principal_id,
+                            delivered_projection.room_id,
+                        ),
+                    )
             if bound:
                 return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
             # Lost the row. Whatever is on it now is the answer this delivery
@@ -1075,42 +1063,26 @@ def _turn_membership_is_current(
     return admitted == journal.current_membership_epoch(transaction, principal_id, room_id)
 
 
-def _register_interactive_question_for_turn(
+def _admit(
     transaction: Transaction,
     principal_id: str,
-    *,
-    turn_id: str,
-    question: InteractiveQuestion,
-    fallback_membership_epoch: int | None,
-) -> bool:
-    """Register one question under the exact room membership that admitted its turn."""
-    admitted = transaction.fetchone(
-        """
-        SELECT room_id, membership_epoch
-        FROM journal_events
-        WHERE principal_id = ? AND event_id = ?
-        """,
-        (principal_id, turn_id),
-    )
-    if admitted is None:
-        return (
-            False
-            if fallback_membership_epoch is None
-            else interactive_questions.register_if_current(
-                transaction,
-                principal_id,
-                expected_membership_epoch=fallback_membership_epoch,
-                question=question,
-            )
+    event: InboundEvent,
+    projected: ProjectedEvent | None,
+) -> AdmissionResult:
+    """Admit one event after any already-visible outbox delivery is projected."""
+    result = journal.admit(transaction, principal_id, event, projected)
+    if (
+        result is AdmissionResult.ADMITTED
+        and interactive_questions.snapshot_source_candidate(
+            transaction,
+            principal_id,
+            event,
         )
-    if admitted["room_id"] != question.room_id:
-        return False
-    return interactive_questions.register_if_current(
-        transaction,
-        principal_id,
-        expected_membership_epoch=int(admitted["membership_epoch"]),
-        question=question,
-    )
+        and outbox.has_attempted_unacknowledged_prompt_delivery(transaction, principal_id, room_id=event.room_id)
+    ):
+        msg = f"Matrix delivery projection is pending in room {event.room_id!r}"
+        raise DeliveryProjectionPendingError(msg)
+    return result
 
 
 def _enqueue_delivery(

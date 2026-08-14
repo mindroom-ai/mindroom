@@ -37,6 +37,7 @@ from mindroom.logging_config import get_logger
 
 from .offloading import ThreadOffload, settled
 from .schema import SQLITE_DIALECT, render, schema_statements
+from .schema_migrations import validate_interactive_question_columns
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -201,6 +202,14 @@ class SqliteBackend:
         # gap the certifier can see. Readers commit nothing, so this is the
         # writer's cost alone.
         _configure(connection, synchronous="FULL")
+        interactive_question_columns = frozenset(
+            str(row[1]) for row in connection.execute("PRAGMA table_info(interactive_questions)")
+        )
+        try:
+            validate_interactive_question_columns(interactive_question_columns)
+        except RuntimeError:
+            connection.close()
+            raise
         connection.execute("BEGIN IMMEDIATE")
         for statement in schema_statements(SQLITE_DIALECT):
             connection.execute(statement)

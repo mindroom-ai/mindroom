@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING
 
+from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -67,6 +69,10 @@ class AdmissionResult(StrEnum):
 
     ADMITTED = "admitted"
     DUPLICATE = "duplicate"
+
+
+class DeliveryProjectionPendingError(RuntimeError):
+    """An interactive source arrived before a visible delivery was projected."""
 
 
 class DeliveryStage(StrEnum):
@@ -280,14 +286,17 @@ class ConversationCursor:
 class RefreshRequest:
     """A logical message whose visible revision must be refetched.
 
-    Produced when the currently visible revision was redacted. The token is the
-    redaction's journal receipt order, and a refetch installs its result only
-    while that exact token is still current.
+    Produced when the currently visible revision was redacted or withheld as a
+    sidecar preview. The revision identity disambiguates projections that do
+    not have a journal receipt, while the token identifies the exact debt
+    raised for that revision. A refetch installs its result only while both are
+    still current.
     """
 
     room_id: str
     thread_id: str | None
     logical_event_id: str
+    revision_event_id: str
     refresh_token: int
     membership_epoch: int
 
@@ -332,6 +341,11 @@ class OutboxDelivery:
     # device this process is no longer logged in as carries an ID the
     # homeserver would accept as new.
     sending_device_id: str | None = None
+
+    @property
+    def has_interactive_prompt(self) -> bool:
+        """Return whether this frozen payload carries an interactive prompt."""
+        return INTERACTIVE_PROMPT_KEY in self.payload
 
 
 @dataclass(frozen=True, slots=True)

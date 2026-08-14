@@ -7235,7 +7235,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         await reservation_owner.release()
         await bot._coalescing_gate.drain_all()
 
-    assert handled is _IngressAdmissionOutcome.ADMITTED
+    assert handled is _IngressAdmissionOutcome.DEFERRED
     assert captured_envelopes[0].source_kind == "message"
     assert captured_envelopes[0].mentioned_agents == ("test_agent",)
     assert captured_envelopes[0].requester_id == "@user:localhost"
@@ -7395,7 +7395,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
         )
         drain_result = await bot._coalescing_gate.drain_all()
 
-    assert outcome is _IngressAdmissionOutcome.ADMITTED
+    assert outcome is _IngressAdmissionOutcome.DEFERRED
     assert drain_result.dispatch_failure_count == 1
     retry_pending_source.assert_called_once_with(sidecar.event_id)
 

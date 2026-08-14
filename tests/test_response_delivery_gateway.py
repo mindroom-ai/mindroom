@@ -38,6 +38,7 @@ from mindroom.streaming import PROGRESS_PLACEHOLDER
 from tests.conftest import (
     FakeOutbox,
     bind_runtime_paths,
+    ignore_delivered_projection,
     ignore_final_delivery_handoff,
     make_outbox_mock,
     runtime_paths_for,
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
         OutboxDelivery,
         OutboxView,
         PrincipalStore,
+        ProjectedEvent,
         TerminalTurnWrite,
     )
 
@@ -85,6 +87,30 @@ def _identity(source_event_id: str = "$cause") -> ResponseIdentity:
     )
 
 
+def _delivered_event_response(
+    room_id: str,
+    event_id: str,
+    *,
+    content: dict[str, object] | None = None,
+    timestamp: int = 1_000,
+) -> nio.RoomGetEventResponse:
+    """Return the authoritative metadata for one test delivery."""
+    event = MagicMock()
+    event.event_id = event_id
+    event.sender = _AGENT_USER_ID
+    event.server_timestamp = timestamp
+    event.source = {
+        "event_id": event_id,
+        "room_id": room_id,
+        "type": "m.room.message",
+        "content": content if content is not None else {"msgtype": "m.text", "body": event_id},
+        "unsigned": {},
+    }
+    response = nio.RoomGetEventResponse()
+    response.event = event
+    return response
+
+
 @pytest.fixture
 def alice(journal_store: EventJournalStore) -> PrincipalStore:
     """Return one bound principal view."""
@@ -103,10 +129,14 @@ def _gateway(
         Config(agents={"agent": AgentConfig(display_name="Agent")}),
         test_runtime_paths(tmp_path),
     )
+    client = AsyncMock()
+    client.user_id = _AGENT_USER_ID
+
+    client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
     return DeliveryGateway(
         DeliveryGatewayDeps(
             runtime=SimpleNamespace(
-                client=AsyncMock(),
+                client=client,
                 config=config,
                 enable_streaming=True,
                 orchestrator=None,
@@ -186,6 +216,198 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.event_id == "$sent"
         assert list(outbox.rows) == [("$cause", "final")]
         assert outbox.rows["$cause", "final"].acknowledged_event_id == "$sent"
+        assert outbox.acknowledged_projections == [()]
+        gateway.deps.runtime.client.room_get_event.assert_not_awaited()
+
+    async def test_interactive_prompt_is_frozen_in_the_terminal_matrix_payload(self, tmp_path: Path) -> None:
+        """Projection ownership requires prompt metadata to cross Matrix with the answer."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "Choose"})
+        response = """```interactive
+{"question":"Pick","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
+```"""
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
+            outcome = await gateway.deliver_final(self._final_request(response))
+
+        assert outcome.event_id == "$sent"
+        assert outbox.rows["$cause", "final"].payload["io.mindroom.interactive"] == {
+            "creator_agent": "agent",
+            "option_labels": {"1": "Yes", "✅": "Yes"},
+            "options": {"1": "yes", "✅": "yes"},
+            "question_text": "Pick",
+            "source_event_id": "$cause",
+        }
+
+    async def test_adopted_event_projection_uses_the_content_matrix_returned(self, tmp_path: Path) -> None:
+        """Recovery must not project one frozen candidate onto a different adopted event."""
+        outbox = FakeOutbox()
+        frozen = {
+            "msgtype": "m.text",
+            "body": "Choose",
+            "io.mindroom.interactive": {
+                "creator_agent": "agent",
+                "option_labels": {"1": "Yes"},
+                "options": {"1": "yes"},
+                "question_text": "Choose?",
+                "source_event_id": "$cause",
+            },
+        }
+        await outbox.enqueue_delivery(
+            turn_id="$cause",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload=frozen,
+        )
+        claimed = await outbox.load_delivery(turn_id="$cause", stage=DeliveryStage.FINAL)
+        assert claimed is not None
+        gateway = _gateway(tmp_path, outbox)
+        visible = {"msgtype": "m.text", "body": "A different reply already in the room"}
+        gateway.deps.runtime.client.room_get_event.return_value = _delivered_event_response(
+            _ROOM_ID,
+            "$adopted",
+            content=visible,
+        )
+        gateway.deps.runtime.client.room_get_event.side_effect = None
+
+        projections = await gateway._observe_delivered(claimed, "$adopted")
+
+        assert len(projections) == 1
+        assert projections[0].content == visible
+
+    async def test_an_edit_acknowledgement_projects_its_target_before_the_edit(self, tmp_path: Path) -> None:
+        """A missed target echo cannot leave an acknowledged prompt edit unresolved."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        edit_content = {
+            "msgtype": "m.text",
+            "body": "Choose",
+            "m.new_content": {"msgtype": "m.text", "body": "Choose"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        }
+
+        async def observe(room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+            if event_id == "$target":
+                return _delivered_event_response(
+                    room_id,
+                    event_id,
+                    content={"msgtype": "m.text", "body": "Thinking..."},
+                    timestamp=1_000,
+                )
+            return _delivered_event_response(room_id, event_id, content=edit_content, timestamp=2_000)
+
+        gateway.deps.runtime.client.room_get_event.side_effect = observe
+        delivery = gateway._response_delivery(AsyncMock(return_value="$edit"), handoff=None)
+
+        assert (
+            await delivery.deliver(
+                turn_id="$cause",
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload=edit_content,
+                edits_event_id="$target",
+            )
+            == "$edit"
+        )
+        projections = outbox.acknowledged_projections[0]
+        assert tuple(projection.event_id for projection in projections) == ("$target", "$edit")
+        assert projections[1].replaces_event_id == "$target"
+
+    async def test_an_undecryptable_edit_target_stays_unacknowledged(self, tmp_path: Path) -> None:
+        """Ciphertext cannot supply the thread identity of an edit target."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        encrypted_target = nio.MegolmEvent.from_dict(
+            {
+                "event_id": "$target",
+                "sender": _AGENT_USER_ID,
+                "origin_server_ts": 1_000,
+                "type": "m.room.encrypted",
+                "room_id": _ROOM_ID,
+                "content": {
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "ciphertext",
+                    "device_id": "DEVICE",
+                    "sender_key": "sender-key",
+                    "session_id": "session",
+                },
+            },
+        )
+        assert isinstance(encrypted_target, nio.MegolmEvent)
+        target_response = nio.RoomGetEventResponse()
+        target_response.event = encrypted_target
+        edit_content = {
+            "msgtype": "m.text",
+            "body": "Choose",
+            "m.new_content": {"msgtype": "m.text", "body": "Choose"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        }
+
+        async def observe(room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+            if event_id == "$target":
+                return target_response
+            return _delivered_event_response(room_id, event_id, content=edit_content, timestamp=2_000)
+
+        gateway.deps.runtime.client.room_get_event.side_effect = observe
+        delivery = gateway._response_delivery(AsyncMock(return_value="$edit"), handoff=None)
+
+        with pytest.raises(RuntimeError, match="could not decrypt delivered event"):
+            await delivery.deliver(
+                turn_id="$cause",
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload=edit_content,
+                edits_event_id="$target",
+            )
+
+        assert outbox.rows["$cause", "final"].acknowledged_event_id is None
+
+    async def test_an_unreadable_delivered_event_stays_unacknowledged_for_recovery(self, tmp_path: Path) -> None:
+        """The outbox must retry rather than invent projection ordering metadata."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.runtime.client.room_get_event.return_value = nio.RoomGetEventError("not found")
+        gateway.deps.runtime.client.room_get_event.side_effect = None
+        response = """```interactive
+{"question":"Pick","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
+```"""
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "Pick"})
+
+        with (
+            patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)),
+            pytest.raises(RuntimeError, match="could not read delivered event"),
+        ):
+            await gateway.deliver_final(self._final_request(response))
+
+        stored = outbox.rows["$cause", "final"]
+        assert stored.attempted
+        assert stored.acknowledged_event_id is None
+
+    async def test_a_redacted_delivery_acknowledges_without_resurrecting_its_content(self, tmp_path: Path) -> None:
+        """Server redaction wins over the frozen plaintext payload."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        response = _delivered_event_response(_ROOM_ID, "$sent")
+        response.event.source["unsigned"] = {"redacted_because": {}}
+        gateway.deps.runtime.client.room_get_event.return_value = response
+        gateway.deps.runtime.client.room_get_event.side_effect = None
+        interactive_text = """```interactive
+{"question":"Pick","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
+```"""
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "Pick"})
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
+            outcome = await gateway.deliver_final(self._final_request(interactive_text))
+
+        assert outcome.event_id == "$sent"
+        assert outbox.acknowledged_projections == [()]
 
     async def test_the_same_turn_resends_under_the_same_transaction_id(
         self,
@@ -385,6 +607,9 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         frozen = outbox.rows["$cause", "final"].payload
         new_content = frozen["m.new_content"]
+        prompt = new_content["io.mindroom.interactive"]
+        assert prompt["question_text"] == "Pick"
+        assert prompt["options"] == {"1": "yes", "✅": "yes"}
         semantic = new_content["io.mindroom.final_delivery"]
         assert semantic["body"] == outcome.final_visible_body
         assert semantic["interactive"]["question_text"] == "Pick"
@@ -549,6 +774,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
         room = MagicMock()
         room.encrypted = False
         client.rooms = {_ROOM_ID: room}
@@ -608,6 +835,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
         room = MagicMock()
         room.encrypted = False
         client.rooms = {_ROOM_ID: room}
@@ -910,12 +1139,14 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             turn_id: str,
             stage: DeliveryStage,
             event_id: str,
+            delivered_projections: tuple[ProjectedEvent, ...],
             terminal_turn: TerminalTurnWrite | None = None,
         ) -> DeliveryAcknowledgement:
             acknowledged = await real_acknowledge(
                 turn_id=turn_id,
                 stage=stage,
                 event_id=event_id,
+                delivered_projections=delivered_projections,
                 terminal_turn=terminal_turn,
             )
             if stage is DeliveryStage.INITIAL:
@@ -923,6 +1154,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                     turn_id="$cause",
                     stage=DeliveryStage.FINAL,
                     event_id="$other-final",
+                    delivered_projections=(),
                 )
             return acknowledged
 
@@ -954,6 +1186,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             turn_id: str,
             stage: DeliveryStage,
             event_id: str,
+            delivered_projections: tuple[ProjectedEvent, ...],
             terminal_turn: TerminalTurnWrite | None = None,
         ) -> DeliveryAcknowledgement:
             if stage is DeliveryStage.FINAL:
@@ -961,12 +1194,14 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                     turn_id=turn_id,
                     stage=stage,
                     event_id="$winner",
+                    delivered_projections=(),
                     terminal_turn=terminal_turn,
                 )
             return await real_acknowledge(
                 turn_id=turn_id,
                 stage=stage,
                 event_id=event_id,
+                delivered_projections=delivered_projections,
                 terminal_turn=terminal_turn,
             )
 
@@ -1418,8 +1653,18 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         async def winning_send(_claimed: OutboxDelivery) -> str:
             return "$winner"
 
-        losing = ResponseDelivery(store=alice, send=losing_send, sending_device_id="DEVICE1")
-        winning = ResponseDelivery(store=alice, send=winning_send, sending_device_id="DEVICE1")
+        losing = ResponseDelivery(
+            store=alice,
+            send=losing_send,
+            observe_delivered=ignore_delivered_projection,
+            sending_device_id="DEVICE1",
+        )
+        winning = ResponseDelivery(
+            store=alice,
+            send=winning_send,
+            observe_delivered=ignore_delivered_projection,
+            sending_device_id="DEVICE1",
+        )
 
         loser = asyncio.create_task(losing.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
         await losing_send_started.wait()
@@ -1464,12 +1709,14 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         losing = ResponseDelivery(
             store=alice,
             send=never_sends,
+            observe_delivered=ignore_delivered_projection,
             sending_device_id="NEW-DEVICE",
             resolve_delivered=losing_lookup,
         )
         winning = ResponseDelivery(
             store=alice,
             send=never_sends,
+            observe_delivered=ignore_delivered_projection,
             sending_device_id="NEW-DEVICE",
             resolve_delivered=winning_lookup,
         )
@@ -1520,12 +1767,14 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         losing = ResponseDelivery(
             store=alice,
             send=losing_send,
+            observe_delivered=ignore_delivered_projection,
             sending_device_id="DEVICE1",
             terminal_turn_committed=losing_publish,
         )
         winning = ResponseDelivery(
             store=alice,
             send=winning_send,
+            observe_delivered=ignore_delivered_projection,
             sending_device_id="DEVICE1",
             terminal_turn_committed=winning_publish,
         )
@@ -1722,7 +1971,7 @@ class TestTurnDeliverySerialization:
             sent.append(delivery.stage)
             return "$final"
 
-        delivery = ResponseDelivery(store=outbox, send=send)
+        delivery = ResponseDelivery(store=outbox, send=send, observe_delivered=ignore_delivered_projection)
         with patch.object(outbox, "enqueue_delivery", side_effect=enqueue_then_wait):
             final = asyncio.create_task(
                 delivery.deliver(
@@ -1765,7 +2014,7 @@ class TestTurnDeliverySerialization:
             sent.append(delivery.stage)
             return "$final"
 
-        delivery = ResponseDelivery(store=outbox, send=send)
+        delivery = ResponseDelivery(store=outbox, send=send, observe_delivered=ignore_delivered_projection)
         with patch.object(outbox, "claim_delivery", side_effect=claim_then_wait):
             final = asyncio.create_task(
                 delivery.deliver(

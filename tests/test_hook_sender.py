@@ -1844,7 +1844,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
         await reservation_owner.release()
         await bot._coalescing_gate.drain_all()
 
-    assert handled is _IngressAdmissionOutcome.ADMITTED
+    assert handled is _IngressAdmissionOutcome.DEFERRED
     interactive_questions.claim_interactive_text.assert_not_awaited()
     mock_dispatch.assert_awaited_once()
 

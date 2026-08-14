@@ -108,7 +108,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -163,7 +163,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -210,7 +210,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -268,7 +268,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -335,7 +335,7 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.show_stop_button = False
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -412,7 +412,7 @@ class TestAgentBot(AgentBotTestBase):
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -484,7 +484,7 @@ class TestAgentBot(AgentBotTestBase):
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
 
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account(
@@ -562,74 +562,6 @@ class TestAgentBot(AgentBotTestBase):
         assert result == "$reject"
 
     @pytest.mark.asyncio
-    async def test_generate_team_response_helper_registers_interactive_questions_with_bot_agent_name(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Team interactive questions should be owned by the real bot agent name."""
-        config = self._config_for_storage(tmp_path)
-        config.defaults.show_stop_button = False
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
-        bot.orchestrator = MagicMock(
-            current_config=config,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
-        matrix_ids = entity_ids(config, runtime_paths_for(config))
-        interactive_response = """```interactive
-{"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
-```"""
-        with (
-            patch_response_runner_module(
-                typing_indicator=_noop_typing_indicator,
-                should_use_streaming=AsyncMock(return_value=False),
-                team_response=AsyncMock(return_value=interactive_response),
-            ),
-            patch(
-                "mindroom.delivery_gateway.send_message_outcome",
-                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
-            ),
-            patch(
-                "mindroom.delivery_gateway.edit_message_outcome",
-                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
-            ),
-            patch(
-                "mindroom.event_journal.store.PrincipalStore.register_interactive_question_for_turn",
-                new_callable=AsyncMock,
-                return_value=True,
-            ) as mock_register,
-            patch("mindroom.interactive.add_reaction_buttons", new_callable=AsyncMock) as mock_add_buttons,
-        ):
-            resolution = await bot._response_runner.generate_team_response_helper(
-                ResponseRequest(
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    prompt="team prompt",
-                    response_envelope=request_envelope(
-                        room_id="!test:localhost",
-                        reply_to_event_id="$team-root",
-                        prompt="team prompt",
-                        user_id="@user:localhost",
-                        agent_name=bot.agent_name,
-                    ),
-                ),
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
-                team_mode="collaborate",
-            )
-
-        assert _handled_response_event_id(resolution) == "$team"
-        mock_register.assert_awaited_once()
-        question = mock_register.await_args.args[1]
-        assert question.question_event_id == "$team"
-        assert question.room_id == "!test:localhost"
-        assert question.thread_id is None
-        assert question.creator_agent == bot.agent_name
-        assert question.creator_agent != "team"
-        mock_add_buttons.assert_awaited_once()
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(("retry_source", "expected_memory_calls"), [(None, 1), ("$event", 0)])
     async def test_generate_team_response_queues_memory_before_helper_failure(
         self,
@@ -674,7 +606,7 @@ class TestAgentBot(AgentBotTestBase):
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
 
         resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -770,7 +702,7 @@ class TestAgentBot(AgentBotTestBase):
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -887,7 +819,7 @@ class TestAgentBot(AgentBotTestBase):
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [suppressing_hook])])
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -1018,7 +950,7 @@ class TestAgentBot(AgentBotTestBase):
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock()
         mock_team_response = AsyncMock()
         with (

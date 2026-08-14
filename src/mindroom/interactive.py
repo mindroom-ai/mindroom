@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING, cast
 
 import nio
 
-from mindroom.interactive_models import InteractiveSelection  # noqa: TC001 - public interactive API
+from mindroom.interactive_models import (
+    InteractivePrompt,
+    InteractiveSelection,
+    interactive_prompt_content,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import send_room_event_result
 from mindroom.matrix.message_builder import build_reaction_content
@@ -18,6 +22,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 logger = get_logger(__name__)
+
+_MAX_PROMPT_METADATA_BYTES = 8_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,12 +47,30 @@ class InteractiveMetadata:
         """Return copied metadata when both interactive registration parts exist."""
         if not option_map or not options_list:
             return None
-        return cls(
+        metadata = cls(
             question_text=question_text,
             option_map=dict(option_map),
             option_labels=dict(option_labels or {}),
             options_list=tuple(dict(item) for item in options_list),
         )
+        encoded = json.dumps(
+            {
+                "option_labels": metadata.option_labels,
+                "options": metadata.option_map,
+                "question_text": metadata.question_text,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        if len(encoded) > _MAX_PROMPT_METADATA_BYTES:
+            logger.warning(
+                "Interactive prompt metadata exceeds the Matrix event budget",
+                metadata_size_bytes=len(encoded),
+                max_size_bytes=_MAX_PROMPT_METADATA_BYTES,
+            )
+            return None
+        return metadata
 
     def options_as_list(self) -> list[dict[str, str]]:
         """Return a mutable copy for Matrix reaction-button registration."""
@@ -96,26 +120,30 @@ class InteractiveMetadata:
         )
 
 
+def build_prompt_content(
+    metadata: InteractiveMetadata,
+    *,
+    creator_agent: str,
+    source_event_id: str,
+) -> dict[str, object]:
+    """Encode parsed interactive metadata into one Matrix prompt revision."""
+    return interactive_prompt_content(
+        InteractivePrompt(
+            creator_agent=creator_agent,
+            question_text=metadata.question_text,
+            options=metadata.option_map,
+            option_labels=metadata.option_labels,
+            source_event_id=source_event_id,
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _InteractiveResponse:
     """Result of parsing and formatting an interactive response."""
 
     formatted_text: str
     interactive_metadata: InteractiveMetadata | None = None
-
-    @property
-    def option_map(self) -> dict[str, str] | None:
-        """Return the emoji/number mapping when this response is interactive."""
-        if self.interactive_metadata is None:
-            return None
-        return dict(self.interactive_metadata.option_map)
-
-    @property
-    def options_list(self) -> list[dict[str, str]] | None:
-        """Return the button option list when this response is interactive."""
-        if self.interactive_metadata is None:
-            return None
-        return self.interactive_metadata.options_as_list()
 
 
 # Constants
@@ -141,11 +169,6 @@ def _preview_text(text: str, max_length: int = 160) -> str:
     if len(compact) <= max_length:
         return compact
     return f"{compact[: max_length - 3].rstrip()}..."
-
-
-def _find_interactive_match(response_text: str) -> re.Match[str] | None:
-    """Return the first interactive block match if present."""
-    return re.search(_INTERACTIVE_PATTERN, response_text, _INTERACTIVE_PATTERN_FLAGS)
 
 
 def _normalize_interactive_marker(text: str) -> str:
@@ -198,19 +221,6 @@ def _should_warn_unparsed_interactive(response_text: str) -> bool:
         if payload_line.startswith(("{", "[")):
             return True
     return False
-
-
-def should_create_interactive_question(response_text: str) -> bool:
-    """Check if the response contains an interactive question in JSON format.
-
-    Args:
-        response_text: The AI's response text
-
-    Returns:
-        True if an interactive code block is found
-
-    """
-    return bool(_find_interactive_match(response_text))
 
 
 def build_selection_prompt(selection: InteractiveSelection) -> str:
@@ -330,7 +340,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         extract_mapping: Whether to extract option mapping and return options list
 
     Returns:
-        _InteractiveResponse with formatted_text, option_map, and options_list
+        The formatted response and any prompt metadata extracted from it.
 
     """
     matches = list(re.finditer(_INTERACTIVE_PATTERN, response_text, _INTERACTIVE_PATTERN_FLAGS))
@@ -360,7 +370,22 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
             option_labels[emoji_char] = label
             option_labels[str(i)] = label
 
-    rendered = [(matches[0], _render_question_text(question, options, include_instruction=True))]
+    interactive_metadata = InteractiveMetadata._from_parts(
+        option_map,
+        options if extract_mapping else None,
+        question_text=question,
+        option_labels=option_labels,
+    )
+    rendered = [
+        (
+            matches[0],
+            _render_question_text(
+                question,
+                options,
+                include_instruction=not extract_mapping or interactive_metadata is not None,
+            ),
+        ),
+    ]
     for extra_match in matches[1:]:
         extra_payload = _coerce_interactive_payload(extra_match.group(1))
         if extra_payload is None:
@@ -383,15 +408,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
     parts.append(response_text[last_end:])
     final_text = _remove_inline_unparsed_interactive_fences("".join(parts).strip())
 
-    return _InteractiveResponse(
-        final_text,
-        InteractiveMetadata._from_parts(
-            option_map,
-            options if extract_mapping else None,
-            question_text=question,
-            option_labels=option_labels,
-        ),
-    )
+    return _InteractiveResponse(final_text, interactive_metadata)
 
 
 async def add_reaction_buttons(

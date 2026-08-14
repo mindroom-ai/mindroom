@@ -3,31 +3,196 @@
 from __future__ import annotations
 
 import json
-import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-from mindroom.interactive_models import InteractiveQuestion, InteractiveSelection
+from mindroom.interactive_models import (
+    InteractivePrompt,
+    InteractiveSelection,
+    interactive_prompt_from_content,
+)
 
-from . import reads
-from .identity import decode_thread_id, encode_thread_id
-from .models import EventKind, SemanticConsumer
+from .identity import decode_thread_id
+from .membership_state import claim_membership_epoch
+from .models import EventClass, EventKind, SemanticConsumer
 from .schema import PENDING_STATE
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from .backend import Row, Transaction
+    from .models import InboundEvent
 
 
-def _question_json(question: InteractiveQuestion) -> str:
-    """Serialize the immutable question payload deterministically."""
+@dataclass(frozen=True, slots=True)
+class _StoredSelection:
+    """One source's immutable prompt snapshot."""
+
+    selection: InteractiveSelection
+    revision_event_id: str
+
+
+def _consume_selection_revision(
+    transaction: Transaction,
+    principal_id: str,
+    source_event_id: str,
+    stored: _StoredSelection,
+) -> bool:
+    """Claim one immutable revision and discard competing snapshots of it."""
+    claimed = transaction.fetchone(
+        """
+        UPDATE interactive_questions
+        SET consumed_by_source_event_id = COALESCE(consumed_by_source_event_id, ?)
+        WHERE principal_id = ? AND question_event_id = ? AND revision_event_id = ?
+          AND (consumed_by_source_event_id IS NULL OR consumed_by_source_event_id = ?)
+        RETURNING consumed_by_source_event_id
+        """,
+        (
+            source_event_id,
+            principal_id,
+            stored.selection.question_event_id,
+            stored.revision_event_id,
+            source_event_id,
+        ),
+    )
+    if claimed is None:
+        return False
+    transaction.execute(
+        """
+        DELETE FROM interactive_selections
+        WHERE principal_id = ? AND question_event_id = ? AND revision_event_id = ?
+          AND source_event_id != ?
+        """,
+        (principal_id, stored.selection.question_event_id, stored.revision_event_id, source_event_id),
+    )
+    return True
+
+
+def _prompt_json(prompt: InteractivePrompt) -> str:
+    """Serialize one projected prompt payload deterministically."""
     return json.dumps(
         {
-            "option_labels": dict(question.option_labels),
-            "options": dict(question.options),
-            "question_text": question.question_text,
+            "option_labels": prompt.option_labels,
+            "options": prompt.options,
+            "question_text": prompt.question_text,
         },
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
+    )
+
+
+def _prompt_membership_epoch(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    source_event_id: str,
+) -> int | None:
+    """Resolve the membership that admitted one prompt's required source."""
+    source = transaction.fetchone(
+        """
+        SELECT room_id, membership_epoch
+        FROM journal_events
+        WHERE principal_id = ? AND event_id = ?
+        """,
+        (principal_id, source_event_id),
+    )
+    if source is None or source["room_id"] != room_id:
+        return None
+    return int(source["membership_epoch"])
+
+
+def prompt_is_current(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    question_event_id: str,
+    expected: InteractivePrompt,
+) -> bool:
+    """Claim membership and match the prompt currently exposed by projection."""
+    membership_epoch = _prompt_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        source_event_id=expected.source_event_id,
+    )
+    if membership_epoch is None or not claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        expected_membership_epoch=membership_epoch,
+    ):
+        return False
+    row = transaction.fetchone(
+        """
+        UPDATE visible_messages
+        SET revision_event_id = revision_event_id
+        WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
+        RETURNING revision_event_id
+        """,
+        (principal_id, room_id, question_event_id),
+    )
+    if row is None:
+        return False
+    prompt = transaction.fetchone(
+        """
+        SELECT question_json
+        FROM interactive_questions
+        WHERE principal_id = ? AND question_event_id = ? AND revision_event_id = ?
+        """,
+        (principal_id, question_event_id, row["revision_event_id"]),
+    )
+    return prompt is not None and prompt["question_json"] == _prompt_json(expected)
+
+
+def record_projected_prompt(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    question_event_id: str,
+    revision_event_id: str,
+    sender: str,
+    membership_epoch: int,
+    content: Mapping[str, object],
+) -> None:
+    """Record one authorized prompt revision."""
+    prompt = interactive_prompt_from_content(content)
+    if prompt is None or principal_id != f"{prompt.creator_agent}@{sender}":
+        return
+    prompt_membership_epoch = _prompt_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        source_event_id=prompt.source_event_id,
+    )
+    if (
+        prompt_membership_epoch is None
+        or membership_epoch != prompt_membership_epoch
+        or not claim_membership_epoch(
+            transaction,
+            principal_id,
+            room_id=room_id,
+            expected_membership_epoch=prompt_membership_epoch,
+        )
+    ):
+        return
+    transaction.execute(
+        """
+        INSERT INTO interactive_questions (
+            principal_id, question_event_id, revision_event_id, room_id, question_json
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (principal_id, question_event_id, revision_event_id) DO NOTHING
+        """,
+        (
+            principal_id,
+            question_event_id,
+            revision_event_id,
+            room_id,
+            _prompt_json(prompt),
+        ),
     )
 
 
@@ -49,6 +214,191 @@ def _selection_from_row(row: Row, selection_key: str) -> InteractiveSelection | 
     )
 
 
+def _stored_selection(
+    transaction: Transaction,
+    principal_id: str,
+    source_event_id: str,
+) -> _StoredSelection | None:
+    """Return the immutable prompt snapshot stored for one source."""
+    row = transaction.fetchone(
+        """
+        SELECT selected.question_event_id, selected.revision_event_id,
+               selected.selection_key, question.question_json, visible.thread_id
+        FROM interactive_selections AS selected
+        JOIN interactive_questions AS question
+          ON question.principal_id = selected.principal_id
+         AND question.question_event_id = selected.question_event_id
+         AND question.revision_event_id = selected.revision_event_id
+        JOIN visible_messages AS visible
+          ON visible.principal_id = question.principal_id
+         AND visible.room_id = question.room_id
+         AND visible.logical_event_id = question.question_event_id
+        WHERE selected.principal_id = ? AND selected.source_event_id = ?
+        """,
+        (principal_id, source_event_id),
+    )
+    if row is None:
+        return None
+    selection = _selection_from_row(row, str(row["selection_key"]))
+    if selection is None:
+        return None
+    return _StoredSelection(
+        selection=selection,
+        revision_event_id=str(row["revision_event_id"]),
+    )
+
+
+def _snapshot_selection(
+    transaction: Transaction,
+    principal_id: str,
+    source_event_id: str,
+    revision_event_id: str,
+    selection: InteractiveSelection,
+) -> None:
+    """Store one source-bound prompt revision snapshot."""
+    transaction.execute(
+        """
+        INSERT INTO interactive_selections (
+            principal_id, source_event_id, question_event_id,
+            revision_event_id, selection_key
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (principal_id, source_event_id) DO NOTHING
+        """,
+        (
+            principal_id,
+            source_event_id,
+            selection.question_event_id,
+            revision_event_id,
+            selection.selection_key,
+        ),
+    )
+
+
+def _snapshot_reaction_candidate(  # noqa: PLR0911 - malformed or unrelated reactions have no candidate
+    transaction: Transaction,
+    principal_id: str,
+    event: InboundEvent,
+) -> bool:
+    """Snapshot one reaction's visible prompt and report whether it could select."""
+    if event.kind is not EventKind.REACTION or event.event_class is not EventClass.ACTIONABLE:
+        return False
+    content = event.source.get("content")
+    if not isinstance(content, dict):
+        return False
+    content = cast("dict[str, object]", content)
+    relation = content.get("m.relates_to")
+    if not isinstance(relation, dict):
+        return False
+    relation = cast("dict[str, object]", relation)
+    if relation.get("rel_type") != "m.annotation":
+        return False
+    question_event_id = relation.get("event_id")
+    selection_key = relation.get("key")
+    if not isinstance(question_event_id, str) or not isinstance(selection_key, str):
+        return False
+    source = transaction.fetchone(
+        """
+        SELECT membership_epoch
+        FROM journal_events
+        WHERE principal_id = ? AND event_id = ? AND state = ?
+        """,
+        (principal_id, event.event_id, PENDING_STATE),
+    )
+    if source is None:
+        return True
+    membership_epoch = int(source["membership_epoch"])
+    question_row = _active_question_row(
+        transaction,
+        principal_id,
+        room_id=event.room_id,
+        question_event_id=question_event_id,
+    )
+    if (
+        question_row is None
+        or question_row["room_id"] != event.room_id
+        or int(question_row["membership_epoch"]) != membership_epoch
+    ):
+        return True
+    selection = _selection_from_row(question_row, selection_key)
+    if selection is None:
+        return True
+    _snapshot_selection(
+        transaction,
+        principal_id,
+        event.event_id,
+        str(question_row["revision_event_id"]),
+        selection,
+    )
+    return True
+
+
+def _snapshot_text_candidate(
+    transaction: Transaction,
+    principal_id: str,
+    event: InboundEvent,
+) -> bool:
+    """Snapshot one numeric answer's oldest prompt and report whether it could select."""
+    if event.kind is not EventKind.MESSAGE or event.event_class is not EventClass.ACTIONABLE:
+        return False
+    content = event.source.get("content")
+    if not isinstance(content, dict):
+        return False
+    body = cast("dict[str, object]", content).get("body")
+    selection_key = body.strip() if isinstance(body, str) else ""
+    if len(selection_key) != 1 or not selection_key.isdigit():
+        return False
+    source = transaction.fetchone(
+        """
+        SELECT room_id, thread_id, membership_epoch
+        FROM journal_events
+        WHERE principal_id = ? AND event_id = ? AND state = ?
+        """,
+        (principal_id, event.event_id, PENDING_STATE),
+    )
+    if source is None:
+        return True
+    question_row = transaction.fetchone(
+        """
+        SELECT iq.question_event_id, iq.revision_event_id, iq.question_json,
+               vm.room_id, vm.thread_id, vm.membership_epoch, vm.revision_ts
+        FROM interactive_questions AS iq
+        JOIN visible_messages AS vm
+          ON vm.principal_id = iq.principal_id
+         AND vm.room_id = iq.room_id
+         AND vm.logical_event_id = iq.question_event_id
+         AND vm.revision_event_id = iq.revision_event_id
+        WHERE iq.principal_id = ? AND vm.room_id = ? AND vm.thread_id = ?
+          AND vm.membership_epoch = ? AND iq.consumed_by_source_event_id IS NULL
+        ORDER BY vm.revision_ts, iq.question_event_id/*bytes*/
+        LIMIT 1
+        """,
+        (principal_id, source["room_id"], source["thread_id"], source["membership_epoch"]),
+    )
+    if question_row is None or (selection := _selection_from_row(question_row, selection_key)) is None:
+        return True
+    _snapshot_selection(
+        transaction,
+        principal_id,
+        event.event_id,
+        str(question_row["revision_event_id"]),
+        selection,
+    )
+    return True
+
+
+def snapshot_source_candidate(
+    transaction: Transaction,
+    principal_id: str,
+    event: InboundEvent,
+) -> bool:
+    """Freeze the visible prompt and report whether the source could select one."""
+    if event.kind is EventKind.REACTION:
+        return _snapshot_reaction_candidate(transaction, principal_id, event)
+    if event.kind is EventKind.MESSAGE:
+        return _snapshot_text_candidate(transaction, principal_id, event)
+    return False
+
+
 def _source_row(transaction: Transaction, principal_id: str, source_event_id: str) -> Row | None:
     """Lock and return one still-pending source event."""
     return transaction.fetchone(
@@ -62,35 +412,101 @@ def _source_row(transaction: Transaction, principal_id: str, source_event_id: st
     )
 
 
-def _question_row(transaction: Transaction, principal_id: str, question_event_id: str) -> Row | None:
-    """Lock and return one question."""
+def _active_question_row(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    question_event_id: str,
+) -> Row | None:
+    """Lock one target and return its currently visible unconsumed prompt."""
+    visible = transaction.fetchone(
+        """
+        UPDATE visible_messages
+        SET revision_event_id = revision_event_id
+        WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
+        RETURNING room_id, thread_id, revision_event_id, revision_ts, membership_epoch
+        """,
+        (principal_id, room_id, question_event_id),
+    )
+    if visible is None:
+        return None
     return transaction.fetchone(
         """
-        UPDATE interactive_questions
-        SET claimed_source_event_id = claimed_source_event_id
-        WHERE principal_id = ? AND question_event_id = ?
-        RETURNING question_event_id, room_id, thread_id, creator_agent,
-                  question_json, membership_epoch, claimed_source_event_id
+        SELECT iq.question_event_id, iq.revision_event_id, iq.question_json,
+               vm.room_id, vm.thread_id, vm.membership_epoch, vm.revision_ts
+        FROM interactive_questions AS iq
+        JOIN visible_messages AS vm
+          ON vm.principal_id = iq.principal_id
+         AND vm.room_id = iq.room_id
+         AND vm.logical_event_id = iq.question_event_id
+         AND vm.revision_event_id = iq.revision_event_id
+        WHERE iq.principal_id = ? AND iq.question_event_id = ?
+          AND iq.consumed_by_source_event_id IS NULL
         """,
         (principal_id, question_event_id),
     )
 
 
-def _bind_question_to_source(
+def _claim_selection(
     transaction: Transaction,
     principal_id: str,
-    question_event_id: str,
+    *,
     source_event_id: str,
-) -> None:
-    """Bind one locked question to its durable selecting source."""
-    transaction.execute(
+    expected_kind: EventKind,
+    claimed_consumer: SemanticConsumer | None,
+) -> InteractiveSelection | None:
+    """Atomically transfer one frozen selection to its still-current source."""
+    consumer_value = claimed_consumer.value if claimed_consumer is not None else None
+    candidate = transaction.fetchone(
         """
-        UPDATE interactive_questions
-        SET claimed_source_event_id = ?
-        WHERE principal_id = ? AND question_event_id = ?
+        SELECT room_id, kind, membership_epoch, semantic_consumer
+        FROM journal_events
+        WHERE principal_id = ? AND event_id = ? AND state = ?
         """,
-        (source_event_id, principal_id, question_event_id),
+        (principal_id, source_event_id, PENDING_STATE),
     )
+    if (
+        candidate is None
+        or EventKind(candidate["kind"]) is not expected_kind
+        or candidate["semantic_consumer"] not in (None, consumer_value)
+    ):
+        return None
+    room_id = str(candidate["room_id"])
+    membership_epoch = int(candidate["membership_epoch"])
+    if not claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        expected_membership_epoch=membership_epoch,
+    ):
+        return None
+
+    source = _source_row(transaction, principal_id, source_event_id)
+    if (
+        source is None
+        or source["room_id"] != room_id
+        or int(source["membership_epoch"]) != membership_epoch
+        or EventKind(source["kind"]) is not expected_kind
+        or source["semantic_consumer"] not in (None, consumer_value)
+    ):
+        return None
+    stored_selection = _stored_selection(transaction, principal_id, source_event_id)
+    if stored_selection is None:
+        return None
+    selection = stored_selection.selection
+    if not _consume_selection_revision(transaction, principal_id, source_event_id, stored_selection):
+        return None
+    if claimed_consumer is not None and source["semantic_consumer"] is None:
+        transaction.execute(
+            """
+            UPDATE journal_events
+            SET semantic_consumer = ?
+            WHERE principal_id = ? AND event_id = ?
+            """,
+            (claimed_consumer.value, principal_id, source_event_id),
+        )
+    return selection
 
 
 def claim_reaction(
@@ -98,229 +514,28 @@ def claim_reaction(
     principal_id: str,
     *,
     source_event_id: str,
-    question_event_id: str,
-    selection_key: str,
-    creator_agent: str,
 ) -> InteractiveSelection | None:
-    """Atomically bind one reaction source to one valid question selection."""
-    candidate = transaction.fetchone(
-        """
-        SELECT source.room_id AS source_room_id, source.kind AS source_kind,
-               source.membership_epoch AS source_membership_epoch,
-               source.semantic_consumer AS source_consumer,
-               question.room_id AS question_room_id,
-               question.membership_epoch AS question_membership_epoch
-        FROM journal_events AS source
-        JOIN interactive_questions AS question
-          ON question.principal_id = source.principal_id
-        WHERE source.principal_id = ? AND source.event_id = ?
-          AND question.question_event_id = ? AND source.state = ?
-        """,
-        (principal_id, source_event_id, question_event_id, PENDING_STATE),
-    )
-    if (
-        candidate is None
-        or candidate["source_room_id"] != candidate["question_room_id"]
-        or int(candidate["source_membership_epoch"]) != int(candidate["question_membership_epoch"])
-        or EventKind(candidate["source_kind"]) is not EventKind.REACTION
-        or candidate["source_consumer"] not in (None, SemanticConsumer.INTERACTIVE_REACTION.value)
-    ):
-        return None
-    room_id = str(candidate["question_room_id"])
-    membership_epoch = int(candidate["question_membership_epoch"])
-    if not reads.claim_membership_epoch(
+    """Atomically transfer one valid question selection to its reaction source."""
+    return _claim_selection(
         transaction,
         principal_id,
-        room_id=room_id,
-        expected_membership_epoch=membership_epoch,
-    ):
-        return None
-
-    source = _source_row(transaction, principal_id, source_event_id)
-    if (
-        source is None
-        or source["room_id"] != room_id
-        or int(source["membership_epoch"]) != membership_epoch
-        or EventKind(source["kind"]) is not EventKind.REACTION
-        or source["semantic_consumer"] not in (None, SemanticConsumer.INTERACTIVE_REACTION.value)
-    ):
-        return None
-    question_row = _question_row(transaction, principal_id, question_event_id)
-    if (
-        question_row is None
-        or question_row["room_id"] != room_id
-        or int(question_row["membership_epoch"]) != membership_epoch
-        or question_row["creator_agent"] != creator_agent
-        or question_row["claimed_source_event_id"] not in (None, source_event_id)
-    ):
-        return None
-    selection = _selection_from_row(question_row, selection_key)
-    if selection is None:
-        return None
-
-    transaction.execute(
-        """
-        UPDATE journal_events
-        SET semantic_consumer = ?
-        WHERE principal_id = ? AND event_id = ?
-        """,
-        (SemanticConsumer.INTERACTIVE_REACTION.value, principal_id, source_event_id),
+        source_event_id=source_event_id,
+        expected_kind=EventKind.REACTION,
+        claimed_consumer=SemanticConsumer.INTERACTIVE_REACTION,
     )
-    _bind_question_to_source(transaction, principal_id, question_event_id, source_event_id)
-    return selection
 
 
-def claim_text(  # noqa: PLR0911 - each failed ownership predicate is terminal
+def claim_text(
     transaction: Transaction,
     principal_id: str,
     *,
     source_event_id: str,
-    selection_key: str,
-    creator_agent: str,
 ) -> InteractiveSelection | None:
-    """Atomically claim the oldest matching question for one text source."""
-    candidate_source = transaction.fetchone(
-        """
-        SELECT room_id, thread_id, kind, membership_epoch, semantic_consumer
-        FROM journal_events
-        WHERE principal_id = ? AND event_id = ? AND state = ?
-        """,
-        (principal_id, source_event_id, PENDING_STATE),
-    )
-    if (
-        candidate_source is None
-        or EventKind(candidate_source["kind"]) is not EventKind.MESSAGE
-        or candidate_source["semantic_consumer"] is not None
-    ):
-        return None
-    room_id = str(candidate_source["room_id"])
-    stored_thread_id = str(candidate_source["thread_id"])
-    thread_id = decode_thread_id(stored_thread_id)
-    membership_epoch = int(candidate_source["membership_epoch"])
-    if not reads.claim_membership_epoch(
+    """Atomically claim the prompt selection frozen for one text source."""
+    return _claim_selection(
         transaction,
         principal_id,
-        room_id=room_id,
-        expected_membership_epoch=membership_epoch,
-    ):
-        return None
-    source = _source_row(transaction, principal_id, source_event_id)
-    if (
-        source is None
-        or source["room_id"] != room_id
-        or decode_thread_id(str(source["thread_id"])) != thread_id
-        or int(source["membership_epoch"]) != membership_epoch
-        or EventKind(source["kind"]) is not EventKind.MESSAGE
-        or source["semantic_consumer"] is not None
-    ):
-        return None
-
-    candidate_question = transaction.fetchone(
-        """
-        SELECT question_event_id
-        FROM interactive_questions
-        WHERE principal_id = ? AND claimed_source_event_id = ?
-        """,
-        (principal_id, source_event_id),
-    )
-    if candidate_question is None:
-        candidate_question = transaction.fetchone(
-            """
-            SELECT question_event_id
-            FROM interactive_questions
-            WHERE principal_id = ? AND room_id = ? AND thread_id = ?
-              AND creator_agent = ? AND membership_epoch = ?
-              AND claimed_source_event_id IS NULL
-            ORDER BY created_at_ns, question_event_id/*bytes*/
-            LIMIT 1
-            """,
-            (principal_id, room_id, stored_thread_id, creator_agent, membership_epoch),
-        )
-    if candidate_question is None:
-        return None
-    question_row = _question_row(transaction, principal_id, str(candidate_question["question_event_id"]))
-    if (
-        question_row is None
-        or question_row["room_id"] != room_id
-        or decode_thread_id(str(question_row["thread_id"])) != thread_id
-        or int(question_row["membership_epoch"]) != membership_epoch
-        or question_row["creator_agent"] != creator_agent
-        or question_row["claimed_source_event_id"] not in (None, source_event_id)
-    ):
-        return None
-    selection = _selection_from_row(question_row, selection_key)
-    if selection is None:
-        return None
-    _bind_question_to_source(
-        transaction,
-        principal_id,
-        str(question_row["question_event_id"]),
-        source_event_id,
-    )
-    return selection
-
-
-def register_if_current(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    expected_membership_epoch: int,
-    question: InteractiveQuestion,
-) -> bool:
-    """Register one question only while its captured membership is active."""
-    if not reads.claim_membership_epoch(
-        transaction,
-        principal_id,
-        room_id=question.room_id,
-        expected_membership_epoch=expected_membership_epoch,
-    ):
-        return False
-    question_json = _question_json(question)
-    transaction.execute(
-        """
-        INSERT INTO interactive_questions (
-            principal_id, question_event_id, room_id, thread_id, creator_agent,
-            question_json, membership_epoch, claimed_source_event_id, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
-        ON CONFLICT (principal_id, question_event_id) DO NOTHING
-        """,
-        (
-            principal_id,
-            question.question_event_id,
-            question.room_id,
-            encode_thread_id(question.thread_id),
-            question.creator_agent,
-            question_json,
-            expected_membership_epoch,
-            time.time_ns(),
-        ),
-    )
-    stored = transaction.fetchone(
-        """
-        SELECT question_event_id, room_id, thread_id, creator_agent, question_json, membership_epoch
-        FROM interactive_questions
-        WHERE principal_id = ? AND question_event_id = ?
-        """,
-        (principal_id, question.question_event_id),
-    )
-    if stored is None:
-        msg = f"Interactive question {question.question_event_id!r} disappeared during registration"
-        raise RuntimeError(msg)
-    if (
-        stored["room_id"] != question.room_id
-        or decode_thread_id(str(stored["thread_id"])) != question.thread_id
-        or stored["creator_agent"] != question.creator_agent
-        or stored["question_json"] != question_json
-        or int(stored["membership_epoch"]) != expected_membership_epoch
-    ):
-        msg = f"Interactive question {question.question_event_id!r} changed across registration replay"
-        raise ValueError(msg)
-    return True
-
-
-def forget(transaction: Transaction, principal_id: str, question_event_id: str) -> None:
-    """Forget one question whose Matrix message no longer offers its options."""
-    transaction.execute(
-        "DELETE FROM interactive_questions WHERE principal_id = ? AND question_event_id = ?",
-        (principal_id, question_event_id),
+        source_event_id=source_event_id,
+        expected_kind=EventKind.MESSAGE,
+        claimed_consumer=None,
     )

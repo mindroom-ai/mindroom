@@ -340,8 +340,8 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     assert captured_envelope.source_event_id == "$selection:localhost"
     assert captured_envelope.target.resolved_thread_id == selection.thread_id
     assert captured_metadata is not None
-    assert captured_metadata[MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == [selection.question_event_id]
-    assert captured_metadata[MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] == ["$selection:localhost"]
+    assert captured_metadata[MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == ["$selection:localhost"]
+    assert captured_metadata[MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] == [selection.question_event_id]
     _assert_interactive_turn_aliases(bot, selection, "$selection:localhost")
 
 
@@ -355,8 +355,8 @@ def _assert_interactive_turn_aliases(
     selection_record = bot._turn_store.get_turn_record(selection_event_id)
     assert question_record is not None
     assert question_record == selection_record
-    assert question_record.source_event_ids == (selection.question_event_id,)
-    assert question_record.discovery_event_ids == (selection_event_id,)
+    assert question_record.source_event_ids == (selection_event_id,)
+    assert question_record.discovery_event_ids == (selection.question_event_id,)
 
 
 @pytest.mark.asyncio
@@ -503,8 +503,6 @@ async def test_on_message_claims_interactive_text_by_durable_source_event(
 
     interactive_questions.claim_interactive_text.assert_awaited_once_with(
         source_event_id="$selection:localhost",
-        selection_key="1",
-        creator_agent="general",
     )
     mock_dispatch_text.assert_awaited_once()
 
@@ -626,8 +624,6 @@ async def test_sidecar_preview_claims_interactive_text_by_durable_source_event(
 
     interactive_questions.claim_interactive_text.assert_awaited_once_with(
         source_event_id=prepared_event.event_id,
-        selection_key="1",
-        creator_agent="general",
     )
     mock_enqueue.assert_awaited_once()
     assert mock_enqueue.await_args.kwargs["prepared_event"] is prepared_event

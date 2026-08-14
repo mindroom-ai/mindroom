@@ -197,7 +197,7 @@ journal event pending
   -> journal event remains pending while downstream owns work
   -> durable pending TurnStore record when response ownership begins
   -> final outbox enqueue settles the journal sources atomically
-  -> delivery acknowledgement binds the Matrix event and terminal TurnStore record
+  -> delivery acknowledgement projects the server-ordered Matrix event and binds its terminal TurnStore record atomically
 ```
 
 The pending claim must be acquired before normalization and released on every non-admission or failure path.
@@ -219,6 +219,9 @@ journal event pending
 For those callback families only, `SemanticConsumer` is the durable authority that prevents a second consumer from claiming the same callback.
 Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
 An interactive reaction remains pending while its detached response owns the selection, so a restart can replay it until response delivery becomes durable.
+Reaction and numeric-answer admission atomically snapshot the prompt revision that the journal projection currently exposes; later edits cannot reinterpret that stored selection, and unrelated Matrix origin clocks are never treated as causal order.
+Active prompts are derived by joining those immutable revisions to the Matrix-visible projection, so history recovery and refetch can restore an unconsumed revision without resurrecting one already answered.
+The active Matrix target and the pending source's immutable selection use separate journal rows, while the exact selecting source—not the reusable target event ID—is the response turn's execution and deduplication identity.
 
 ### Deferred callback outcome
 

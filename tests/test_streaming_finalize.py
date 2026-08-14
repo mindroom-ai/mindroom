@@ -26,7 +26,7 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -42,6 +42,7 @@ from tests.conftest import (
     ignore_final_delivery_handoff,
     make_conversation_reader_mock,
     make_matrix_client_mock,
+    make_membership_stub,
     make_outbox_mock,
     message_origin,
     runtime_paths_for,
@@ -828,12 +829,17 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
             response_stream=interactive_stream(),
             existing_event_id="$displayed-root",
             adopt_existing_placeholder=True,
+            interactive_creator_agent="code",
+            interactive_source_event_id="$source",
         )
 
     assert stream_outcome.last_physical_stream_event_id == "$displayed-root"
     assert stream_outcome.rendered_body == formatted_interactive.formatted_text
     assert stream_outcome.canonical_final_body_candidate == raw_interactive
+    assert len(captured_stream_edits) >= 2
+    assert all("io.mindroom.interactive" not in content for content in captured_stream_edits[:-1])
     assert captured_stream_edits[-1]["body"] == formatted_interactive.formatted_text
+    assert captured_stream_edits[-1]["io.mindroom.interactive"]["source_event_id"] == "$source"
 
     envelope = _envelope()
     response_hooks = SimpleNamespace(
@@ -899,30 +905,23 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
         _room_send_response("$reaction-no"),
         _room_send_response("$reaction-test"),
     ]
-    membership = MagicMock()
-    membership.register_interactive_question_for_turn = AsyncMock(return_value=True)
     support = PostResponseEffectsSupport(
         runtime=SimpleNamespace(client=client, config=config),
         logger=get_logger("tests.post_response"),
         runtime_paths=runtime_paths_for(config),
-        delivery_gateway=Mock(),
         conversation_reader=make_conversation_reader_mock(),
-        membership=membership,
+        membership=make_membership_stub(),
+        agent_name="agent",
     )
     await apply_post_response_effects(
         final_outcome,
-        ResponseOutcome(interactive_target=target),
+        ResponseOutcome(response_target=target),
         support.build_deps(
             room_id=target.room_id,
-            interactive_agent_name="code",
-            membership_turn_id="$source",
+            membership_turn_id="$turn",
         ),
     )
 
-    membership.register_interactive_question_for_turn.assert_awaited_once()
-    registered = membership.register_interactive_question_for_turn.await_args.args[1]
-    assert registered.thread_id == "$thread-root"
-    assert registered.options == final_outcome.option_map
     reaction_targets = [call.kwargs["content"]["m.relates_to"]["event_id"] for call in client.room_send.await_args_list]
     reaction_keys = [call.kwargs["content"]["m.relates_to"]["key"] for call in client.room_send.await_args_list]
     assert reaction_targets == ["$displayed-root", "$displayed-root", "$displayed-root"]
@@ -931,53 +930,6 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
 
 
 @pytest.mark.asyncio
-async def test_stale_response_skips_interactive_registration_and_buttons(tmp_path: Path) -> None:
-    """A response that finished after its membership ended cannot create a live question."""
-    config = _config(tmp_path)
-    client = make_matrix_client_mock()
-    membership = MagicMock()
-    membership.register_interactive_question_for_turn = AsyncMock(return_value=False)
-    target = MessageTarget.resolve("!room:localhost", None, "$source")
-    formatted = interactive.parse_and_format_interactive(
-        """Choose one.
-
-```interactive
-{"question":"Pick","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
-```""",
-        extract_mapping=True,
-    )
-    assert formatted.interactive_metadata is not None
-    outcome = FinalDeliveryOutcome(
-        terminal_status="completed",
-        event_id="$question",
-        is_visible_response=True,
-        final_visible_body=formatted.formatted_text,
-        delivery_kind="sent",
-        interactive_metadata=formatted.interactive_metadata,
-    )
-    support = PostResponseEffectsSupport(
-        runtime=SimpleNamespace(client=client, config=config),
-        logger=get_logger("tests.post_response"),
-        runtime_paths=runtime_paths_for(config),
-        delivery_gateway=Mock(),
-        conversation_reader=make_conversation_reader_mock(),
-        membership=membership,
-    )
-
-    await apply_post_response_effects(
-        outcome,
-        ResponseOutcome(interactive_target=target),
-        support.build_deps(
-            room_id=target.room_id,
-            interactive_agent_name="code",
-            membership_turn_id="$source",
-        ),
-    )
-
-    membership.register_interactive_question_for_turn.assert_awaited_once()
-    client.room_send.assert_not_awaited()
-
-
 @pytest.mark.asyncio
 async def test_streamed_interactive_metadata_survives_unparseable_canonical_final_body(tmp_path: Path) -> None:
     """Registration should use the same interactive parse that rendered the visible streamed body."""

@@ -32,11 +32,11 @@ from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import (
+    AdmissionResult,
     ApprovalContinuation,
     EventClass,
     EventKind,
     InboundEvent,
-    InteractiveQuestion,
     ProjectedEvent,
     SemanticConsumer,
 )
@@ -71,6 +71,7 @@ from tests.bot_helpers import (
     dispatch_reaction_durably as _dispatch_reaction,
 )
 from tests.conftest import (
+    activate_interactive_prompt,
     install_relation_lookup,
     make_matrix_client_mock,
     replace_interactive_selection_handlers,
@@ -140,13 +141,13 @@ def _approval_reply_event(event_id: str = "$approval-reply") -> nio.RoomMessageT
     return event
 
 
-def _reaction_event(key: str, event_id: str) -> nio.ReactionEvent:
+def _reaction_event(key: str, event_id: str, *, timestamp: int = 1) -> nio.ReactionEvent:
     event = nio.Event.parse_event(
         {
             "type": "m.reaction",
             "event_id": event_id,
             "sender": "@user:localhost",
-            "origin_server_ts": 1,
+            "origin_server_ts": timestamp,
             "content": {
                 "m.relates_to": {
                     "rel_type": "m.annotation",
@@ -394,7 +395,7 @@ class TestAgentBot(AgentBotTestBase):
         room.room_id = "!test:localhost"
         room.canonical_alias = None
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
-        replace_interactive_selection_handlers(bot, handle=AsyncMock())
+        replace_interactive_selection_handlers(bot, handle=AsyncMock(return_value=False))
         selection = interactive.InteractiveSelection(
             question_event_id="$question",
             question_text="Choose one",
@@ -495,7 +496,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A failed detached response leaves its source and question paired for retry."""
+        """A failed detached response leaves its source-owned selection replayable."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -511,18 +512,17 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
         store = bot._journal_store.principal(bot._journal_principal_id)
-        assert await store.register_interactive_question_for_epoch(
-            await store.membership_epoch(room.room_id),
-            InteractiveQuestion(
-                question_event_id="$question",
-                room_id=room.room_id,
-                thread_id=None,
-                creator_agent=bot.agent_name,
-                question_text="Choose one",
-                options={"👍": "approve"},
-                option_labels={"👍": "Approve"},
-            ),
+        admission = await activate_interactive_prompt(
+            store,
+            question_event_id="$question",
+            room_id=room.room_id,
+            sender=bot.matrix_id.full_id,
+            creator_agent=bot.agent_name,
+            question_text="Choose one",
+            options={"👍": "approve"},
+            option_labels={"👍": "Approve"},
         )
+        assert admission is AdmissionResult.ADMITTED
 
         execute = AsyncMock(side_effect=(OSError("pending write failed"), None))
         with patch.object(bot._turn_controller, "_execute_interactive_selection", new=execute):
@@ -542,7 +542,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A departure retires both the claimed source and its journal-owned question."""
+        """A departure retires both the pending source and its stored selection."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -558,18 +558,17 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
         store = bot._journal_store.principal(bot._journal_principal_id)
-        assert await store.register_interactive_question_for_epoch(
-            await store.membership_epoch(room.room_id),
-            InteractiveQuestion(
-                question_event_id="$question",
-                room_id=room.room_id,
-                thread_id=None,
-                creator_agent=bot.agent_name,
-                question_text="Choose one",
-                options={"👍": "approve"},
-                option_labels={"👍": "Approve"},
-            ),
+        admission = await activate_interactive_prompt(
+            store,
+            question_event_id="$question",
+            room_id=room.room_id,
+            sender=bot.matrix_id.full_id,
+            creator_agent=bot.agent_name,
+            question_text="Choose one",
+            options={"👍": "approve"},
+            option_labels={"👍": "Approve"},
         )
+        assert admission is AdmissionResult.ADMITTED
 
         with patch.object(
             bot._turn_controller,
@@ -615,9 +614,10 @@ class TestAgentBot(AgentBotTestBase):
         )
         selection_started = asyncio.Event()
 
-        async def handle_selection(*_args: object, **_kwargs: object) -> None:
+        async def handle_selection(*_args: object, **_kwargs: object) -> bool:
             selection_started.set()
             assert bot._coalescing_gate.lanes.unsettled_slots()
+            return False
 
         replace_interactive_selection_handlers(bot, handle=handle_selection)
         with _mock_interactive_claim(bot, selection):
@@ -768,9 +768,10 @@ class TestAgentBot(AgentBotTestBase):
         release_selection = asyncio.Event()
         message_started = asyncio.Event()
 
-        async def blocked_selection(*_args: object, **_kwargs: object) -> None:
+        async def blocked_selection(*_args: object, **_kwargs: object) -> bool:
             selection_started.set()
             await release_selection.wait()
+            return False
 
         async def handle_other_thread(*_args: object, **_kwargs: object) -> TurnDispatchOutcome:
             message_started.set()
@@ -844,8 +845,9 @@ class TestAgentBot(AgentBotTestBase):
             await release_older.wait()
             return "$older-response"
 
-        async def handle_selection(*_args: object, **_kwargs: object) -> None:
+        async def handle_selection(*_args: object, **_kwargs: object) -> bool:
             preparation_started.set()
+            return False
 
         replace_interactive_selection_handlers(bot, handle=handle_selection)
         older: asyncio.Task[str | None] | None = None
@@ -948,6 +950,40 @@ class TestAgentBot(AgentBotTestBase):
         settle_dispatch_sources.assert_awaited_once_with(("$reaction",))
         # The failed settlement must hand the exact journal source back for retry.
         retry_dispatch_sources.assert_called_once_with(("$reaction",))
+
+    @pytest.mark.asyncio
+    async def test_interactive_approval_handoff_skips_fallback_source_settlement(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A suspended reaction response leaves its source to the approval continuation."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        settle_dispatch_sources = AsyncMock()
+        controller = replace_turn_controller_deps(
+            bot,
+            settle_dispatch_sources=settle_dispatch_sources,
+        )
+
+        async def hand_off_response() -> bool:
+            return True
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!test:localhost",
+            thread_id="$thread-a",
+            reply_to_event_id="$question",
+        )
+        await controller._start_interactive_selection(
+            hand_off_response,
+            response_target=target,
+            source_event_id="$reaction",
+            user_id="@user:localhost",
+            selected_value="Selected",
+        )
+        await bot._response_runner.drain_inbox_responses()
+
+        settle_dispatch_sources.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_terminal_interactive_selection_preserves_task_cancellation(
@@ -1534,12 +1570,13 @@ class TestAgentBot(AgentBotTestBase):
 
         lifecycle_lock.acquire = tracked_acquire  # type: ignore[method-assign]
 
-        async def handle_selection(*_args: object, **_kwargs: object) -> None:
+        async def handle_selection(*_args: object, **_kwargs: object) -> bool:
             preparation_started.set()
             await release_preparation.wait()
             await bot._response_runner.generate_response(
                 _direct_response_request(target, "interactive", reaction.event_id),
             )
+            return False
 
         async def generate_locked(
             _self: ResponseRunner,
@@ -1681,7 +1718,7 @@ class TestAgentBot(AgentBotTestBase):
             await release_approval.wait()
             return False
 
-        replace_interactive_selection_handlers(bot, handle=AsyncMock())
+        replace_interactive_selection_handlers(bot, handle=AsyncMock(return_value=False))
         with (
             patch("mindroom.reaction_dispatch.handle_tool_approval_action", side_effect=delayed_approval),
             _mock_interactive_claim(bot, selection),
@@ -2527,7 +2564,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
-        event = _reaction_event("👍", "$interactive-reaction")
+        event = _reaction_event("👍", "$interactive-reaction", timestamp=2_000)
         selection = interactive.InteractiveSelection(
             question_event_id="$response",
             question_text="Choose",
@@ -2542,18 +2579,18 @@ class TestAgentBot(AgentBotTestBase):
             handle=AsyncMock(side_effect=failure),
         )
         store = bot._journal_store.principal(bot._journal_principal_id)
-        assert await store.register_interactive_question_for_epoch(
-            await store.membership_epoch(room.room_id),
-            InteractiveQuestion(
-                question_event_id=selection.question_event_id,
-                room_id=room.room_id,
-                thread_id=selection.thread_id,
-                creator_agent=bot.agent_name,
-                question_text=selection.question_text,
-                options={selection.selection_key: selection.selected_value},
-                option_labels={selection.selection_key: selection.selected_label},
-            ),
+        admission = await activate_interactive_prompt(
+            store,
+            question_event_id=selection.question_event_id,
+            room_id=room.room_id,
+            sender=bot.matrix_id.full_id,
+            creator_agent=bot.agent_name,
+            thread_id=selection.thread_id,
+            question_text=selection.question_text,
+            options={selection.selection_key: selection.selected_value},
+            option_labels={selection.selection_key: selection.selected_label},
         )
+        assert admission is AdmissionResult.ADMITTED
 
         await bot._journal_dispatcher.admit_out_of_band(
             room,
@@ -2570,7 +2607,7 @@ class TestAgentBot(AgentBotTestBase):
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
-        replace_interactive_selection_handlers(restarted, handle=AsyncMock())
+        replace_interactive_selection_handlers(restarted, handle=AsyncMock(return_value=False))
         await restarted._journal_dispatcher.drain_once()
         await restarted._response_runner.drain_inbox_responses()
 

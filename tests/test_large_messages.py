@@ -20,6 +20,7 @@ from mindroom.constants import (
     STREAM_WARMUP_SUFFIX_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
+from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _NORMAL_MESSAGE_LIMIT,
@@ -56,6 +57,38 @@ class _UploadClient:
 
 def _large_text_content(prefix: str) -> dict[str, str]:
     return {"body": prefix + ("x" * 100000), "msgtype": "m.text"}
+
+
+@pytest.mark.parametrize("is_edit", [False, True])
+@pytest.mark.asyncio
+async def test_oversized_interactive_values_do_not_escape_the_matrix_event_limit(is_edit: bool) -> None:
+    """Unbounded local selection values must not be copied into the preview event."""
+    raw = json.dumps(
+        {
+            "question": "Choose",
+            "options": [{"emoji": "1️⃣", "label": "Huge", "value": "x" * 70_000}],
+        },
+    )
+    parsed = parse_and_format_interactive(f"```interactive\n{raw}\n```", extract_mapping=True)
+    assert parsed.interactive_metadata is None
+    assert "React with an emoji" not in parsed.formatted_text
+    content: dict[str, object] = {"msgtype": "m.text", "body": parsed.formatted_text}
+    if is_edit:
+        content = {
+            "msgtype": "m.text",
+            "body": f"* {parsed.formatted_text}",
+            "m.new_content": content,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        }
+
+    prepared = await prepare_large_message(
+        _UploadClient(nio.UploadResponse("mxc://server/sidecar")),
+        "!room:server",
+        content,
+    )
+
+    assert "io.mindroom.interactive" not in prepared
+    assert _calculate_event_size(prepared) <= _MATRIX_EVENT_HARD_LIMIT
 
 
 def _assert_text_sidecar_fallback(result: dict[str, object], expected_prefix: str) -> None:

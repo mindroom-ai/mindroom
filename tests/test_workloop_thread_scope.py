@@ -762,8 +762,7 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
 
     parsed = MagicMock()
     parsed.formatted_text = "visible response"
-    parsed.option_map = None
-    parsed.options_list = None
+    parsed.interactive_metadata = None
 
     delivery_result = None
 

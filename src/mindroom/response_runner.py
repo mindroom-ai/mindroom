@@ -665,10 +665,9 @@ class ResponseRunner:
         queue_memory_persistence: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], None] | None = None,
     ) -> PostResponseEffectsDeps:
-        """Build post-response effect deps bound to one request's room and source turn."""
+        """Build post-response effect deps bound to one request's room."""
         return self.deps.post_response_effects.build_deps(
             room_id=request.room_id,
-            interactive_agent_name=self.deps.agent_name,
             membership_turn_id=request.response_envelope.source_event_id,
             queue_memory_persistence=queue_memory_persistence,
             persist_response_event_id=persist_response_event_id,
@@ -1214,7 +1213,7 @@ class ResponseRunner:
             session_type=SessionType.TEAM if continuation.entity_kind == "team" else SessionType.AGENT,
             execution_identity=execution_identity,
             run_succeeded=run_succeeded,
-            interactive_target=target,
+            response_target=target,
             thread_summary_room_id=continuation.room_id if target.resolved_thread_id is not None else None,
             thread_summary_thread_id=target.resolved_thread_id,
             thread_summary_message_count_hint=continuation.thread_summary_message_count_hint,
@@ -1231,7 +1230,6 @@ class ResponseRunner:
         """Build normal post-response dependencies for a continued run."""
         return self.deps.post_response_effects.build_deps(
             room_id=continuation.room_id,
-            interactive_agent_name=continuation.entity_name,
             membership_turn_id=continuation.source_event_ids[0],
             queue_memory_persistence=self._approval_memory_persistence(continuation),
             persist_response_event_id=self._approval_response_event_persistence(continuation),
@@ -3288,7 +3286,7 @@ class ResponseRunner:
                 session_type=SessionType.TEAM,
                 execution_identity=tool_dispatch.execution_identity,
                 run_succeeded=team_turn_recorder.outcome == "completed",
-                interactive_target=resolved_target,
+                response_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
                 thread_summary_message_count_hint=thread_summary_message_count_hint(
@@ -4049,7 +4047,7 @@ class ResponseRunner:
                     if generation is not None
                     else final_delivery_outcome.terminal_status == "completed"
                 ),
-                interactive_target=resolved_target,
+                response_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
                 thread_summary_message_count_hint=thread_summary_message_count_hint(

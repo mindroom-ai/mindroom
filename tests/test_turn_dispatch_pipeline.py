@@ -1899,7 +1899,7 @@ class TestAgentBot(AgentBotTestBase):
             )
             await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
 
-        assert handled is _IngressAdmissionOutcome.ADMITTED
+        assert handled is _IngressAdmissionOutcome.DEFERRED
         mock_dispatch.assert_not_awaited()
         mock_admit.assert_awaited_once()
         key = mock_admit.await_args.args[0]
@@ -2008,7 +2008,7 @@ class TestAgentBot(AgentBotTestBase):
             )
             await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
 
-        assert handled is _IngressAdmissionOutcome.ADMITTED
+        assert handled is _IngressAdmissionOutcome.DEFERRED
         mock_dispatch.assert_not_awaited()
         mock_reserve_waiting_human_message.assert_called_once()
         mock_admit.assert_awaited_once()

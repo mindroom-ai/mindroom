@@ -369,6 +369,8 @@ class _StreamingDeliverySnapshot:
     extra_content: dict[str, Any] | None
     warmup_suffix_lines: tuple[RenderedWarmupLine, ...]
     stream_status: str
+    interactive_creator_agent: str | None
+    interactive_source_event_id: str | None
 
 
 def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _PreparedStreamingDelivery:
@@ -383,6 +385,19 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
     )
     extra_content = dict(snapshot.extra_content or {})
     extra_content[STREAM_STATUS_KEY] = snapshot.stream_status
+    if (
+        snapshot.stream_status == STREAM_STATUS_COMPLETED
+        and response.interactive_metadata is not None
+        and snapshot.interactive_creator_agent is not None
+        and snapshot.interactive_source_event_id is not None
+    ):
+        extra_content.update(
+            interactive.build_prompt_content(
+                response.interactive_metadata,
+                creator_agent=snapshot.interactive_creator_agent,
+                source_event_id=snapshot.interactive_source_event_id,
+            ),
+        )
     tool_trace = list(snapshot.tool_trace)
 
     content = format_message_with_mentions(
@@ -462,6 +477,8 @@ class StreamingResponse:
     show_tool_calls: bool = True  # When False, omit inline tool call text and tool-trace metadata
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     extra_content: dict[str, Any] | None = None
+    interactive_creator_agent: str | None = None
+    interactive_source_event_id: str | None = None
     stream_started_at: float | None = None
     chars_since_last_update: int = 0
     last_delta_at: float | None = None
@@ -1023,6 +1040,8 @@ class StreamingResponse:
             extra_content=deepcopy(self.extra_content) if self.extra_content is not None else None,
             warmup_suffix_lines=tuple(warmup_suffix_lines),
             stream_status=self._resolve_stream_status(is_final=is_final, stream_status=stream_status),
+            interactive_creator_agent=self.interactive_creator_agent,
+            interactive_source_event_id=self.interactive_source_event_id,
         )
 
     async def _prepare_delivery_async(
@@ -1865,6 +1884,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     terminal_send: TerminalSend | None = None,
     final_text_transform: FinalTextTransform | None = None,
     transport_is_current: Callable[[], Awaitable[bool]] | None = None,
+    interactive_creator_agent: str | None = None,
+    interactive_source_event_id: str | None = None,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome."""
     sc = config.defaults.streaming
@@ -1886,6 +1907,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         terminal_edit=terminal_edit,
         terminal_send=terminal_send,
         transport_is_current=transport_is_current,
+        interactive_creator_agent=interactive_creator_agent,
+        interactive_source_event_id=interactive_source_event_id,
     )
 
     # Ensure the first chunk triggers an initial send immediately

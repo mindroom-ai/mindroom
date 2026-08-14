@@ -12,7 +12,7 @@ from mindroom.history_recovery import (
     HistoryRecoveryState,
     RoomHistoryRecovery,
 )
-from mindroom.interactive_models import InteractiveQuestion, InteractiveSelection
+from mindroom.interactive_models import InteractiveSelection
 
 from .approval_continuations import (
     ApprovalCall,
@@ -30,6 +30,7 @@ from .models import (
     ConversationCursor,
     ConversationPage,
     DeliveryAcknowledgement,
+    DeliveryProjectionPendingError,
     DeliveryStage,
     DepartureObservation,
     DepartureOutcome,
@@ -75,6 +76,7 @@ __all__ = [
     "ConversationPage",
     "ConversationReadView",
     "DeliveryAcknowledgement",
+    "DeliveryProjectionPendingError",
     "DeliveryStage",
     "DepartureObservation",
     "DepartureOutcome",
@@ -90,7 +92,6 @@ __all__ = [
     "HydrationPolicy",
     "HydrationView",
     "InboundEvent",
-    "InteractiveQuestion",
     "InteractiveSelection",
     "JournalEvent",
     "MembershipFence",

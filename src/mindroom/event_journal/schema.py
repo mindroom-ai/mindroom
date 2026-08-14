@@ -150,18 +150,39 @@ _TABLES = (
     """
     CREATE TABLE IF NOT EXISTS interactive_questions (
         principal_id TEXT NOT NULL,
+        -- One logical Matrix target can expose several revisions over time.
+        -- Keeping each prompt revision immutable lets refetch restore an old
+        -- visible revision without losing whether that exact prompt was used.
         question_event_id {ordered_text} NOT NULL,
+        revision_event_id {ordered_text} NOT NULL,
         room_id TEXT NOT NULL,
-        thread_id TEXT NOT NULL,
-        creator_agent TEXT NOT NULL,
         question_json TEXT NOT NULL,
-        membership_epoch BIGINT NOT NULL,
-        claimed_source_event_id {ordered_text},
-        created_at_ns BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, question_event_id),
-        UNIQUE (principal_id, claimed_source_event_id),
-        FOREIGN KEY (principal_id, claimed_source_event_id)
-            REFERENCES journal_events (principal_id, event_id)
+        -- Null means this revision remains selectable whenever it is the
+        -- visible projection revision. The durable source ID is its one-shot
+        -- tombstone and survives source settlement.
+        consumed_by_source_event_id {ordered_text},
+        PRIMARY KEY (principal_id, question_event_id, revision_event_id),
+        UNIQUE (principal_id, consumed_by_source_event_id),
+        FOREIGN KEY (principal_id, consumed_by_source_event_id)
+            REFERENCES journal_events (principal_id, event_id),
+        FOREIGN KEY (principal_id, room_id, question_event_id)
+            REFERENCES visible_messages (principal_id, room_id, logical_event_id)
+            ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS interactive_selections (
+        principal_id TEXT NOT NULL,
+        source_event_id {ordered_text} NOT NULL,
+        question_event_id {ordered_text} NOT NULL,
+        revision_event_id {ordered_text} NOT NULL,
+        selection_key TEXT NOT NULL,
+        PRIMARY KEY (principal_id, source_event_id),
+        FOREIGN KEY (principal_id, source_event_id)
+            REFERENCES journal_events (principal_id, event_id),
+        FOREIGN KEY (principal_id, question_event_id, revision_event_id)
+            REFERENCES interactive_questions (principal_id, question_event_id, revision_event_id)
+            ON DELETE CASCADE
     )
     """,
     """
@@ -362,11 +383,8 @@ _INDEXES = (
     WHERE run_closed = 0
     """,
     """
-    CREATE INDEX IF NOT EXISTS interactive_questions_active
-    ON interactive_questions (
-        principal_id, room_id, thread_id, creator_agent, created_at_ns, question_event_id/*bytes*/
-    )
-    WHERE claimed_source_event_id IS NULL
+    CREATE INDEX IF NOT EXISTS interactive_selections_revision
+    ON interactive_selections (principal_id, question_event_id, revision_event_id)
     """,
     """
     CREATE INDEX IF NOT EXISTS journal_events_pending

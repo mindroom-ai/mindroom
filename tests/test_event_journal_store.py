@@ -43,12 +43,13 @@ from mindroom.event_journal import (
     EventKind,
     HistoryRecoveryOutcome,
     InboundEvent,
-    InteractiveQuestion,
     InteractiveSelection,
     ProjectedEvent,
     SemanticConsumer,
     TerminalTurnWrite,
     delivery_transaction_id,
+    reads,
+    replacement_target,
 )
 from mindroom.event_journal.offloading import settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
@@ -59,6 +60,7 @@ from mindroom.event_journal.schema import (
     schema_statements,
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
+from mindroom.interactive_models import InteractivePrompt
 from tests.conftest import postgres_journal_schema_url
 
 if TYPE_CHECKING:
@@ -240,6 +242,54 @@ def edit(target: str, body: str) -> dict[str, object]:
     }
 
 
+def interactive_prompt(
+    question: str,
+    value: str,
+    *,
+    source_event_id: str,
+    creator_agent: str = "agent",
+) -> dict[str, object]:
+    """Return literal Matrix content carrying one journal-authorized prompt."""
+    metadata: dict[str, object] = {
+        "creator_agent": creator_agent,
+        "question_text": question,
+        "options": {"1": value},
+        "option_labels": {"1": value.title()},
+    }
+    metadata["source_event_id"] = source_event_id
+    return {
+        "msgtype": "m.text",
+        "body": question,
+        "io.mindroom.interactive": metadata,
+    }
+
+
+def interactive_edit(
+    target: str,
+    question: str,
+    value: str,
+    *,
+    source_event_id: str,
+) -> dict[str, object]:
+    """Return one Matrix edit whose installed revision carries a prompt."""
+    content = edit(target, question)
+    metadata = interactive_prompt(question, value, source_event_id=source_event_id)["io.mindroom.interactive"]
+    cast("dict[str, object]", content["m.new_content"])["io.mindroom.interactive"] = metadata
+    content["io.mindroom.interactive"] = metadata
+    return content
+
+
+def reaction_content(target: str, key: str) -> dict[str, object]:
+    """Return one Matrix annotation relation."""
+    return {
+        "m.relates_to": {
+            "rel_type": "m.annotation",
+            "event_id": target,
+            "key": key,
+        },
+    }
+
+
 class _PausingTransaction:
     """One real transaction that runs a hook after its first matching statement.
 
@@ -412,6 +462,7 @@ def sidecar(content: dict[str, object]) -> dict[str, object]:
 def message(
     event_id: str,
     *,
+    room_id: str = ROOM,
     sender: str = ALICE,
     ts: int = 1_000,
     content: Mapping[str, object] | None = None,
@@ -424,7 +475,7 @@ def message(
     body = dict(content) if content is not None else text(event_id)
     inbound = InboundEvent(
         event_id=event_id,
-        room_id=ROOM,
+        room_id=room_id,
         thread_id=thread_id,
         kind=kind,
         event_class=event_class,
@@ -434,15 +485,20 @@ def message(
     )
     projected = ProjectedEvent(
         event_id=event_id,
-        room_id=ROOM,
+        room_id=room_id,
         thread_id=thread_id,
         sender=sender,
         origin_server_ts=ts,
         content=body,
-        replaces_event_id=None,
+        replaces_event_id=replacement_target(body),
         redacts_event_id=redacts,
     )
     return inbound, projected
+
+
+def projection(event_id: str, **kwargs: object) -> ProjectedEvent:
+    """Return only the projected half of one test event."""
+    return message(event_id, **kwargs)[1]  # type: ignore[arg-type]
 
 
 async def admit(store: PrincipalStore, *args: object, **kwargs: object) -> AdmissionResult:
@@ -473,33 +529,85 @@ async def refreshes(
     return page.refresh_pending
 
 
-def _interactive_question(
+async def _activate_interactive_question(
+    store: PrincipalStore,
     question_event_id: str,
     *,
+    revision_event_id: str | None = None,
     room_id: str = ROOM,
     thread_id: str | None = "$thread",
-) -> InteractiveQuestion:
-    """Return one literal journal-owned question fixture."""
-    return InteractiveQuestion(
-        question_event_id=question_event_id,
-        room_id=room_id,
-        thread_id=thread_id,
-        creator_agent="agent",
-        question_text="Choose",
-        options={"1": "one", "👍": "one"},
-        option_labels={"1": "One", "👍": "One"},
+    question_text: str = "Choose",
+    options: Mapping[str, str] | None = None,
+    option_labels: Mapping[str, str] | None = None,
+    source_event_id: str = "$turn",
+    ts: int | None = None,
+) -> None:
+    """Admit one self-authored Matrix revision carrying an active prompt."""
+    metadata = {
+        "creator_agent": "agent",
+        "question_text": question_text,
+        "options": dict(options or {"1": "one", "👍": "one"}),
+        "option_labels": dict(option_labels or {"1": "One", "👍": "One"}),
+        "source_event_id": source_event_id,
+    }
+    content = text(question_text)
+    event_id = question_event_id
+    if revision_event_id is not None:
+        event_id = revision_event_id
+        content = edit(question_event_id, question_text)
+        cast("dict[str, object]", content["m.new_content"])["io.mindroom.interactive"] = metadata
+    content["io.mindroom.interactive"] = metadata
+    assert (
+        await admit(
+            store,
+            event_id,
+            room_id=room_id,
+            sender="alice",
+            thread_id=thread_id,
+            ts=ts if ts is not None else (3_000 if revision_event_id is not None else 2_000),
+            content=content,
+        )
+        is AdmissionResult.ADMITTED
     )
+    await store.settle(event_id)
 
 
 async def _interactive_question_rows(store: EventJournalStore) -> list[dict[str, object]]:
-    """Return journal-owned questions as plain test evidence."""
+    """Return currently visible, unconsumed questions as plain test evidence."""
     rows = await store.backend.read(
         lambda transaction: transaction.fetchall(
             """
-            SELECT principal_id, question_event_id, room_id, thread_id, creator_agent,
-                   question_json, membership_epoch, claimed_source_event_id
-            FROM interactive_questions
-            ORDER BY question_event_id
+            SELECT iq.principal_id, iq.question_event_id, iq.room_id, vm.thread_id,
+                   iq.revision_event_id, iq.question_json, vm.membership_epoch
+            FROM interactive_questions AS iq
+            JOIN visible_messages AS vm
+              ON vm.principal_id = iq.principal_id
+             AND vm.room_id = iq.room_id
+             AND vm.logical_event_id = iq.question_event_id
+             AND vm.revision_event_id = iq.revision_event_id
+            WHERE iq.consumed_by_source_event_id IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM redaction_tombstones AS tombstone
+                  WHERE tombstone.principal_id = iq.principal_id
+                    AND tombstone.room_id = iq.room_id
+                    AND tombstone.redacted_event_id = iq.revision_event_id
+              )
+            ORDER BY iq.question_event_id
+            """,
+        ),
+    )
+    return [dict(row) for row in rows]
+
+
+async def _interactive_selection_rows(store: EventJournalStore) -> list[dict[str, object]]:
+    """Return source-bound selection snapshots as plain test evidence."""
+    rows = await store.backend.read(
+        lambda transaction: transaction.fetchall(
+            """
+            SELECT principal_id, source_event_id, question_event_id,
+                   revision_event_id, selection_key
+            FROM interactive_selections
+            ORDER BY source_event_id
             """,
         ),
     )
@@ -507,10 +615,14 @@ async def _interactive_question_rows(store: EventJournalStore) -> list[dict[str,
 
 
 async def _membership_accepts_question(store: PrincipalStore, epoch: int) -> bool:
-    """Probe active membership through the real guarded registration capability."""
-    return await store.register_interactive_question_for_epoch(
-        epoch,
-        _interactive_question("$membership-probe"),
+    """Probe active membership through the same row-locked predicate as prompt admission."""
+    return await store._backend.write(
+        lambda transaction: reads.claim_membership_epoch(
+            transaction,
+            store._principal_id,
+            room_id=ROOM,
+            expected_membership_epoch=epoch,
+        ),
     )
 
 
@@ -716,7 +828,7 @@ class TestEditReduction:
         alice: PrincipalStore,
         edit_count: int,
     ) -> None:
-        """Streaming rewrites the same row; intermediate bodies are not stored."""
+        """Streaming rewrites one projected row rather than accumulating messages."""
         await admit(alice, "$original", content=text("chunk 0"))
         for index in range(1, edit_count + 1):
             await admit(
@@ -969,6 +1081,45 @@ class TestRedaction:
 
         assert not installed
         assert await bodies(alice) == ["newest"]
+
+    async def test_a_stale_zero_token_cannot_drop_a_newer_outbox_projection(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Revision identity must disambiguate sidecar debts projected outside ingress."""
+        await admit(alice, "$target", sender="alice", content=text("first"))
+
+        async def acknowledge_sidecar_edit(turn_id: str, event_id: str, timestamp: int) -> None:
+            content = sidecar(edit("$target", event_id))
+            await alice.enqueue_delivery(
+                turn_id=turn_id,
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload=content,
+                edits_event_id="$target",
+            )
+            await alice.claim_delivery(turn_id=turn_id, stage=DeliveryStage.FINAL)
+            await alice.acknowledge_delivery(
+                turn_id=turn_id,
+                stage=DeliveryStage.FINAL,
+                event_id=event_id,
+                delivered_projections=(
+                    projection(
+                        event_id,
+                        sender="alice",
+                        ts=timestamp,
+                        content=content,
+                    ),
+                ),
+            )
+
+        await acknowledge_sidecar_edit("$first-turn", "$first-edit", 2_000)
+        stale_request = (await refreshes(alice))[0]
+        await acknowledge_sidecar_edit("$second-turn", "$second-edit", 3_000)
+
+        assert not await alice.drop_refetched_message(stale_request)
+        assert [request.logical_event_id for request in await refreshes(alice)] == ["$target"]
 
     async def test_a_refetch_can_remove_a_message_the_server_lost(
         self,
@@ -1470,95 +1621,872 @@ class TestLatestVisibleEvent:
         assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") is None
 
 
-class TestInteractiveQuestionRegistration:
-    """Question registration shares the membership row's transaction boundary."""
+class TestProjectedInteractivePrompts:
+    """The Matrix-visible revision is the sole active-prompt authority."""
 
-    async def test_interactive_question_registration_is_durable_and_idempotent(
+    @pytest.mark.parametrize(
+        ("prompt_event_id", "prompt_ts", "reaction_event_id", "reaction_ts"),
+        [
+            ("$target", 2_000, "$reaction", 1_000),
+            ("$z-target", 2_000, "$a-reaction", 2_000),
+        ],
+    )
+    async def test_reaction_snapshots_the_current_prompt_without_comparing_origin_clocks(
+        self,
+        alice: PrincipalStore,
+        prompt_event_id: str,
+        prompt_ts: int,
+        reaction_event_id: str,
+        reaction_ts: int,
+    ) -> None:
+        """Admission order is local truth; unrelated Matrix origin clocks are not causal order."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread", ts=500)
+        await admit(
+            alice,
+            prompt_event_id,
+            sender="alice",
+            thread_id="$thread",
+            ts=prompt_ts,
+            content=interactive_prompt("Choose?", "yes", source_event_id="$turn"),
+        )
+
+        await admit(
+            alice,
+            reaction_event_id,
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content(prompt_event_id, "1"),
+            thread_id="$thread",
+            ts=reaction_ts,
+        )
+
+        selection = await alice.claim_interactive_reaction(source_event_id=reaction_event_id)
+        assert selection is not None
+        assert (selection.question_text, selection.selected_value) == ("Choose?", "yes")
+
+    async def test_delivery_acknowledgement_projects_a_prompt_before_its_echo(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The durable delivery boundary must not wait for a later sync echo."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        content = interactive_prompt("Choose?", "yes", source_event_id="$turn")
+        await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=content,
+        )
+        await alice.claim_delivery(turn_id="$turn", stage=DeliveryStage.FINAL)
+
+        acknowledgement = await alice.acknowledge_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            event_id="$prompt",
+            delivered_projections=(
+                projection("$prompt", thread_id="$thread", sender="alice", ts=2_000, content=content),
+            ),
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$prompt", "1"),
+            thread_id="$thread",
+            ts=3_000,
+        )
+
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$prompt", bound=True)
+        assert await alice.claim_interactive_reaction(source_event_id="$reaction") == InteractiveSelection(
+            question_event_id="$prompt",
+            question_text="Choose?",
+            selection_key="1",
+            selected_label="Yes",
+            selected_value="yes",
+            thread_id="$thread",
+        )
+
+    async def test_interactive_source_waits_for_an_attempted_delivery_to_be_projected(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A visible-but-unacknowledged edit can still change the active prompt."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=interactive_prompt("Choose?", "yes", source_event_id="$turn"),
+        )
+        await alice.claim_delivery(turn_id="$turn", stage=DeliveryStage.FINAL)
+        reaction, _projected = message(
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$prompt", "1"),
+            thread_id="$thread",
+            ts=3_000,
+        )
+
+        with pytest.raises(RuntimeError, match="delivery projection is pending"):
+            await alice.admit(reaction)
+
+        assert await alice.load_event("$reaction") is None
+
+    async def test_edit_acknowledgement_projects_a_missing_target_before_its_prompt(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Target and edit share the ACK transaction when sync missed both echoes."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        edit_content = interactive_edit("$target", "Choose?", "yes", source_event_id="$turn")
+        await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=edit_content,
+            edits_event_id="$target",
+        )
+        await alice.claim_delivery(turn_id="$turn", stage=DeliveryStage.FINAL)
+
+        await alice.acknowledge_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            event_id="$edit",
+            delivered_projections=(
+                projection("$target", thread_id="$thread", sender="alice", ts=2_000, content=text("Thinking...")),
+                projection("$edit", thread_id="$thread", sender="alice", ts=3_000, content=edit_content),
+            ),
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+            thread_id="$thread",
+            ts=4_000,
+        )
+
+        selection = await alice.claim_interactive_reaction(source_event_id="$reaction")
+        assert selection is not None
+        assert (selection.question_event_id, selection.question_text, selection.selected_value) == (
+            "$target",
+            "Choose?",
+            "yes",
+        )
+
+    async def test_admitting_a_self_authored_prompt_activates_it_before_its_reaction(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Removing admission reconciliation would leave the reaction unclaimed."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        await admit(
+            alice,
+            "$target",
+            sender="alice",
+            thread_id="$thread",
+            content=interactive_prompt("Old?", "old", source_event_id="$turn"),
+            event_class=EventClass.CONTEXT_ONLY,
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+            ts=2_000,
+        )
+
+        selection = await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+        )
+
+        assert selection == InteractiveSelection(
+            question_event_id="$target",
+            question_text="Old?",
+            selection_key="1",
+            selected_label="Old",
+            selected_value="old",
+            thread_id="$thread",
+        )
+
+    async def test_admission_rejects_an_option_the_visible_prompt_does_not_offer(
         self,
         alice: PrincipalStore,
         journal_store: EventJournalStore,
     ) -> None:
-        """A replay keeps the exact question payload users originally saw."""
-        await admit(alice, "$turn")
-        question = _interactive_question("$question")
+        """An invalid reaction never creates the source snapshot that claim trusts."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        await admit(
+            alice,
+            "$target",
+            sender="alice",
+            thread_id="$thread",
+            content=interactive_prompt("Choose?", "valid", source_event_id="$turn"),
+            event_class=EventClass.CONTEXT_ONLY,
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "missing"),
+            ts=2_000,
+        )
 
-        assert await alice.register_interactive_question_for_turn("$turn", question)
-        assert await alice.register_interactive_question_for_turn("$turn", question)
+        assert await alice.claim_interactive_reaction(source_event_id="$reaction") is None
+        assert await _interactive_selection_rows(journal_store) == []
+        assert [row["question_event_id"] for row in await _interactive_question_rows(journal_store)] == ["$target"]
 
-        assert await _interactive_question_rows(journal_store) == [
-            {
-                "principal_id": "agent@alice",
-                "question_event_id": "$question",
-                "room_id": ROOM,
-                "thread_id": "$thread",
-                "creator_agent": "agent",
-                "question_json": json.dumps(
-                    {
-                        "option_labels": {"1": "One", "👍": "One"},
-                        "options": {"1": "one", "👍": "one"},
-                        "question_text": "Choose",
-                    },
-                    ensure_ascii=True,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
-                "membership_epoch": 0,
-                "claimed_source_event_id": None,
-            },
-        ]
+    async def test_a_sidecar_prompt_activates_from_the_revision_admission_installed(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The projection withholds an unresolved preview body but still owns its prompt metadata."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        content = interactive_prompt("Large?", "large", source_event_id="$turn")
+        content["io.mindroom.long_text"] = {
+            "version": 2,
+            "encoding": "matrix_event_content_json",
+        }
+        content["url"] = "mxc://example.org/body"
+        await admit(
+            alice,
+            "$target",
+            sender="alice",
+            thread_id="$thread",
+            content=content,
+        )
+        assert await alice.interactive_prompt_is_current(
+            room_id=ROOM,
+            question_event_id="$target",
+            expected=InteractivePrompt(
+                creator_agent="agent",
+                question_text="Large?",
+                options={"1": "large"},
+                option_labels={"1": "Large"},
+                source_event_id="$turn",
+            ),
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+            ts=2_000,
+        )
 
-    async def test_stale_and_fenced_memberships_cannot_register_questions(
+        selection = await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+        )
+
+        assert selection is not None
+        assert (selection.question_text, selection.selected_value) == ("Large?", "large")
+
+    async def test_losing_edit_cannot_reactivate_its_prompt(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """HTTP completion order cannot override the projection's revision order."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        await admit(
+            alice,
+            "$target",
+            sender="alice",
+            thread_id="$thread",
+            content=interactive_prompt("Original?", "original", source_event_id="$turn"),
+        )
+        await admit(
+            alice,
+            "$newer",
+            sender="alice",
+            ts=3_000,
+            content=interactive_edit("$target", "New?", "new", source_event_id="$turn"),
+        )
+        await admit(
+            alice,
+            "$older",
+            sender="alice",
+            ts=2_000,
+            content=interactive_edit("$target", "Stale?", "stale", source_event_id="$turn"),
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+            ts=4_000,
+        )
+
+        selection = await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+        )
+
+        assert selection is not None
+        assert (selection.question_text, selection.selected_value) == ("New?", "new")
+
+    async def test_out_of_order_edit_activates_when_its_target_arrives(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Reconciling the incoming original instead of the visible row loses the held edit."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        await admit(
+            alice,
+            "$edit",
+            sender="alice",
+            ts=2_000,
+            content=interactive_edit("$target", "Held?", "held", source_event_id="$turn"),
+        )
+        await admit(
+            alice,
+            "$target",
+            sender="alice",
+            thread_id="$thread",
+            content=interactive_prompt("Original?", "original", source_event_id="$turn"),
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+            ts=3_000,
+        )
+
+        selection = await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+        )
+
+        assert selection is not None
+        assert (selection.question_text, selection.selected_value) == ("Held?", "held")
+
+    async def test_a_held_sidecar_edit_activates_when_its_target_arrives(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A winning held edit carries prompt metadata even while its preview body stays unreadable."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        await admit(
+            alice,
+            "$edit",
+            sender="alice",
+            ts=2_000,
+            content=sidecar(interactive_edit("$target", "Held large?", "held", source_event_id="$turn")),
+        )
+        await admit(
+            alice,
+            "$target",
+            sender="alice",
+            thread_id="$thread",
+            content=interactive_prompt("Original?", "original", source_event_id="$turn"),
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+            ts=3_000,
+        )
+
+        selection = await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+        )
+
+        assert selection is not None
+        assert (selection.question_text, selection.selected_value) == ("Held large?", "held")
+
+    async def test_plain_edit_clears_the_active_prompt(
         self,
         alice: PrincipalStore,
         journal_store: EventJournalStore,
     ) -> None:
-        """Registration cannot repopulate questions after the authorizing membership ends."""
-        await admit(alice, "$old-turn")
-        old_epoch = await alice.membership_epoch(ROOM)
-        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
-
-        assert not await alice.register_interactive_question_for_turn(
-            "$old-turn",
-            _interactive_question("$fenced-turn"),
-        )
-        assert not await alice.register_interactive_question_for_epoch(
-            old_epoch,
-            _interactive_question("$fenced-epoch"),
+        """Leaving the old row active would let numeric text answer invisible options."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        await admit(
+            alice,
+            "$target",
+            sender="alice",
+            thread_id="$thread",
+            content=interactive_prompt("Choose?", "yes", source_event_id="$turn"),
         )
 
-        await alice.note_membership_restarted(ROOM)
+        await admit(alice, "$plain-edit", sender="alice", ts=2_000, content=edit("$target", "No question"))
 
-        assert not await alice.register_interactive_question_for_turn(
-            "$old-turn",
-            _interactive_question("$stale-turn"),
-        )
-        assert not await alice.register_interactive_question_for_epoch(
-            old_epoch,
-            _interactive_question("$stale-epoch"),
-        )
         assert await _interactive_question_rows(journal_store) == []
 
-    async def test_forget_interactive_question_removes_only_the_target(
+    async def test_redacting_a_prompt_revision_erases_its_pending_selection(
         self,
         alice: PrincipalStore,
         journal_store: EventJournalStore,
     ) -> None:
-        """Editing one message cannot remove another active question."""
-        await admit(alice, "$turn")
-        for event_id in ("$first", "$second"):
-            assert await alice.register_interactive_question_for_turn(
-                "$turn",
-                _interactive_question(event_id),
+        """A deleted prompt cannot survive in a source snapshot waiting to run."""
+        await admit(alice, "$turn", sender=BOB)
+        await admit(alice, "$target", sender="alice", content=text("Plain"))
+        await admit(
+            alice,
+            "$edit",
+            sender="alice",
+            ts=2_000,
+            content=interactive_edit("$target", "Secret?", "secret", source_event_id="$turn"),
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+            ts=2_500,
+        )
+        assert await _interactive_selection_rows(journal_store)
+
+        await admit(
+            alice,
+            "$redaction",
+            sender=BOB,
+            ts=3_000,
+            kind=EventKind.REDACTION,
+            redacts="$edit",
+        )
+
+        assert await alice.claim_interactive_reaction(source_event_id="$reaction") is None
+        rows = await journal_store.backend.read(
+            lambda transaction: transaction.fetchall(
+                "SELECT question_json FROM interactive_questions WHERE revision_event_id = ?",
+                ("$edit",),
+            ),
+        )
+        assert rows == ()
+
+    async def test_another_sender_cannot_forge_a_prompt_for_this_principal(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Trusting namespaced content without its Matrix sender would create user-owned prompts."""
+        await admit(alice, "$turn", sender=BOB)
+        await admit(
+            alice,
+            "$forged",
+            sender=BOB,
+            content=interactive_prompt("Forged?", "forged", source_event_id="$turn"),
+        )
+
+        assert await _interactive_question_rows(journal_store) == []
+
+    async def test_old_source_proof_cannot_borrow_a_current_membership(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A stale turn cannot authorize a prompt after the room membership changes."""
+        await admit(alice, "$old-turn", sender=BOB)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        await admit(
+            alice,
+            "$stale-question",
+            sender="alice",
+            content=interactive_prompt(
+                "Stale?",
+                "stale",
+                source_event_id="$old-turn",
+            ),
+        )
+
+        assert await _interactive_question_rows(journal_store) == []
+
+    async def test_button_check_requires_the_same_visible_prompt(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Post-effects cannot put regenerated buttons on a different visible event."""
+        await admit(alice, "$turn", sender=BOB)
+        expected = InteractivePrompt(
+            creator_agent="agent",
+            question_text="Choose?",
+            options={"1": "yes"},
+            option_labels={"1": "Yes"},
+            source_event_id="$turn",
+        )
+        await admit(
+            alice,
+            "$question",
+            sender="alice",
+            ts=1_000,
+            content=interactive_prompt("Choose?", "yes", source_event_id="$turn"),
+        )
+        assert await alice.interactive_prompt_is_current(
+            room_id=ROOM,
+            question_event_id="$question",
+            expected=expected,
+        )
+
+        await admit(
+            alice,
+            "$plain-edit",
+            sender="alice",
+            ts=2_000,
+            content=edit("$question", "Plain replacement"),
+        )
+
+        assert not await alice.interactive_prompt_is_current(
+            room_id=ROOM,
+            question_event_id="$question",
+            expected=expected,
+        )
+
+    async def test_button_check_rejects_a_fenced_prompt(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Post-transport button delivery must obey the same fence as projection."""
+        await admit(alice, "$turn", sender=BOB)
+        expected = InteractivePrompt(
+            creator_agent="agent",
+            question_text="Choose?",
+            options={"1": "yes"},
+            option_labels={"1": "Yes"},
+            source_event_id="$turn",
+        )
+        await admit(
+            alice,
+            "$question",
+            sender="alice",
+            content=interactive_prompt("Choose?", "yes", source_event_id="$turn"),
+        )
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+
+        assert not await alice.interactive_prompt_is_current(
+            room_id=ROOM,
+            question_event_id="$question",
+            expected=expected,
+        )
+
+    @pytest.mark.parametrize("installer", ["hydration", "recovery"])
+    async def test_history_install_activates_the_projected_prompt(
+        self,
+        alice: PrincipalStore,
+        installer: str,
+    ) -> None:
+        """Every projection entry point must install the same prompt revision."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        epoch = await alice.membership_epoch(ROOM)
+        prompt = message(
+            "$historical-question",
+            sender="alice",
+            thread_id="$thread",
+            content=interactive_prompt("Historical?", "yes", source_event_id="$turn"),
+        )[1]
+
+        if installer == "hydration":
+            assert await alice.install_hydrated_conversation(
+                room_id=ROOM,
+                thread_id="$thread",
+                events=(prompt,),
+                complete=True,
+                expected_membership_epoch=epoch,
+            )
+        else:
+            recovery = await alice.record_room_history_recovery(ROOM)
+            assert recovery is not None
+            assert await alice.install_room_history_recovery_chunk(
+                recovery,
+                events=(prompt,),
+                expected_membership_epoch=epoch,
             )
 
-        await alice.forget_interactive_question("$first")
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$historical-question", "1"),
+            ts=2_000,
+        )
 
-        rows = await _interactive_question_rows(journal_store)
-        assert [row["question_event_id"] for row in rows] == ["$second"]
+        selection = await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+        )
+
+        assert selection is not None
+        assert (selection.question_text, selection.selected_value) == ("Historical?", "yes")
+
+    async def test_refetch_restores_an_unconsumed_visible_prompt(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Returning to an older visible prompt revision makes that revision active again."""
+        await admit(alice, "$turn", sender=BOB)
+        original = interactive_prompt("Original?", "original", source_event_id="$turn")
+        await admit(alice, "$target", sender="alice", content=original)
+        await admit(alice, "$plain", sender="alice", ts=2_000, content=edit("$target", "Plain"))
+        await admit(alice, "$redaction", ts=3_000, kind=EventKind.REDACTION, redacts="$plain")
+        request = (await refreshes(alice))[0]
+
+        assert await alice.install_refetched_revision(
+            request,
+            revision_event_id="$target",
+            revision_ts=1_000,
+            content=original,
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+            ts=4_000,
+        )
+
+        selection = await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+        )
+
+        assert selection is not None
+        assert selection.selected_value == "original"
+
+    async def test_refetch_cannot_resurrect_a_consumed_prompt_revision(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Consumption is durable even when projection repair shows the old revision again."""
+        await admit(alice, "$turn", sender=BOB)
+        original = interactive_prompt("Original?", "original", source_event_id="$turn")
+        await admit(alice, "$target", sender="alice", content=original)
+        await admit(
+            alice,
+            "$first-reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+            ts=1_500,
+        )
+        assert await alice.claim_interactive_reaction(
+            source_event_id="$first-reaction",
+        )
+        await alice.settle("$first-reaction")
+
+        await admit(alice, "$plain", sender="alice", ts=2_000, content=edit("$target", "Plain"))
+        await admit(alice, "$redaction", ts=3_000, kind=EventKind.REDACTION, redacts="$plain")
+        request = (await refreshes(alice))[0]
+        assert await alice.install_refetched_revision(
+            request,
+            revision_event_id="$target",
+            revision_ts=1_000,
+            content=original,
+        )
+        await admit(
+            alice,
+            "$second-reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+            ts=4_000,
+        )
+
+        assert (
+            await alice.claim_interactive_reaction(
+                source_event_id="$second-reaction",
+            )
+            is None
+        )
+
+    async def test_dropping_a_refetched_message_removes_its_prompt_from_discovery(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A sidecar message absent from the server cannot keep accepting answers."""
+        await admit(alice, "$turn", sender=BOB)
+        content = interactive_prompt("Large?", "large", source_event_id="$turn")
+        content["io.mindroom.long_text"] = {
+            "version": 2,
+            "encoding": "matrix_event_content_json",
+        }
+        content["url"] = "mxc://example.org/body"
+        await admit(alice, "$target", sender="alice", content=content)
+        request = (await refreshes(alice))[0]
+
+        assert await alice.drop_refetched_message(request)
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+            ts=2_000,
+        )
+
+        assert (
+            await alice.claim_interactive_reaction(
+                source_event_id="$reaction",
+            )
+            is None
+        )
 
 
 class TestInteractiveQuestionClaims:
-    """A journal source and its question become one replayable owner."""
+    """A journal source owns an immutable replayable selection."""
+
+    async def test_a_replacement_question_does_not_overwrite_its_source_owned_selection(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A visible replacement and the older source selection have independent owners."""
+        await admit(alice, "$turn")
+        await _activate_interactive_question(alice, "$question")
+        await admit(
+            alice,
+            "$reaction",
+            kind=EventKind.REACTION,
+            content=reaction_content("$question", "1"),
+            ts=2_500,
+        )
+        original = InteractiveSelection(
+            question_event_id="$question",
+            question_text="Choose",
+            selection_key="1",
+            selected_label="One",
+            selected_value="one",
+            thread_id="$thread",
+        )
+        assert (
+            await alice.claim_interactive_reaction(
+                source_event_id="$reaction",
+            )
+            == original
+        )
+
+        await _activate_interactive_question(
+            alice,
+            "$question",
+            revision_event_id="$question-edit",
+            question_text="Choose again",
+            options={"2": "two"},
+            option_labels={"2": "Two"},
+        )
+        assert (
+            await alice.claim_interactive_reaction(
+                source_event_id="$reaction",
+            )
+            == original
+        )
+
+        await alice.settle("$reaction")
+        await admit(
+            alice,
+            "$replacement-reaction",
+            kind=EventKind.REACTION,
+            content=reaction_content("$question", "2"),
+            ts=3_500,
+        )
+        selected_replacement = await alice.claim_interactive_reaction(
+            source_event_id="$replacement-reaction",
+        )
+
+        assert selected_replacement == InteractiveSelection(
+            question_event_id="$question",
+            question_text="Choose again",
+            selection_key="2",
+            selected_label="Two",
+            selected_value="two",
+            thread_id="$thread",
+        )
+
+    async def test_reaction_admission_preserves_the_prompt_seen_before_an_edit(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A queued reaction cannot be reinterpreted through a later prompt revision."""
+        await admit(alice, "$turn")
+        await _activate_interactive_question(alice, "$question")
+        reaction, _ = message(
+            "$reaction",
+            kind=EventKind.REACTION,
+            ts=2_500,
+            content={
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$question",
+                    "key": "1",
+                },
+            },
+        )
+        await alice.admit(reaction)
+
+        await _activate_interactive_question(
+            alice,
+            "$question",
+            revision_event_id="$question-edit",
+            question_text="Choose again",
+            options={"1": "new"},
+            option_labels={"1": "New"},
+        )
+
+        selected = await alice.claim_interactive_reaction(
+            source_event_id="$reaction",
+        )
+
+        assert selected is not None
+        assert (selected.question_text, selected.selected_value) == ("Choose", "one")
+
+        await alice.settle("$reaction")
+        replacement_reaction, _ = message(
+            "$replacement-reaction",
+            kind=EventKind.REACTION,
+            ts=3_500,
+            content={
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$question",
+                    "key": "1",
+                },
+            },
+        )
+        await alice.admit(replacement_reaction)
+        replacement_selection = await alice.claim_interactive_reaction(
+            source_event_id="$replacement-reaction",
+        )
+
+        assert replacement_selection is not None
+        assert (replacement_selection.question_text, replacement_selection.selected_value) == (
+            "Choose again",
+            "new",
+        )
+
+    async def test_text_admission_preserves_the_prompt_seen_before_an_edit(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A queued numeric answer cannot be reinterpreted through a later prompt revision."""
+        await admit(alice, "$turn")
+        await _activate_interactive_question(alice, "$question")
+        await admit(alice, "$answer", thread_id="$thread", content=text("1"), ts=2_500)
+        await _activate_interactive_question(
+            alice,
+            "$question",
+            revision_event_id="$question-edit",
+            question_text="Choose again",
+            options={"1": "replacement"},
+            option_labels={"1": "Replacement"},
+        )
+
+        selection = await alice.claim_interactive_text(
+            source_event_id="$answer",
+        )
+
+        assert selection is not None
+        assert (selection.question_text, selection.selected_value) == ("Choose", "one")
 
     async def test_interactive_reaction_claim_is_atomic_and_replayable(
         self,
@@ -1567,8 +2495,14 @@ class TestInteractiveQuestionClaims:
     ) -> None:
         """Replaying one reaction returns the same selection instead of losing its claim."""
         await admit(alice, "$turn")
-        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$question"))
-        await admit(alice, "$reaction", kind=EventKind.REACTION)
+        await _activate_interactive_question(alice, "$question")
+        await admit(
+            alice,
+            "$reaction",
+            kind=EventKind.REACTION,
+            content=reaction_content("$question", "👍"),
+            ts=2_500,
+        )
         expected = InteractiveSelection(
             question_event_id="$question",
             question_text="Choose",
@@ -1581,18 +2515,12 @@ class TestInteractiveQuestionClaims:
         assert (
             await alice.claim_interactive_reaction(
                 source_event_id="$reaction",
-                question_event_id="$question",
-                selection_key="👍",
-                creator_agent="agent",
             )
             == expected
         )
         assert (
             await alice.claim_interactive_reaction(
                 source_event_id="$reaction",
-                question_event_id="$question",
-                selection_key="👍",
-                creator_agent="agent",
             )
             == expected
         )
@@ -1600,8 +2528,9 @@ class TestInteractiveQuestionClaims:
         reaction = await alice.load_event("$reaction")
         assert reaction is not None
         assert reaction.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
-        rows = await _interactive_question_rows(journal_store)
-        assert rows[0]["claimed_source_event_id"] == "$reaction"
+        assert await _interactive_question_rows(journal_store) == []
+        rows = await _interactive_selection_rows(journal_store)
+        assert [row["source_event_id"] for row in rows] == ["$reaction"]
 
     async def test_another_reaction_cannot_steal_an_interactive_claim(
         self,
@@ -1610,22 +2539,28 @@ class TestInteractiveQuestionClaims:
     ) -> None:
         """A losing reaction keeps no semantic claim that would hide other routing."""
         await admit(alice, "$turn")
-        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$question"))
-        await admit(alice, "$winner", kind=EventKind.REACTION)
-        await admit(alice, "$loser", kind=EventKind.REACTION)
+        await _activate_interactive_question(alice, "$question")
+        for timestamp, event_id in enumerate(("$winner", "$loser"), start=2_500):
+            reaction, _ = message(
+                event_id,
+                kind=EventKind.REACTION,
+                ts=timestamp,
+                content={
+                    "m.relates_to": {
+                        "rel_type": "m.annotation",
+                        "event_id": "$question",
+                        "key": "1",
+                    },
+                },
+            )
+            await alice.admit(reaction)
         assert await alice.claim_interactive_reaction(
             source_event_id="$winner",
-            question_event_id="$question",
-            selection_key="1",
-            creator_agent="agent",
         )
 
         assert (
             await alice.claim_interactive_reaction(
                 source_event_id="$loser",
-                question_event_id="$question",
-                selection_key="1",
-                creator_agent="agent",
             )
             is None
         )
@@ -1633,43 +2568,9 @@ class TestInteractiveQuestionClaims:
         loser = await alice.load_event("$loser")
         assert loser is not None
         assert loser.semantic_consumer is None
-        rows = await _interactive_question_rows(journal_store)
-        assert rows[0]["claimed_source_event_id"] == "$winner"
-
-    async def test_invalid_reaction_claims_leave_both_records_unchanged(
-        self,
-        alice: PrincipalStore,
-        journal_store: EventJournalStore,
-    ) -> None:
-        """Wrong options and agents cannot partially claim the source or question."""
-        await admit(alice, "$turn")
-        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$question"))
-        await admit(alice, "$reaction", kind=EventKind.REACTION)
-
-        assert (
-            await alice.claim_interactive_reaction(
-                source_event_id="$reaction",
-                question_event_id="$question",
-                selection_key="missing",
-                creator_agent="agent",
-            )
-            is None
-        )
-        assert (
-            await alice.claim_interactive_reaction(
-                source_event_id="$reaction",
-                question_event_id="$question",
-                selection_key="1",
-                creator_agent="other-agent",
-            )
-            is None
-        )
-
-        reaction = await alice.load_event("$reaction")
-        assert reaction is not None
-        assert reaction.semantic_consumer is None
-        rows = await _interactive_question_rows(journal_store)
-        assert rows[0]["claimed_source_event_id"] is None
+        assert await _interactive_question_rows(journal_store) == []
+        rows = await _interactive_selection_rows(journal_store)
+        assert [row["source_event_id"] for row in rows] == ["$winner"]
 
     async def test_interactive_text_claim_chooses_the_oldest_question_and_replays_it(
         self,
@@ -1678,11 +2579,11 @@ class TestInteractiveQuestionClaims:
     ) -> None:
         """Database order replaces process-dictionary insertion order deterministically."""
         await admit(alice, "$turn")
-        for event_id in ("$first", "$second"):
-            assert await alice.register_interactive_question_for_turn("$turn", _interactive_question(event_id))
-        await admit(alice, "$answer", thread_id="$thread")
+        await _activate_interactive_question(alice, "$z-first", ts=1_000)
+        await _activate_interactive_question(alice, "$a-second", ts=2_000)
+        await admit(alice, "$answer", thread_id="$thread", content=text("1"), ts=2_500)
         expected = InteractiveSelection(
-            question_event_id="$first",
+            question_event_id="$z-first",
             question_text="Choose",
             selection_key="1",
             selected_label="One",
@@ -1693,22 +2594,20 @@ class TestInteractiveQuestionClaims:
         assert (
             await alice.claim_interactive_text(
                 source_event_id="$answer",
-                selection_key="1",
-                creator_agent="agent",
             )
             == expected
         )
         assert (
             await alice.claim_interactive_text(
                 source_event_id="$answer",
-                selection_key="1",
-                creator_agent="agent",
             )
             == expected
         )
 
         rows = await _interactive_question_rows(journal_store)
-        assert [row["claimed_source_event_id"] for row in rows] == ["$answer", None]
+        assert [row["question_event_id"] for row in rows] == ["$a-second"]
+        selection_rows = await _interactive_selection_rows(journal_store)
+        assert [row["source_event_id"] for row in selection_rows] == ["$answer"]
 
     async def test_room_level_text_claim_matches_a_room_level_question(
         self,
@@ -1716,16 +2615,11 @@ class TestInteractiveQuestionClaims:
     ) -> None:
         """Canonical room-level thread identity must preserve numeric answers."""
         await admit(alice, "$turn")
-        assert await alice.register_interactive_question_for_turn(
-            "$turn",
-            _interactive_question("$question", thread_id=None),
-        )
-        await admit(alice, "$answer")
+        await _activate_interactive_question(alice, "$question", thread_id=None)
+        await admit(alice, "$answer", content=text("1"), ts=2_500)
 
         selection = await alice.claim_interactive_text(
             source_event_id="$answer",
-            selection_key="1",
-            creator_agent="agent",
         )
 
         assert selection is not None
@@ -1738,23 +2632,16 @@ class TestInteractiveQuestionClaims:
     ) -> None:
         """The journal chooses one source owner when two numeric answers race."""
         await admit(alice, "$turn")
-        assert await alice.register_interactive_question_for_turn(
-            "$turn",
-            _interactive_question("$question"),
-        )
-        await admit(alice, "$first-answer", thread_id="$thread")
-        await admit(alice, "$second-answer", thread_id="$thread")
+        await _activate_interactive_question(alice, "$question")
+        await admit(alice, "$first-answer", thread_id="$thread", content=text("1"), ts=2_500)
+        await admit(alice, "$second-answer", thread_id="$thread", content=text("1"), ts=2_600)
 
         claims = await asyncio.gather(
             alice.claim_interactive_text(
                 source_event_id="$first-answer",
-                selection_key="1",
-                creator_agent="agent",
             ),
             alice.claim_interactive_text(
                 source_event_id="$second-answer",
-                selection_key="1",
-                creator_agent="agent",
             ),
         )
 
@@ -1762,38 +2649,42 @@ class TestInteractiveQuestionClaims:
 
 
 class TestInteractiveQuestionConsumption:
-    """Terminal sources and membership changes retire their owned questions."""
+    """Terminal sources and membership changes retire derived interactive state."""
 
-    async def test_settling_a_claimed_source_consumes_only_its_question(
+    async def test_settling_a_selected_source_consumes_only_its_selection(
         self,
         alice: PrincipalStore,
         journal_store: EventJournalStore,
     ) -> None:
-        """Question consumption commits with the source's terminal journal fact."""
+        """Selection consumption commits with the source's terminal journal fact."""
         await admit(alice, "$turn")
         for event_id in ("$claimed", "$active"):
-            assert await alice.register_interactive_question_for_turn("$turn", _interactive_question(event_id))
-        await admit(alice, "$reaction", kind=EventKind.REACTION)
+            await _activate_interactive_question(alice, event_id)
+        await admit(
+            alice,
+            "$reaction",
+            kind=EventKind.REACTION,
+            content=reaction_content("$claimed", "1"),
+            ts=2_500,
+        )
         assert await alice.claim_interactive_reaction(
             source_event_id="$reaction",
-            question_event_id="$claimed",
-            selection_key="1",
-            creator_agent="agent",
         )
 
         await alice.settle_many(("$reaction",))
 
         rows = await _interactive_question_rows(journal_store)
         assert [row["question_event_id"] for row in rows] == ["$active"]
+        assert await _interactive_selection_rows(journal_store) == []
 
     async def test_settling_an_unrelated_source_keeps_active_questions(
         self,
         alice: PrincipalStore,
         journal_store: EventJournalStore,
     ) -> None:
-        """Only the source that owns a claim can consume its question."""
+        """Settling an unrelated source leaves active questions unchanged."""
         await admit(alice, "$turn")
-        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$question"))
+        await _activate_interactive_question(alice, "$question")
         await admit(alice, "$other")
 
         await alice.settle("$other")
@@ -1801,31 +2692,78 @@ class TestInteractiveQuestionConsumption:
         rows = await _interactive_question_rows(journal_store)
         assert [row["question_event_id"] for row in rows] == ["$question"]
 
-    async def test_departure_drops_active_and_claimed_questions_for_the_room(
+    async def test_departure_drops_active_questions_and_owned_selections_for_the_room(
         self,
         alice: PrincipalStore,
         journal_store: EventJournalStore,
     ) -> None:
-        """The membership fence and its derived-question deletion are one transaction."""
+        """The membership fence and its interactive-state deletion are one transaction."""
         await admit(alice, "$turn")
-        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$active"))
-        assert await alice.register_interactive_question_for_turn("$turn", _interactive_question("$claimed"))
-        assert await alice.register_interactive_question_for_epoch(
-            0,
-            _interactive_question("$other-room", room_id=OTHER_ROOM),
+        await _activate_interactive_question(alice, "$active")
+        await _activate_interactive_question(alice, "$claimed")
+        await admit(alice, "$other-turn", room_id=OTHER_ROOM)
+        await _activate_interactive_question(
+            alice,
+            "$other-room",
+            room_id=OTHER_ROOM,
+            source_event_id="$other-turn",
         )
-        await admit(alice, "$reaction", kind=EventKind.REACTION)
+        await admit(
+            alice,
+            "$reaction",
+            kind=EventKind.REACTION,
+            content=reaction_content("$claimed", "1"),
+            ts=2_500,
+        )
         assert await alice.claim_interactive_reaction(
             source_event_id="$reaction",
-            question_event_id="$claimed",
-            selection_key="1",
-            creator_agent="agent",
         )
 
         await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         rows = await _interactive_question_rows(journal_store)
         assert [row["question_event_id"] for row in rows] == ["$other-room"]
+        assert await _interactive_selection_rows(journal_store) == []
+
+
+class TestIncompatibleInteractiveSchemaRefusal:
+    """An old question-claim shape must not be read under new ownership semantics."""
+
+    async def test_sqlite_refuses_the_legacy_claim_column(self, tmp_path: Path) -> None:
+        """SQLite fails loudly instead of treating an owned question as active."""
+        database_path = tmp_path / "legacy.db"
+        with sqlite3.connect(database_path) as database:
+            database.execute(
+                """
+                CREATE TABLE interactive_questions (
+                    principal_id TEXT NOT NULL,
+                    question_event_id TEXT NOT NULL,
+                    claimed_source_event_id TEXT
+                )
+                """,
+            )
+
+        with pytest.raises(RuntimeError, match="incompatible pre-selection schema"):
+            EventJournalStore.open_sqlite(database_path)
+
+    async def test_postgres_refuses_the_legacy_claim_column(self, postgres_journal_url: str) -> None:
+        """PostgreSQL applies the same explicit schema boundary as SQLite."""
+        import psycopg  # noqa: PLC0415
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        with psycopg.connect(database_url, autocommit=True) as database:
+            database.execute(
+                """
+                CREATE TABLE interactive_questions (
+                    principal_id TEXT NOT NULL,
+                    question_event_id TEXT NOT NULL,
+                    claimed_source_event_id TEXT
+                )
+                """,
+            )
+
+        with pytest.raises(RuntimeError, match="incompatible pre-selection schema"):
+            EventJournalStore.open_postgres(database_url)
 
 
 class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
@@ -2312,7 +3250,12 @@ class TestMembershipEpoch:
             payload=text("answer"),
         )
         await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
-        await alice.acknowledge_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL, event_id="$sent")
+        await alice.acknowledge_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$sent",
+            delivered_projections=(),
+        )
 
         await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
@@ -2977,14 +3920,14 @@ def _watch_until_queued_or_finished(
             time.sleep(_QUEUE_POLL_SECONDS)
 
 
-class TestInteractiveRegistrationAndDepartureAreCrossProcessOrdered:
-    """Question registration and departure share one PostgreSQL membership-row lock."""
+class TestInteractiveActivationAndDepartureAreCrossProcessOrdered:
+    """Prompt activation and departure share one PostgreSQL membership-row lock."""
 
     async def test_departure_waits_for_a_current_turn_registration(
         self,
         rival_stores: RivalStores,
     ) -> None:
-        """A registration that wins the row claim is subsequently removed by the fence."""
+        """An activation that wins the row claim is subsequently removed by the fence."""
         principal_id = "agent@alice"
         first = rival_stores.first.principal(principal_id)
         second = rival_stores.second.principal(principal_id)
@@ -3003,12 +3946,13 @@ class TestInteractiveRegistrationAndDepartureAreCrossProcessOrdered:
                 statement_matches=lambda sql: "INSERT INTO room_membership" in sql,
             ),
         ).principal(principal_id)
-        registration = asyncio.create_task(
-            registering.register_interactive_question_for_turn(
-                "$turn",
-                _interactive_question("$question"),
-            ),
+        inbound, projected = message(
+            "$question",
+            sender="alice",
+            thread_id="$thread",
+            content=interactive_prompt("Choose", "one", source_event_id="$turn"),
         )
+        registration = asyncio.create_task(registering.admit(inbound, projected))
         try:
             await asyncio.to_thread(registration_claimed.wait, _WORKER_WAIT_SECONDS)
             assert registration_claimed.is_set(), "the registration never claimed the membership row"
@@ -3027,7 +3971,7 @@ class TestInteractiveRegistrationAndDepartureAreCrossProcessOrdered:
             release_registration.set()
             await asyncio.gather(registration, return_exceptions=True)
 
-        assert accepted
+        assert accepted is AdmissionResult.ADMITTED
         assert await _interactive_question_rows(rival_stores.first) == []
 
 
@@ -3211,12 +4155,14 @@ class TestOutbox:
             turn_id="turn-1",
             stage=DeliveryStage.FINAL,
             event_id="$first",
+            delivered_projections=(),
             terminal_turn=record("$first"),
         )
         await alice.acknowledge_delivery(
             turn_id="turn-1",
             stage=DeliveryStage.FINAL,
             event_id="$second",
+            delivered_projections=(),
             terminal_turn=record("$second"),
         )
 
@@ -3329,6 +4275,7 @@ class TestOutbox:
                 turn_id="turn-1",
                 stage=DeliveryStage.FINAL,
                 event_id=event_id,
+                delivered_projections=(),
                 terminal_turn=TerminalTurnWrite(
                     agent_name="general",
                     index_event_ids=("$source",),
@@ -3491,6 +4438,7 @@ class TestOutbox:
             turn_id="turn-1",
             stage=DeliveryStage.FINAL,
             event_id="$sent",
+            delivered_projections=(),
         )
 
         assert await alice.unacknowledged_deliveries() == ()
@@ -3505,8 +4453,18 @@ class TestOutbox:
             payload=text("sent"),
         )
         await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
-        await alice.acknowledge_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL, event_id="$first")
-        await alice.acknowledge_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL, event_id="$second")
+        await alice.acknowledge_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$first",
+            delivered_projections=(),
+        )
+        await alice.acknowledge_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$second",
+            delivered_projections=(),
+        )
 
         stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None
@@ -4364,6 +5322,7 @@ class TestApprovalContinuations:
             turn_id="$source-1",
             stage=DeliveryStage.FINAL,
             event_id="$finished",
+            delivered_projections=(),
         )
 
         assert await alice.finish_approval_continuation("approval-1") is True
@@ -4417,6 +5376,7 @@ class TestApprovalContinuations:
             turn_id="approval-unavailable:approval-1",
             stage=DeliveryStage.FINAL,
             event_id="$unavailable",
+            delivered_projections=(),
         )
 
         assert (
