@@ -75,12 +75,6 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
     if trigger_snapshot.allowed_kinds and payload.kind not in trigger_snapshot.allowed_kinds:
         raise HTTPException(status_code=422, detail="External trigger kind is not allowed")
     runtime = _require_external_trigger_runtime_binding(request, trigger_snapshot)
-    _validate_snapshot_policy_and_auth(
-        trigger_snapshot,
-        config,
-        runtime_paths,
-        runtime.agent_reply_memberships,
-    )
     try:
         async with admitted_response_decision(
             runtime.response_admission_gate,

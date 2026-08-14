@@ -15,7 +15,7 @@ from uuid import uuid4
 import uvicorn
 
 from mindroom import constants
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_reply_membership_policy_changed
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.attachments import wait_for_attachment_cleanup_tasks
@@ -958,7 +958,7 @@ class _MultiAgentOrchestrator:
         current_config: Config,
         new_config: Config,
         changed_server_ids: set[str],
-        invalidate_reply_memberships: bool,
+        reply_membership_policy_changed: bool,
     ) -> set[str]:
         """Stage and commit plugin changes without interleaving live reloads."""
         prepared_plugin_roots, prepared_plugin_root_snapshots = self.plugin_watch.capture(new_config)
@@ -973,7 +973,7 @@ class _MultiAgentOrchestrator:
             changed_server_ids,
         )
         self.config = new_config
-        if invalidate_reply_memberships:
+        if reply_membership_policy_changed:
             self.invalidate_agent_reply_memberships(reason="config_reload")
         new_hook_registry = apply_prepared_plugin_reload(
             prepared_plugin_reload,
@@ -1661,6 +1661,10 @@ class _MultiAgentOrchestrator:
     ) -> bool:
         """Apply one computed config update plan: restart entities and reconcile state."""
         new_config = plan.new_config
+        reply_membership_policy_changed = agent_reply_membership_policy_changed(
+            current_config.authorization,
+            new_config.authorization,
+        )
         await self._prepare_accounts_for_config_update(new_config, plan)
         replay_startup_maintenance = await self._startup_maintenance.cancel()
 
@@ -1670,7 +1674,7 @@ class _MultiAgentOrchestrator:
                     current_config=current_config,
                     new_config=new_config,
                     changed_server_ids=plan.changed_mcp_servers,
-                    invalidate_reply_memberships=not plan.only_support_service_changes,
+                    reply_membership_policy_changed=reply_membership_policy_changed,
                 )
             else:
                 pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
@@ -1680,7 +1684,7 @@ class _MultiAgentOrchestrator:
                 )
                 # Only apply the new config after validation and account checks succeed.
                 self.config = new_config
-                if not plan.only_support_service_changes:
+                if reply_membership_policy_changed:
                     self.invalidate_agent_reply_memberships(reason="config_reload")
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 import pytest_asyncio
 
@@ -17,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.conftest import orchestrator_runtime_paths
@@ -510,6 +512,80 @@ class TestDynamicConfigUpdate:
             _agent_reply_membership_policy_signature(updated_config.authorization)
         )
         assert orchestrator.agent_reply_memberships.needs_refresh(updated_config.authorization)
+
+    @pytest.mark.asyncio
+    async def test_matrix_space_change_preserves_ready_reply_memberships(
+        self,
+        orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
+    ) -> None:
+        """Unrelated room presentation changes must not erase authoritative grants."""
+        agent = {
+            "display_name": "GeneralAgent",
+            "role": "General assistant",
+            "model": "default",
+            "rooms": ["lobby"],
+        }
+        authorization = {
+            "global_users": ["@alice:example.com"],
+            "agent_reply_permissions": {
+                "general": {"joined_rooms": ["lobby"]},
+            },
+        }
+        initial_config = Config(
+            agents={"general": agent},
+            rooms={"lobby": {"display_name": "Lobby"}},
+            models={"default": {"provider": "test", "id": "test-model"}},
+            authorization=authorization,
+            matrix_space={"enabled": False},
+        )
+        updated_config = Config(
+            agents={"general": agent},
+            rooms={"lobby": {"display_name": "Lobby"}},
+            models={"default": {"provider": "test", "id": "test-model"}},
+            authorization=authorization,
+            matrix_space={"enabled": True},
+        )
+        orchestrator = orchestrator_factory()
+        orchestrator.config = initial_config
+        room_id = "!lobby:example.com"
+        state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
+        state.add_room("lobby", room_id, "#lobby:example.com", "Lobby")
+        state.save(runtime_paths=orchestrator.runtime_paths)
+        membership_client = AsyncMock(spec=nio.AsyncClient)
+        membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+        membership_client.joined_members.return_value = nio.JoinedMembersResponse(
+            members=[nio.RoomMember("@alice:example.com", None, None)],
+            room_id=room_id,
+        )
+        await orchestrator.agent_reply_memberships.refresh(
+            initial_config,
+            orchestrator.runtime_paths,
+            membership_client,
+        )
+        general_bot = _mock_agent_bot(initial_config)
+        router_bot = _mock_agent_bot(initial_config)
+        router_bot.client = membership_client
+        orchestrator.agent_bots = {
+            "general": general_bot,
+            ROUTER_AGENT_NAME: router_bot,
+        }
+
+        with (
+            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+            patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
+            patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock(return_value={"lobby": room_id})),
+            patch.object(orchestrator, "_ensure_root_space", new=AsyncMock()),
+            patch.object(orchestrator, "_finalize_config_reload", new=AsyncMock()),
+        ):
+            updated = await orchestrator.config_reload._update_config()
+
+        assert updated is True
+        assert orchestrator.agent_reply_memberships.is_allowed(
+            "@alice:example.com",
+            ["lobby"],
+            updated_config.authorization,
+        )
+        assert membership_client.joined_members.await_count == 1
 
     @pytest.mark.asyncio
     async def test_mindroom_user_display_name_change_updates_user_account(

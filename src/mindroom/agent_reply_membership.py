@@ -45,6 +45,14 @@ def _agent_reply_membership_policy_signature(
     return room_grants, aliases
 
 
+def agent_reply_membership_policy_changed(
+    current: AuthorizationConfig,
+    replacement: AuthorizationConfig,
+) -> bool:
+    """Return whether a config replacement changes membership snapshot inputs."""
+    return _agent_reply_membership_policy_signature(current) != _agent_reply_membership_policy_signature(replacement)
+
+
 def _referenced_room_keys(authorization: AuthorizationConfig) -> tuple[str, ...]:
     """Return distinct managed grant-room keys in deterministic order."""
     return tuple(
