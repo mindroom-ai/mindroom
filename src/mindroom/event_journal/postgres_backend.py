@@ -16,7 +16,7 @@ from psycopg.rows import dict_row
 
 from .offloading import ThreadOffload
 from .schema import POSTGRES_DIALECT, render, schema_statements
-from .schema_migrations import validate_interactive_question_columns
+from .schema_migrations import migration_statements, validate_interactive_question_columns
 
 # An arbitrary constant that only this schema setup uses, so the lock it
 # takes cannot collide with an application advisory lock.
@@ -129,6 +129,8 @@ class PostgresBackend:
                 frozenset(str(row["column_name"]) for row in cursor.fetchall()),
             )
             for statement in schema_statements(POSTGRES_DIALECT):
+                cursor.execute(cast("LiteralString", statement))
+            for statement in migration_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
         self._writer.commit()
 
