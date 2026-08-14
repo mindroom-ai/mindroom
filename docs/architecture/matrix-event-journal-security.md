@@ -122,6 +122,10 @@ An attempted row is kept instead because its outcome is unknown and its immutabl
 
 Same-device recovery reuses the frozen transaction, while changed-device recovery first reconciles room history and then either replays an ordinary response or retains actionable approval debt.
 
+When a visible approval card deliberately survives a router departure, its card row and both delivery stages atomically transfer to the successor membership so the already-decided terminal edit remains recoverable.
+
+The actionable root card is retained after an inconclusive changed-device scan, while its immutable terminal edit may be replayed because it cannot create another approval action.
+
 Old-membership recovery never sends and retires the row only after exact reconciliation proves its physical event absent.
 
 Every outbox row freezes the membership epoch that authorized it, and acknowledgement projects its Matrix event only while that exact membership remains current.

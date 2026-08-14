@@ -331,7 +331,11 @@ class MatrixDeliveryWorker:
             already_delivered = await self._resolve_delivered_event(claimed)
             if already_delivered is not None:
                 return await self._acknowledge(claimed, already_delivered)
-            if not self.resend_after_reconciliation_miss:
+            # An actionable root card must not be duplicated after an
+            # inconclusive bounded scan. Its terminal edit is different: the
+            # exact decision is already durable, so replaying the identical
+            # replacement preserves cleanup liveness without another action.
+            if not self.resend_after_reconciliation_miss and claimed.edits_event_id is None:
                 return _FlushOutcome(event_id=None, retry_required=True)
         # Only now, with a send actually about to happen. Writing this at claim
         # time instead loses the fact that a lookup is still owed: a room scan

@@ -2000,11 +2000,11 @@ class TestGenericDeliveryDeviceChangePolicy:
         assert delivered.acknowledged_event_id == "$duplicate-edit"
         assert not delivered.retired
 
-    async def test_an_absent_approval_edit_keeps_its_delivery_retryable(
+    async def test_an_absent_terminal_approval_edit_replays_from_a_new_device(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """A clickable edit cannot be resent or discarded when history is inconclusive."""
+        """A terminal edit is safe to replay after its exact prior event is absent."""
         await alice.enqueue_matrix_delivery(
             delivery_id="approval-card-1",
             stage=DeliveryStage.FINAL,
@@ -2030,16 +2030,16 @@ class TestGenericDeliveryDeviceChangePolicy:
             resolve_delivered=resolve,
         )
 
-        assert await worker.flush(delivery_id="approval-card-1", stage=DeliveryStage.FINAL) is None
+        assert await worker.flush(delivery_id="approval-card-1", stage=DeliveryStage.FINAL) == "$duplicate-edit"
         resolve.assert_awaited_once()
-        send.assert_not_awaited()
-        retained = await alice.load_matrix_delivery(
+        send.assert_awaited_once()
+        delivered = await alice.load_matrix_delivery(
             delivery_id="approval-card-1",
             stage=DeliveryStage.FINAL,
         )
-        assert retained is not None
-        assert retained.acknowledged_event_id is None
-        assert not retained.retired
+        assert delivered is not None
+        assert delivered.acknowledged_event_id == "$duplicate-edit"
+        assert not delivered.retired
 
     async def test_a_stale_approval_edit_is_adopted_before_its_attempt_retires(
         self,

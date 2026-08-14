@@ -66,6 +66,7 @@ from mindroom.event_journal.schema import (
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.interactive_models import InteractivePrompt
+from mindroom.matrix_delivery import MatrixDeliveryWorker
 from tests.conftest import postgres_journal_schema_url
 
 if TYPE_CHECKING:
@@ -7439,13 +7440,56 @@ class TestApprovalContinuations:
             resolution={"status": "denied", "resolution_reason": "Unsafe."},
         )
         assert recorded.recorded is True
+        assert await router.claim_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            sending_device_id="OLD-DEVICE",
+        )
 
         await router.fence_departure(ROOM, source=DepartureSource.REPORTED)
         await router.note_membership_restarted(ROOM)
 
+        sent: list[MatrixDelivery] = []
+        resolved: list[MatrixDelivery] = []
+
+        async def send(delivery: MatrixDelivery) -> str:
+            sent.append(delivery)
+            return "$terminal-edit"
+
+        async def resolve(delivery: MatrixDelivery) -> str | None:
+            resolved.append(delivery)
+            return None
+
+        worker = MatrixDeliveryWorker(
+            store=router,
+            send=send,
+            event_type="io.mindroom.tool_approval",
+            resend_after_reconciliation_miss=False,
+            sending_device_id="NEW-DEVICE",
+            resolve_delivered=resolve,
+        )
+
+        assert await worker.flush(delivery_id="approval-card-1", stage=DeliveryStage.FINAL) == "$terminal-edit"
+        assert len(resolved) == 1
+        assert len(sent) == 1
+
         stored = await router.pending_approval_card(room_id=ROOM, card_event_id="$approval")
         assert stored is not None
         assert stored.resolution == {"status": "denied", "resolution_reason": "Unsafe."}
+        initial = await router.load_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+        )
+        final = await router.load_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+        )
+        assert initial is not None
+        assert final is not None
+        current_epoch = await router.membership_epoch(ROOM)
+        assert initial.membership_epoch == current_epoch
+        assert final.membership_epoch == current_epoch
+        assert final.acknowledged_event_id == "$terminal-edit"
         continuation = await alice.approval_continuation("approval-1")
         assert continuation is not None
         assert continuation.calls[0].decision is ApprovalDecision.DENIED

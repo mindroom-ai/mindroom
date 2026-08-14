@@ -646,12 +646,11 @@ def fail_continuations_for_departed_card_owner(
             _delete_unattempted_card_delivery(transaction, card_principal_id, delivery_id)
             continue
         if row["final_delivery_id"] is not None:
-            transaction.execute(
-                """
-                UPDATE approval_cards SET membership_epoch = ?
-                WHERE principal_id = ? AND delivery_id = ?
-                """,
-                (int(row["current_membership_epoch"]), card_principal_id, delivery_id),
+            _carry_card_delivery_to_membership(
+                transaction,
+                card_principal_id,
+                delivery_id,
+                membership_epoch=int(row["current_membership_epoch"]),
             )
             continue
         try:
@@ -672,13 +671,36 @@ def fail_continuations_for_departed_card_owner(
             edits_event_id=(None if row["acknowledged_event_id"] is None else str(row["acknowledged_event_id"])),
             edit_target_pending=row["acknowledged_event_id"] is None,
         )
-        transaction.execute(
-            """
-            UPDATE approval_cards SET membership_epoch = ?
-            WHERE principal_id = ? AND delivery_id = ?
-            """,
-            (int(row["current_membership_epoch"]), card_principal_id, delivery_id),
+        _carry_card_delivery_to_membership(
+            transaction,
+            card_principal_id,
+            delivery_id,
+            membership_epoch=int(row["current_membership_epoch"]),
         )
+
+
+def _carry_card_delivery_to_membership(
+    transaction: Transaction,
+    principal_id: str,
+    delivery_id: str,
+    *,
+    membership_epoch: int,
+) -> None:
+    """Transfer one card and its cleanup delivery to the membership that inherited it."""
+    transaction.execute(
+        """
+        UPDATE approval_cards SET membership_epoch = ?
+        WHERE principal_id = ? AND delivery_id = ?
+        """,
+        (membership_epoch, principal_id, delivery_id),
+    )
+    transaction.execute(
+        """
+        UPDATE matrix_delivery_outbox SET membership_epoch = ?
+        WHERE principal_id = ? AND delivery_id = ?
+        """,
+        (membership_epoch, principal_id, delivery_id),
+    )
 
 
 def _delete_unattempted_card_delivery(

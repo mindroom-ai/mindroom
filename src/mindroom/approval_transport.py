@@ -42,6 +42,15 @@ _UNAVAILABLE_OWNER_SCAN_LIMIT = 100
 _UNAVAILABLE_NOTICE_APPROVAL_ID_KEY = "io.mindroom.approval_unavailable_id"
 
 
+def _approval_delivery_content(claimed: MatrixDelivery) -> dict[str, object]:
+    """Return the exact physical payload used to send or reconcile a delivery."""
+    content = dict(claimed.payload)
+    if claimed.edits_event_id is None:
+        return content
+    content.pop("thread_id", None)
+    return build_matrix_edit_content(claimed.edits_event_id, content)
+
+
 class _ApprovalTransportBot(Protocol):
     """The live bot surface needed for card transport and source wakeups."""
 
@@ -367,15 +376,11 @@ class ApprovalMatrixTransport:
         bot = self.transport_bot(claimed.room_id)
         if bot is None or bot.client is None:
             raise ToolApprovalTransportError(DEFAULT_ROUTER_MANAGED_ROOM_REASON)
-        content = dict(claimed.payload)
-        if claimed.edits_event_id is not None:
-            content.pop("thread_id", None)
-            content = build_matrix_edit_content(claimed.edits_event_id, content)
         response = await send_room_event_result(
             bot.client,
             claimed.room_id,
             claimed.event_type,
-            content,
+            _approval_delivery_content(claimed),
             transaction_id=claimed.transaction_id,
             operation="send_approval_delivery",
         )
@@ -392,16 +397,12 @@ class ApprovalMatrixTransport:
         sender = bot.client.user_id
         if not isinstance(sender, str) or not sender:
             return None
-        content = dict(claimed.payload)
-        if claimed.edits_event_id is not None:
-            content.pop("thread_id", None)
-            content = build_matrix_edit_content(claimed.edits_event_id, content)
         return await find_outbox_delivery_event_id_via_room_messages(
             bot.client,
             claimed.room_id,
             delivery_sender=sender,
             source_event_ids=(),
-            delivery_content=content,
+            delivery_content=_approval_delivery_content(claimed),
             delivery_event_type=claimed.event_type,
         )
 
