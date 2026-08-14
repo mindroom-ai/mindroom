@@ -75,10 +75,17 @@ class UnresolvedOpaqueRoomHistoryError(OpaqueEncryptedThreadHistoryError):
     """Raised when opaque room history cannot be assigned to a specific thread."""
 
 
-def _require_exact_delivery_scan_within_bound(*, room_id: str, pages_fetched: int) -> None:
-    """Raise when recent history did not prove an exact frozen payload absent."""
+def _finish_exact_delivery_scan_at_bound(
+    *,
+    room_id: str,
+    pages_fetched: int,
+    delivery_found: bool,
+) -> bool:
+    """Finish with a bounded match, or raise when its absence remains unproven."""
     if pages_fetched < _MAX_EXACT_DELIVERY_SCAN_PAGES:
-        return
+        return False
+    if delivery_found:
+        return True
     msg = (
         f"exact delivery room scan in {room_id} reached its "
         f"{_MAX_EXACT_DELIVERY_SCAN_PAGES}-page bound with history left, so the delivery's absence is unproven"
@@ -231,8 +238,11 @@ async def find_response_event_ids_via_room_messages(
     from_token: str | None = None
     seen_pagination_tokens: set[str] = set()
     pages_fetched = 0
+    exact_delivery_scan_complete = False
 
-    while remaining_sources or (not sources and response_content is not None and not response_event_ids):
+    while not exact_delivery_scan_complete and (
+        remaining_sources or (not sources and response_content is not None and not response_event_ids)
+    ):
         response = await client.room_messages(
             room_id,
             start=from_token,
@@ -270,7 +280,11 @@ async def find_response_event_ids_via_room_messages(
             msg = f"response recovery room scan repeated pagination token for {room_id}"
             raise RuntimeError(msg)
         if response_content is not None:
-            _require_exact_delivery_scan_within_bound(room_id=room_id, pages_fetched=pages_fetched)
+            exact_delivery_scan_complete = _finish_exact_delivery_scan_at_bound(
+                room_id=room_id,
+                pages_fetched=pages_fetched,
+                delivery_found=bool(response_event_ids),
+            )
         seen_pagination_tokens.add(response.end)
         from_token = response.end
 

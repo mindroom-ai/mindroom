@@ -277,6 +277,45 @@ async def test_response_recovery_scan_rejects_repeated_pagination_token() -> Non
 
 
 @pytest.mark.asyncio
+async def test_exact_outbox_scan_adopts_a_match_when_its_source_exceeds_the_bound() -> None:
+    """A recent frozen delivery remains proof even when its older reply target is out of range."""
+    source_event_id = "$old-response:localhost"
+    delivered = _message_event(
+        "$notice:localhost",
+        "Approval owner unavailable.",
+        timestamp=2000,
+        reply_to_event_id=source_event_id,
+        sender="@bot:localhost",
+        msgtype="m.notice",
+    )
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response([delivered], end="page-1"),
+            *[
+                _messages_response(
+                    [_message_event(f"$unrelated-{page}:localhost", "unrelated", timestamp=page)],
+                    end=f"page-{page}",
+                )
+                for page in range(2, _MAX_EXACT_DELIVERY_SCAN_PAGES + 1)
+            ],
+        ],
+    )
+
+    found = await find_outbox_delivery_event_id_via_room_messages(
+        client,
+        _ROOM_ID,
+        delivery_sender="@bot:localhost",
+        source_event_ids=(source_event_id,),
+        delivery_content=delivered.source["content"],
+        delivery_event_type="m.room.message",
+    )
+
+    assert found == "$notice:localhost"
+    assert client.room_messages.await_count == _MAX_EXACT_DELIVERY_SCAN_PAGES
+
+
+@pytest.mark.asyncio
 async def test_scan_failure_log_names_the_acting_client() -> None:
     """A rejected scan must name the client whose credentials the homeserver refused.
 
