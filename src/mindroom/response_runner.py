@@ -1213,7 +1213,7 @@ class ResponseRunner:
             session_type=SessionType.TEAM if continuation.entity_kind == "team" else SessionType.AGENT,
             execution_identity=execution_identity,
             run_succeeded=run_succeeded,
-            interactive_target=target,
+            response_target=target,
             thread_summary_room_id=continuation.room_id if target.resolved_thread_id is not None else None,
             thread_summary_thread_id=target.resolved_thread_id,
             thread_summary_message_count_hint=continuation.thread_summary_message_count_hint,
@@ -1230,7 +1230,6 @@ class ResponseRunner:
         """Build normal post-response dependencies for a continued run."""
         return self.deps.post_response_effects.build_deps(
             room_id=continuation.room_id,
-            interactive_agent_name=continuation.entity_name,
             membership_turn_id=continuation.source_event_ids[0],
             queue_memory_persistence=self._approval_memory_persistence(continuation),
             persist_response_event_id=self._approval_response_event_persistence(continuation),
