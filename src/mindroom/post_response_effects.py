@@ -144,7 +144,6 @@ class PostResponseEffectsSupport:
             if not await self.membership.interactive_prompt_membership_is_current(
                 room_id=room_id,
                 source_event_id=membership_turn_id,
-                fallback_membership_epoch=None,
             ):
                 return
             await interactive.add_reaction_buttons(

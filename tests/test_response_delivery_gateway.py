@@ -280,6 +280,56 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert tuple(projection.event_id for projection in projections) == ("$target", "$edit")
         assert projections[1].replaces_event_id == "$target"
 
+    async def test_an_undecryptable_edit_target_stays_unacknowledged(self, tmp_path: Path) -> None:
+        """Ciphertext cannot supply the thread identity of an edit target."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        encrypted_target = nio.MegolmEvent.from_dict(
+            {
+                "event_id": "$target",
+                "sender": _AGENT_USER_ID,
+                "origin_server_ts": 1_000,
+                "type": "m.room.encrypted",
+                "room_id": _ROOM_ID,
+                "content": {
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "ciphertext",
+                    "device_id": "DEVICE",
+                    "sender_key": "sender-key",
+                    "session_id": "session",
+                },
+            },
+        )
+        assert isinstance(encrypted_target, nio.MegolmEvent)
+        target_response = nio.RoomGetEventResponse()
+        target_response.event = encrypted_target
+        edit_content = {
+            "msgtype": "m.text",
+            "body": "Choose",
+            "m.new_content": {"msgtype": "m.text", "body": "Choose"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        }
+
+        async def observe(room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+            if event_id == "$target":
+                return target_response
+            return _delivered_event_response(room_id, event_id, content=edit_content, timestamp=2_000)
+
+        gateway.deps.runtime.client.room_get_event.side_effect = observe
+        delivery = gateway._response_delivery(AsyncMock(return_value="$edit"), handoff=None)
+
+        with pytest.raises(RuntimeError, match="could not decrypt delivered event"):
+            await delivery.deliver(
+                turn_id="$cause",
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload=edit_content,
+                edits_event_id="$target",
+            )
+
+        assert outbox.rows["$cause", "final"].acknowledged_event_id is None
+
     async def test_an_unreadable_delivered_event_stays_unacknowledged_for_recovery(self, tmp_path: Path) -> None:
         """The outbox must retry rather than invent projection ordering metadata."""
         outbox = FakeOutbox()

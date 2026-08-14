@@ -321,13 +321,25 @@ async def activate_interactive_prompt(
     source_event_id: str | None = None,
 ) -> AdmissionResult:
     """Admit and settle one self-authored Matrix revision carrying a prompt."""
+    prompt_source_event_id = source_event_id or f"{question_event_id}-source"
+    await store.admit(
+        InboundEvent(
+            event_id=prompt_source_event_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.CONTEXT_ONLY,
+            sender="@user:localhost",
+            origin_server_ts=500,
+            source={},
+        ),
+    )
     prompt = InteractivePrompt(
         creator_agent=creator_agent,
         question_text=question_text,
         options=dict(options or {"1": "one"}),
         option_labels=dict(option_labels or {"1": "One"}),
-        source_event_id=source_event_id,
-        membership_epoch=await store.membership_epoch(room_id),
+        source_event_id=prompt_source_event_id,
     )
     installed_content: dict[str, object] = {
         "msgtype": "m.text",

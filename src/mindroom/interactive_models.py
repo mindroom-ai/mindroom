@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-_INTERACTIVE_PROMPT_KEY = "io.mindroom.interactive"
+INTERACTIVE_PROMPT_KEY = "io.mindroom.interactive"
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,8 +19,7 @@ class InteractivePrompt:
     question_text: str
     options: dict[str, str]
     option_labels: dict[str, str]
-    source_event_id: str | None = None
-    membership_epoch: int | None = None
+    source_event_id: str
 
 
 def interactive_prompt_content(prompt: InteractivePrompt) -> dict[str, object]:
@@ -30,12 +29,9 @@ def interactive_prompt_content(prompt: InteractivePrompt) -> dict[str, object]:
         "option_labels": dict(prompt.option_labels),
         "options": dict(prompt.options),
         "question_text": prompt.question_text,
+        "source_event_id": prompt.source_event_id,
     }
-    if prompt.source_event_id is not None:
-        payload["source_event_id"] = prompt.source_event_id
-    if prompt.membership_epoch is not None:
-        payload["membership_epoch"] = prompt.membership_epoch
-    return {_INTERACTIVE_PROMPT_KEY: payload}
+    return {INTERACTIVE_PROMPT_KEY: payload}
 
 
 def _string_mapping(value: object) -> dict[str, str] | None:
@@ -50,14 +46,13 @@ def _string_mapping(value: object) -> dict[str, str] | None:
 
 def interactive_prompt_from_content(content: Mapping[str, object]) -> InteractivePrompt | None:
     """Decode one complete prompt from Matrix message content."""
-    raw = content.get(_INTERACTIVE_PROMPT_KEY)
+    raw = content.get(INTERACTIVE_PROMPT_KEY)
     if not isinstance(raw, dict):
         return None
     payload = cast("dict[str, object]", raw)
     creator_agent = payload.get("creator_agent")
     question_text = payload.get("question_text")
     source_event_id = payload.get("source_event_id")
-    membership_epoch = payload.get("membership_epoch")
     options = _string_mapping(payload.get("options"))
     option_labels = _string_mapping(payload.get("option_labels"))
     if (
@@ -67,9 +62,8 @@ def interactive_prompt_from_content(content: Mapping[str, object]) -> Interactiv
         or not question_text
         or options is None
         or option_labels is None
-        or (source_event_id is not None and (not isinstance(source_event_id, str) or not source_event_id))
-        or (membership_epoch is not None and (type(membership_epoch) is not int or membership_epoch < 0))
-        or (source_event_id is None and membership_epoch is None)
+        or not isinstance(source_event_id, str)
+        or not source_event_id
     ):
         return None
     return InteractivePrompt(
@@ -78,7 +72,6 @@ def interactive_prompt_from_content(content: Mapping[str, object]) -> Interactiv
         options=options,
         option_labels=option_labels,
         source_event_id=source_event_id,
-        membership_epoch=membership_epoch,
     )
 
 

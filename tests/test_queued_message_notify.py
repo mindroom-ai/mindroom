@@ -876,7 +876,6 @@ async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(t
     membership.interactive_prompt_membership_is_current.assert_awaited_once_with(
         room_id="!room:localhost",
         source_event_id="$turn",
-        fallback_membership_epoch=None,
     )
     client.room_send.assert_not_awaited()
 

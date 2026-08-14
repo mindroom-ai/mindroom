@@ -124,8 +124,7 @@ def build_prompt_content(
     metadata: InteractiveMetadata,
     *,
     creator_agent: str,
-    source_event_id: str | None = None,
-    membership_epoch: int | None = None,
+    source_event_id: str,
 ) -> dict[str, object]:
     """Encode parsed interactive metadata into one Matrix prompt revision."""
     return interactive_prompt_content(
@@ -135,7 +134,6 @@ def build_prompt_content(
             options=metadata.option_map,
             option_labels=metadata.option_labels,
             source_event_id=source_event_id,
-            membership_epoch=membership_epoch,
         ),
     )
 

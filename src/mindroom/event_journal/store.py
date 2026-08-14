@@ -208,8 +208,7 @@ class PrincipalStore:
         self,
         *,
         room_id: str,
-        source_event_id: str | None,
-        fallback_membership_epoch: int | None,
+        source_event_id: str,
     ) -> bool:
         """Return whether one prompt proof still names the active room membership."""
         return await self._backend.write(
@@ -218,7 +217,6 @@ class PrincipalStore:
                 self._principal_id,
                 room_id=room_id,
                 source_event_id=source_event_id,
-                fallback_membership_epoch=fallback_membership_epoch,
             ),
         )
 
@@ -534,6 +532,7 @@ class PrincipalStore:
                 revision_event_id=revision_event_id,
                 revision_ts=revision_ts,
                 content=content,
+                expected_revision_event_id=request.revision_event_id,
                 expected_refresh_token=request.refresh_token,
                 expected_membership_epoch=request.membership_epoch,
             ),
@@ -547,6 +546,7 @@ class PrincipalStore:
                 self._principal_id,
                 room_id=request.room_id,
                 logical_event_id=request.logical_event_id,
+                expected_revision_event_id=request.revision_event_id,
                 expected_refresh_token=request.refresh_token,
                 expected_membership_epoch=request.membership_epoch,
             ),

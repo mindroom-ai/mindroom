@@ -434,6 +434,7 @@ def _refresh_request(row: Row) -> RefreshRequest:
         room_id=row["room_id"],
         thread_id=decode_thread_id(row["thread_id"]),
         logical_event_id=row["logical_event_id"],
+        revision_event_id=row["revision_event_id"],
         refresh_token=int(row["refresh_token"]),
         membership_epoch=int(row["membership_epoch"]),
     )

@@ -88,6 +88,22 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS interactive_revision_order (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        logical_event_id {ordered_text} NOT NULL,
+        revision_event_id {ordered_text} NOT NULL,
+        revision_ts BIGINT NOT NULL,
+        redacted_by_event_id {ordered_text},
+        redacted_ts BIGINT,
+        PRIMARY KEY (principal_id, room_id, revision_event_id),
+        CHECK ((redacted_by_event_id IS NULL) = (redacted_ts IS NULL)),
+        FOREIGN KEY (principal_id, room_id, logical_event_id)
+            REFERENCES visible_messages (principal_id, room_id, logical_event_id)
+            ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS unresolved_edits (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
@@ -378,6 +394,12 @@ _TABLES = (
 
 
 _INDEXES = (
+    """
+    CREATE INDEX IF NOT EXISTS interactive_revision_order_by_logical_event
+    ON interactive_revision_order (
+        principal_id, room_id, logical_event_id, revision_ts, revision_event_id
+    )
+    """,
     """
     CREATE INDEX IF NOT EXISTS reported_departures_open
     ON reported_departures (principal_id, room_id, report_order)

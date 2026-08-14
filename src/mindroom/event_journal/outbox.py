@@ -28,6 +28,8 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
+
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .models import DeliveryStage, OutboxDelivery
 
@@ -354,7 +356,7 @@ def has_attempted_unacknowledged_prompt_delivery(
           )
         LIMIT 1
         """,
-        (principal_id, room_id, '%"io.mindroom.interactive"%'),
+        (principal_id, room_id, f'%"{INTERACTIVE_PROMPT_KEY}"%'),
     )
     return row is not None
 

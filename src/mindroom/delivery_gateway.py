@@ -693,6 +693,9 @@ class DeliveryGateway:
             msg = f"Matrix could not read delivered event {event_id!r} in {room_id!r}"
             raise _DeliveryObservationError(msg)
         event = response.event
+        if isinstance(event, nio.MegolmEvent):
+            msg = f"Matrix could not decrypt delivered event {event_id!r} in {room_id!r}"
+            raise _DeliveryObservationError(msg)
         if event.event_id != event_id or event.sender != client.user_id:
             msg = f"Matrix returned the wrong delivered event for {event_id!r}"
             raise _DeliveryObservationError(msg)
@@ -727,7 +730,7 @@ class DeliveryGateway:
 
     async def _observe_delivered(self, claimed: OutboxDelivery, event_id: str) -> tuple[ProjectedEvent, ...]:
         """Return the target and result one delivered outbox row made visible."""
-        if claimed.edits_event_id is None and "io.mindroom.interactive" not in claimed.payload:
+        if claimed.edits_event_id is None and not claimed.has_interactive_prompt:
             return ()
         projections: list[ProjectedEvent] = []
         if claimed.edits_event_id is not None:

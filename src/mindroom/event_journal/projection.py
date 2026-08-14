@@ -3,10 +3,13 @@
 Every rule here runs inside the admission transaction, so the projection can
 never disagree with the journal about what was admitted.
 
-The projection deliberately keeps no edit history. An edit overwrites the
-visible row; the previous body is gone. That is what makes streaming edit churn
-free, and it is why redacting the currently visible revision has to ask the
-homeserver for the new truth instead of popping a local stack.
+The projection deliberately keeps no edit-body history. An edit overwrites the
+visible row and the previous body is gone. Logical messages that expose an
+interactive prompt get a content-free revision-order ledger so a delayed
+answer can identify which immutable prompt revision was on screen when Matrix
+accepted it. Ordinary streaming edits create no history. Redacting the current
+revision still has to ask the homeserver for its new body rather than popping a
+local content stack.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 
 from .identity import encode_thread_id
-from .interactive_questions import reconcile_visible_prompt
+from .interactive_questions import record_projected_prompt
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -185,30 +188,21 @@ def project(
         return
     replaces = replacement_target(event.content)
     if replaces is None:
-        installed_content = _project_original(
+        _project_original(
             transaction,
             principal_id,
             event,
             receipt_order=receipt_order,
             membership_epoch=membership_epoch,
         )
-        question_event_id = event.event_id
     else:
-        installed_content = _project_edit(
+        _project_edit(
             transaction,
             principal_id,
             event,
             target_event_id=replaces,
             receipt_order=receipt_order,
-        )
-        question_event_id = replaces
-    if installed_content is not None:
-        reconcile_visible_prompt(
-            transaction,
-            principal_id,
-            room_id=event.room_id,
-            question_event_id=question_event_id,
-            content=installed_content,
+            membership_epoch=membership_epoch,
         )
 
 
@@ -219,7 +213,7 @@ def _project_original(
     *,
     receipt_order: int,
     membership_epoch: int,
-) -> Mapping[str, object] | None:
+) -> None:
     """Install a new logical message and apply an edit that beat it here.
 
     Every event reaching here came from sync, so a repeat is the same event
@@ -250,17 +244,24 @@ def _project_original(
             membership_epoch,
         ),
     )
-    installed_edit = _apply_unresolved_edit(transaction, principal_id, event, receipt_order=receipt_order)
-    if installed_edit is not None:
-        return installed_edit
-    current = transaction.fetchone(
-        """
-        SELECT revision_event_id FROM visible_messages
-        WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
-        """,
-        (principal_id, event.room_id, event.event_id),
+    _record_revision(
+        transaction,
+        principal_id,
+        room_id=event.room_id,
+        logical_event_id=event.event_id,
+        revision_event_id=event.event_id,
+        revision_ts=event.origin_server_ts,
+        sender=event.sender,
+        membership_epoch=membership_epoch,
+        content=event.content,
     )
-    return event.content if current is not None and current["revision_event_id"] == event.event_id else None
+    _apply_unresolved_edit(
+        transaction,
+        principal_id,
+        event,
+        receipt_order=receipt_order,
+        membership_epoch=membership_epoch,
+    )
 
 
 def _apply_unresolved_edit(
@@ -269,7 +270,8 @@ def _apply_unresolved_edit(
     event: ProjectedEvent,
     *,
     receipt_order: int,
-) -> Mapping[str, object] | None:
+    membership_epoch: int,
+) -> None:
     """Apply the original sender's held edit, then drop every held edit.
 
     Unresolved edits are keyed by sender as well as target. Without the sender
@@ -291,10 +293,21 @@ def _apply_unresolved_edit(
         (principal_id, event.room_id, event.event_id),
     )
     if held is None:
-        return None
+        return
     if _is_tombstoned(transaction, principal_id, event.room_id, held["edit_event_id"]):
-        return None
+        return
     content = visible_content(_loads(held["content_json"]))
+    _record_revision(
+        transaction,
+        principal_id,
+        room_id=event.room_id,
+        logical_event_id=event.event_id,
+        revision_event_id=str(held["edit_event_id"]),
+        revision_ts=int(held["edit_ts"]),
+        sender=event.sender,
+        membership_epoch=membership_epoch,
+        content=content,
+    )
     _install_revision(
         transaction,
         principal_id,
@@ -305,7 +318,6 @@ def _apply_unresolved_edit(
         content=content,
         receipt_order=receipt_order,
     )
-    return content
 
 
 def _project_edit(
@@ -315,7 +327,8 @@ def _project_edit(
     *,
     target_event_id: str,
     receipt_order: int,
-) -> Mapping[str, object] | None:
+    membership_epoch: int,
+) -> None:
     """Replace the target's visible body, or hold the edit until it arrives."""
     current = transaction.fetchone(
         """
@@ -326,17 +339,28 @@ def _project_edit(
     )
     if current is None:
         if _is_tombstoned(transaction, principal_id, event.room_id, target_event_id):
-            return None
+            return
         _hold_unresolved_edit(transaction, principal_id, event, target_event_id=target_event_id)
-        return None
+        return
     if current["sender"] != event.sender:
-        return None
+        return
+    content = visible_content(event.content)
+    _record_revision(
+        transaction,
+        principal_id,
+        room_id=event.room_id,
+        logical_event_id=target_event_id,
+        revision_event_id=event.event_id,
+        revision_ts=event.origin_server_ts,
+        sender=event.sender,
+        membership_epoch=membership_epoch,
+        content=content,
+    )
     if not _is_newer(
         (event.origin_server_ts, event.event_id),
         (int(current["revision_ts"]), current["revision_event_id"]),
     ):
-        return None
-    content = visible_content(event.content)
+        return
     _install_revision(
         transaction,
         principal_id,
@@ -347,7 +371,55 @@ def _project_edit(
         content=content,
         receipt_order=receipt_order,
     )
-    return content
+
+
+def _record_revision(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    logical_event_id: str,
+    revision_event_id: str,
+    revision_ts: int,
+    sender: str,
+    membership_epoch: int,
+    content: Mapping[str, object],
+) -> None:
+    """Remember revision order only for logical messages that expose prompts."""
+    carries_prompt = record_projected_prompt(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        question_event_id=logical_event_id,
+        revision_event_id=revision_event_id,
+        sender=sender,
+        membership_epoch=membership_epoch,
+        content=content,
+    )
+    transaction.execute(
+        """
+        INSERT INTO interactive_revision_order (
+            principal_id, room_id, logical_event_id, revision_event_id, revision_ts
+        )
+        SELECT ?, ?, ?, ?, ?
+        WHERE ? = 1 OR EXISTS (
+            SELECT 1 FROM interactive_revision_order
+            WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
+        )
+        ON CONFLICT (principal_id, room_id, revision_event_id) DO NOTHING
+        """,
+        (
+            principal_id,
+            room_id,
+            logical_event_id,
+            revision_event_id,
+            revision_ts,
+            int(carries_prompt),
+            principal_id,
+            room_id,
+            logical_event_id,
+        ),
+    )
 
 
 def _held_edit_yields_to(held: Row, event: ProjectedEvent) -> bool:
@@ -460,6 +532,28 @@ def _project_redaction(
     if target is None:
         return
     _record_tombstone(transaction, principal_id, event.room_id, target)
+    transaction.execute(
+        """
+        UPDATE interactive_revision_order
+        SET redacted_by_event_id = ?, redacted_ts = ?
+        WHERE principal_id = ? AND room_id = ? AND revision_event_id = ?
+          AND (
+              redacted_ts IS NULL
+              OR redacted_ts > ?
+              OR (redacted_ts = ? AND redacted_by_event_id/*bytes*/ > ?)
+          )
+        """,
+        (
+            event.event_id,
+            event.origin_server_ts,
+            principal_id,
+            event.room_id,
+            target,
+            event.origin_server_ts,
+            event.origin_server_ts,
+            event.event_id,
+        ),
+    )
     # Prompt revisions retain their text for replay and consumed-revision
     # proof, so a redaction must erase that payload explicitly. Selections
     # bound to the revision disappear through their foreign-key cascade.
@@ -535,15 +629,17 @@ def install_refetched_revision(
     revision_event_id: str,
     revision_ts: int,
     content: Mapping[str, object],
+    expected_revision_event_id: str,
     expected_refresh_token: int,
     expected_membership_epoch: int,
 ) -> bool:
     """Install a refetched revision only if nothing changed underneath it.
 
-    A newer edit or redaction landing while the refetch was in flight moves the
-    refresh token, so this conditional update is what stops a slow refetch from
-    overwriting fresher truth. Returning ``False`` leaves the token durable and
-    the message unreadable, which is the safe direction.
+    A newer edit or redaction landing while the refetch was in flight changes
+    either the revision identity or the refresh token, so this conditional
+    update stops a slow refetch from overwriting fresher truth. Returning
+    ``False`` leaves the debt durable and the message unreadable, which is the
+    safe direction.
 
     Content that still holds a sidecar reference is refused for the same
     reason. A refetch returns the event as the server stored it, preview and
@@ -569,8 +665,8 @@ def install_refetched_revision(
         UPDATE visible_messages
         SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = NULL
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
-          AND refresh_token = ? AND membership_epoch = ?
-        RETURNING logical_event_id
+          AND revision_event_id = ? AND refresh_token = ? AND membership_epoch = ?
+        RETURNING sender, membership_epoch
         """,
         (
             revision_event_id,
@@ -579,17 +675,22 @@ def install_refetched_revision(
             principal_id,
             room_id,
             logical_event_id,
+            expected_revision_event_id,
             expected_refresh_token,
             expected_membership_epoch,
         ),
     )
     if row is None:
         return False
-    reconcile_visible_prompt(
+    _record_revision(
         transaction,
         principal_id,
         room_id=room_id,
-        question_event_id=logical_event_id,
+        logical_event_id=logical_event_id,
+        revision_event_id=revision_event_id,
+        revision_ts=revision_ts,
+        sender=str(row["sender"]),
+        membership_epoch=int(row["membership_epoch"]),
         content=content,
     )
     return True
@@ -601,6 +702,7 @@ def drop_refetched_message(
     *,
     room_id: str,
     logical_event_id: str,
+    expected_revision_event_id: str,
     expected_refresh_token: int,
     expected_membership_epoch: int,
 ) -> bool:
@@ -609,13 +711,14 @@ def drop_refetched_message(
         """
         DELETE FROM visible_messages
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
-          AND refresh_token = ? AND membership_epoch = ?
+          AND revision_event_id = ? AND refresh_token = ? AND membership_epoch = ?
         RETURNING logical_event_id
         """,
         (
             principal_id,
             room_id,
             logical_event_id,
+            expected_revision_event_id,
             expected_refresh_token,
             expected_membership_epoch,
         ),

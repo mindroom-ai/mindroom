@@ -138,13 +138,13 @@ def _approval_reply_event(event_id: str = "$approval-reply") -> nio.RoomMessageT
     return event
 
 
-def _reaction_event(key: str, event_id: str) -> nio.ReactionEvent:
+def _reaction_event(key: str, event_id: str, *, timestamp: int = 1) -> nio.ReactionEvent:
     event = nio.Event.parse_event(
         {
             "type": "m.reaction",
             "event_id": event_id,
             "sender": "@user:localhost",
-            "origin_server_ts": 1,
+            "origin_server_ts": timestamp,
             "content": {
                 "m.relates_to": {
                     "rel_type": "m.annotation",
@@ -2561,7 +2561,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
-        event = _reaction_event("👍", "$interactive-reaction")
+        event = _reaction_event("👍", "$interactive-reaction", timestamp=2_000)
         selection = interactive.InteractiveSelection(
             question_event_id="$response",
             question_text="Choose",

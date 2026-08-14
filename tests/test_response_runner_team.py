@@ -108,7 +108,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -163,7 +163,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -210,7 +210,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -268,7 +268,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -335,7 +335,7 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.show_stop_button = False
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -412,7 +412,7 @@ class TestAgentBot(AgentBotTestBase):
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -484,7 +484,7 @@ class TestAgentBot(AgentBotTestBase):
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
 
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account(
@@ -606,7 +606,7 @@ class TestAgentBot(AgentBotTestBase):
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
 
         resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -702,7 +702,7 @@ class TestAgentBot(AgentBotTestBase):
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -819,7 +819,7 @@ class TestAgentBot(AgentBotTestBase):
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [suppressing_hook])])
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -950,7 +950,7 @@ class TestAgentBot(AgentBotTestBase):
 
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock()
         mock_team_response = AsyncMock()
         with (
