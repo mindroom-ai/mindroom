@@ -29,7 +29,7 @@ Use these tools when you need repository context, issue tracking, documentation 
 
 The `todo` tool is available without credentials.
 The other tools on this page are registered as `status=requires_config`, so they stay unavailable in the dashboard until their required credentials or connection fields are present.
-None of these tools declare an `auth_provider`, and `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes, so project-management tools are configured through stored tool credentials or environment variables rather than a dedicated dashboard OAuth flow.
+GitHub supports requester-scoped OAuth through MindRoom's built-in `github` provider, while the remaining project-management tools use stored tool credentials or environment variables.
 Password and token fields should be stored through the dashboard or credential store instead of inline YAML.
 Most upstream SDKs also read environment variables, including `GITHUB_ACCESS_TOKEN`, `BITBUCKET_USERNAME`, `BITBUCKET_PASSWORD`, `BITBUCKET_TOKEN`, `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_PASSWORD`, `JIRA_TOKEN`, `LINEAR_API_KEY`, `CLICKUP_API_KEY`, `MASTER_SPACE_ID`, `CONFLUENCE_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_KEY`, `CONFLUENCE_PASSWORD`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`, `TRELLO_API_KEY`, `TRELLO_API_SECRET`, `TRELLO_TOKEN`, `TODOIST_API_TOKEN`, `ZENDESK_USERNAME`, `ZENDESK_PASSWORD`, and `ZENDESK_COMPANY_NAME`.
 Several registry fields on this page are marked optional in metadata even though the upstream tool effectively requires them at runtime, so the notes below call out the practical requirement level for each tool.
@@ -50,8 +50,19 @@ The file-management surface includes `create_file()`, `get_file_content()`, `upd
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `access_token` | `password` | `no` | `null` | GitHub personal access token or GitHub App token. |
+| `access_token` | `password` | `no` | `null` | Optional explicit GitHub access token; takes precedence over OAuth when set. |
 | `base_url` | `url` | `no` | `null` | Optional GitHub Enterprise API base URL such as `https://github.example.com/api/v3`. |
+
+### OAuth Setup
+
+Choose **Connect with GitHub** on the Tools dashboard to use requester-scoped GitHub App user OAuth.
+For a self-hosted installation, configure the GitHub App client ID and client secret under the `github_oauth_client` credential service and register `/api/oauth/github/callback` on the installation's public URL as the callback URL.
+MindRoom requests no classic OAuth scopes because GitHub App user tokens use the app's fine-grained permissions.
+When a requester has not connected GitHub, tool calls return a structured `OAuthConnectionRequired` result containing that requester's connect URL.
+MindRoom refreshes expiring access tokens through the existing scoped OAuth refresh flow and persists rotated access and refresh tokens.
+
+Choose **Use access token** instead to save an explicit token, or set `GITHUB_ACCESS_TOKEN` in the runtime environment.
+An explicit token always takes precedence over requester-scoped OAuth credentials.
 
 ### Example
 
@@ -71,7 +82,7 @@ get_pull_request("mindroom-ai/mindroom", 123)
 
 ### Notes
 
-- `access_token` is marked optional in MindRoom metadata, but the upstream client raises at startup if neither `access_token` nor `GITHUB_ACCESS_TOKEN` is present.
+- The tool can start without credentials; its functions return a requester-bound OAuth connection link until GitHub is connected or an explicit token is configured.
 - Use `base_url` only for GitHub Enterprise, and set it to the API endpoint such as `/api/v3` rather than the human-facing site root.
 - `github` is the best fit on this page when you need repository file operations or rich pull-request inspection in addition to issue tracking.
 

@@ -462,7 +462,7 @@ Below is a representative selection:
 
 ### Development Tools
 - **docker** - Manage Docker containers (requires Docker installed)
-- **github** - Interact with GitHub repositories (requires token)
+- **github** - Interact with GitHub repositories (requester-scoped OAuth or explicit access token)
 - **jira** - Jira issue tracking (requires API token)
 - **linear** - Linear issue tracking (requires API key)
 
@@ -596,11 +596,11 @@ Some tools need additional setup:
 - **googlesearch** - Set up Google API credentials
 - **tavily** - Get API key from Tavily
 - **exa** - Get API key from Exa
-- **github** - Create a GitHub personal access token
 - **telegram** - Create a Telegram bot and get token
 - **email** - Configure SMTP server details
 
 ### Tools requiring OAuth:
+- **github** - GitHub App user OAuth, with an explicit access token or `GITHUB_ACCESS_TOKEN` as a higher-precedence alternative
 - **gmail**, **google_calendar**, **google_docs**, **google_drive**, **google_sheets** - Google OAuth
 - **homeassistant** - Home Assistant OAuth or long-lived access token
 - **spotify** - Manually supplied Spotify OAuth access token
