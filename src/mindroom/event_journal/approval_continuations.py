@@ -27,6 +27,11 @@ _CONTINUATION_COLUMNS = """
 """
 
 
+def unavailable_notice_delivery_id(approval_id: str) -> str:
+    """Return the durable delivery identity for an unavailable-owner notice."""
+    return f"approval-unavailable:{approval_id}"
+
+
 class ApprovalDecision(StrEnum):
     """One terminal decision for an exact paused tool call."""
 
@@ -658,7 +663,7 @@ def discard_unavailable(
         WHERE principal_id = ? AND delivery_id = ? AND stage = ?
           AND acknowledged_event_id IS NOT NULL
         """,
-        (notice_principal_id, continuation.response_event_id, DeliveryStage.FINAL.value),
+        (notice_principal_id, unavailable_notice_delivery_id(approval_id), DeliveryStage.FINAL.value),
     )
     if delivered is None:
         return False

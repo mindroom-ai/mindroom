@@ -11,7 +11,6 @@ from .models import DeliveryStage
 if TYPE_CHECKING:
     from .backend import Transaction
 
-_LEGACY_UNAVAILABLE_NOTICE_PREFIX = "approval-unavailable:"
 _LEGACY_APPROVAL_EXPIRY_REASON = "Tool approval request expired during delivery upgrade."
 _APPROVAL_EVENT_TYPE = "io.mindroom.tool_approval"
 
@@ -39,69 +38,10 @@ def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: boo
         transaction.execute(
             "ALTER TABLE matrix_delivery_outbox ADD COLUMN edit_target_pending INTEGER NOT NULL DEFAULT 0",
         )
-    if _table_exists(transaction, "matrix_delivery_outbox", postgres=postgres) and _table_exists(
-        transaction,
-        "approval_continuations",
-        postgres=postgres,
-    ):
-        _migrate_unavailable_notice_delivery_ids(transaction)
     legacy_approvals = _column_exists(transaction, "approval_cards", "transaction_id", postgres=postgres)
     if legacy_approvals:
         transaction.execute("ALTER TABLE approval_cards RENAME TO approval_cards_legacy_delivery")
     return legacy_approvals
-
-
-def _migrate_unavailable_notice_delivery_ids(transaction: Transaction) -> None:
-    """Move #1834 notice debt onto the response event ID used by the generic flow."""
-    rows = transaction.fetchall(
-        """
-        SELECT principal_id, delivery_id
-        FROM matrix_delivery_outbox
-        WHERE stage = 'final' AND delivery_id LIKE ?
-        """,
-        (f"{_LEGACY_UNAVAILABLE_NOTICE_PREFIX}%",),
-    )
-    for row in rows:
-        old_delivery_id = str(row["delivery_id"])
-        approval_id = old_delivery_id.removeprefix(_LEGACY_UNAVAILABLE_NOTICE_PREFIX)
-        continuation = transaction.fetchone(
-            "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
-            (approval_id,),
-        )
-        if continuation is None:
-            continue
-        try:
-            context = json.loads(str(continuation["context_json"]))
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(context, dict):
-            continue
-        response_event_id = context.get("response_event_id")
-        if not isinstance(response_event_id, str) or not response_event_id:
-            continue
-        target = transaction.fetchone(
-            """
-            SELECT 1 AS present FROM matrix_delivery_outbox
-            WHERE principal_id = ? AND delivery_id = ? AND stage = 'final'
-            """,
-            (str(row["principal_id"]), response_event_id),
-        )
-        if target is not None:
-            transaction.execute(
-                """
-                DELETE FROM matrix_delivery_outbox
-                WHERE principal_id = ? AND delivery_id = ? AND stage = 'final'
-                """,
-                (str(row["principal_id"]), old_delivery_id),
-            )
-            continue
-        transaction.execute(
-            """
-            UPDATE matrix_delivery_outbox SET delivery_id = ?
-            WHERE principal_id = ? AND delivery_id = ? AND stage = 'final'
-            """,
-            (response_event_id, str(row["principal_id"]), old_delivery_id),
-        )
 
 
 def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approvals: bool) -> None:
@@ -139,6 +79,19 @@ def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approv
         """,
     )
     for row in rows:
+        principal_id = str(row["principal_id"])
+        room_id = str(row["room_id"])
+        card_event_id = str(row["card_event_id"])
+        if not card_event_id:
+            continue
+        transaction.execute(
+            """
+            INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT (principal_id, card_event_id) DO NOTHING
+            """,
+            (principal_id, room_id, card_event_id),
+        )
         card = _object_json(row["card_json"])
         if card is None:
             continue
@@ -153,26 +106,16 @@ def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approv
                 continue
         event_type = card.get("type")
         thread_id = content.get("thread_id")
-        principal_id = str(row["principal_id"])
-        card_event_id = str(row["card_event_id"])
         outbox.enqueue(
             transaction,
             principal_id,
             delivery_id=str(row["transaction_id"]),
             stage=DeliveryStage.FINAL,
             event_type=event_type if isinstance(event_type, str) and event_type else _APPROVAL_EVENT_TYPE,
-            room_id=str(row["room_id"]),
+            room_id=room_id,
             thread_id=thread_id if isinstance(thread_id, str) and thread_id else None,
             payload=resolution,
             edits_event_id=card_event_id,
-        )
-        transaction.execute(
-            """
-            INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
-            VALUES (?, ?, ?)
-            ON CONFLICT (principal_id, card_event_id) DO NOTHING
-            """,
-            (principal_id, str(row["room_id"]), card_event_id),
         )
     transaction.execute("DROP TABLE approval_cards_legacy_delivery")
 

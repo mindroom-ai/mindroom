@@ -827,7 +827,7 @@ def pending_cards(
     uses. A card whose settlement failed keeps its row on purpose, so without a
     cursor a page of them is re-read forever and every card behind it starves.
     """
-    # transaction_id shipped as unpinned TEXT, so the byte-order pin goes on
+    # delivery_id shipped as unpinned TEXT, so the byte-order pin goes on
     # the comparison itself. A server whose collation is not byte order would
     # otherwise order the rows differently from the cursor that walks them, and
     # the scan would skip rows or revisit them.

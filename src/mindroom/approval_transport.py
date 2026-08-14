@@ -11,7 +11,7 @@ import nio
 
 from mindroom import approval_manager
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.event_journal import DeliveryStage
+from mindroom.event_journal import DeliveryStage, unavailable_notice_delivery_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     can_send_to_encrypted_room,
@@ -278,7 +278,7 @@ class ApprovalMatrixTransport:
                 sending_device_id=self.transport_device_id(),
                 resolve_delivered=resolve_delivered,
             ).deliver(
-                delivery_id=continuation.response_event_id,
+                delivery_id=unavailable_notice_delivery_id(continuation.approval_id),
                 stage=DeliveryStage.FINAL,
                 room_id=continuation.room_id,
                 thread_id=continuation.thread_id,
@@ -305,7 +305,7 @@ class ApprovalMatrixTransport:
         store = self.journal_provider().principal(principal_id)
         current = await store.approval_continuation(continuation.approval_id)
         if current is None:
-            return current is None
+            return True
         final_delivery = await store.load_matrix_delivery(
             delivery_id=current.source_event_ids[0],
             stage=DeliveryStage.FINAL,

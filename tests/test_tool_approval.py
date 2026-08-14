@@ -34,12 +34,14 @@ from mindroom.event_journal import (
     ApprovalContinuation,
     DeliveryAcknowledgement,
     DeliveryStage,
+    DepartureSource,
     EventClass,
     EventJournalStore,
     EventKind,
     InboundEvent,
     MatrixDelivery,
     delivery_transaction_id,
+    unavailable_notice_delivery_id,
 )
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.tool_approval import (
@@ -644,7 +646,7 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
         runtime_generation=None,
     )
     frozen_notice: dict[str, object] = {}
-    notice_turn_id = "$waiting"
+    notice_turn_id = unavailable_notice_delivery_id("approval-removed")
     transaction_id = delivery_transaction_id("router@localhost", notice_turn_id, DeliveryStage.FINAL.value)
 
     async def enqueue_notice(**kwargs: object) -> str:
@@ -823,7 +825,7 @@ async def test_removed_owner_cleanup_adopts_notice_after_matrix_device_change(tm
     notice_marker = "io.mindroom.approval_unavailable_id"
     source_event_id = "$source"
     waiting_event_id = "$waiting"
-    notice_turn_id = waiting_event_id
+    notice_turn_id = unavailable_notice_delivery_id(approval_id)
     await principal.admit(
         InboundEvent(
             event_id=source_event_id,
@@ -938,7 +940,7 @@ async def test_removed_owner_cleanup_adopts_notice_after_matrix_device_change(tm
 
 @pytest.mark.asyncio
 async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp_path: Path) -> None:
-    """A Matrix refusal must leave the fenced owner and its notice queued for retry."""
+    """After a router rejoin, Matrix refusal leaves the owner and notice queued for retry."""
     journal = EventJournalStore.open_sqlite(tmp_path / "approval-notice-refusal.db")
     principal = journal.principal("agent@removed")
     notice_store = journal.principal("router@localhost")
@@ -979,6 +981,20 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
         failure_reason="Requesting agent 'removed' is no longer available.",
     )
     assert await principal.create_approval_continuation(continuation) == continuation
+    await notice_store.admit(
+        InboundEvent(
+            event_id=continuation.response_event_id,
+            room_id=continuation.room_id,
+            thread_id=continuation.thread_id,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.CONTEXT_ONLY,
+            sender="@mindroom_removed:localhost",
+            origin_server_ts=2_000,
+            source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "waiting"}},
+        ),
+    )
+    await notice_store.fence_departure(continuation.room_id, source=DepartureSource.LOCAL)
+    await notice_store.note_membership_restarted(continuation.room_id)
     client = MagicMock()
     client.user_id = "@mindroom_router:localhost"
     client.device_id = "DEVICE"
@@ -1014,7 +1030,7 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
         assert await principal.approval_continuation(approval_id) == continuation
         assert await principal.is_pending(source_event_id)
         delivery = await notice_store.load_matrix_delivery(
-            delivery_id="$waiting",
+            delivery_id=unavailable_notice_delivery_id(approval_id),
             stage=DeliveryStage.FINAL,
         )
         assert delivery is not None
@@ -1022,7 +1038,7 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
         assert delivery.acknowledged_event_id is None
         assert (
             await principal.load_matrix_delivery(
-                delivery_id="$waiting",
+                delivery_id=unavailable_notice_delivery_id(approval_id),
                 stage=DeliveryStage.FINAL,
             )
             is None

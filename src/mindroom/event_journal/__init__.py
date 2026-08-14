@@ -19,6 +19,7 @@ from .approval_continuations import (
     ApprovalContinuation,
     ApprovalDecision,
     ApprovalMemoryTurn,
+    unavailable_notice_delivery_id,
 )
 from .approvals import (
     ApprovalCardReservation,
@@ -121,5 +122,6 @@ __all__ = [
     "encode_thread_id",
     "replacement_target",
     "thread_root",
+    "unavailable_notice_delivery_id",
     "visible_content",
 ]

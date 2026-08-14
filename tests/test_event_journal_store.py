@@ -51,6 +51,7 @@ from mindroom.event_journal import (
     delivery_transaction_id,
     reads,
     replacement_target,
+    unavailable_notice_delivery_id,
 )
 from mindroom.event_journal.offloading import settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
@@ -393,6 +394,7 @@ async def _assert_legacy_delivery_state_migrated(store: EventJournalStore) -> No
             )
             is None
         )
+    assert await router.is_terminal_approval_card(room_id=ROOM, card_event_id="$malformed-approval")
 
     continuation = await store.principal("agent@alice").approval_continuation("approval-1")
     assert continuation is not None
@@ -407,23 +409,23 @@ async def _assert_legacy_delivery_state_migrated(store: EventJournalStore) -> No
 
 
 async def _assert_legacy_unavailable_notices_migrated(store: EventJournalStore) -> None:
-    """Legacy unavailable-owner notice IDs become the generic response delivery ID."""
-    for response_event_id, old_delivery_id, event_id in (
+    """Legacy unavailable-owner notice IDs remain valid generic delivery IDs."""
+    for response_event_id, delivery_id, event_id in (
         ("$waiting", "approval-unavailable:approval-1", None),
         ("$waiting-acknowledged", "approval-unavailable:approval-2", "$unavailable-notice"),
     ):
         notice = await store.principal("router@shared").load_matrix_delivery(
-            delivery_id=response_event_id,
+            delivery_id=delivery_id,
             stage=DeliveryStage.FINAL,
         )
         assert notice is not None
-        assert notice.transaction_id == f"unavailable-txn-{old_delivery_id.removeprefix('approval-unavailable:')}"
+        assert notice.transaction_id == f"unavailable-txn-{delivery_id.removeprefix('approval-unavailable:')}"
         assert notice.attempted is True
         assert notice.sending_device_id == DEVICE
         assert notice.acknowledged_event_id == event_id
         assert (
             await store.principal("router@shared").load_matrix_delivery(
-                delivery_id=old_delivery_id,
+                delivery_id=response_event_id,
                 stage=DeliveryStage.FINAL,
             )
             is None
@@ -5818,18 +5820,18 @@ class TestApprovalContinuations:
 
         router = journal_store.principal("router@alice")
         await router.enqueue_matrix_delivery(
-            delivery_id="$waiting",
+            delivery_id=unavailable_notice_delivery_id("approval-1"),
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id="$thread",
             payload=text("agent removed"),
         )
         await router.claim_matrix_delivery(
-            delivery_id="$waiting",
+            delivery_id=unavailable_notice_delivery_id("approval-1"),
             stage=DeliveryStage.FINAL,
         )
         await router.acknowledge_matrix_delivery(
-            delivery_id="$waiting",
+            delivery_id=unavailable_notice_delivery_id("approval-1"),
             stage=DeliveryStage.FINAL,
             event_id="$unavailable",
             delivered_projections=(),
