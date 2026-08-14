@@ -17,6 +17,7 @@ import pytest
 
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import STREAM_STATUS_KEY
@@ -83,6 +84,7 @@ def config_with_team() -> Config:
             ),
         },
         router=RouterConfig(model="default"),
+        authorization=AuthorizationConfig(default_room_access=True),
     )
 
 

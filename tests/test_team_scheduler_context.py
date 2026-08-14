@@ -11,6 +11,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
@@ -74,6 +75,7 @@ def _make_bot(tmp_path: Path) -> AgentBot:
             },
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             router=RouterConfig(model="default"),
+            authorization=AuthorizationConfig(default_room_access=True),
         ),
         runtime_paths,
     )

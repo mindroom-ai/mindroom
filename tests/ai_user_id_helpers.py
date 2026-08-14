@@ -19,6 +19,7 @@ from mindroom.ai import (
 )
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
@@ -105,6 +106,7 @@ def _config() -> Config:
     return Config(
         agents={"general": AgentConfig(display_name="General")},
         models={"default": ModelConfig(provider="openai", id="test-model")},
+        authorization=AuthorizationConfig(default_room_access=True),
     )
 
 
@@ -117,6 +119,7 @@ def _config_with_matrix_message() -> Config:
             ),
         },
         models={"default": ModelConfig(provider="openai", id="test-model")},
+        authorization=AuthorizationConfig(default_room_access=True),
     )
 
 
@@ -132,6 +135,7 @@ def _config_with_team() -> Config:
             ),
         },
         models={"default": ModelConfig(provider="openai", id="test-model")},
+        authorization=AuthorizationConfig(default_room_access=True),
     )
 
 
@@ -152,6 +156,7 @@ def _config_with_team_matrix_message() -> Config:
             ),
         },
         models={"default": ModelConfig(provider="openai", id="test-model")},
+        authorization=AuthorizationConfig(default_room_access=True),
     )
 
 

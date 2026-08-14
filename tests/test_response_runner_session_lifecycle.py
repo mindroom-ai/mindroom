@@ -29,6 +29,7 @@ from mindroom.ai import (
 from mindroom.bot import AgentBot
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
@@ -1316,6 +1317,7 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
                 ),
             },
             models={"default": ModelConfig(provider="openai", id="test-model")},
+            authorization=AuthorizationConfig(default_room_access=True),
         ),
         runtime_paths,
     )

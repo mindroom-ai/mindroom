@@ -10,6 +10,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot, create_bot_for_entity
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.users import AgentMatrixUser
@@ -282,6 +283,7 @@ class TestBotIntegration:
                         rooms=["#test:localhost"],
                     ),
                 },
+                authorization=AuthorizationConfig(default_room_access=True),
             ),
             test_runtime_paths(tmp_path),
         )
@@ -374,6 +376,7 @@ class TestBotIntegration:
                         rooms=["#test:localhost"],
                     ),
                 },
+                authorization=AuthorizationConfig(default_room_access=True),
             ),
             test_runtime_paths(tmp_path),
         )

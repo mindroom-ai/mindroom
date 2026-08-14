@@ -18,6 +18,7 @@ from agno.session.team import TeamSession
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
@@ -180,6 +181,7 @@ async def test_generate_team_response_allows_explicit_private_ad_hoc_member(tmp_
                 "calculator": AgentConfig(display_name="Calculator"),
             },
             models={"default": ModelConfig(provider="openai", id="test-model")},
+            authorization=AuthorizationConfig(default_room_access=True),
         ),
         runtime_paths,
     )

@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.bot import TeamBot
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.delivery_gateway import (
@@ -73,6 +74,7 @@ def _config(tmp_path: Path) -> Config:
             agents={
                 "code": AgentConfig(display_name="Code", rooms=["!room:localhost"]),
             },
+            authorization=AuthorizationConfig(default_room_access=True),
         ),
         runtime_paths,
     )

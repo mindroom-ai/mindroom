@@ -21,6 +21,7 @@ from pydantic import ValidationError
 from mindroom.bot import AgentBot
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, CancelSource
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
 from mindroom.constants import (
@@ -138,6 +139,7 @@ def _make_bot_with_shared_knowledge(
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             router=RouterConfig(model="default"),
             knowledge_bases={base_id: {"path": f"./{base_id}"}},
+            authorization=AuthorizationConfig(default_room_access=True),
         ),
         runtime_paths,
     )
@@ -278,6 +280,7 @@ class TestStreamingBehavior:
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
                 router=RouterConfig(model="default"),
+                authorization=AuthorizationConfig(default_room_access=True),
             ),
             runtime_paths,
         )
