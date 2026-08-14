@@ -265,7 +265,6 @@ class ApprovalMatrixTransport:
                 store=store,
                 send=send,
                 event_type="m.room.message",
-                resend_after_reconciliation_miss=False,
                 sending_device_id=self.transport_device_id(),
                 resolve_delivered=resolve_delivered,
             ).flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
@@ -386,21 +385,23 @@ class ApprovalMatrixTransport:
         return str(response.event_id)
 
     async def resolve_approval_delivery(self, claimed: MatrixDelivery) -> str | None:
-        """Adopt a card found after device change; unresolved edits retain their debt."""
-        if claimed.edits_event_id is not None:
-            return None
+        """Adopt the exact card or terminal edit found after a device change."""
         bot = self.transport_bot(claimed.room_id)
         if bot is None or bot.client is None:
             return None
         sender = bot.client.user_id
         if not isinstance(sender, str) or not sender:
             return None
+        content = dict(claimed.payload)
+        if claimed.edits_event_id is not None:
+            content.pop("thread_id", None)
+            content = build_matrix_edit_content(claimed.edits_event_id, content)
         return await find_outbox_delivery_event_id_via_room_messages(
             bot.client,
             claimed.room_id,
             delivery_sender=sender,
             source_event_ids=(),
-            delivery_content=claimed.payload,
+            delivery_content=content,
             delivery_event_type=claimed.event_type,
         )
 

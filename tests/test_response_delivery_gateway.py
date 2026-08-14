@@ -2041,6 +2041,48 @@ class TestGenericDeliveryDeviceChangePolicy:
         assert retained.acknowledged_event_id is None
         assert not retained.retired
 
+    async def test_a_stale_approval_edit_is_adopted_before_its_attempt_retires(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An old-membership edit already in Matrix remains terminal proof."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            event_type="io.mindroom.tool_approval",
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"status": "approved"},
+            edits_event_id="$approval-card",
+        )
+        await alice.claim_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            sending_device_id="OLD-DEVICE",
+        )
+        await alice.fence_departure(_ROOM_ID, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(_ROOM_ID)
+        send = AsyncMock(return_value="$duplicate-edit")
+        resolve = AsyncMock(return_value="$original-edit")
+        worker = MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            event_type="io.mindroom.tool_approval",
+            resend_after_reconciliation_miss=False,
+            sending_device_id="NEW-DEVICE",
+            resolve_delivered=resolve,
+        )
+
+        assert await worker.flush(delivery_id="approval-card-1", stage=DeliveryStage.FINAL) == "$original-edit"
+        send.assert_not_awaited()
+        adopted = await alice.load_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+        )
+        assert adopted is not None
+        assert adopted.acknowledged_event_id == "$original-edit"
+        assert not adopted.retired
+
     async def test_stale_attempt_without_a_matrix_event_is_retired_instead_of_sent(
         self,
         alice: PrincipalStore,

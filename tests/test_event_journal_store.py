@@ -6833,6 +6833,82 @@ class TestApprovalContinuations:
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
 
+    async def test_unavailable_cleanup_and_router_departure_share_membership_first_lock_order(
+        self,
+        rival_stores: RivalStores,
+    ) -> None:
+        """Cross-principal cleanup cannot deadlock router departure."""
+        responder = rival_stores.first.principal("agent@alice")
+        router = rival_stores.first.principal("router@alice")
+        await self.admit_sources(responder)
+        await responder.create_approval_continuation(
+            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
+        )
+        await self.remember_card(router)
+        assert (
+            await responder.request_approval_failure(
+                "approval-1",
+                "agent removed",
+                expected_state="waiting",
+                expected_runtime_generation=None,
+            )
+            is not None
+        )
+        delivery_id = await router.enqueue_unavailable_approval_notice(
+            approval_id="approval-1",
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("agent removed"),
+        )
+        assert delivery_id is not None
+        assert await router.claim_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.FINAL) is not None
+        await router.acknowledge_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=DeliveryStage.FINAL,
+            event_id="$unavailable",
+            delivered_projections=(),
+        )
+
+        membership_locked = threading.Event()
+        release_departure = threading.Event()
+        cleanup_finished = threading.Event()
+
+        def pause_after_membership_lock() -> None:
+            membership_locked.set()
+            assert release_departure.wait(_WORKER_WAIT_SECONDS), "router departure was never released"
+
+        departing = EventJournalStore(
+            backend=_PausingBackend(
+                rival_stores.second.backend,
+                pause_after_membership_lock,
+                statement_matches=lambda sql: "INSERT INTO room_membership" in sql,
+            ),
+        ).principal("router@alice")
+        departure = asyncio.create_task(departing.fence_departure(ROOM, source=DepartureSource.LOCAL))
+        try:
+            await asyncio.to_thread(membership_locked.wait, _WORKER_WAIT_SECONDS)
+            assert membership_locked.is_set(), "departure never locked router membership"
+            cleanup = asyncio.create_task(
+                responder.discard_unavailable_approval_continuation(
+                    "approval-1",
+                    notice_principal_id="router@alice",
+                ),
+            )
+            cleanup.add_done_callback(lambda _: cleanup_finished.set())
+            await asyncio.to_thread(
+                _watch_until_queued_or_finished,
+                rival_stores.database_url,
+                rival_stores.racer_application_name,
+                cleanup_finished,
+            )
+        finally:
+            release_departure.set()
+
+        departed, discarded = await asyncio.gather(departure, cleanup)
+
+        assert departed.fenced
+        assert not discarded
+
     async def test_stale_unavailable_notice_cannot_discard_sources(
         self,
         journal_store: EventJournalStore,
