@@ -67,6 +67,7 @@ def enqueue(
     thread_id: str | None,
     payload: Mapping[str, object],
     edits_event_id: str | None,
+    edit_target_pending: bool = False,
 ) -> str:
     """Record delivery intent, refusing to change an already attempted row."""
     _lock_delivery_stages(transaction, principal_id, delivery_id)
@@ -75,14 +76,15 @@ def enqueue(
         """
         INSERT INTO matrix_delivery_outbox (
             principal_id, delivery_id, stage, event_type, room_id, thread_id, transaction_id,
-            payload_json, edits_event_id, attempted, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            payload_json, edits_event_id, edit_target_pending, attempted, created_at_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
         ON CONFLICT (principal_id, delivery_id, stage) DO UPDATE SET
             room_id = excluded.room_id,
             thread_id = excluded.thread_id,
             event_type = excluded.event_type,
             payload_json = excluded.payload_json,
-            edits_event_id = excluded.edits_event_id
+            edits_event_id = excluded.edits_event_id,
+            edit_target_pending = excluded.edit_target_pending
         WHERE matrix_delivery_outbox.attempted = 0
         """,
         (
@@ -95,6 +97,7 @@ def enqueue(
             transaction_id,
             json.dumps(dict(payload), ensure_ascii=True, separators=(",", ":"), sort_keys=True),
             edits_event_id,
+            int(edit_target_pending),
             time.time_ns(),
         ),
     )
@@ -332,7 +335,7 @@ def acknowledge(
             SET edits_event_id = ?, edit_target_pending = 0
             WHERE principal_id = ? AND delivery_id = ? AND stage = ?
               AND attempted = 0
-              AND (edits_event_id IS NULL OR edit_target_pending = 1)
+              AND edit_target_pending = 1
             """,
             (event_id, principal_id, delivery_id, DeliveryStage.FINAL.value),
         )

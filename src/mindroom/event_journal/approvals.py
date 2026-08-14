@@ -479,6 +479,7 @@ def expire_cards_for_departed_continuations(
             thread_id=decode_thread_id(str(row["thread_id"])),
             payload=resolution,
             edits_event_id=None if row["acknowledged_event_id"] is None else str(row["acknowledged_event_id"]),
+            edit_target_pending=row["acknowledged_event_id"] is None,
         )
 
 
@@ -579,6 +580,7 @@ def fail_continuations_for_departed_card_owner(
             thread_id=decode_thread_id(str(row["thread_id"])),
             payload=resolution,
             edits_event_id=(None if row["acknowledged_event_id"] is None else str(row["acknowledged_event_id"])),
+            edit_target_pending=row["acknowledged_event_id"] is None,
         )
         transaction.execute(
             """
