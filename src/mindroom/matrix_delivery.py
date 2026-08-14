@@ -331,8 +331,6 @@ class MatrixDeliveryWorker:
             already_delivered = await self._resolve_delivered_event(claimed)
             if already_delivered is not None:
                 return await self._acknowledge(claimed, already_delivered)
-            if claimed.edits_event_id is not None:
-                return await self._retire_delivery(claimed)
             if not self.resend_after_reconciliation_miss:
                 return _FlushOutcome(event_id=None, retry_required=True)
         # Only now, with a send actually about to happen. Writing this at claim

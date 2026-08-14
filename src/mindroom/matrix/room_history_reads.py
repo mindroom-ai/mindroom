@@ -259,6 +259,12 @@ async def find_response_event_ids_via_room_messages(
                 continue
             remaining_sources.discard(event.event_id)
             event_source = event.source if isinstance(event.source, dict) else {}
+            _refuse_opaque_exact_delivery_candidate(
+                room_id=room_id,
+                event_source=event_source,
+                response_sender=response_sender,
+                exact_content_required=response_content is not None,
+            )
             event_info = EventInfo.from_event(event_source)
             exact_content = response_content is not None and event_source.get("content") == response_content
             replies_to_source = (
@@ -289,6 +295,21 @@ async def find_response_event_ids_via_room_messages(
         from_token = response.end
 
     return frozenset(response_event_ids)
+
+
+def _refuse_opaque_exact_delivery_candidate(
+    *,
+    room_id: str,
+    event_source: Mapping[str, Any],
+    response_sender: str,
+    exact_content_required: bool,
+) -> None:
+    """Fail closed when ciphertext may hide the exact delivery marker."""
+    if not exact_content_required or event_source.get("sender") != response_sender:
+        return
+    if is_opaque_encrypted_event_source(event_source):
+        msg = f"exact delivery room scan for {room_id} contains undecryptable events from its sender"
+        raise UnresolvedOpaqueRoomHistoryError(msg)
 
 
 async def find_outbox_delivery_event_id_via_room_messages(

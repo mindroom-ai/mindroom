@@ -64,8 +64,8 @@ _TABLES = (
         source_json TEXT NOT NULL,
         semantic_consumer TEXT,
         -- The membership this event was admitted under, which is what refuses
-        -- an answer written for a conversation the bot has since left. Read by
-        -- `admitted_membership_epoch` and by nothing else.
+        -- an answer written for a conversation the bot has since left. The
+        -- delivery enqueue transaction derives its immutable owner here.
         membership_epoch BIGINT NOT NULL,
         state TEXT NOT NULL CHECK (state IN ('pending', 'settled')),
         UNIQUE (principal_id, event_id)

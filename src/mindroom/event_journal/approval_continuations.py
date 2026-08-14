@@ -27,7 +27,7 @@ _CONTINUATION_COLUMNS = """
 """
 
 
-def unavailable_notice_delivery_id(approval_id: str, membership_epoch: int) -> str:
+def _unavailable_notice_delivery_id(approval_id: str, membership_epoch: int) -> str:
     """Return one membership's delivery identity for an unavailable-owner notice."""
     return f"approval-unavailable:{approval_id}:{membership_epoch}"
 
@@ -49,7 +49,7 @@ def enqueue_unavailable_notice(
     )
     if membership_epoch is None:
         return None
-    delivery_id = unavailable_notice_delivery_id(approval_id, membership_epoch)
+    delivery_id = _unavailable_notice_delivery_id(approval_id, membership_epoch)
     transaction_id = outbox.enqueue(
         transaction,
         principal_id,
@@ -697,7 +697,7 @@ def discard_unavailable(
     )
     if membership_epoch is None:
         return False
-    delivery_id = unavailable_notice_delivery_id(approval_id, membership_epoch)
+    delivery_id = _unavailable_notice_delivery_id(approval_id, membership_epoch)
     ownership = outbox.claim_active_delivery_ownership(
         transaction,
         notice_principal_id,

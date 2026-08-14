@@ -64,7 +64,7 @@ Acknowledgement, retirement, and live echo admission will lock in membership-row
 
 ## Stable Matrix Identity and Projection
 
-Every new generic delivery payload will carry `io.mindroom.delivery_id` with agent, delivery ID, and stage.
+Every new generic delivery payload will carry `io.mindroom.delivery_id` with principal, delivery ID, and stage.
 
 The marker will identify response messages, approval cards, terminal approval edits, and source-less notices across device changes.
 
@@ -80,7 +80,7 @@ Retiring an edit that raced into projection will remove that revision and invali
 
 PR #1837's `event_journal/migrations.py` remains the only schema-migration module.
 
-The stacked migration will add membership ownership and retirement to `matrix_delivery_outbox` after #1837's response-outbox rename and approval promotion.
+The stacked migration will move the released `response_outbox` directly into the final membership-owned `matrix_delivery_outbox` while #1837's approval promotion runs in the same transaction.
 
 Existing approval deliveries may derive their epoch only from their exact `approval_cards` ownership row.
 
@@ -130,7 +130,7 @@ It will not merge PR #1837 or PR #1836.
 ## Acceptance Criteria
 
 - PR #1836 is based on the latest exact PR #1837 head and its GitHub base names the #1837 branch.
-- No `response_outbox`, `ResponseDelivery`, or approval-specific steady-state send protocol remains in the stacked diff.
+- No steady-state `response_outbox`, `ResponseDelivery`, or approval-specific send protocol remains in the stacked diff; the released table name appears only at the one-time migration boundary.
 - Responses and approvals share one membership-owned generic delivery state machine.
 - A stale unavailable-owner notice cannot release sources or prevent a current-membership notice generation from completing the logical obligation.
 - Every useful #1836 test is ported or has an explicitly identified generic equivalent.

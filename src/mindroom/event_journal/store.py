@@ -1187,11 +1187,12 @@ def _enqueue_matrix_delivery(
     refused". Neither leaves a sendable answer behind, while the retired row
     prevents a later stage from adopting the rejoined membership.
 
-    An already-attempted row remains recoverable, and deliberately so. Its outcome is
-    unknown -- the homeserver may be holding it -- and refusing the retry
-    would strand it unacknowledged forever while leaving whatever it sent
-    visible. Only the frozen transaction ID can resolve that, by collapsing
-    the retry onto the same event.
+    An already-attempted row remains recoverable, and deliberately so. Its
+    outcome is unknown -- the homeserver may be holding it -- and refusing the
+    retry would strand it unacknowledged forever while leaving whatever it
+    sent visible. Same-device recovery can reuse the frozen transaction ID;
+    changed-device recovery first reconciles exact room history and then
+    follows the delivery type's explicit replay-or-retain policy.
 
     Settling the sources here rather than after the commit is what makes the
     handoff one event. A refusal settles nothing, because nothing durable

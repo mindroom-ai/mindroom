@@ -1958,11 +1958,11 @@ class TestGenericDeliveryDeviceChangePolicy:
         resolve.assert_awaited_once()
         send.assert_not_awaited()
 
-    async def test_a_compacted_edit_is_retired_instead_of_replayed_from_a_new_device(
+    async def test_an_absent_response_edit_replays_from_a_new_device(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """A history miss cannot prove an old compacted edit safe to replay."""
+        """A response edit retains liveness when the prior device left no visible event."""
         assert (
             await alice.enqueue_matrix_delivery(
                 delivery_id="turn-1",
@@ -1992,12 +1992,54 @@ class TestGenericDeliveryDeviceChangePolicy:
             resolve_delivered=resolve,
         )
 
-        assert await worker.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL) is None
+        assert await worker.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL) == "$duplicate-edit"
+        resolve.assert_awaited_once()
+        send.assert_awaited_once()
+        delivered = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert delivered is not None
+        assert delivered.acknowledged_event_id == "$duplicate-edit"
+        assert not delivered.retired
+
+    async def test_an_absent_approval_edit_keeps_its_delivery_retryable(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A clickable edit cannot be resent or discarded when history is inconclusive."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            event_type="io.mindroom.tool_approval",
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"status": "approved"},
+            edits_event_id="$approval-card",
+        )
+        await alice.claim_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            sending_device_id="OLD-DEVICE",
+        )
+        send = AsyncMock(return_value="$duplicate-edit")
+        resolve = AsyncMock(return_value=None)
+        worker = MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            event_type="io.mindroom.tool_approval",
+            resend_after_reconciliation_miss=False,
+            sending_device_id="NEW-DEVICE",
+            resolve_delivered=resolve,
+        )
+
+        assert await worker.flush(delivery_id="approval-card-1", stage=DeliveryStage.FINAL) is None
         resolve.assert_awaited_once()
         send.assert_not_awaited()
-        retired = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
-        assert retired is not None
-        assert retired.retired
+        retained = await alice.load_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+        )
+        assert retained is not None
+        assert retained.acknowledged_event_id is None
+        assert not retained.retired
 
     async def test_stale_attempt_without_a_matrix_event_is_retired_instead_of_sent(
         self,

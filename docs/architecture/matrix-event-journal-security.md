@@ -118,7 +118,11 @@ Unattempted outbox rows for the room are retired, because they answer a conversa
 
 The retired row remains as the delivery identity tombstone, so a source-less multi-stage turn cannot enqueue `INITIAL` before departure and let `FINAL` adopt the later membership.
 
-An attempted row is kept instead: its outcome is unknown, and only presenting the same frozen transaction again can converge on one visible answer rather than posting a second.
+An attempted row is kept instead because its outcome is unknown and its immutable payload, transaction, and sending-device facts are required for exact recovery.
+
+Same-device recovery reuses the frozen transaction, while changed-device recovery first reconciles room history and then either replays an ordinary response or retains actionable approval debt.
+
+Old-membership recovery never sends and retires the row only after exact reconciliation proves its physical event absent.
 
 Every outbox row freezes the membership epoch that authorized it, and acknowledgement projects its Matrix event only while that exact membership remains current.
 

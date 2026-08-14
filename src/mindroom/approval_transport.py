@@ -386,7 +386,7 @@ class ApprovalMatrixTransport:
         return str(response.event_id)
 
     async def resolve_approval_delivery(self, claimed: MatrixDelivery) -> str | None:
-        """Adopt a card found after device change; edit misses remain safely replayable."""
+        """Adopt a card found after device change; unresolved edits retain their debt."""
         if claimed.edits_event_id is not None:
             return None
         bot = self.transport_bot(claimed.room_id)

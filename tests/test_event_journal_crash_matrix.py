@@ -1172,16 +1172,11 @@ class TestARelogInCannotDuplicateTheAnswer:
         assert runtime.homeserver.room_scans == 1
         assert runtime.homeserver.visible_messages == 1
 
-    async def test_an_absent_edit_is_retired_across_a_relogin(
+    async def test_an_absent_response_edit_is_replayed_across_a_relogin(
         self,
         runtime: TurnRuntime,
     ) -> None:
-        """A delayed duplicate edit could overwrite newer content, so it is not resent.
-
-        Changed-device recovery scans for the exact physical edit. Absence
-        retires the delivery rather than creating a second edit that could
-        arrive after and replace a newer revision.
-        """
+        """A response edit whose first send never landed remains deliverable."""
         await runtime.store.enqueue_matrix_delivery(
             delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
@@ -1201,14 +1196,15 @@ class TestARelogInCannotDuplicateTheAnswer:
         runtime.homeserver.device_id = "DEVICE2"
         outcome = await runtime.delivery.recover()
 
-        assert outcome.recovered == 0
+        assert outcome.recovered == 1
         assert runtime.homeserver.room_scans == 1
-        retired = await runtime.store.load_matrix_delivery(
+        delivered = await runtime.store.load_matrix_delivery(
             delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
         )
-        assert retired is not None
-        assert retired.retired
+        assert delivered is not None
+        assert delivered.acknowledged_event_id is not None
+        assert not delivered.retired
 
     async def test_the_device_is_recorded_before_the_send_but_not_at_the_claim(
         self,

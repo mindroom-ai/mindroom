@@ -42,7 +42,6 @@ from mindroom.event_journal import (
     MatrixDelivery,
     UnreadableApprovalCard,
     delivery_transaction_id,
-    unavailable_notice_delivery_id,
 )
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.tool_approval import (
@@ -772,7 +771,7 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
         runtime_generation=None,
     )
     frozen_notice: dict[str, object] = {}
-    notice_turn_id = unavailable_notice_delivery_id("approval-removed", 0)
+    notice_turn_id = "approval-unavailable:approval-removed:0"
     transaction_id = delivery_transaction_id("router@localhost", notice_turn_id, DeliveryStage.FINAL.value)
 
     async def enqueue_notice(**kwargs: object) -> str:
@@ -953,7 +952,7 @@ async def test_removed_owner_cleanup_adopts_notice_after_matrix_device_change(tm
     notice_marker = "io.mindroom.approval_unavailable_id"
     source_event_id = "$source"
     waiting_event_id = "$waiting"
-    notice_turn_id = unavailable_notice_delivery_id(approval_id, 0)
+    notice_turn_id = f"approval-unavailable:{approval_id}:0"
     await principal.admit(
         InboundEvent(
             event_id=source_event_id,
@@ -1120,7 +1119,7 @@ async def test_removed_owner_cleanup_retries_a_stale_notice_in_current_membershi
         thread_id=continuation.thread_id,
         payload={"msgtype": "m.notice", "body": reason},
     )
-    assert stale_delivery_id == unavailable_notice_delivery_id(approval_id, 0)
+    assert stale_delivery_id == f"approval-unavailable:{approval_id}:0"
     assert (
         await notice_store.claim_matrix_delivery(
             delivery_id=stale_delivery_id,
@@ -1166,7 +1165,7 @@ async def test_removed_owner_cleanup_retries_a_stale_notice_in_current_membershi
         ):
             assert await transport._discard_unavailable("agent@removed", continuation, reason)
 
-        current_delivery_id = unavailable_notice_delivery_id(approval_id, 1)
+        current_delivery_id = f"approval-unavailable:{approval_id}:1"
         current = await notice_store.load_matrix_delivery(
             delivery_id=current_delivery_id,
             stage=DeliveryStage.FINAL,
@@ -1273,7 +1272,7 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
         assert await principal.approval_continuation(approval_id) == continuation
         assert await principal.is_pending(source_event_id)
         delivery = await notice_store.load_matrix_delivery(
-            delivery_id=unavailable_notice_delivery_id(approval_id, 1),
+            delivery_id=f"approval-unavailable:{approval_id}:1",
             stage=DeliveryStage.FINAL,
         )
         assert delivery is not None
@@ -1281,7 +1280,7 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
         assert delivery.acknowledged_event_id is None
         assert (
             await principal.load_matrix_delivery(
-                delivery_id=unavailable_notice_delivery_id(approval_id, 1),
+                delivery_id=f"approval-unavailable:{approval_id}:1",
                 stage=DeliveryStage.FINAL,
             )
             is None

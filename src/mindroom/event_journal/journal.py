@@ -268,11 +268,12 @@ def _advance_membership_epoch(
     # the mistake worth naming. Its outcome is unknown: the homeserver may hold
     # it already. Dropping the row frees the turn to run again and post a second
     # answer, and re-deriving a fresh transaction for that answer guarantees the
-    # duplicate rather than preventing it. Keeping the row keeps the frozen
-    # payload and the transaction that goes with it, so the only thing a retry
-    # can do is present the same transaction again and collapse onto the same
-    # event. That converges on exactly one visible answer whether or not the
-    # first attempt landed, which is the property this table exists for.
+    # duplicate rather than preventing it. Keeping the row preserves the exact
+    # payload, transaction, and sending-device facts needed for recovery:
+    # same-device attempts reuse the transaction; changed-device attempts
+    # reconcile exact room history before their delivery-specific replay or
+    # retain decision. That durable identity is the property this table exists
+    # for.
     # A terminal acknowledgement may have committed just before a crash that
     # prevented its approval-domain row from being retired. Preserve the click
     # tombstone before either side of the cross-principal relationship is

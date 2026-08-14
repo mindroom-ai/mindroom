@@ -395,6 +395,32 @@ async def test_exact_delivery_scan_continues_after_an_empty_page_with_a_cursor()
 
 
 @pytest.mark.asyncio
+async def test_exact_delivery_scan_cannot_prove_absence_past_opaque_bot_ciphertext() -> None:
+    """An undecryptable event from the delivery sender could be the frozen payload."""
+    opaque = _opaque_reply_event("$opaque:localhost", replies_to="$unrelated:localhost", timestamp=2000)
+    opaque.source["sender"] = "@bot:localhost"
+    client = AsyncMock()
+    client.room_messages = AsyncMock(return_value=_messages_response([opaque], end=None))
+
+    with pytest.raises(OpaqueEncryptedThreadHistoryError, match="exact delivery"):
+        await find_response_event_ids_via_room_messages(
+            client,
+            _ROOM_ID,
+            response_sender="@bot:localhost",
+            source_event_ids=(),
+            response_content={
+                "msgtype": "m.text",
+                "body": "scheduled",
+                DURABLE_DELIVERY_ID_KEY: {
+                    "principal": "agent@@bot:localhost",
+                    "delivery_id": "scheduled-turn",
+                    "stage": "final",
+                },
+            },
+        )
+
+
+@pytest.mark.asyncio
 async def test_exact_delivery_bound_does_not_override_a_completed_source_scan() -> None:
     """Reaching every source proves the delivery absent even on the final bounded page."""
     client = AsyncMock()
@@ -1141,9 +1167,9 @@ async def test_approval_card_scan_ignores_the_edit_that_replaces_the_card() -> N
 async def test_approval_card_scan_refuses_to_call_a_bounded_walk_an_absence() -> None:
     """Running out of pages establishes nothing, and must not read as "no card".
 
-    An unproven absence retires the row, and the card it belongs to then stays
-    clickable with nothing behind it forever. So the bound raises, the row is
-    kept, and the sweep comes back.
+    An unproven absence must not discard the retry debt, because the card it
+    belongs to would stay clickable with nothing behind it forever. So the
+    bound raises, the row is kept, and the sweep comes back.
     """
     client = AsyncMock()
     client.room_messages = AsyncMock(

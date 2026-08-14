@@ -150,9 +150,9 @@ class JournalEvent:
     Carries neither the class that decided whether it was actionable nor the
     membership it was admitted under. Both are settled at admission and read
     from the row by the journal itself -- the class becomes the ``pending``
-    state, and the epoch is asked for by ``admitted_membership_epoch`` when a
-    delivery is fenced. Replaying them beside the event would offer a consumer
-    a second, staler way to ask the same questions.
+    state, and delivery ownership is derived from the admitted row when intent
+    is recorded. Replaying them beside the event would offer a consumer a
+    second, staler way to ask the same questions.
     """
 
     event_id: str
