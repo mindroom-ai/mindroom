@@ -323,6 +323,17 @@ async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
 
 
+def test_router_limited_sync_invalidates_before_timeline_admission(tmp_path: Path) -> None:
+    """The Matrix client's pre-admission hook must fail room grants closed immediately."""
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    response = _limited_classic_sync_response("s-before-gap-timeline")
+
+    bot._before_sync_response_admission(response)
+
+    orchestrator.invalidate_agent_reply_memberships.assert_called_once_with(reason="uncertain_sync_response")
+    assert bot._preinvalidated_sync_response is response
+
+
 @pytest.mark.asyncio
 async def test_failed_membership_refresh_is_backed_off_between_sync_responses(tmp_path: Path) -> None:
     """An unavailable grant room must not cause one Matrix API refresh for every incoming message."""

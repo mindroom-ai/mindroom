@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -33,7 +34,7 @@ from mindroom.timing import (
 from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     import nio
 
@@ -110,38 +111,39 @@ async def dispatch_text_message(
         ):
             return
 
-        message_attachment_ids, trusted_attachment_ids, router_extra_content = _attachment_parts(
-            prepared,
-            media_events=list(turn.media_events) or None,
-            requester_user_id=turn.requester_user_id,
-        )
-        if dispatch_timing is not None:
-            dispatch_timing.mark("dispatch_plan_start")
-        plan = await controller.deps.turn_policy.plan_turn(
-            turn.room,
-            prepared.event,
-            prepared.dispatch,
-            is_dm=await is_dm_room(controller._client(), turn.room.room_id),
-            has_active_response_for_target=controller.deps.response_runner.has_active_response_for_target,
-            extra_content=router_extra_content or None,
-            media_events=list(turn.media_events) or None,
-            router_event=turn.media_events[0]
-            if turn.media_events and len(prepared.handled_turn.source_event_ids) == 1
-            else turn.event,
-        )
-        if dispatch_timing is not None:
-            dispatch_timing.mark("dispatch_plan_ready")
-        await _apply_turn_plan(
-            controller,
-            turn.room,
-            prepared,
-            plan,
-            message_attachment_ids=message_attachment_ids,
-            trusted_attachment_ids=trusted_attachment_ids,
-            media_events=list(turn.media_events) or None,
-            turn_claim=turn_claim,
-            mark_claim_transferred=mark_claim_transferred,
-        )
+        async with _admitted_response_decision(controller):
+            message_attachment_ids, trusted_attachment_ids, router_extra_content = _attachment_parts(
+                prepared,
+                media_events=list(turn.media_events) or None,
+                requester_user_id=turn.requester_user_id,
+            )
+            if dispatch_timing is not None:
+                dispatch_timing.mark("dispatch_plan_start")
+            plan = await controller.deps.turn_policy.plan_turn(
+                turn.room,
+                prepared.event,
+                prepared.dispatch,
+                is_dm=await is_dm_room(controller._client(), turn.room.room_id),
+                has_active_response_for_target=controller.deps.response_runner.has_active_response_for_target,
+                extra_content=router_extra_content or None,
+                media_events=list(turn.media_events) or None,
+                router_event=turn.media_events[0]
+                if turn.media_events and len(prepared.handled_turn.source_event_ids) == 1
+                else turn.event,
+            )
+            if dispatch_timing is not None:
+                dispatch_timing.mark("dispatch_plan_ready")
+            await _apply_turn_plan(
+                controller,
+                turn.room,
+                prepared,
+                plan,
+                message_attachment_ids=message_attachment_ids,
+                trusted_attachment_ids=trusted_attachment_ids,
+                media_events=list(turn.media_events) or None,
+                turn_claim=turn_claim,
+                mark_claim_transferred=mark_claim_transferred,
+            )
     finally:
         if not claim_transferred:
             controller.deps.turn_store.release_pending_turn_claim(turn_claim)
@@ -455,19 +457,26 @@ async def _run_claimed_response(
         controller.deps.turn_store.release_pending_turn_claim(turn_claim)
 
 
-async def _run_admitted_router_relay(
-    controller: TurnController,
-    relay: Callable[[], Awaitable[None]],
-) -> None:
-    """Keep config application outside one router selection and relay delivery."""
+@asynccontextmanager
+async def _admitted_response_decision(controller: TurnController) -> AsyncIterator[None]:
+    """Keep config application outside authorization-sensitive planning and handoff."""
     admission_gate = controller.deps.runtime.response_admission_gate
     while not admission_gate.admit():
         if not await controller.deps.response_runner.wait_for_admission_or_shutdown():
             raise ResponseAdmissionRefusedError
     try:
-        await relay()
+        yield
     finally:
         admission_gate.release()
+
+
+async def _run_admitted_router_relay(
+    controller: TurnController,
+    relay: Callable[[], Awaitable[None]],
+) -> None:
+    """Keep config application outside one router selection and relay delivery."""
+    async with _admitted_response_decision(controller):
+        await relay()
 
 
 async def _execute_route_plan(

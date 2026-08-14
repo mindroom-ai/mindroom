@@ -125,7 +125,11 @@ from .knowledge import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
-from .matrix.client_session import MatrixSyncStorage, PermanentMatrixStartupError
+from .matrix.client_session import (
+    MatrixSyncStorage,
+    PermanentMatrixStartupError,
+    set_before_sync_response_callback,
+)
 from .matrix.conversation_hydration import ConversationHydrator
 from .matrix.conversation_reads import ConversationReader, latest_agent_message_snapshot
 from .matrix.journal_ingress import event_is_live as journal_event_is_live
@@ -395,6 +399,7 @@ class AgentBot:
     _reply_membership_refresh_pending: bool
     _reply_membership_refresh_attempt: int
     _reply_membership_refresh_retry_at: float
+    _preinvalidated_sync_response: nio.SyncResponse | nio.SlidingSyncResponse | None
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
@@ -458,6 +463,7 @@ class AgentBot:
         self._reply_membership_refresh_pending = False
         self._reply_membership_refresh_attempt = 0
         self._reply_membership_refresh_retry_at = 0.0
+        self._preinvalidated_sync_response = None
         self._runtime_view = BotRuntimeState(
             client=None,
             config=config,
@@ -1798,6 +1804,13 @@ class AgentBot:
             # did not read is stale the moment the response is done.
             self._journal_dispatcher.timeline_member_provenance.clear()
 
+    def _before_sync_response_admission(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
+        """Fail closed on a visible sync gap before nio admits its timeline."""
+        if self.agent_name != ROUTER_AGENT_NAME or not _sync_response_has_uncertain_membership(response):
+            return
+        self._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+        self._preinvalidated_sync_response = response
+
     async def _apply_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Apply one certified sync response through its transport owners."""
         first_sync_response = not self._first_sync_done
@@ -1809,7 +1822,9 @@ class AgentBot:
         if self._sync_shutting_down:
             return
 
-        if _sync_response_has_uncertain_membership(_response):
+        preinvalidated = self._preinvalidated_sync_response is _response
+        self._preinvalidated_sync_response = None
+        if _sync_response_has_uncertain_membership(_response) and not preinvalidated:
             self._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
 
         if isinstance(_response, nio.SyncResponse):
@@ -2031,6 +2046,8 @@ class AgentBot:
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
             self._journal_dispatcher.register(client)
+            if self.agent_name == ROUTER_AGENT_NAME:
+                set_before_sync_response_callback(client, self._before_sync_response_admission)
             self._register_call_manager_callbacks(client)
             register_desktop_pairing_receiver(
                 self.config,

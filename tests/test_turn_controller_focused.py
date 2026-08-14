@@ -99,7 +99,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable, Mapping
+    from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping
     from pathlib import Path
 
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
@@ -140,12 +140,18 @@ class _RecordingResponseRunner:
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     recovery_proof_checks: list[Callable[[], bool]] = field(default_factory=list)
     failure_callbacks: list[Callable[[], None] | None] = field(default_factory=list)
+    admission_waiter: Callable[[], Awaitable[bool]] | None = None
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
         return frozenset()
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:  # noqa: ARG002
         return False
+
+    async def wait_for_admission_or_shutdown(self) -> bool:
+        """Wait through a replacement when a focused test closes admission."""
+        assert self.admission_waiter is not None
+        return await self.admission_waiter()
 
     def reserve_waiting_human_message(
         self,
@@ -1528,6 +1534,97 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     assert metadata is not None
     assert metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] == "general"
     assert harness.turn_store.is_handled(event.event_id) is True
+
+
+@pytest.mark.asyncio
+async def test_policy_planning_waits_for_config_replacement_before_authorizing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn prechecked before reload must plan against the replacement policy."""
+    runtime_paths = test_runtime_paths(tmp_path / "runtime")
+    old_config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            authorization=AuthorizationConfig(agent_reply_permissions={"general": [_SENDER]}),
+        ),
+        runtime_paths,
+    )
+    new_config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            authorization=AuthorizationConfig(agent_reply_permissions={"general": []}),
+        ),
+        runtime_paths,
+    )
+    harness = _build_harness(old_config, tmp_path)
+    room = _room_with_members(old_config, "general")
+    event = _text_event("please answer after the reload")
+    admission_gate = harness.controller.deps.runtime.response_admission_gate
+    assert admission_gate.close_if_idle()
+
+    plan_started = asyncio.Event()
+    gate_wait_started = asyncio.Event()
+    real_plan_turn = harness.policy.plan_turn
+
+    async def observed_plan_turn(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        plan_started.set()
+        return await real_plan_turn(*args, **kwargs)
+
+    async def wait_for_replacement() -> bool:
+        gate_wait_started.set()
+        await admission_gate.wait_until_open()
+        return True
+
+    monkeypatch.setattr(harness.policy, "plan_turn", observed_plan_turn)
+    harness.runner.admission_waiter = wait_for_replacement
+    delivery_task = asyncio.create_task(harness.deliver(room, event))
+    await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
+
+    assert not plan_started.is_set()
+    runtime = cast("BotRuntimeState", harness.controller.deps.runtime)
+    runtime.config = new_config
+    admission_gate.reopen()
+    await delivery_task
+
+    assert harness.policy.plan_turn_calls == 1
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
+async def test_policy_decision_reserves_config_until_response_handoff(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reload cannot commit between reply authorization and runner handoff."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("keep this decision atomic")
+    pending_write_started = asyncio.Event()
+    continue_pending_write = asyncio.Event()
+    real_record_pending_turn = harness.turn_store.record_pending_turn
+
+    async def hold_pending_write(turn_record: TurnRecord) -> TurnRecord | None:
+        pending_write_started.set()
+        await continue_pending_write.wait()
+        return await real_record_pending_turn(turn_record)
+
+    monkeypatch.setattr(harness.turn_store, "record_pending_turn", hold_pending_write)
+    delivery_task = asyncio.create_task(harness.deliver(room, event))
+    await asyncio.wait_for(pending_write_started.wait(), timeout=1)
+
+    admission_gate = harness.controller.deps.runtime.response_admission_gate
+    reload_closed_gate = admission_gate.close_if_idle()
+    try:
+        assert not reload_closed_gate
+    finally:
+        if reload_closed_gate:
+            admission_gate.reopen()
+        continue_pending_write.set()
+        await delivery_task
+
+    assert len(harness.runner.requests) == 1
 
 
 @pytest.mark.asyncio

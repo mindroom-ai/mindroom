@@ -1291,6 +1291,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot._classic_sync_rebuild_pending = False
     bot._sync_shutting_down = False
     bot._calls_reconcile_pending = False
+    bot._preinvalidated_sync_response = None
     bot._room_member_join_hooks_armed = False
     bot._journal_dispatcher = MagicMock()
     # The sync callback delegates its body, which a spec'd mock would swallow.

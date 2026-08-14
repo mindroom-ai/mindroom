@@ -4110,6 +4110,7 @@ expose = [
     "olm_store_dir",
     "olm_store_exists",
     "restore_login",
+    "set_before_sync_response_callback",
 ]
 from = ["mindroom.matrix.client_session"]
 

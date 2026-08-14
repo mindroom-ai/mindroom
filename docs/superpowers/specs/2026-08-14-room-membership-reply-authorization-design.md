@@ -98,8 +98,10 @@ Starting a replacement router receive loop invalidates membership readiness unti
 The first successful router sync after a receive-loop start refreshes the configured grant rooms.
 
 A limited timeline, unrecovered room, rejected checkpoint, or other uncertain router sync condition invalidates and refreshes affected membership state authoritatively.
+Visible limited-timeline state invalidates grants before nio admits any timeline event from that response.
 
 Configuration reload runs behind the existing response-admission gate.
+Authorization-sensitive turn planning retains an admission slot through response-runner handoff so a reload cannot commit between an allow decision and its response.
 
 It reconciles any new managed rooms, builds a snapshot for the new policy, atomically replaces the service snapshot, and only then re-exposes runtime delivery.
 

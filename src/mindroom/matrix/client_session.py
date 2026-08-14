@@ -26,7 +26,7 @@ from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Mapping
+    from collections.abc import AsyncGenerator, Callable, Mapping
 
 logger = get_logger(__name__)
 
@@ -90,6 +90,22 @@ class _AsyncRequestHeaders(Protocol):
 
 class _MindRoomAsyncClient(nio.AsyncClient):
     """Matrix client for MindRoom-specific encrypted event behavior."""
+
+    _before_sync_response_callback: Callable[[nio.SyncResponse | nio.SlidingSyncResponse], None] | None = None
+
+    def set_before_sync_response_callback(
+        self,
+        callback: Callable[[nio.SyncResponse | nio.SlidingSyncResponse], None],
+    ) -> None:
+        """Register synchronous control-plane work that must precede timeline admission."""
+        self._before_sync_response_callback = callback
+
+    async def _receive_sync_family(self, envelope: Any) -> None:  # noqa: ANN401
+        """Run MindRoom's pre-admission callback before nio handles timeline events."""
+        callback = self._before_sync_response_callback
+        if callback is not None:
+            callback(envelope.response)
+        await super()._receive_sync_family(envelope)
 
     async def send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         """Prepare dynamic request headers before every transport attempt."""
@@ -196,6 +212,17 @@ def _require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
         "Call matrix_client(homeserver, runtime_paths, user_id=...)"
     )
     raise TypeError(msg)
+
+
+def set_before_sync_response_callback(
+    client: nio.AsyncClient,
+    callback: Callable[[nio.SyncResponse | nio.SlidingSyncResponse], None],
+) -> None:
+    """Register pre-admission sync work on a MindRoom-created Matrix client."""
+    if not isinstance(client, _MindRoomAsyncClient):
+        msg = "Pre-admission sync callbacks require a MindRoom Matrix client"
+        raise TypeError(msg)
+    client.set_before_sync_response_callback(callback)
 
 
 def matrix_startup_error(
@@ -501,4 +528,5 @@ __all__ = [
     "olm_store_dir",
     "olm_store_exists",
     "restore_login",
+    "set_before_sync_response_callback",
 ]

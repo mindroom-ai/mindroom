@@ -7,6 +7,10 @@ active responses to drain, and then force-applies if the runtime never becomes
 idle. MCP notifications schedule their replacement asynchronously so the
 triggering admitted tool call can release its own slot first.
 
+Inbound turns reserve admission before authorization-sensitive planning and
+keep it through the response-runner handoff. This prevents a policy reload from
+committing between a reply authorization decision and the response it permits.
+
 The gate closes admission for exactly the apply window, but the applier never
 holds it while running the plan. Applying stops bots, and stopping a bot drains
 its detached responses, which would otherwise wait on the very gate the
@@ -59,7 +63,7 @@ class ResponseAdmissionGate:
 
     @property
     def in_flight_response_count(self) -> int:
-        """Return the number of admitted, not-yet-finished response lifecycles."""
+        """Return the number of admitted response-planning or lifecycle slots."""
         return self._in_flight_response_count
 
     @property
