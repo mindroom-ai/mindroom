@@ -26,6 +26,15 @@ class _MatrixDeliveryMigration:
 
 def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: bool) -> _MatrixDeliveryMigration:
     """Move released legacy tables aside before current DDL is installed."""
+    if _table_exists(transaction, "matrix_delivery_outbox", postgres=postgres) and (
+        not _column_exists(transaction, "matrix_delivery_outbox", "membership_epoch", postgres=postgres)
+        or not _column_exists(transaction, "matrix_delivery_outbox", "retired", postgres=postgres)
+    ):
+        msg = (
+            "The generic Matrix delivery schema predates membership fencing and cannot prove which room "
+            "membership owns its existing deliveries. Reset the event journal before restarting."
+        )
+        raise RuntimeError(msg)
     migrate_responses = _table_exists(transaction, "response_outbox", postgres=postgres)
     if migrate_responses:
         transaction.execute("DROP INDEX IF EXISTS response_outbox_unacknowledged_scan")

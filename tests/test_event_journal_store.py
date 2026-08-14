@@ -102,6 +102,17 @@ CREATE TABLE response_outbox (
     PRIMARY KEY (principal_id, turn_id, stage)
 )
 """
+_RELEASED_UNFENCED_MATRIX_DELIVERY_OUTBOX_DDL = """
+CREATE TABLE matrix_delivery_outbox (
+    principal_id TEXT NOT NULL, delivery_id TEXT NOT NULL,
+    stage TEXT NOT NULL, event_type TEXT NOT NULL, room_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL, transaction_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+    edits_event_id TEXT, edit_target_pending INTEGER NOT NULL DEFAULT 0,
+    attempted INTEGER NOT NULL DEFAULT 0, sending_device_id TEXT,
+    acknowledged_event_id TEXT, created_at_ns BIGINT NOT NULL,
+    PRIMARY KEY (principal_id, delivery_id, stage)
+)
+"""
 _LEGACY_JOURNAL_EVENTS_DDL = """
 CREATE TABLE journal_events (
     receipt_order {receipt_order},
@@ -145,6 +156,21 @@ def _install_ambiguous_legacy_response(connection: object, *, postgres: bool) ->
             None,
             1,
         ),
+    )
+
+
+def _install_released_unfenced_delivery_schema(connection: object) -> None:
+    """Install the released generic outbox that predates membership ownership."""
+    execute = cast("Any", connection).execute
+    execute(_RELEASED_UNFENCED_MATRIX_DELIVERY_OUTBOX_DDL)
+    execute(
+        "CREATE INDEX matrix_delivery_outbox_unacknowledged_scan "
+        "ON matrix_delivery_outbox (principal_id, event_type, created_at_ns, delivery_id, stage) "
+        "WHERE acknowledged_event_id IS NULL",
+    )
+    execute(
+        "CREATE INDEX matrix_delivery_outbox_room_scan "
+        "ON matrix_delivery_outbox (principal_id, room_id, stage, created_at_ns, delivery_id)",
     )
 
 
@@ -7885,7 +7911,31 @@ class TestTheJournalIsAtLeastAsDurableAsWhatCertifiesIt:
 
 
 class TestMatrixDeliveryMigration:
-    """Opening current code migrates exact responses and expires old approval debt."""
+    """Opening current code migrates provable debt and refuses unprovable ownership."""
+
+    async def test_sqlite_refuses_the_released_unfenced_generic_outbox(self, tmp_path: Path) -> None:
+        """SQLite fails at startup instead of accepting a schema it cannot use."""
+        database_path = tmp_path / "released-unfenced-delivery.db"
+        with sqlite3.connect(database_path) as connection:
+            _install_released_unfenced_delivery_schema(connection)
+
+        with pytest.raises(RuntimeError, match="generic Matrix delivery schema predates membership fencing"):
+            EventJournalStore.open_sqlite(database_path)
+
+    async def test_postgres_refuses_the_released_unfenced_generic_outbox(
+        self,
+        postgres_journal_url: str,
+    ) -> None:
+        """PostgreSQL enforces the same explicit reset boundary."""
+        import psycopg  # noqa: PLC0415 - optional backend exercised explicitly
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        with psycopg.connect(database_url) as connection:
+            _install_released_unfenced_delivery_schema(connection)
+            connection.commit()
+
+        with pytest.raises(RuntimeError, match="generic Matrix delivery schema predates membership fencing"):
+            EventJournalStore.open_postgres(database_url)
 
     async def test_sqlite_migrates_exact_responses_and_expires_legacy_approvals(self, tmp_path: Path) -> None:
         """SQLite replaces legacy approval transport with fail-closed decisions."""

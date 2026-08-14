@@ -55,6 +55,7 @@ The decision remains in the exact-call continuation ledger, the terminal edit is
 During the delivery-outbox schema upgrade, already-decided legacy calls keep their first decision and undecided calls expire atomically.
 Known card event IDs are tombstoned so every late click remains inert.
 All legacy approval delivery debt is dropped because its Matrix outcome cannot be reconciled safely without retaining the removed delivery protocol.
+An existing generic outbox without membership and retirement columns is rejected at startup with reset guidance because its rows lack the ownership facts the current schema requires.
 
 ## Sidecar previews are never stored as bodies
 
