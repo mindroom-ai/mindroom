@@ -2433,7 +2433,7 @@ def test_disconnect_deletes_credentials_under_refresh_lock(tmp_path: Path, monke
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider()
+    provider = _fake_provider(credential_service="test_drive_oauth")
     manager = get_runtime_credentials_manager(runtime_paths)
     scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
     scoped_manager.save_credentials(
@@ -2471,10 +2471,6 @@ def test_disconnect_deletes_credentials_under_refresh_lock(tmp_path: Path, monke
         )
 
     monkeypatch.setattr("mindroom.oauth.service.delete_scoped_credentials", delete_while_locked)
-    monkeypatch.setattr(
-        "mindroom.oauth.service.load_scoped_credentials",
-        lambda *_args, **_kwargs: {"token": "stored-token"},
-    )
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
@@ -2483,6 +2479,7 @@ def test_disconnect_deletes_credentials_under_refresh_lock(tmp_path: Path, monke
 
     assert response.status_code == 200
     assert delete_was_locked is True
+    assert scoped_manager.load_credentials(provider.credential_service) is None
 
 
 def test_callback_drops_old_refresh_token_when_identity_changes(tmp_path: Path) -> None:
@@ -4088,7 +4085,7 @@ def test_status_disconnects_after_terminal_refresh_rejection(
             response = Response(
                 400,
                 request=request,
-                json={"error": "invalid_grant", "error_description": "refresh grant rejected"},
+                json={"error": " Invalid_Grant ", "error_description": "refresh grant rejected"},
             )
             message = "refresh rejected"
             raise HTTPStatusError(message, request=request, response=response)

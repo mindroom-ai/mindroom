@@ -324,7 +324,7 @@ def _token_data_needs_refresh(
 
 def _oauth_error_fields(error: object, description: object) -> tuple[str | None, str | None, str | None]:
     """Return safe OAuth error code and detail from standard non-secret response fields."""
-    error_code = error.strip() if isinstance(error, str) and error.strip() else None
+    error_code = error.strip().lower() if isinstance(error, str) and error.strip() else None
     error_description = description.strip() if isinstance(description, str) and description.strip() else None
     parts = [value.strip() for value in (error, description) if isinstance(value, str) and value.strip()]
     return error_code, error_description, ": ".join(parts) if parts else None

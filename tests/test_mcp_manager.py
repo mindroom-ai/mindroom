@@ -534,7 +534,7 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
             return None
 
         async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, object]:
-            error = "invalid_grant"
+            error = " Invalid_Grant "
             description = "refresh grant rejected: provider-token-value"
             raise OAuthError(error, description)
 
