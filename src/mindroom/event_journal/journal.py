@@ -869,7 +869,11 @@ def _settle_tombstoned_turn_source(
     room_id: str,
     event_id: str,
 ) -> None:
-    """Retire pending turn ingress whose tombstone is authoritative."""
+    """Retire tombstoned turn ingress unless a durable continuation owns it.
+
+    Approval continuations dispatch before event-kind ingress, so preserving
+    one cannot replay its source through a message or media callback.
+    """
     kinds = tuple(sorted(kind.value for kind in TURN_BACKED_KINDS))
     kind_placeholders = ", ".join("?" for _ in kinds)
     transaction.execute(
@@ -878,8 +882,12 @@ def _settle_tombstoned_turn_source(
         SET state = ?, source_json = '', semantic_consumer = NULL
         WHERE principal_id = ? AND room_id = ? AND event_id = ? AND state = ?
           AND kind IN ({kind_placeholders})
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_continuation_sources
+              WHERE principal_id = ? AND event_id = ?
+          )
         """,  # noqa: S608 - placeholders are generated, values are still bound
-        (SETTLED_STATE, principal_id, room_id, event_id, PENDING_STATE, *kinds),
+        (SETTLED_STATE, principal_id, room_id, event_id, PENDING_STATE, *kinds, principal_id, event_id),
     )
 
 
