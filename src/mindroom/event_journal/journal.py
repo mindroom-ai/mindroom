@@ -270,6 +270,15 @@ def _advance_membership_epoch(
     # can do is present the same transaction again and collapse onto the same
     # event. That converges on exactly one visible answer whether or not the
     # first attempt landed, which is the property this table exists for.
+    # A terminal acknowledgement may have committed just before a crash that
+    # prevented its approval-domain row from being retired. Preserve the click
+    # tombstone before either side of the cross-principal relationship is
+    # fenced or deleted below.
+    approvals.retire_completed_cards_for_departure(
+        transaction,
+        principal_id,
+        room_id=room_id,
+    )
     approvals.fail_continuations_for_departed_card_owner(
         transaction,
         principal_id,

@@ -400,6 +400,57 @@ def _resolved_continuation_content(
     return stored
 
 
+def retire_completed_cards_for_departure(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+) -> None:
+    """Finish domain retirement that crashed after a terminal Matrix acknowledgement."""
+    rows = transaction.fetchall(
+        """
+        SELECT cards.principal_id, cards.delivery_id, initial.acknowledged_event_id
+        FROM approval_cards AS cards
+        JOIN matrix_delivery_outbox AS initial
+          ON initial.principal_id = cards.principal_id
+         AND initial.delivery_id = cards.delivery_id
+         AND initial.stage = 'initial'
+        JOIN matrix_delivery_outbox AS final
+          ON final.principal_id = cards.principal_id
+         AND final.delivery_id = cards.delivery_id
+         AND final.stage = 'final'
+        LEFT JOIN approval_continuations AS continuations
+          ON continuations.approval_id = cards.continuation_id
+        WHERE initial.acknowledged_event_id IS NOT NULL
+          AND final.acknowledged_event_id IS NOT NULL
+          AND (
+              (cards.principal_id = ? AND initial.room_id = ?)
+              OR (
+                  continuations.principal_id = ?
+                  AND EXISTS (
+                      SELECT 1
+                      FROM approval_continuation_sources AS sources
+                      JOIN journal_events AS events
+                        ON events.principal_id = sources.principal_id
+                       AND events.event_id = sources.event_id
+                      WHERE sources.principal_id = continuations.principal_id
+                        AND sources.approval_id = continuations.approval_id
+                        AND events.room_id = ?
+                  )
+              )
+          )
+        """,
+        (principal_id, room_id, principal_id, room_id),
+    )
+    for row in rows:
+        retire(
+            transaction,
+            str(row["principal_id"]),
+            delivery_id=str(row["delivery_id"]),
+            card_event_id=str(row["acknowledged_event_id"]),
+        )
+
+
 def expire_cards_for_departed_continuations(
     transaction: Transaction,
     continuation_principal_id: str,

@@ -387,6 +387,7 @@ def has_attempted_unacknowledged_prompt_delivery(
         """
         SELECT 1 AS present FROM matrix_delivery_outbox
         WHERE principal_id = ? AND room_id = ?
+          AND event_type = 'm.room.message'
           AND attempted = 1 AND acknowledged_event_id IS NULL
           AND (
               edits_event_id IS NOT NULL

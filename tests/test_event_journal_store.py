@@ -1987,6 +1987,34 @@ class TestProjectedInteractivePrompts:
 
         assert await alice.load_event("$reaction") is None
 
+    async def test_approval_edit_debt_does_not_block_interactive_source_admission(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only response messages can owe the interactive-prompt projection gate."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        await alice.enqueue_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            event_type="io.mindroom.tool_approval",
+            room_id=ROOM,
+            thread_id="$thread",
+            payload={"approval_id": "approval-card-1", "status": "approved"},
+            edits_event_id="$approval",
+        )
+        await alice.claim_matrix_delivery(delivery_id="approval-card-1", stage=DeliveryStage.FINAL)
+        reaction, _projected = message(
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$prompt", "1"),
+            thread_id="$thread",
+            ts=3_000,
+        )
+
+        assert await alice.admit(reaction) is AdmissionResult.ADMITTED
+        assert await alice.load_event("$reaction") is not None
+
     async def test_edit_acknowledgement_projects_a_missing_target_before_its_prompt(
         self,
         alice: PrincipalStore,
@@ -5702,6 +5730,41 @@ class TestApprovalContinuations:
         assert stored.resolution["status"] == "expired"
         assert stored.resolution["resolution_reason"] == "Requesting agent left the room."
 
+    async def test_room_departure_retires_router_card_after_terminal_ack_crash(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """A responder departure preserves a terminal card whose domain retirement crashed."""
+        router = journal_store.principal("router@shared")
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(
+            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
+        )
+        await self.remember_card(router)
+        await router.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="denied",
+            reason="Unsafe.",
+            resolution={"status": "denied", "resolution_reason": "Unsafe."},
+        )
+        assert await router.claim_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+        )
+        await router.acknowledge_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$terminal-edit",
+            delivered_projections=(),
+        )
+
+        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+
+        assert await alice.approval_continuation("approval-1") is None
+        assert await router.pending_approval_cards(room_id=ROOM) == ()
+        assert await router.is_terminal_approval_card(room_id=ROOM, card_event_id="$approval") is True
+
     async def test_room_departure_retires_router_cards_that_were_never_attempted(
         self,
         journal_store: EventJournalStore,
@@ -5859,6 +5922,38 @@ class TestApprovalContinuations:
         assert terminal.edits_event_id == "$approval"
         assert terminal.payload["status"] == "denied"
         assert terminal.payload["resolution_reason"] == "Approval transport left the room."
+
+    async def test_card_owner_departure_retires_card_after_terminal_ack_crash(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A card-owner departure completes domain retirement after Matrix already acknowledged it."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(
+            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
+        )
+        await self.remember_card(alice)
+        await alice.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="denied",
+            reason="Unsafe.",
+            resolution={"status": "denied", "resolution_reason": "Unsafe."},
+        )
+        assert await alice.claim_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+        )
+        await alice.acknowledge_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$terminal-edit",
+            delivered_projections=(),
+        )
+
+        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+
+        assert await alice.pending_approval_cards(room_id=ROOM) == ()
+        assert await alice.is_terminal_approval_card(room_id=ROOM, card_event_id="$approval") is True
 
     async def test_router_departure_denies_a_card_that_was_never_attempted(
         self,
