@@ -30,7 +30,7 @@ from mindroom.matrix_rtc.call_manager import (
     _build_call_instructions,
     maybe_build_call_manager,
 )
-from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps
+from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps, CallStartRevokedError
 from mindroom.matrix_rtc.call_tools import CallAgentResponse, CallAgentTooling
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
@@ -1445,6 +1445,82 @@ async def test_reply_revocation_stops_call_while_admission_is_closed(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -> None:
+    """A grant-room departure must not wait for voice-agent startup to finish."""
+
+    class StartingBridge(FakeBridge):
+        def __init__(self) -> None:
+            super().__init__()
+            self.agent_starting = asyncio.Event()
+            self.release_agent = asyncio.Event()
+
+        async def start_agent(self, options: CallVoiceAgentOptions) -> None:
+            self.agent_options = options
+            self.agent_starting.set()
+            await self.release_agent.wait()
+
+    grant_room_id = "!grant:example.org"
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = StartingBridge()
+    config = _config()
+    config.agents["helper"].rooms = [ROOM_ID, "grant"]
+    config.authorization = AuthorizationConfig(
+        global_users=["@alice:example.org"],
+        agent_reply_permissions={
+            "helper": AgentReplyPermission(joined_rooms=["grant"]),
+        },
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
+    state.save(runtime_paths=runtime_paths)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@alice:example.org", None, None)],
+        room_id=grant_room_id,
+    )
+    memberships = AgentReplyMembershipIndex()
+    await memberships.refresh(config, runtime_paths, client)
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        agent_reply_memberships=memberships,
+    )
+
+    join_task = asyncio.create_task(manager.on_room_event(_room(), _member_unknown_event()))
+    await asyncio.wait_for(bridge.agent_starting.wait(), timeout=1)
+    memberships.apply_member_event(
+        config,
+        grant_room_id,
+        nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": "$grant-leave-during-start",
+                "sender": "@alice:example.org",
+                "state_key": "@alice:example.org",
+                "origin_server_ts": 1,
+                "content": {"membership": "leave"},
+                "unsigned": {"prev_content": {"membership": "join"}},
+            },
+        ),
+        control_user_id=BOT_USER,
+    )
+
+    try:
+        await asyncio.wait_for(manager.revoke_reply_authorization(), timeout=1)
+    finally:
+        bridge.release_agent.set()
+        await join_task
+
+    assert bridge.closed
+    assert not manager._sessions
+    assert not manager._logical_calls
+
+
+@pytest.mark.asyncio
 async def test_manager_uses_reloaded_reply_policy(tmp_path: Path) -> None:
     """Authorization-only reloads must replace the call manager's live config."""
     client = _client()
@@ -1927,6 +2003,7 @@ def _session(client: AsyncMock, bridge: FakeBridge, transport: FakeKeyTransport,
             fetch_grant=fetch_grant,
             agent_options=VoiceAgentOptions(instructions="hi", model="gpt-realtime-2.1", api_key="sk-test"),
             livekit_service_url=SERVICE_URL,
+            start_is_allowed=lambda: True,
             clock_ms=lambda: clock[0],
         ),
     )
@@ -1952,6 +2029,30 @@ async def test_session_distributes_and_applies_first_key_on_start() -> None:
     assert bridge.frame_keys[0][0] == own_identity
     assert bridge.frame_keys[0][2] == 0
     await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_rechecks_start_authorization_before_publishing_membership() -> None:
+    """A grant revoked during SFU connect must not publish or start the agent."""
+
+    class RevokingBridge(FakeBridge):
+        async def connect(self, grant: SfuGrant) -> None:
+            start_allowed[0] = False
+            await super().connect(grant)
+
+    start_allowed = [True]
+    client = _client()
+    bridge = RevokingBridge()
+    session = _session(client, bridge, FakeKeyTransport(), [1_000])
+    session.deps.start_is_allowed = lambda: start_allowed[0]
+
+    with pytest.raises(CallStartRevokedError):
+        await session.start([_member("@alice:example.org", "ALICEDEV")])
+
+    published_contents = [call.args[2] for call in client.room_put_state.await_args_list]
+    assert published_contents == [{}]
+    assert bridge.agent_options is None
+    assert bridge.closed
 
 
 @pytest.mark.asyncio
@@ -3268,6 +3369,7 @@ def _plain_session(
             fetch_grant=fetch_grant,
             agent_options=VoiceAgentOptions(instructions="x", model="m", api_key="k"),
             livekit_service_url=SERVICE_URL,
+            start_is_allowed=lambda: True,
             on_stopped=on_stopped,  # type: ignore[arg-type]
         ),
     )

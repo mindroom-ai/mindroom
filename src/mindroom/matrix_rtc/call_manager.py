@@ -29,7 +29,13 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
-from mindroom.matrix_rtc.call_session import CallJoinError, CallSession, CallSessionDeps, required_device_id
+from mindroom.matrix_rtc.call_session import (
+    CallJoinError,
+    CallSession,
+    CallSessionDeps,
+    CallStartRevokedError,
+    required_device_id,
+)
 from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
@@ -120,6 +126,14 @@ class _LogicalCallState:
     join_blocked: bool = False
 
 
+@dataclass(frozen=True)
+class _StartingCall:
+    """One session start that revocation may cancel before publication."""
+
+    session: CallSession
+    task: asyncio.Task[None]
+
+
 def _build_call_instructions(chat_system_prompt: str) -> str:
     """Append voice-specific delivery guidance to the chat system prompt."""
     return f"{chat_system_prompt}\n\n{_VOICE_STYLE_ADDENDUM}"
@@ -200,6 +214,7 @@ class CallManager:
         self._wait_for_admission_or_shutdown = wait_for_admission_or_shutdown
         self._key_transport = ToDeviceFrameKeyTransport(client)
         self._sessions: dict[str, CallSession] = {}
+        self._starting_calls: dict[str, _StartingCall] = {}
         self._pending_keys: dict[str, dict[tuple[str, str, int], ReceivedFrameKey]] = {}
         self._observed_rooms: dict[str, nio.MatrixRoom] = {}
         self._departed_rooms: set[str] = set()
@@ -357,27 +372,37 @@ class CallManager:
         """End tracked calls whose requester no longer passes current reply access."""
         if self._shutting_down:
             return
-        room_ids = set(self._logical_calls) | set(self._sessions)
+        room_ids = set(self._logical_calls) | set(self._sessions) | set(self._starting_calls)
         await asyncio.gather(*(self._reconcile_room_reply_authorization(room_id) for room_id in room_ids))
 
     async def _reconcile_room_reply_authorization(self, room_id: str) -> None:
         """Recheck one tracked call against the current shared reply policy."""
+        logical_call = self._logical_calls.get(room_id)
+        session = self._sessions.get(room_id)
+        starting_call = self._starting_calls.get(room_id)
+        requester_ids = {
+            requester_id
+            for requester_id in (
+                logical_call.requester_id if logical_call is not None else None,
+                session.requester_id if session is not None else None,
+                starting_call.session.requester_id if starting_call is not None else None,
+            )
+            if requester_id is not None
+        }
+        if not requester_ids:
+            return
+        if all(self._is_authorized_call_member(requester_id, room_id) for requester_id in requester_ids):
+            return
+
+        if logical_call is not None:
+            logical_call.join_blocked = True
+        if starting_call is not None:
+            starting_call.task.cancel()
+            await asyncio.gather(starting_call.task, return_exceptions=True)
+            await self._stop_session(starting_call.session)
+
         lock = self._locks.setdefault(room_id, asyncio.Lock())
         async with lock:
-            logical_call = self._logical_calls.get(room_id)
-            session = self._sessions.get(room_id)
-            requester_ids = {
-                requester_id
-                for requester_id in (
-                    logical_call.requester_id if logical_call is not None else None,
-                    session.requester_id if session is not None else None,
-                )
-                if requester_id is not None
-            }
-            if not requester_ids:
-                return
-            if all(self._is_authorized_call_member(requester_id, room_id) for requester_id in requester_ids):
-                return
             self._clear_logical_call(room_id)
             self._pending_keys.pop(room_id, None)
             expiry = self._expiry_handles.pop(room_id, None)
@@ -397,6 +422,8 @@ class CallManager:
         """Leave every active call."""
         self._shutting_down = True
         self._pending_keys.clear()
+        starting_calls = list(self._starting_calls.values())
+        self._starting_calls.clear()
         background_tasks = [*self._retry_tasks.values(), *self._background_tasks]
         self._retry_tasks.clear()
         self._background_tasks.clear()
@@ -410,8 +437,13 @@ class CallManager:
         self._expiry_handles.clear()
         for task in background_tasks:
             task.cancel()
-        if background_tasks:
-            await asyncio.gather(*background_tasks, return_exceptions=True)
+        for starting_call in starting_calls:
+            starting_call.task.cancel()
+        cancelled_tasks = [*background_tasks, *(starting_call.task for starting_call in starting_calls)]
+        if cancelled_tasks:
+            await asyncio.gather(*cancelled_tasks, return_exceptions=True)
+        for starting_call in starting_calls:
+            await self._stop_session(starting_call.session, event="call_start_shutdown_failed")
         sessions = list(self._sessions.values())
         self._sessions.clear()
         for session in sessions:
@@ -670,8 +702,10 @@ class CallManager:
             members.append(member)
         return members
 
-    async def _join(self, room: nio.MatrixRoom, members: list[CallMember]) -> _JoinResult:  # noqa: PLR0911
+    async def _join(self, room: nio.MatrixRoom, members: list[CallMember]) -> _JoinResult:  # noqa: C901, PLR0911
         room_id = room.room_id
+        logical_call = self._logical_calls[room_id]
+        requester_id = members[0].user_id
         backend = self._resolve_voice_backend(room_id)
         if backend is None:
             return "skip"
@@ -689,7 +723,7 @@ class CallManager:
         try:
             tooling = await self._build_tooling(
                 room_id,
-                requester_id=members[0].user_id,
+                requester_id=requester_id,
                 cascaded=self._call_config.backend == "cascaded",
             )
             transcript = CallTranscript.start(
@@ -733,7 +767,7 @@ class CallManager:
         try:
             session = CallSession(
                 room_id=room_id,
-                requester_id=members[0].user_id,
+                requester_id=requester_id,
                 e2ee_enabled=room.encrypted,
                 deps=CallSessionDeps(
                     client=self._client,
@@ -742,18 +776,24 @@ class CallManager:
                     fetch_grant=lambda: self._fetch_grant(room_id, service),
                     agent_options=options,
                     livekit_service_url=service,
+                    start_is_allowed=lambda: self._call_start_is_allowed(
+                        room_id,
+                        requester_id,
+                        logical_call,
+                    ),
                     on_stopped=lambda: transcript.finalize(
                         config=self._config,
                         runtime_paths=self._runtime_paths,
                     ),
                     on_failure=lambda message: self._send_call_failure_notice(
                         room_id,
-                        members[0].user_id,
+                        requester_id,
                         message,
                     ),
                 ),
             )
-            await session.start(members)
+            if not await self._start_call_session(session, members, logical_call):
+                return "skip"
         except ValueError as error:
             logger.warning("call_join_rejected", room_id=room_id, agent=self._agent_name, error=str(error))
             return "skip"
@@ -770,6 +810,50 @@ class CallManager:
         self._replay_pending_keys(room_id, session)
         logger.info("call_session_started", room_id=room_id, agent=self._agent_name)
         return "joined"
+
+    async def _start_call_session(
+        self,
+        session: CallSession,
+        members: list[CallMember],
+        logical_call: _LogicalCallState,
+    ) -> bool:
+        """Start one tracked session so revocation can cancel it without the room lock."""
+        room_id = session.room_id
+        start_task = asyncio.create_task(session.start(members), name=f"matrix_rtc_start_{room_id}")
+        starting_call = _StartingCall(session=session, task=start_task)
+        self._starting_calls[room_id] = starting_call
+        try:
+            await start_task
+        except CallStartRevokedError:
+            logger.info("call_join_aborted_authorization_revoked", room_id=room_id, agent=self._agent_name)
+            return False
+        except asyncio.CancelledError:
+            if self._call_start_is_allowed(room_id, session.requester_id, logical_call):
+                raise
+            logger.info("call_join_cancelled_authorization_revoked", room_id=room_id, agent=self._agent_name)
+            return False
+        finally:
+            if self._starting_calls.get(room_id) is starting_call:
+                self._starting_calls.pop(room_id, None)
+        if not self._call_start_is_allowed(room_id, session.requester_id, logical_call):
+            await self._stop_session(session)
+            return False
+        return True
+
+    def _call_start_is_allowed(
+        self,
+        room_id: str,
+        requester_id: str,
+        logical_call: _LogicalCallState,
+    ) -> bool:
+        """Return whether one exact logical call still owns startup authority."""
+        return (
+            not self._shutting_down
+            and room_id not in self._departed_rooms
+            and self._logical_calls.get(room_id) is logical_call
+            and not logical_call.join_blocked
+            and self._is_authorized_call_member(requester_id, room_id)
+        )
 
     def _schedule_reconcile_retry(self, room: nio.MatrixRoom) -> None:
         """Retry transient reconciliation failures with a bounded backoff."""
