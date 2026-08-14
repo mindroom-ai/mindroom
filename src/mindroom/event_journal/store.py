@@ -29,8 +29,9 @@ from .approvals import (  # noqa: TC001 - part of this module's runtime return t
     StoredApprovalCard,
     UnreadableApprovalCard,
 )
+from .membership_state import claim_active_membership_epoch
 from .models import AdmissionResult, DeliveryAcknowledgement, DeliveryProjectionPendingError
-from .projection import drop_refetched_message, install_refetched_revision, project
+from .projection import discard_delivery_event, drop_refetched_message, install_refetched_revision, project
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -527,6 +528,8 @@ class PrincipalStore:
         *,
         revision_event_id: str,
         revision_ts: int,
+        revision_sender: str,
+        revision_transaction_id: str | None = None,
         content: Mapping[str, object],
     ) -> bool:
         """Install a point-refetched revision if its refresh token still holds."""
@@ -538,6 +541,8 @@ class PrincipalStore:
                 logical_event_id=request.logical_event_id,
                 revision_event_id=revision_event_id,
                 revision_ts=revision_ts,
+                revision_sender=revision_sender,
+                revision_transaction_id=revision_transaction_id,
                 content=content,
                 expected_revision_event_id=request.revision_event_id,
                 expected_refresh_token=request.refresh_token,
@@ -659,6 +664,47 @@ class PrincipalStore:
             ),
         )
 
+    async def retire_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        membership_epoch: int,
+    ) -> str | None:
+        """Retain an obsolete send as an identity tombstone, or return its ACK."""
+
+        def retire(transaction: Transaction) -> str | None:
+            # Projection and acknowledgement take the membership row before
+            # the delivery row. Retirement uses the same order, so an echo
+            # either projects first and is removed below, or observes the
+            # committed tombstone and is refused.
+            reads.claim_membership_epoch(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                expected_membership_epoch=membership_epoch,
+            )
+            delivery = outbox.retire(
+                transaction,
+                self._principal_id,
+                delivery_id=delivery_id,
+                stage=stage,
+                room_id=room_id,
+                membership_epoch=membership_epoch,
+            )
+            if delivery is None:
+                return None
+            if delivery.retired and delivery.edits_event_id is not None:
+                discard_delivery_event(
+                    transaction,
+                    self._principal_id,
+                    event_id=delivery.edits_event_id,
+                )
+            return delivery.acknowledged_event_id
+
+        return await self._backend.write(retire)
+
     async def acknowledge_matrix_delivery(
         self,
         *,
@@ -703,6 +749,14 @@ class PrincipalStore:
         """
 
         def acknowledge(transaction: Transaction) -> DeliveryAcknowledgement:
+            ownership = outbox.claim_active_delivery_ownership(
+                transaction,
+                self._principal_id,
+                delivery_id=delivery_id,
+                stage=stage,
+            )
+            may_project = ownership is not None
+            projection_epoch = 0 if ownership is None else ownership[1]
             bound = outbox.acknowledge(
                 transaction,
                 self._principal_id,
@@ -722,19 +776,21 @@ class PrincipalStore:
                     anchor_event_id=terminal_turn.anchor_event_id,
                     record_json=terminal_turn.record_json,
                 )
-            if bound:
+            if bound and may_project:
                 for delivered_projection in delivered_projections:
                     project(
                         transaction,
                         self._principal_id,
                         delivered_projection,
                         receipt_order=0,
-                        membership_epoch=journal.current_membership_epoch(
-                            transaction,
-                            self._principal_id,
-                            delivered_projection.room_id,
-                        ),
+                        membership_epoch=projection_epoch,
                     )
+            elif bound and not may_project:
+                discard_delivery_event(
+                    transaction,
+                    self._principal_id,
+                    event_id=event_id,
+                )
             if bound:
                 return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
             # Lost the row. Whatever is on it now is the answer this delivery
@@ -1016,6 +1072,26 @@ class PrincipalStore:
             ),
         )
 
+    async def enqueue_unavailable_approval_notice(
+        self,
+        *,
+        approval_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+    ) -> str | None:
+        """Enqueue this membership's physical attempt for one logical notice."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.enqueue_unavailable_notice(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                payload=payload,
+            ),
+        )
+
     async def discard_unavailable_approval_continuation(
         self,
         approval_id: str,
@@ -1046,11 +1122,18 @@ def _turn_membership_is_current(
     room_id: str,
 ) -> bool:
     """Return whether the membership that admitted a turn is still the room's."""
-    admitted = journal.admitted_membership_epoch(transaction, principal_id, turn_id)
-    if admitted is None:
-        # Nothing the journal admitted, so nothing a rejoin invalidated.
+    owner = journal.admitted_membership_owner(transaction, principal_id, turn_id)
+    if owner is None:
+        owner = outbox.turn_ownership(transaction, principal_id, delivery_id=turn_id)
+    if owner is None:
+        # Nothing admitted or enqueued this turn, so no membership owns it yet.
         return True
-    return admitted == journal.current_membership_epoch(transaction, principal_id, room_id)
+    owner_room_id, owner_epoch = owner
+    return owner_room_id == room_id and owner_epoch == journal.current_membership_epoch(
+        transaction,
+        principal_id,
+        room_id,
+    )
 
 
 def _admit(
@@ -1068,7 +1151,12 @@ def _admit(
             principal_id,
             event,
         )
-        and outbox.has_attempted_unacknowledged_prompt_delivery(transaction, principal_id, room_id=event.room_id)
+        and outbox.has_attempted_unacknowledged_prompt_delivery(
+            transaction,
+            principal_id,
+            room_id=event.room_id,
+            membership_epoch=journal.current_membership_epoch(transaction, principal_id, event.room_id),
+        )
     ):
         msg = f"Matrix delivery projection is pending in room {event.room_id!r}"
         raise DeliveryProjectionPendingError(msg)
@@ -1090,29 +1178,64 @@ def _enqueue_matrix_delivery(
 ) -> str | None:
     """Record delivery intent unless the membership that authorized it has ended.
 
-    The fence deletes a room's unattempted deliveries because they answer a
+    The fence retires a room's unattempted deliveries because they answer a
     conversation the bot has left. This closes the other half of the same
     window: a turn that was still running when the fence committed would
     otherwise write its answer back in afterwards, and the fence has already
-    been and gone. Because both are single write transactions against a
-    serialized writer, the two possible orderings are "enqueued, then deleted"
-    and "fenced, then refused". Neither leaves an answer behind.
+    been and gone. Because both are writes that claim the membership row, the
+    two possible orderings are "enqueued, then retired" and "fenced, then
+    refused". Neither leaves a sendable answer behind, while the retired row
+    prevents a later stage from adopting the rejoined membership.
 
-    An already-attempted row is exempt, and deliberately so. Its outcome is
-    unknown -- the homeserver may be holding it -- and refusing the retry
-    would strand it unacknowledged forever while leaving whatever it sent
-    visible. Only the frozen transaction ID can resolve that, by collapsing
-    the retry onto the same event.
+    An already-attempted row remains recoverable, and deliberately so. Its
+    outcome is unknown -- the homeserver may be holding it -- and refusing the
+    retry would strand it unacknowledged forever while leaving whatever it
+    sent visible. Same-device recovery can reuse the frozen transaction ID;
+    changed-device recovery first reconciles exact room history and then
+    follows the delivery type's explicit replay-or-retain policy.
 
     Settling the sources here rather than after the commit is what makes the
     handoff one event. A refusal settles nothing, because nothing durable
     would owe the answer afterwards; anything else settles every source the
     delivery accounts for, atomically with the row that now answers them.
     """
-    if not outbox.is_attempted(transaction, principal_id, delivery_id=delivery_id, stage=stage) and not (
-        _turn_membership_is_current(transaction, principal_id, turn_id=delivery_id, room_id=room_id)
-    ):
-        return None
+    admitted_owner = journal.admitted_membership_owner(transaction, principal_id, delivery_id)
+    attempted = outbox.is_attempted(
+        transaction,
+        principal_id,
+        delivery_id=delivery_id,
+        stage=stage,
+    )
+    if attempted:
+        ownership = outbox.delivery_ownership(
+            transaction,
+            principal_id,
+            delivery_id=delivery_id,
+            stage=stage,
+        )
+        if ownership is None:
+            msg = f"Attempted delivery {delivery_id!r}/{stage.value!r} has no outbox row"
+            raise RuntimeError(msg)
+        _stored_room_id, membership_epoch = ownership
+    elif admitted_owner is None:
+        active_epoch = claim_active_membership_epoch(
+            transaction,
+            principal_id,
+            room_id=room_id,
+        )
+        if active_epoch is None:
+            return None
+        membership_epoch = active_epoch
+    else:
+        admitted_room_id, admitted_epoch = admitted_owner
+        if admitted_room_id != room_id or not reads.claim_membership_epoch(
+            transaction,
+            principal_id,
+            room_id=room_id,
+            expected_membership_epoch=admitted_epoch,
+        ):
+            return None
+        membership_epoch = admitted_epoch
     transaction_id = outbox.enqueue(
         transaction,
         principal_id,
@@ -1120,10 +1243,13 @@ def _enqueue_matrix_delivery(
         stage=stage,
         event_type=event_type,
         room_id=room_id,
+        membership_epoch=membership_epoch,
         thread_id=thread_id,
         payload=payload,
         edits_event_id=edits_event_id,
     )
+    if transaction_id is None:
+        return None
     journal.settle_many(transaction, principal_id, settle_source_event_ids)
     return transaction_id
 

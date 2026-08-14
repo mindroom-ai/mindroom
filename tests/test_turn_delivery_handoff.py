@@ -820,6 +820,11 @@ class TestAFailedFinalEditLeavesOneOwner:
     ) -> None:
         """The notice stays the outbox's to deliver, and recovery delivers it once."""
         bot = _make_bot(tmp_path)
+        # Production records the authenticated device when the bot starts.
+        # This test constructs the runtime without login, but its recovery
+        # premise is specifically that the same device can safely reuse the
+        # frozen transaction ID.
+        bot._sending_device_id = bot.client.device_id
         await admit(journal(bot), text_event("$cause"))
         await adopt(bot, ["$cause"])
         homeserver = _RefusesTheFirstAttempts()

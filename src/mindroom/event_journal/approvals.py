@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 from . import approval_continuations, outbox, reads
 from .identity import decode_thread_id
-from .models import DeliveryStage
+from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage
 
 _DEFAULT_ROOM_CARD_LIMIT = 256
 logger = get_logger(__name__)
@@ -105,6 +105,7 @@ def _object_json(value: object, *, description: str) -> dict[str, Any]:
     if not isinstance(decoded, dict):
         msg = f"Stored {description} is not an object"
         raise TypeError(msg)
+    decoded.pop(DURABLE_DELIVERY_ID_KEY, None)
     return decoded
 
 
@@ -178,6 +179,7 @@ def reserve_deliveries(
             stage=DeliveryStage.INITIAL,
             event_type=card.event_type,
             room_id=continuation.room_id,
+            membership_epoch=membership_epoch,
             thread_id=continuation.thread_id,
             payload=card.payload,
             edits_event_id=None,
@@ -253,7 +255,7 @@ def resolve_continuation(
         f"""
         SELECT cards.delivery_id, cards.continuation_id, cards.continuation_generation,
                cards.tool_call_id, initial.event_type, initial.room_id, initial.thread_id,
-               initial.payload_json, initial.acknowledged_event_id
+               initial.payload_json, initial.acknowledged_event_id, initial.membership_epoch
         FROM approval_cards AS cards
         JOIN matrix_delivery_outbox AS initial
           ON initial.principal_id = cards.principal_id
@@ -360,6 +362,7 @@ def resolve_continuation(
         stage=DeliveryStage.FINAL,
         event_type=str(card["event_type"]),
         room_id=str(card["room_id"]),
+        membership_epoch=int(card["membership_epoch"]),
         thread_id=decode_thread_id(str(card["thread_id"])),
         payload=stored_resolution,
         edits_event_id=(None if card["acknowledged_event_id"] is None else str(card["acknowledged_event_id"])),
@@ -526,7 +529,7 @@ def expire_cards_for_departed_continuations(
         """
         SELECT cards.principal_id, cards.delivery_id, initial.event_type,
                initial.room_id, initial.thread_id, initial.payload_json,
-               initial.attempted, initial.acknowledged_event_id,
+               initial.attempted, initial.acknowledged_event_id, initial.membership_epoch,
                final.delivery_id AS final_delivery_id
         FROM approval_cards AS cards
         JOIN approval_continuations AS continuations
@@ -573,6 +576,7 @@ def expire_cards_for_departed_continuations(
             stage=DeliveryStage.FINAL,
             event_type=str(row["event_type"]),
             room_id=str(row["room_id"]),
+            membership_epoch=int(row["membership_epoch"]),
             thread_id=decode_thread_id(str(row["thread_id"])),
             payload=resolution,
             edits_event_id=None if row["acknowledged_event_id"] is None else str(row["acknowledged_event_id"]),
@@ -615,7 +619,9 @@ def fail_continuations_for_departed_card_owner(
         SELECT cards.delivery_id, cards.continuation_id, cards.continuation_generation,
                cards.tool_call_id, initial.event_type, initial.room_id, initial.thread_id,
                initial.payload_json, initial.attempted, initial.acknowledged_event_id,
-               membership.membership_epoch, final.delivery_id AS final_delivery_id
+               initial.membership_epoch AS delivery_membership_epoch,
+               membership.membership_epoch AS current_membership_epoch,
+               final.delivery_id AS final_delivery_id
         FROM approval_cards AS cards
         JOIN matrix_delivery_outbox AS initial
           ON initial.principal_id = cards.principal_id
@@ -640,12 +646,11 @@ def fail_continuations_for_departed_card_owner(
             _delete_unattempted_card_delivery(transaction, card_principal_id, delivery_id)
             continue
         if row["final_delivery_id"] is not None:
-            transaction.execute(
-                """
-                UPDATE approval_cards SET membership_epoch = ?
-                WHERE principal_id = ? AND delivery_id = ?
-                """,
-                (int(row["membership_epoch"]), card_principal_id, delivery_id),
+            _carry_card_delivery_to_membership(
+                transaction,
+                card_principal_id,
+                delivery_id,
+                membership_epoch=int(row["current_membership_epoch"]),
             )
             continue
         try:
@@ -660,18 +665,42 @@ def fail_continuations_for_departed_card_owner(
             stage=DeliveryStage.FINAL,
             event_type=str(row["event_type"]),
             room_id=str(row["room_id"]),
+            membership_epoch=int(row["delivery_membership_epoch"]),
             thread_id=decode_thread_id(str(row["thread_id"])),
             payload=resolution,
             edits_event_id=(None if row["acknowledged_event_id"] is None else str(row["acknowledged_event_id"])),
             edit_target_pending=row["acknowledged_event_id"] is None,
         )
-        transaction.execute(
-            """
-            UPDATE approval_cards SET membership_epoch = ?
-            WHERE principal_id = ? AND delivery_id = ?
-            """,
-            (int(row["membership_epoch"]), card_principal_id, delivery_id),
+        _carry_card_delivery_to_membership(
+            transaction,
+            card_principal_id,
+            delivery_id,
+            membership_epoch=int(row["current_membership_epoch"]),
         )
+
+
+def _carry_card_delivery_to_membership(
+    transaction: Transaction,
+    principal_id: str,
+    delivery_id: str,
+    *,
+    membership_epoch: int,
+) -> None:
+    """Transfer one card and its cleanup delivery to the membership that inherited it."""
+    transaction.execute(
+        """
+        UPDATE approval_cards SET membership_epoch = ?
+        WHERE principal_id = ? AND delivery_id = ?
+        """,
+        (membership_epoch, principal_id, delivery_id),
+    )
+    transaction.execute(
+        """
+        UPDATE matrix_delivery_outbox SET membership_epoch = ?
+        WHERE principal_id = ? AND delivery_id = ?
+        """,
+        (membership_epoch, principal_id, delivery_id),
+    )
 
 
 def _delete_unattempted_card_delivery(
@@ -679,7 +708,7 @@ def _delete_unattempted_card_delivery(
     principal_id: str,
     delivery_id: str,
 ) -> None:
-    """Retire a card and every stage that provably never reached Matrix."""
+    """Delete a card and every stage that provably never reached Matrix."""
     transaction.execute(
         "DELETE FROM approval_cards WHERE principal_id = ? AND delivery_id = ?",
         (principal_id, delivery_id),
@@ -904,6 +933,7 @@ def _card(row: Row) -> StoredApprovalCard | None:
     if not isinstance(content, dict):
         _log_unreadable_card(row)
         return None
+    content.pop(DURABLE_DELIVERY_ID_KEY, None)
     card: dict[str, Any] = {
         "type": str(row["event_type"]),
         "content": content,
@@ -951,4 +981,5 @@ def _resolution(stored: str | None) -> dict[str, Any] | None:
     if not isinstance(resolution, dict):
         msg = "Stored approval resolution is not an object"
         raise TypeError(msg)
+    resolution.pop(DURABLE_DELIVERY_ID_KEY, None)
     return resolution

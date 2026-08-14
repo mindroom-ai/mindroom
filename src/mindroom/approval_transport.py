@@ -10,7 +10,7 @@ import nio
 
 from mindroom import approval_manager
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.event_journal import DeliveryStage, unavailable_notice_delivery_id
+from mindroom.event_journal import DeliveryStage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     can_send_to_encrypted_room,
@@ -40,6 +40,15 @@ _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
 _STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION = 10
 _UNAVAILABLE_OWNER_SCAN_LIMIT = 100
 _UNAVAILABLE_NOTICE_APPROVAL_ID_KEY = "io.mindroom.approval_unavailable_id"
+
+
+def _approval_delivery_content(claimed: MatrixDelivery) -> dict[str, object]:
+    """Return the exact physical payload used to send or reconcile a delivery."""
+    content = dict(claimed.payload)
+    if claimed.edits_event_id is None:
+        return content
+    content.pop("thread_id", None)
+    return build_matrix_edit_content(claimed.edits_event_id, content)
 
 
 class _ApprovalTransportBot(Protocol):
@@ -252,21 +261,22 @@ class ApprovalMatrixTransport:
                 delivery_event_type=claimed.event_type,
             )
 
+        delivery_id = await store.enqueue_unavailable_approval_notice(
+            approval_id=continuation.approval_id,
+            room_id=continuation.room_id,
+            thread_id=continuation.thread_id,
+            payload=content,
+        )
+        if delivery_id is None:
+            return None
         try:
             delivered = await MatrixDeliveryWorker(
                 store=store,
                 send=send,
                 event_type="m.room.message",
-                resend_after_reconciliation_miss=False,
                 sending_device_id=self.transport_device_id(),
                 resolve_delivered=resolve_delivered,
-            ).deliver(
-                delivery_id=unavailable_notice_delivery_id(continuation.approval_id),
-                stage=DeliveryStage.FINAL,
-                room_id=continuation.room_id,
-                thread_id=continuation.thread_id,
-                payload=content,
-            )
+            ).flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
         except ToolApprovalTransportError:
             logger.warning(
                 "approval_unavailable_notice_send_failed",
@@ -366,15 +376,11 @@ class ApprovalMatrixTransport:
         bot = self.transport_bot(claimed.room_id)
         if bot is None or bot.client is None:
             raise ToolApprovalTransportError(DEFAULT_ROUTER_MANAGED_ROOM_REASON)
-        content = dict(claimed.payload)
-        if claimed.edits_event_id is not None:
-            content.pop("thread_id", None)
-            content = build_matrix_edit_content(claimed.edits_event_id, content)
         response = await send_room_event_result(
             bot.client,
             claimed.room_id,
             claimed.event_type,
-            content,
+            _approval_delivery_content(claimed),
             transaction_id=claimed.transaction_id,
             operation="send_approval_delivery",
         )
@@ -384,9 +390,7 @@ class ApprovalMatrixTransport:
         return str(response.event_id)
 
     async def resolve_approval_delivery(self, claimed: MatrixDelivery) -> str | None:
-        """Adopt a card found after device change; edit misses remain safely replayable."""
-        if claimed.edits_event_id is not None:
-            return None
+        """Adopt the exact card or terminal edit found after a device change."""
         bot = self.transport_bot(claimed.room_id)
         if bot is None or bot.client is None:
             return None
@@ -398,7 +402,7 @@ class ApprovalMatrixTransport:
             claimed.room_id,
             delivery_sender=sender,
             source_event_ids=(),
-            delivery_content=claimed.payload,
+            delivery_content=_approval_delivery_content(claimed),
             delivery_event_type=claimed.event_type,
         )
 

@@ -29,6 +29,7 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
 )
+from mindroom.event_journal import DepartureSource
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
@@ -121,7 +122,7 @@ def _gateway(
     tmp_path: Path,
     outbox: MatrixDeliveryView | None = None,
     *,
-    sending_device_id: str | None = None,
+    sending_device_id: str | None = "CURRENT-DEVICE",
     terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None,
     terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> DeliveryGateway:
@@ -221,6 +222,32 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outbox.acknowledged_projections == [()]
         gateway.deps.runtime.client.room_get_event.assert_not_awaited()
 
+    async def test_fake_outbox_stages_share_one_membership(self) -> None:
+        """The delivery double must reject a FINAL owned by a later membership."""
+        outbox = FakeOutbox()
+        assert (
+            await outbox.enqueue_matrix_delivery(
+                delivery_id="$cause",
+                stage=DeliveryStage.INITIAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "Thinking..."},
+            )
+            is not None
+        )
+        outbox.room_membership_epochs[_ROOM_ID] = 1
+
+        final = await outbox.enqueue_matrix_delivery(
+            delivery_id="$cause",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "answer"},
+        )
+
+        assert final is None
+        assert ("$cause", DeliveryStage.FINAL.value) not in outbox.rows
+
     async def test_interactive_prompt_is_frozen_in_the_terminal_matrix_payload(self, tmp_path: Path) -> None:
         """Projection ownership requires prompt metadata to cross Matrix with the answer."""
         outbox = FakeOutbox()
@@ -318,6 +345,42 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         projections = outbox.acknowledged_projections[0]
         assert tuple(projection.event_id for projection in projections) == ("$target", "$edit")
         assert projections[1].replaces_event_id == "$target"
+
+    async def test_departure_after_send_skips_observation_but_acknowledges_delivery(self, tmp_path: Path) -> None:
+        """Old-membership content settles without a stale Matrix projection read."""
+        outbox = FakeOutbox()
+        payload = {
+            "msgtype": "m.text",
+            "body": "Choose",
+            "io.mindroom.interactive": {
+                "creator_agent": "agent",
+                "option_labels": {"1": "Yes"},
+                "options": {"1": "yes"},
+                "question_text": "Choose?",
+                "source_event_id": "$cause",
+            },
+        }
+
+        async def send(_claimed: MatrixDelivery) -> str:
+            outbox.room_membership_epochs[_ROOM_ID] = 1
+            return "$sent"
+
+        gateway = _gateway(tmp_path, outbox)
+        delivery = gateway._response_delivery(send, handoff=None)
+
+        assert (
+            await delivery.deliver(
+                delivery_id="$cause",
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload=payload,
+            )
+            == "$sent"
+        )
+        gateway.deps.runtime.client.room_get_event.assert_not_awaited()
+        assert outbox.acknowledged_projections == [()]
+        assert outbox.rows["$cause", "final"].acknowledged_event_id == "$sent"
 
     async def test_an_undecryptable_edit_target_stays_unacknowledged(self, tmp_path: Path) -> None:
         """Ciphertext cannot supply the thread identity of an edit target."""
@@ -1881,6 +1944,263 @@ class TestGenericDeliveryDeviceChangePolicy:
         assert retained.acknowledged_event_id is None
         assert retained.sending_device_id == "OLD-DEVICE"
 
+    async def test_final_edit_is_adopted_instead_of_replayed_from_a_new_device(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A delayed duplicate edit could otherwise overwrite a newer replacement."""
+        assert (
+            await alice.enqueue_matrix_delivery(
+                delivery_id="turn-1",
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "* old answer"},
+                edits_event_id="$placeholder",
+            )
+            is not None
+        )
+        assert (
+            await alice.claim_matrix_delivery(
+                delivery_id="turn-1",
+                stage=DeliveryStage.FINAL,
+                sending_device_id="OLD-DEVICE",
+            )
+            is not None
+        )
+        send = AsyncMock(return_value="$duplicate-edit")
+        resolve = AsyncMock(return_value="$original-edit")
+        worker = MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            observe_delivered=ignore_delivered_projection,
+            sending_device_id="NEW-DEVICE",
+            resolve_delivered=resolve,
+        )
+
+        event_id = await worker.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        assert event_id == "$original-edit"
+        resolve.assert_awaited_once()
+        send.assert_not_awaited()
+
+    async def test_an_absent_response_edit_replays_from_a_new_device(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A response edit retains liveness when the prior device left no visible event."""
+        assert (
+            await alice.enqueue_matrix_delivery(
+                delivery_id="turn-1",
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "* old answer"},
+                edits_event_id="$placeholder",
+            )
+            is not None
+        )
+        assert (
+            await alice.claim_matrix_delivery(
+                delivery_id="turn-1",
+                stage=DeliveryStage.FINAL,
+                sending_device_id="OLD-DEVICE",
+            )
+            is not None
+        )
+        send = AsyncMock(return_value="$duplicate-edit")
+        resolve = AsyncMock(return_value=None)
+        worker = MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            observe_delivered=ignore_delivered_projection,
+            sending_device_id="NEW-DEVICE",
+            resolve_delivered=resolve,
+        )
+
+        assert await worker.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL) == "$duplicate-edit"
+        resolve.assert_awaited_once()
+        send.assert_awaited_once()
+        delivered = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert delivered is not None
+        assert delivered.acknowledged_event_id == "$duplicate-edit"
+        assert not delivered.retired
+
+    async def test_an_absent_terminal_approval_edit_replays_from_a_new_device(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A terminal edit is safe to replay after its exact prior event is absent."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            event_type="io.mindroom.tool_approval",
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"status": "approved"},
+            edits_event_id="$approval-card",
+        )
+        await alice.claim_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            sending_device_id="OLD-DEVICE",
+        )
+        send = AsyncMock(return_value="$duplicate-edit")
+        resolve = AsyncMock(return_value=None)
+        worker = MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            event_type="io.mindroom.tool_approval",
+            resend_after_reconciliation_miss=False,
+            sending_device_id="NEW-DEVICE",
+            resolve_delivered=resolve,
+        )
+
+        assert await worker.flush(delivery_id="approval-card-1", stage=DeliveryStage.FINAL) == "$duplicate-edit"
+        resolve.assert_awaited_once()
+        send.assert_awaited_once()
+        delivered = await alice.load_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+        )
+        assert delivered is not None
+        assert delivered.acknowledged_event_id == "$duplicate-edit"
+        assert not delivered.retired
+
+    async def test_a_stale_approval_edit_is_adopted_before_its_attempt_retires(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An old-membership edit already in Matrix remains terminal proof."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            event_type="io.mindroom.tool_approval",
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"status": "approved"},
+            edits_event_id="$approval-card",
+        )
+        await alice.claim_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            sending_device_id="OLD-DEVICE",
+        )
+        await alice.fence_departure(_ROOM_ID, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(_ROOM_ID)
+        send = AsyncMock(return_value="$duplicate-edit")
+        resolve = AsyncMock(return_value="$original-edit")
+        worker = MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            event_type="io.mindroom.tool_approval",
+            resend_after_reconciliation_miss=False,
+            sending_device_id="NEW-DEVICE",
+            resolve_delivered=resolve,
+        )
+
+        assert await worker.flush(delivery_id="approval-card-1", stage=DeliveryStage.FINAL) == "$original-edit"
+        send.assert_not_awaited()
+        adopted = await alice.load_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+        )
+        assert adopted is not None
+        assert adopted.acknowledged_event_id == "$original-edit"
+        assert not adopted.retired
+
+    async def test_stale_attempt_without_a_matrix_event_is_retired_instead_of_sent(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Recovery cannot make an old membership's first physical send after rejoin."""
+        assert (
+            await alice.enqueue_matrix_delivery(
+                delivery_id="turn-1",
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "old answer"},
+            )
+            is not None
+        )
+        assert (
+            await alice.claim_matrix_delivery(
+                delivery_id="turn-1",
+                stage=DeliveryStage.FINAL,
+                sending_device_id="DEVICE",
+            )
+            is not None
+        )
+        await alice.fence_departure(_ROOM_ID, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(_ROOM_ID)
+        send = AsyncMock(return_value="$stale-answer")
+        resolve = AsyncMock(return_value=None)
+        worker = MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            observe_delivered=ignore_delivered_projection,
+            sending_device_id="DEVICE",
+            resolve_delivered=resolve,
+        )
+
+        assert await worker.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL) is None
+        resolve.assert_awaited_once()
+        send.assert_not_awaited()
+        retired = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert retired is not None
+        assert retired.retired
+
+    async def test_a_send_that_finishes_after_retirement_binds_the_tombstone(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Recovery cannot erase ownership while the first Matrix send is in flight."""
+        assert (
+            await alice.enqueue_matrix_delivery(
+                delivery_id="turn-1",
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "old answer"},
+            )
+            is not None
+        )
+        send_started = asyncio.Event()
+        finish_send = asyncio.Event()
+
+        async def delayed_send(_claimed: MatrixDelivery) -> str:
+            send_started.set()
+            await finish_send.wait()
+            return "$late-answer"
+
+        live = MatrixDeliveryWorker(
+            store=alice,
+            send=delayed_send,
+            observe_delivered=ignore_delivered_projection,
+            sending_device_id="DEVICE",
+        )
+        sending = asyncio.create_task(live.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL))
+        await send_started.wait()
+        await alice.fence_departure(_ROOM_ID, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(_ROOM_ID)
+
+        recovery = MatrixDeliveryWorker(
+            store=alice,
+            send=AsyncMock(return_value="$duplicate"),
+            observe_delivered=ignore_delivered_projection,
+            sending_device_id="DEVICE",
+            resolve_delivered=AsyncMock(return_value=None),
+        )
+        assert await recovery.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL) is None
+
+        finish_send.set()
+        assert await sending == "$late-answer"
+        retired = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert retired is not None
+        assert retired.retired
+        assert retired.acknowledged_event_id == "$late-answer"
+
     @pytest.mark.parametrize("accepted_before_crash", [True, False], ids=["accepted", "history-miss"])
     async def test_router_recovery_never_duplicates_an_unavailable_notice_after_device_change(
         self,
@@ -1904,11 +2224,12 @@ class TestGenericDeliveryDeviceChangePolicy:
             thread_id=None,
             payload=payload,
         )
-        await alice.claim_matrix_delivery(
+        claimed = await alice.claim_matrix_delivery(
             delivery_id=delivery_id,
             stage=DeliveryStage.FINAL,
             sending_device_id="OLD-DEVICE",
         )
+        assert claimed is not None
         prior_notice = nio.Event.parse_event(
             {
                 "event_id": "$notice-old-device",
@@ -1916,7 +2237,7 @@ class TestGenericDeliveryDeviceChangePolicy:
                 "sender": _AGENT_USER_ID,
                 "origin_server_ts": 2_000,
                 "type": "m.room.message",
-                "content": payload,
+                "content": dict(claimed.payload),
             },
         )
         assert isinstance(prior_notice, nio.Event)
@@ -1937,16 +2258,129 @@ class TestGenericDeliveryDeviceChangePolicy:
 
         outcome = await gateway._response_delivery(send, handoff=None).recover()
 
-        assert sent == []
         recovered = await alice.load_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
         assert recovered is not None
         if accepted_before_crash:
+            assert sent == []
             assert outcome == RecoveryOutcome(recovered=1, failed=0)
             assert recovered.acknowledged_event_id == "$notice-old-device"
         else:
-            assert outcome == RecoveryOutcome(recovered=0, failed=1)
-            assert recovered.acknowledged_event_id is None
-            assert recovered.sending_device_id == "OLD-DEVICE"
+            assert len(sent) == 1
+            assert outcome == RecoveryOutcome(recovered=1, failed=0)
+            assert recovered.acknowledged_event_id == "$duplicate"
+
+    async def test_source_less_delivery_is_adopted_by_its_frozen_content(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A scheduled delivery has no reply source, but its exact marker is durable."""
+        assert (
+            await alice.enqueue_matrix_delivery(
+                delivery_id="scheduled-turn",
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "scheduled notice"},
+            )
+            is not None
+        )
+        claimed = await alice.claim_matrix_delivery(
+            delivery_id="scheduled-turn",
+            stage=DeliveryStage.FINAL,
+            sending_device_id="OLD-DEVICE",
+        )
+        assert claimed is not None
+        prior = nio.Event.parse_event(
+            {
+                "event_id": "$prior",
+                "room_id": _ROOM_ID,
+                "sender": _AGENT_USER_ID,
+                "origin_server_ts": 1_000,
+                "type": "m.room.message",
+                "content": dict(claimed.payload),
+            },
+        )
+        assert isinstance(prior, nio.Event)
+        gateway = _gateway(tmp_path, alice, sending_device_id="NEW-DEVICE")
+        gateway.deps.runtime.client.room_messages = AsyncMock(
+            return_value=nio.RoomMessagesResponse(
+                room_id=_ROOM_ID,
+                chunk=[prior],
+                start="start",
+                end=None,
+            ),
+        )
+        send = AsyncMock(return_value="$replacement")
+
+        outcome = await gateway._response_delivery(send, handoff=None).recover()
+
+        stored = await alice.load_matrix_delivery(delivery_id="scheduled-turn", stage=DeliveryStage.FINAL)
+        assert outcome == RecoveryOutcome(recovered=1, failed=0)
+        send.assert_not_awaited()
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$prior"
+        gateway.deps.runtime.client.room_messages.assert_awaited_once()
+
+    async def test_final_marker_does_not_adopt_the_initial_placeholder(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """The exact stage marker outranks a placeholder's shared logical identity."""
+        assert (
+            await alice.enqueue_matrix_delivery(
+                delivery_id="$source",
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "done"},
+            )
+            is not None
+        )
+        claimed = await alice.claim_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.FINAL,
+            sending_device_id="OLD-DEVICE",
+        )
+        assert claimed is not None
+        placeholder = nio.Event.parse_event(
+            {
+                "event_id": "$placeholder",
+                "room_id": _ROOM_ID,
+                "sender": _AGENT_USER_ID,
+                "origin_server_ts": 1_000,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "Thinking...",
+                    "io.mindroom.delivery_id": {
+                        "principal": "agent@alice",
+                        "delivery_id": "$source",
+                        "stage": "initial",
+                    },
+                },
+            },
+        )
+        assert isinstance(placeholder, nio.Event)
+        gateway = _gateway(tmp_path, alice, sending_device_id="NEW-DEVICE")
+        gateway.deps.runtime.client.room_messages = AsyncMock(
+            return_value=nio.RoomMessagesResponse(
+                room_id=_ROOM_ID,
+                chunk=[placeholder],
+                start="start",
+                end=None,
+            ),
+        )
+        send = AsyncMock(return_value="$replacement")
+
+        outcome = await gateway._response_delivery(send, handoff=None).recover()
+
+        stored = await alice.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+        assert outcome == RecoveryOutcome(recovered=1, failed=0)
+        send.assert_awaited_once()
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$replacement"
 
 
 class TestTurnDeliverySerialization:

@@ -64,8 +64,8 @@ _TABLES = (
         source_json TEXT NOT NULL,
         semantic_consumer TEXT,
         -- The membership this event was admitted under, which is what refuses
-        -- an answer written for a conversation the bot has since left. Read by
-        -- `admitted_membership_epoch` and by nothing else.
+        -- an answer written for a conversation the bot has since left. The
+        -- delivery enqueue transaction derives its immutable owner here.
         membership_epoch BIGINT NOT NULL,
         state TEXT NOT NULL CHECK (state IN ('pending', 'settled')),
         UNIQUE (principal_id, event_id)
@@ -229,6 +229,7 @@ _TABLES = (
         stage TEXT NOT NULL CHECK (stage IN ('initial', 'final')),
         event_type TEXT NOT NULL,
         room_id TEXT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
         thread_id TEXT NOT NULL,
         transaction_id TEXT NOT NULL,
         payload_json TEXT NOT NULL,
@@ -237,6 +238,7 @@ _TABLES = (
         -- Its claim waits until INITIAL acknowledgement fills the target.
         edit_target_pending INTEGER NOT NULL DEFAULT 0,
         attempted INTEGER NOT NULL DEFAULT 0,
+        retired INTEGER NOT NULL DEFAULT 0,
         -- The device whose transaction ID the homeserver may already hold. A
         -- transaction ID deduplicates within one device, so a row attempted by
         -- a device this process is no longer logged in as carries an ID that
@@ -395,7 +397,7 @@ _INDEXES = (
     ON matrix_delivery_outbox (
         principal_id, event_type, created_at_ns, delivery_id/*bytes*/, stage/*bytes*/
     )
-    WHERE acknowledged_event_id IS NULL
+    WHERE acknowledged_event_id IS NULL AND retired = 0
     """,
     """
     CREATE INDEX IF NOT EXISTS matrix_delivery_outbox_room_scan
