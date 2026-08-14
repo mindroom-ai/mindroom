@@ -260,16 +260,20 @@ def _advance_membership_epoch(
     # A delivery that was never attempted was written for the conversation this
     # bot was in before it left, and nothing outside this process has seen it.
     # Sending it now would answer the previous membership inside the new one.
+    # Keep its identity as a retired tombstone: a source-less stream may have
+    # enqueued INITIAL just before this fence and still be running, and deleting
+    # the row would let FINAL adopt the rejoined membership.
     #
     # An attempted delivery is a different object entirely, and deleting it was
     # the mistake worth naming. Its outcome is unknown: the homeserver may hold
     # it already. Dropping the row frees the turn to run again and post a second
     # answer, and re-deriving a fresh transaction for that answer guarantees the
-    # duplicate rather than preventing it. Keeping the row keeps the frozen
-    # payload and the transaction that goes with it, so the only thing a retry
-    # can do is present the same transaction again and collapse onto the same
-    # event. That converges on exactly one visible answer whether or not the
-    # first attempt landed, which is the property this table exists for.
+    # duplicate rather than preventing it. Keeping the row preserves the exact
+    # payload, transaction, and sending-device facts needed for recovery:
+    # same-device attempts reuse the transaction; changed-device attempts
+    # reconcile exact room history before their delivery-specific replay or
+    # retain decision. That durable identity is the property this table exists
+    # for.
     # A terminal acknowledgement may have committed just before a crash that
     # prevented its approval-domain row from being retired. Preserve the click
     # tombstone before either side of the cross-principal relationship is
@@ -287,7 +291,7 @@ def _advance_membership_epoch(
     )
     transaction.execute(
         """
-        DELETE FROM matrix_delivery_outbox AS delivery
+        UPDATE matrix_delivery_outbox AS delivery SET retired = 1
         WHERE principal_id = ? AND room_id = ? AND acknowledged_event_id IS NULL AND attempted = 0
           AND NOT EXISTS (
               SELECT 1 FROM approval_cards AS cards
@@ -914,12 +918,12 @@ def admitted_thread_id(
     return True, decode_thread_id(row["thread_id"])
 
 
-def admitted_membership_epoch(
+def admitted_membership_owner(
     transaction: Transaction,
     principal_id: str,
     event_id: str,
-) -> int | None:
-    """Return the membership one event was admitted under, or nothing.
+) -> tuple[str, int] | None:
+    """Return the room and membership that admitted one event, or nothing.
 
     Nothing means no membership: the caller named something the journal never
     admitted -- a scheduled task, a hook-authored turn -- and there is no
@@ -929,10 +933,10 @@ def admitted_membership_epoch(
     for as long as the turn it authorized can still be running.
     """
     row = transaction.fetchone(
-        "SELECT membership_epoch FROM journal_events WHERE principal_id = ? AND event_id = ?",
+        "SELECT room_id, membership_epoch FROM journal_events WHERE principal_id = ? AND event_id = ?",
         (principal_id, event_id),
     )
-    return None if row is None else int(row["membership_epoch"])
+    return None if row is None else (str(row["room_id"]), int(row["membership_epoch"]))
 
 
 def pending(

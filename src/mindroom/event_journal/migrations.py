@@ -2,21 +2,30 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+from . import outbox
+from .models import DeliveryStage
 
 if TYPE_CHECKING:
     from .backend import Transaction
 
 _LEGACY_APPROVAL_EXPIRY_REASON = "Tool approval request expired during delivery upgrade."
+_LEGACY_RESPONSE_OUTBOX = "response_outbox_legacy_delivery"
 
 
-def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: bool) -> bool:
-    """Rename legacy tables before current DDL is installed.
+@dataclass(frozen=True, slots=True)
+class _MatrixDeliveryMigration:
+    """Legacy tables current DDL must consume after creating their replacements."""
 
-    Returns whether approval-card rows must be copied after the new tables
-    exist. The caller runs this and ``finish_matrix_delivery_migration`` in the
-    same schema transaction, so no process can observe a half-migrated owner.
-    """
+    migrate_approvals: bool
+    migrate_responses: bool
+
+
+def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: bool) -> _MatrixDeliveryMigration:
+    """Move released legacy tables aside before current DDL is installed."""
     if _table_exists(transaction, "approval_continuation_calls", postgres=postgres) and not _column_exists(
         transaction,
         "approval_continuation_calls",
@@ -26,25 +35,33 @@ def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: boo
         transaction.execute(
             "ALTER TABLE approval_continuation_calls ADD COLUMN human_approval_required BOOLEAN",
         )
-    if _table_exists(transaction, "response_outbox", postgres=postgres):
-        transaction.execute("ALTER TABLE response_outbox RENAME TO matrix_delivery_outbox")
-        transaction.execute("ALTER TABLE matrix_delivery_outbox RENAME COLUMN turn_id TO delivery_id")
+    if _table_exists(transaction, "matrix_delivery_outbox", postgres=postgres) and (
+        not _column_exists(transaction, "matrix_delivery_outbox", "membership_epoch", postgres=postgres)
+        or not _column_exists(transaction, "matrix_delivery_outbox", "retired", postgres=postgres)
+    ):
+        msg = (
+            "The generic Matrix delivery schema predates membership fencing and cannot prove which room "
+            "membership owns its existing deliveries. Reset the event journal before restarting."
+        )
+        raise RuntimeError(msg)
+    migrate_responses = _table_exists(transaction, "response_outbox", postgres=postgres)
+    if migrate_responses:
         transaction.execute("DROP INDEX IF EXISTS response_outbox_unacknowledged_scan")
-        transaction.execute(
-            "ALTER TABLE matrix_delivery_outbox ADD COLUMN event_type TEXT NOT NULL DEFAULT 'm.room.message'",
-        )
-        transaction.execute(
-            "ALTER TABLE matrix_delivery_outbox ADD COLUMN edit_target_pending INTEGER NOT NULL DEFAULT 0",
-        )
-    legacy_approvals = _column_exists(transaction, "approval_cards", "transaction_id", postgres=postgres)
-    if legacy_approvals:
+        transaction.execute(f"ALTER TABLE response_outbox RENAME TO {_LEGACY_RESPONSE_OUTBOX}")
+    migrate_approvals = _column_exists(transaction, "approval_cards", "transaction_id", postgres=postgres)
+    if migrate_approvals:
         transaction.execute("ALTER TABLE approval_cards RENAME TO approval_cards_legacy_delivery")
-    return legacy_approvals
+    return _MatrixDeliveryMigration(
+        migrate_approvals=migrate_approvals,
+        migrate_responses=migrate_responses,
+    )
 
 
-def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approvals: bool) -> None:
-    """Expire pre-unification approvals without retaining a second delivery protocol."""
-    if not migrate_approvals:
+def finish_matrix_delivery_migration(transaction: Transaction, *, migration: _MatrixDeliveryMigration) -> None:
+    """Move released delivery facts into the final generic ownership schema."""
+    if migration.migrate_responses:
+        _migrate_response_outbox(transaction)
+    if not migration.migrate_approvals:
         return
     transaction.execute(
         """
@@ -71,6 +88,86 @@ def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approv
         """,
     )
     transaction.execute("DROP TABLE approval_cards_legacy_delivery")
+
+
+def _migrate_response_outbox(transaction: Transaction) -> None:
+    """Copy the released response outbox directly into the final generic table."""
+    ambiguous = transaction.fetchone(
+        f"""
+        SELECT turn_id, stage FROM {_LEGACY_RESPONSE_OUTBOX}
+        WHERE attempted = 1 AND acknowledged_event_id IS NULL LIMIT 1
+        """,  # noqa: S608 - fixed private migration table
+    )
+    if ambiguous is not None:
+        msg = (
+            "Cannot upgrade attempted Matrix delivery "
+            f"{ambiguous['turn_id']!r}/{ambiguous['stage']!r}: the legacy payload has no stable "
+            "delivery marker, so its visible event cannot be proven. Reset the event journal before restarting."
+        )
+        raise RuntimeError(msg)
+
+    rows = transaction.fetchall(
+        f"SELECT * FROM {_LEGACY_RESPONSE_OUTBOX}",  # noqa: S608 - fixed private migration table
+    )
+    for row in rows:
+        principal_id = str(row["principal_id"])
+        delivery_id = str(row["turn_id"])
+        stage = DeliveryStage(str(row["stage"]))
+        room_id = str(row["room_id"])
+        event = transaction.fetchone(
+            """
+            SELECT membership_epoch FROM journal_events
+            WHERE principal_id = ? AND event_id = ? AND room_id = ?
+            """,
+            (principal_id, delivery_id, room_id),
+        )
+        acknowledged_event_id = row["acknowledged_event_id"]
+        if event is None and acknowledged_event_id is None:
+            continue
+        membership_epoch = 0 if event is None else int(event["membership_epoch"])
+        retired = int(event is None)
+        payload_json = str(row["payload_json"])
+        if event is not None:
+            payload = _object_json(payload_json)
+            if payload is None:
+                msg = f"Matrix delivery {delivery_id!r}/{stage.value!r} has a non-object payload"
+                raise RuntimeError(msg)
+            payload_json = outbox.delivery_payload_json(principal_id, delivery_id, stage, payload)
+        transaction.execute(
+            """
+            INSERT INTO matrix_delivery_outbox (
+                principal_id, delivery_id, stage, event_type, room_id, membership_epoch,
+                thread_id, transaction_id, payload_json, edits_event_id,
+                edit_target_pending, attempted, retired, sending_device_id,
+                acknowledged_event_id, created_at_ns
+            ) VALUES (?, ?, ?, 'm.room.message', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+            """,
+            (
+                principal_id,
+                delivery_id,
+                stage.value,
+                room_id,
+                membership_epoch,
+                str(row["thread_id"]),
+                str(row["transaction_id"]),
+                payload_json,
+                row["edits_event_id"],
+                int(row["attempted"]),
+                retired,
+                row["sending_device_id"],
+                acknowledged_event_id,
+                int(row["created_at_ns"]),
+            ),
+        )
+    transaction.execute(f"DROP TABLE {_LEGACY_RESPONSE_OUTBOX}")
+
+
+def _object_json(value: object) -> dict[str, Any] | None:
+    try:
+        decoded = json.loads(str(value))
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
 
 
 def _table_exists(transaction: Transaction, table: str, *, postgres: bool) -> bool:

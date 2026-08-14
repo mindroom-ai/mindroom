@@ -54,13 +54,11 @@ from mindroom.matrix.client_delivery import (
     send_message_outcome,
     send_message_result,
 )
-from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.room_history_reads import (
     find_outbox_delivery_event_id_via_room_messages,
-    find_response_event_ids_via_room_messages,
 )
 from mindroom.matrix_delivery import (
     DeliveryStage,
@@ -724,6 +722,7 @@ class DeliveryGateway:
             thread_id=thread_root(content),
             sender=event.sender,
             origin_server_ts=timestamp,
+            transaction_id=event.transaction_id if isinstance(event.transaction_id, str) else None,
             content=content,
             replaces_event_id=replacement_target(content),
             redacts_event_id=None,
@@ -796,64 +795,19 @@ class DeliveryGateway:
         )
 
     async def _delivered_under_a_previous_device(self, claimed: MatrixDelivery) -> str | None:
-        """Return the answer an earlier device already put in the room, if it did.
-
-        Reached only when the frozen transaction ID has stopped being proof,
-        which is a re-login between the attempt and the retry. The room itself
-        is then the only witness, so it is read the same way replayed turns
-        read it: find a message from this bot replying to the sources this turn
-        answers.
-
-        The turn's sources come from the durable ledger rather than from
-        anything this process remembers, because the process that made the
-        first attempt is gone. A turn the ledger has never heard of resolves to
-        its own anchor event, which is the right question for the uncoalesced
-        case and the only one available for the rest.
-
-        Ordinary answers match their exact source relation. A standalone
-        delivery that replies outside the turn -- such as an unavailable-owner
-        notice -- instead matches its exact frozen payload. A miss in that
-        second path remains unresolved rather than authorizing a blind resend.
-        """
+        """Return the exact marker-bearing event an earlier device delivered."""
         client = self._client()
         response_sender = client.user_id
         if not response_sender:
             return None
-        source_event_ids = self.deps.turn_handoff.sources_for_turn(claimed.delivery_id)
-        reply_to_event_id = EventInfo.from_event(
-            {"type": claimed.event_type, "content": dict(claimed.payload)},
-        ).reply_to_event_id
-        if reply_to_event_id is not None and reply_to_event_id not in source_event_ids:
-            delivered = await find_outbox_delivery_event_id_via_room_messages(
-                client,
-                claimed.room_id,
-                delivery_sender=response_sender,
-                source_event_ids=(reply_to_event_id,),
-                delivery_content=claimed.payload,
-                delivery_event_type=claimed.event_type,
-            )
-            if delivered is None:
-                msg = f"Exact Matrix delivery {claimed.delivery_id!r} was not found, so its absence is unproven"
-                raise RuntimeError(msg)
-            return delivered
-        delivered = await find_response_event_ids_via_room_messages(
+        return await find_outbox_delivery_event_id_via_room_messages(
             client,
             claimed.room_id,
-            response_sender=response_sender,
-            source_event_ids=source_event_ids,
+            delivery_sender=response_sender,
+            source_event_ids=(),
+            delivery_content=claimed.payload,
+            delivery_event_type=claimed.event_type,
         )
-        if len(delivered) > 1:
-            # Two visible answers to the same sources is the duplicate this
-            # lookup exists to prevent, already committed. Adopting one at
-            # random would bind every later edit to a coin flip, so the row
-            # stays unacknowledged and a human-visible error is raised rather
-            # than a third answer sent.
-            msg = (
-                f"Turn {claimed.delivery_id!r} has {len(delivered)} visible answers in {claimed.room_id}, "
-                f"so no single one can be adopted after the sending device changed"
-            )
-            raise RuntimeError(msg)
-        return next(iter(delivered), None)
 
     async def recover_deliveries(self) -> RecoveryOutcome:
         """Resend every delivery whose Matrix outcome this process cannot know.

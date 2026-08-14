@@ -55,6 +55,7 @@ The decision remains in the exact-call continuation ledger, the terminal edit is
 During the delivery-outbox schema upgrade, already-decided legacy calls keep their first decision and undecided calls expire atomically.
 Known card event IDs are tombstoned so every late click remains inert.
 All legacy approval delivery debt is dropped because its Matrix outcome cannot be reconciled safely without retaining the removed delivery protocol.
+An existing generic outbox without membership and retirement columns is rejected at startup with reset guidance because its rows lack the ownership facts the current schema requires.
 
 ## Sidecar previews are never stored as bodies
 
@@ -114,9 +115,23 @@ Journal rows survive the fence on purpose, because they are the proof that an ev
 
 Turn-backed rows still pending are settled as intentionally ignored, since their answers would be refused by the epoch check forever and leaving them pending would replay the model run on every recovery pass.
 
-Unattempted outbox rows for the room are deleted, because they answer a conversation the bot has left and nothing outside the process has seen them.
+Unattempted non-card outbox rows for the room are retired, because they answer a conversation the bot has left and must never be sent after rejoin.
 
-An attempted row is kept instead: its outcome is unknown, and only presenting the same frozen transaction again can converge on one visible answer rather than posting a second.
+An unattempted approval card is instead deleted with its provably invisible delivery stages, while an attempted visible card follows the approval cleanup policy below.
+
+The retired row remains as the delivery identity tombstone, so a source-less multi-stage turn cannot enqueue `INITIAL` before departure and let `FINAL` adopt the later membership.
+
+An attempted row is kept instead because its outcome is unknown and its immutable payload, transaction, and sending-device facts are required for exact recovery.
+
+Same-device recovery reuses the frozen transaction, while changed-device recovery first reconciles room history and then either replays an ordinary response or retains actionable approval debt.
+
+When a visible approval card deliberately survives a router departure, its card row and both delivery stages atomically transfer to the successor membership so the already-decided terminal edit remains recoverable.
+
+The actionable root card is retained after an inconclusive changed-device scan, while its immutable terminal edit may be replayed because it cannot create another approval action.
+
+Old-membership recovery never sends and retires the row only after exact reconciliation proves its physical event absent.
+
+Every outbox row freezes the membership epoch that authorized it, and acknowledgement projects its Matrix event only while that exact membership remains current.
 
 One departure reaches the bot twice, locally and again in the sync response that reports it, and both must fence exactly once.
 

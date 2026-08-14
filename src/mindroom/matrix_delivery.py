@@ -157,7 +157,7 @@ class MatrixDeliveryWorker:
         disagree forever.
 
         Nothing means the delivery must not become visible: either the store
-        refused the intent, the fence deleted the row between recording it and
+        refused the intent, the row was retired between recording it and
         claiming it, or a FINAL already superseded an INITIAL. None is a
         failure to report.
 
@@ -271,12 +271,10 @@ class MatrixDeliveryWorker:
         for actionable events instead retain the debt when a miss cannot prove
         the earlier event absent.
 
-        An edit is exempt. A second ``m.replace`` carrying identical content
-        resolves to the same visible message as the first, so the duplicate a
-        stale transaction ID admits is not one anybody can see.
+        Edits follow the same rule. A delayed duplicate edit can arrive after
+        a newer replacement and overwrite it, so recovery must adopt the first
+        physical edit instead of sending another.
         """
-        if claimed.edits_event_id is not None:
-            return True
         if not claimed.attempted:
             return True
         if claimed.sending_device_id is None or self.sending_device_id is None:
@@ -286,8 +284,8 @@ class MatrixDeliveryWorker:
     async def flush(self, *, delivery_id: str, stage: DeliveryStage) -> str | None:
         """Send one enqueued delivery, or resend the identical one.
 
-        Nothing means the row is gone behind a membership fence, or this is an
-        INITIAL a FINAL already superseded.
+        Nothing means the row was retired, or this is an INITIAL a FINAL
+        already superseded.
 
         Between the claim and the send sits the one question the outbox cannot
         answer from its own state: is the frozen transaction ID still proof
@@ -308,14 +306,12 @@ class MatrixDeliveryWorker:
             sending_device_id=self.sending_device_id,
         )
         if claimed is None:
-            blocked_final = (
-                stage is DeliveryStage.FINAL
-                and await self.store.load_matrix_delivery(
-                    delivery_id=delivery_id,
-                    stage=stage,
-                )
-                is not None
+            stored = (
+                await self.store.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
+                if stage is DeliveryStage.FINAL
+                else None
             )
+            blocked_final = stage is DeliveryStage.FINAL and stored is not None and not stored.retired
             logger.info(
                 "matrix_delivery_stage_blocked" if blocked_final else "matrix_delivery_row_withdrawn",
                 delivery_id=delivery_id,
@@ -324,10 +320,21 @@ class MatrixDeliveryWorker:
             return _FlushOutcome(event_id=None, retry_required=blocked_final)
         if claimed.acknowledged_event_id is not None:
             return _FlushOutcome(event_id=claimed.acknowledged_event_id)
+        current_epoch = await self.store.membership_epoch(claimed.room_id)
+        if claimed.membership_epoch != current_epoch:
+            return await self._reconcile_stale_delivery(claimed)
+        return await self._flush_current_delivery(claimed)
+
+    async def _flush_current_delivery(self, claimed: MatrixDelivery) -> _FlushOutcome:
+        """Reconcile or send one delivery owned by the current membership."""
         if not self._transaction_id_still_deduplicates(claimed):
-            already_delivered = await self._delivered_before_device_changed(claimed)
+            already_delivered = await self._resolve_delivered_event(claimed)
             if already_delivered is not None:
                 return await self._acknowledge(claimed, already_delivered)
+            # An actionable root card must not be duplicated after an
+            # inconclusive bounded scan. Its terminal edit is different: the
+            # exact decision is already durable, so replaying the identical
+            # replacement preserves cleanup liveness without another action.
             if not self.resend_after_reconciliation_miss and claimed.edits_event_id is None:
                 return _FlushOutcome(event_id=None, retry_required=True)
         # Only now, with a send actually about to happen. Writing this at claim
@@ -336,6 +343,26 @@ class MatrixDeliveryWorker:
         # device, and the next pass would see its own marker, skip the lookup
         # and post the answer twice.
         return await self._complete_send_across_cancellation(claimed)
+
+    async def _reconcile_stale_delivery(self, claimed: MatrixDelivery) -> _FlushOutcome:
+        """Adopt or retire an old membership's attempt without sending it now."""
+        if self.resolve_delivered is None:
+            await self._resolve_delivered_event(claimed)
+            return _FlushOutcome(event_id=None, retry_required=True)
+        already_delivered = await self._resolve_delivered_event(claimed)
+        if already_delivered is not None:
+            return await self._acknowledge(claimed, already_delivered)
+        return await self._retire_delivery(claimed)
+
+    async def _retire_delivery(self, claimed: MatrixDelivery) -> _FlushOutcome:
+        """Stop retrying one obsolete attempt while retaining its identity."""
+        acknowledged_event_id = await self.store.retire_matrix_delivery(
+            delivery_id=claimed.delivery_id,
+            stage=claimed.stage,
+            room_id=claimed.room_id,
+            membership_epoch=claimed.membership_epoch,
+        )
+        return _FlushOutcome(event_id=acknowledged_event_id)
 
     async def _complete_send_across_cancellation(self, claimed: MatrixDelivery) -> _FlushOutcome:
         """Retain a completed outcome while delaying cancellation until post-lock work."""
@@ -395,9 +422,7 @@ class MatrixDeliveryWorker:
         record end up naming different events even though the acknowledgement
         itself was guarded.
         """
-        delivered_projections = (
-            await self.observe_delivered(claimed, event_id) if self.observe_delivered is not None else ()
-        )
+        delivered_projections = await self._delivered_projections(claimed, event_id)
         terminal_response_event_id = claimed.edits_event_id or event_id
         acknowledged = await self.store.acknowledge_matrix_delivery(
             delivery_id=claimed.delivery_id,
@@ -418,6 +443,21 @@ class MatrixDeliveryWorker:
             terminal_response_event_id=terminal_response_event_id if bound_terminal else None,
             publish_committed_terminal=bound_terminal,
         )
+
+    async def _delivered_projections(
+        self,
+        claimed: MatrixDelivery,
+        event_id: str,
+    ) -> tuple[ProjectedEvent, ...]:
+        """Avoid Matrix reads once this delivery's membership is already stale."""
+        if self.observe_delivered is None:
+            return ()
+        # This is only an I/O short-circuit. The acknowledgement transaction
+        # reclaims the membership row and remains authoritative if departure
+        # races this read.
+        if claimed.membership_epoch != await self.store.membership_epoch(claimed.room_id):
+            return ()
+        return await self.observe_delivered(claimed, event_id)
 
     async def _finish_flush(self, delivery_id: str, outcome: _FlushOutcome) -> str | None:
         """Run post-lock bookkeeping and return the visible event."""
@@ -442,8 +482,8 @@ class MatrixDeliveryWorker:
             return None
         return self.terminal_turn_for(delivery_id, event_id)
 
-    async def _delivered_before_device_changed(self, claimed: MatrixDelivery) -> str | None:
-        """Return the event a previous device's attempt left in the room, if any.
+    async def _resolve_delivered_event(self, claimed: MatrixDelivery) -> str | None:
+        """Return the event an earlier attempt left in the room, if any.
 
         Failing to find one is not the same as there not being one, and the
         difference decides between a duplicate and a lost answer. Both are bad;
@@ -458,7 +498,7 @@ class MatrixDeliveryWorker:
         """
         if self.resolve_delivered is None:
             logger.warning(
-                "matrix_delivery_resend_unverified",
+                "matrix_delivery_reconciliation_unavailable",
                 delivery_id=claimed.delivery_id,
                 stage=claimed.stage.value,
                 room_id=claimed.room_id,
@@ -468,7 +508,7 @@ class MatrixDeliveryWorker:
             return None
         already_delivered = await self.resolve_delivered(claimed)
         logger.info(
-            "matrix_delivery_device_changed",
+            "matrix_delivery_attempt_reconciled",
             delivery_id=claimed.delivery_id,
             stage=claimed.stage.value,
             room_id=claimed.room_id,
@@ -479,7 +519,7 @@ class MatrixDeliveryWorker:
         return already_delivered
 
     async def recover(self) -> RecoveryOutcome:
-        """Resend every delivery whose Matrix outcome is unknown.
+        """Reconcile every delivery whose Matrix outcome is unknown.
 
         A delivery the homeserver already accepted is resent under the same
         transaction ID and collapses back to the same event, so recovery
@@ -541,9 +581,8 @@ class MatrixDeliveryWorker:
                     if outcome.retry_required:
                         failed_deliveries.add((delivery.delivery_id, delivery.stage))
                         continue
-                    # The row went away behind a membership fence, or a
-                    # FINAL superseded this INITIAL. Nothing is owed and
-                    # nothing failed.
+                    # The row was retired, or a FINAL superseded this INITIAL.
+                    # Nothing is owed and nothing failed.
                     continue
                 recovered += 1
 

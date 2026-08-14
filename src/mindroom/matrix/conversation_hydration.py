@@ -232,6 +232,7 @@ def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -
             content=content,
             replaces_event_id=None,
             redacts_event_id=redacts,
+            transaction_id=event.transaction_id,
         )
     if not content or event.source.get("type") != "m.room.message":
         return None
@@ -244,6 +245,7 @@ def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -
         content=content,
         replaces_event_id=replacement_target(content),
         redacts_event_id=None,
+        transaction_id=event.transaction_id,
     )
     if is_transport_progress_revision(projected, self_sender=self_sender):
         return None
@@ -361,6 +363,8 @@ class _Revision:
 
     event_id: str
     origin_server_ts: int
+    sender: str
+    transaction_id: str | None
     content: Mapping[str, object]
 
 
@@ -376,6 +380,8 @@ def _reduce_current_revision(
     winner = _Revision(
         event_id=original.event_id,
         origin_server_ts=original.origin_server_ts,
+        sender=original.sender,
+        transaction_id=original.transaction_id,
         content=visible_content(original.content),
     )
     for relation in relations:
@@ -391,6 +397,8 @@ def _reduce_current_revision(
         winner = _Revision(
             event_id=relation.event_id,
             origin_server_ts=relation.origin_server_ts,
+            sender=relation.sender,
+            transaction_id=relation.transaction_id,
             content=visible_content(relation.content),
         )
     return winner
@@ -1083,6 +1091,8 @@ class ConversationHydrator:
             request,
             revision_event_id=revision.event_id,
             revision_ts=revision.origin_server_ts,
+            revision_sender=revision.sender,
+            revision_transaction_id=revision.transaction_id,
             content=content,
         )
 
