@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
@@ -18,7 +19,7 @@ from mindroom.orchestration.config_updates import (
 from mindroom.orchestration.runtime import cancel_logged_task, create_logged_task
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from pathlib import Path
 
     from mindroom.bot import AgentBot, TeamBot
@@ -250,6 +251,16 @@ class ConfigReloadLifecycle:
             await operation()
         finally:
             self.response_admission_gate.reopen()
+
+    @asynccontextmanager
+    async def startup_publication_admission(self) -> AsyncIterator[None]:
+        """Serialize startup publication with every runtime replacement."""
+        async with self._response_admission_apply_lock:
+            self.response_admission_gate.close()
+            try:
+                yield
+            finally:
+                self.response_admission_gate.reopen()
 
     async def apply_with_response_admission(
         self,

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -38,6 +39,8 @@ class TestScheduledTaskRestoration:
 
     @staticmethod
     def _install_runtime_support(bot: AgentBot) -> AgentBot:
+        if bot.agent_name == ROUTER_AGENT_NAME:
+            bot._reply_membership_sync = AgentReplyMembershipSync(bot._runtime_view.agent_reply_memberships)
         return install_runtime_journal_support(bot)
 
     @pytest.mark.asyncio

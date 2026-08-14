@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.bot import TeamBot, create_bot_for_entity
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -24,6 +26,12 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.identity_helpers import persist_entity_accounts
+
+
+def _router_membership_dependencies() -> tuple[AgentReplyMembershipIndex, AgentReplyMembershipSync]:
+    """Return one consistent shared index and router sync owner for factory tests."""
+    memberships = AgentReplyMembershipIndex()
+    return memberships, AgentReplyMembershipSync(memberships)
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -94,12 +102,15 @@ async def test_router_gets_all_configured_rooms(
     )
 
     # Create the router bot
+    memberships, membership_sync = _router_membership_dependencies()
     router_bot = create_bot_for_entity(
         ROUTER_AGENT_NAME,
         router_user,
         config_with_rooms,
         runtime_paths_for(config_with_rooms),
         tmp_path,
+        agent_reply_memberships=memberships,
+        agent_reply_membership_sync=membership_sync,
     )
 
     # Check that the router has all rooms
@@ -238,12 +249,15 @@ async def test_router_joins_rooms_on_start(
     )
 
     # Create and configure the router bot
+    memberships, membership_sync = _router_membership_dependencies()
     router_bot = create_bot_for_entity(
         ROUTER_AGENT_NAME,
         router_user,
         config_with_rooms,
         runtime_paths_for(config_with_rooms),
         tmp_path,
+        agent_reply_memberships=memberships,
+        agent_reply_membership_sync=membership_sync,
     )
 
     # Mock the client

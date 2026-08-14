@@ -18,6 +18,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, _classic_sync_rebuild_backoff_seconds
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -1291,7 +1292,6 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot._classic_sync_rebuild_pending = False
     bot._sync_shutting_down = False
     bot._calls_reconcile_pending = False
-    bot._preinvalidated_sync_response = None
     bot._room_member_join_hooks_armed = False
     bot._journal_dispatcher = MagicMock()
     # The sync callback delegates its body, which a spec'd mock would swallow.
@@ -1308,6 +1308,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
         enable_streaming=True,
         orchestrator=None,
     )
+    bot._reply_membership_sync = AgentReplyMembershipSync(bot._runtime_view.agent_reply_memberships)
 
     # Call the real sync_forever method
     await AgentBot.sync_forever(bot)
@@ -2549,6 +2550,121 @@ async def test_start_runtime_waits_for_authoritative_memberships_before_sync_and
         finally:
             setup_can_finish.set()
             await orchestrator.stop()
+            if not runtime_task.done():
+                runtime_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait_for(runtime_task, timeout=1.0)
+
+
+def _orchestrator_with_membership_startup_bots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[_MultiAgentOrchestrator, AsyncMock, AsyncMock]:
+    """Build the narrow startup runtime used by publication-ordering tests."""
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.0)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    config = MagicMock(spec=Config)
+    config.authorization = AuthorizationConfig(
+        agent_reply_permissions={
+            "general": AgentReplyPermission(joined_rooms=["grant"]),
+        },
+    )
+    config.agents = {"general": MagicMock()}
+    config.teams = {}
+    config.mcp_servers = {}
+    config.event_journal = MagicMock()
+    orchestrator.config = config
+    router_bot = AsyncMock()
+    router_bot.agent_name = "router"
+    router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
+    router_bot.running = True
+    router_bot.stop = AsyncMock()
+    router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    router_bot.preserve_reply_memberships_on_next_sync_start = MagicMock()
+    general_bot = AsyncMock()
+    general_bot.agent_name = "general"
+    general_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
+    general_bot.running = True
+    general_bot.stop = AsyncMock()
+    general_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
+    return orchestrator, router_bot, general_bot
+
+
+@pytest.mark.asyncio
+async def test_startup_membership_publication_serializes_config_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reload must not share or prematurely reopen startup admission ownership."""
+    orchestrator, router_bot, general_bot = _orchestrator_with_membership_startup_bots(tmp_path, monkeypatch)
+
+    setup_started = asyncio.Event()
+    setup_can_finish = asyncio.Event()
+    router_sync_started = asyncio.Event()
+    runtime_ready = asyncio.Event()
+    reload_started = asyncio.Event()
+    reload_can_finish = asyncio.Event()
+
+    async def blocked_setup(_: list[object]) -> None:
+        setup_started.set()
+        await setup_can_finish.wait()
+
+    def start_sync_task(entity_name: str, _bot: object) -> None:
+        if entity_name == ROUTER_AGENT_NAME:
+            router_sync_started.set()
+
+    async def blocked_reload() -> bool:
+        reload_started.set()
+        await reload_can_finish.wait()
+        return True
+
+    with (
+        patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
+        patch.object(orchestrator, "_start_router_bot", new=AsyncMock(return_value=router_bot)),
+        patch.object(
+            orchestrator,
+            "_start_entities_once",
+            new=AsyncMock(return_value=EntityStartResults(started_bots=[general_bot])),
+        ),
+        patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=blocked_setup),
+        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()),
+        patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
+        patch.object(orchestrator.config_reload, "_update_config", side_effect=blocked_reload),
+        patch("mindroom.orchestrator.set_runtime_ready", side_effect=runtime_ready.set),
+    ):
+        runtime_task = asyncio.create_task(orchestrator._start_runtime())
+        reload_task: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(setup_started.wait(), timeout=1.0)
+            assert orchestrator._response_admission_gate.closed
+
+            orchestrator.config_reload.request_reload()
+            reload_task = orchestrator.config_reload._reload_task
+            assert reload_task is not None
+            await asyncio.sleep(0)
+            assert not reload_started.is_set()
+
+            setup_can_finish.set()
+            await asyncio.wait_for(router_sync_started.wait(), timeout=1.0)
+            await orchestrator.handle_bot_ready(router_bot)
+            await asyncio.wait_for(runtime_ready.wait(), timeout=1.0)
+            await asyncio.wait_for(reload_started.wait(), timeout=1.0)
+            assert orchestrator._response_admission_gate.closed
+
+            reload_can_finish.set()
+            await asyncio.wait_for(reload_task, timeout=1.0)
+            assert not orchestrator._response_admission_gate.closed
+        finally:
+            setup_can_finish.set()
+            reload_can_finish.set()
+            await orchestrator.stop()
+            if reload_task is not None and not reload_task.done():
+                reload_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await reload_task
             if not runtime_task.done():
                 runtime_task.cancel()
             with suppress(asyncio.CancelledError):

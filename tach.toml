@@ -24,6 +24,14 @@ exclude = ["**/*__pycache__", "**/*egg-info", "**/docs", "**/tests", "**/venv"]
 source_roots = ["src"]
 
 [[modules]]
+path = "mindroom.agent_reply_membership_sync"
+depends_on = ["mindroom.matrix.sync_loop"]
+visibility = [
+    "mindroom.bot",
+    "mindroom.orchestrator",
+]
+
+[[modules]]
 path = "mindroom.chunking"
 depends_on = []
 
@@ -1567,6 +1575,7 @@ depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindro
 [[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
+    "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
     "mindroom.event_journal_open",
     "mindroom.api.main",
@@ -2237,7 +2246,10 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.sync_loop"
 depends_on = ["mindroom.membership_models"]
-visibility = ["mindroom.bot"]
+visibility = [
+    "mindroom.agent_reply_membership_sync",
+    "mindroom.bot",
+]
 
 [[modules]]
 path = "mindroom.matrix.to_device"

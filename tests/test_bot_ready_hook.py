@@ -10,6 +10,8 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
@@ -18,7 +20,7 @@ from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.constants import ROUTER_AGENT_NAME, SOURCE_KIND_KEY
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -65,6 +67,7 @@ def _config(tmp_path: Path) -> Config:
 
 def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     config = _config(tmp_path)
+    memberships = AgentReplyMembershipIndex()
     return install_runtime_journal_support(
         AgentBot(
             agent_user=AgentMatrixUser(
@@ -77,6 +80,10 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=["!room:localhost"],
+            agent_reply_memberships=memberships,
+            agent_reply_membership_sync=(
+                AgentReplyMembershipSync(memberships) if agent_name == ROUTER_AGENT_NAME else None
+            ),
         ),
     )
 
@@ -85,7 +92,9 @@ def _router_bot_with_orchestrator(tmp_path: Path) -> tuple[AgentBot, MagicMock]:
     """Return a router bot wired to a narrow mocked orchestrator lifecycle."""
     bot = _agent_bot(tmp_path, agent_name="router")
     orchestrator = MagicMock()
-    orchestrator.invalidate_agent_reply_memberships = MagicMock()
+    orchestrator.invalidate_agent_reply_memberships = MagicMock(
+        side_effect=lambda *, reason: bot._router_reply_membership_sync.invalidate(bot.config, reason=reason),
+    )
     orchestrator.refresh_agent_reply_memberships = AsyncMock()
     orchestrator.revoke_reply_authorized_calls = AsyncMock()
     orchestrator.handle_bot_ready = AsyncMock()
@@ -387,7 +396,6 @@ def test_router_limited_sync_invalidates_before_timeline_admission(tmp_path: Pat
     bot._before_sync_response_admission(response)
 
     orchestrator.invalidate_agent_reply_memberships.assert_called_once_with(reason="uncertain_sync_response")
-    assert bot._preinvalidated_sync_response is response
 
 
 @pytest.mark.asyncio
@@ -436,7 +444,7 @@ async def test_router_departure_revokes_grant_before_timeline_admission(
         ["grant", "second-grant"],
         bot.config.authorization,
     )
-    assert bot._reply_membership_refresh_pending
+    assert bot._runtime_view.agent_reply_memberships.needs_refresh(bot.config.authorization)
 
 
 @pytest.mark.asyncio
@@ -448,25 +456,28 @@ async def test_failed_membership_refresh_is_backed_off_between_sync_responses(tm
     }
     bot._runtime_view.agent_reply_memberships.invalidate(bot.config, reason="test")
 
-    with patch("mindroom.bot.time.monotonic", return_value=100.0):
+    with patch("mindroom.agent_reply_membership_sync.time.monotonic", return_value=100.0):
         await bot._refresh_agent_reply_memberships_if_needed()
         await bot._refresh_agent_reply_memberships_if_needed()
 
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
-    assert bot._reply_membership_refresh_pending
 
 
-def test_repeated_membership_invalidation_preserves_refresh_backoff(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_repeated_membership_invalidation_preserves_refresh_backoff(tmp_path: Path) -> None:
     """Repeated uncertain responses must not bypass the bounded refresh retry delay."""
-    bot, _orchestrator = _router_bot_with_orchestrator(tmp_path)
-    bot._reply_membership_refresh_pending = True
-    bot._reply_membership_refresh_attempt = 3
-    bot._reply_membership_refresh_retry_at = 123.0
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot.config.authorization.agent_reply_permissions = {
+        "router": AgentReplyPermission(joined_rooms=["grant"]),
+    }
+    bot._runtime_view.agent_reply_memberships.invalidate(bot.config, reason="test")
 
-    bot._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+    with patch("mindroom.agent_reply_membership_sync.time.monotonic", return_value=100.0):
+        await bot._refresh_agent_reply_memberships_if_needed()
+        bot._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+        await bot._refresh_agent_reply_memberships_if_needed()
 
-    assert bot._reply_membership_refresh_attempt == 3
-    assert bot._reply_membership_refresh_retry_at == 123.0
+    orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -525,7 +536,7 @@ async def test_router_authoritative_departure_revokes_grant_before_membership_fe
         await asyncio.wait_for(fence_started.wait(), timeout=1)
         try:
             assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
-            assert bot._reply_membership_refresh_pending
+            assert index.needs_refresh(bot.config.authorization)
         finally:
             release_fence.set()
             await apply_task
@@ -575,7 +586,7 @@ async def test_router_leave_then_rejoin_in_one_sync_requires_grant_refresh(tmp_p
     )
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
-    assert bot._reply_membership_refresh_pending
+    assert index.needs_refresh(bot.config.authorization)
     orchestrator.revoke_reply_authorized_calls.assert_awaited_once_with()
 
 
@@ -616,7 +627,7 @@ async def test_router_final_invite_revokes_grant_before_timeline_admission(
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
-    assert bot._reply_membership_refresh_pending
+    assert index.needs_refresh(bot.config.authorization)
 
 
 @pytest.mark.asyncio
@@ -700,7 +711,7 @@ async def test_grant_user_revocation_precedes_cross_room_timeline_admission(
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
-    assert not bot._reply_membership_refresh_pending
+    assert not index.needs_refresh(bot.config.authorization)
     orchestrator.revoke_reply_authorized_calls.assert_awaited_once_with()
 
 
@@ -761,6 +772,94 @@ async def test_grant_user_join_waits_for_durable_timeline_admission(
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
     orchestrator.revoke_reply_authorized_calls.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["classic", "sliding"])
+@pytest.mark.parametrize("membership", ["leave", "ban"])
+async def test_grant_user_join_superseded_in_same_sync_never_temporarily_grants(
+    tmp_path: Path,
+    transport: str,
+    membership: str,
+) -> None:
+    """A batch's known final revocation must fence its earlier positive event."""
+    room_id = "!grant:localhost"
+    sender_id = "@bob:localhost"
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot.config.authorization.agent_reply_permissions = {
+        "router": AgentReplyPermission(joined_rooms=["grant"]),
+    }
+    state = MatrixState.load(runtime_paths=bot.runtime_paths)
+    state.add_room("grant", room_id, "#grant:localhost", "Grant")
+    state.save(runtime_paths=bot.runtime_paths)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(bot.agent_user.user_id, None, None)],
+        room_id=room_id,
+    )
+    index = bot._runtime_view.agent_reply_memberships
+    await index.refresh(bot.config, bot.runtime_paths, client)
+    join_event = _departure_member_event("$join", user_id=sender_id, membership="join", ts=1)
+    revoke_event = _departure_member_event("$revoke", user_id=sender_id, membership=membership, ts=2)
+    if transport == "classic":
+        response = nio.SyncResponse.from_dict(
+            {
+                "next_batch": "s-join-then-revoke",
+                "rooms": {
+                    "invite": {},
+                    "leave": {},
+                    "join": {
+                        room_id: {
+                            "state": {"events": []},
+                            "timeline": {
+                                "events": [join_event, revoke_event],
+                                "limited": False,
+                            },
+                        },
+                    },
+                },
+            },
+        )
+        assert isinstance(response, nio.SyncResponse)
+        live_join_event, live_revoke_event = response.rooms.join[room_id].timeline.events
+    else:
+        response = nio.SlidingSyncResponse.from_dict(
+            {
+                "pos": "s-join-then-revoke",
+                "rooms": {
+                    room_id: {
+                        "membership": "join",
+                        "timeline": [join_event, revoke_event],
+                    },
+                },
+            },
+        )
+        assert isinstance(response, nio.SlidingSyncResponse)
+        live_join_event, live_revoke_event = response.rooms[room_id].timeline
+    assert isinstance(live_join_event, nio.RoomMemberEvent)
+    assert isinstance(live_revoke_event, nio.RoomMemberEvent)
+
+    orchestrator.reconcile_reply_authorized_calls = AsyncMock()
+    bot._before_sync_response_admission(response)
+    assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+
+    await bot._apply_live_reply_membership_transition(room_id, live_join_event)
+    assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+    await bot._apply_live_reply_membership_transition(room_id, live_revoke_event)
+
+    assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+    orchestrator.reconcile_reply_authorized_calls.assert_not_awaited()
+
+    bot._router_reply_membership_sync.finish_response(response)
+    later_join = nio.RoomMemberEvent.from_dict(
+        _departure_member_event("$later-join", user_id=sender_id, membership="join", ts=3),
+    )
+    assert isinstance(later_join, nio.RoomMemberEvent)
+    await bot._apply_live_reply_membership_transition(room_id, later_join)
+
+    assert index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+    orchestrator.reconcile_reply_authorized_calls.assert_awaited_once_with()
 
 
 def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Path) -> None:

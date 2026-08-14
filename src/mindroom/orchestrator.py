@@ -16,6 +16,7 @@ import uvicorn
 
 from mindroom import constants
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_reply_membership_policy_changed
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.attachments import wait_for_attachment_cleanup_tasks
@@ -274,6 +275,7 @@ class _MultiAgentOrchestrator:
         init=False,
         repr=False,
     )
+    agent_reply_membership_sync: AgentReplyMembershipSync = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Store canonical derived paths from the explicit runtime context."""
@@ -281,6 +283,7 @@ class _MultiAgentOrchestrator:
         self.config_path = self.runtime_paths.config_path
         self._knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler)
+        self.agent_reply_membership_sync = AgentReplyMembershipSync(self.agent_reply_memberships)
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
         self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
@@ -871,6 +874,9 @@ class _MultiAgentOrchestrator:
                 config_path=self.config_path,
                 journal_store=self._shared_journal_store(),
                 agent_reply_memberships=self.agent_reply_memberships,
+                agent_reply_membership_sync=(
+                    self.agent_reply_membership_sync if entity_name == ROUTER_AGENT_NAME else None
+                ),
             ),
         )
         bot.orchestrator = self
@@ -1275,7 +1281,7 @@ class _MultiAgentOrchestrator:
     def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
         """Synchronously revoke every room-backed reply grant."""
         if self.config is not None:
-            self.agent_reply_memberships.invalidate(self.config, reason=reason)
+            self.agent_reply_membership_sync.invalidate(self.config, reason=reason)
             for bot in self.agent_bots.values():
                 bot.schedule_reply_authorized_call_reconciliation()
 
@@ -1357,42 +1363,43 @@ class _MultiAgentOrchestrator:
         self._bind_started_runtime_support_services(started_bots)
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
-        self.running = True
+        async with self.config_reload.startup_publication_admission():
+            self.running = True
 
-        startup_cutoff_ms = int(time.time() * 1000)
-        self._startup_maintenance.start(started_bots, config, startup_cutoff_ms=startup_cutoff_ms)
-        room_membership_policy_configured = any(
-            policy.joined_rooms for policy in config.authorization.agent_reply_permissions.values()
-        )
-        if room_membership_policy_configured:
-            set_runtime_starting("Establishing Matrix room memberships")
-            await self._startup_maintenance.wait_for_rooms_and_memberships()
-            router_bot.preserve_reply_memberships_on_next_sync_start()
+            startup_cutoff_ms = int(time.time() * 1000)
+            self._startup_maintenance.start(started_bots, config, startup_cutoff_ms=startup_cutoff_ms)
+            room_membership_policy_configured = any(
+                policy.joined_rooms for policy in config.authorization.agent_reply_permissions.values()
+            )
+            if room_membership_policy_configured:
+                set_runtime_starting("Establishing Matrix room memberships")
+                await self._startup_maintenance.wait_for_rooms_and_memberships()
+                router_bot.preserve_reply_memberships_on_next_sync_start()
 
-        if runtime_shutdown_event.is_set():
-            return
+            if runtime_shutdown_event.is_set():
+                return
 
-        # Expose live sync callbacks only after room-backed reply grants have an
-        # authoritative startup snapshot.
-        set_runtime_starting("Starting Matrix sync loops")
-        phase_started = log_startup_phase_started("start_matrix_sync_loops")
-        sync_started = await self._start_sync_tasks_after_membership_publication(
-            router_bot,
-            runtime_shutdown_event,
-            room_membership_policy_configured=room_membership_policy_configured,
-        )
-        if not sync_started:
-            return
-        log_startup_phase_finished("start_matrix_sync_loops", phase_started)
+            # Expose live sync callbacks only after room-backed reply grants have an
+            # authoritative startup snapshot.
+            set_runtime_starting("Starting Matrix sync loops")
+            phase_started = log_startup_phase_started("start_matrix_sync_loops")
+            sync_started = await self._start_sync_tasks_after_membership_publication(
+                router_bot,
+                runtime_shutdown_event,
+                room_membership_policy_configured=room_membership_policy_configured,
+            )
+            if not sync_started:
+                return
+            log_startup_phase_finished("start_matrix_sync_loops", phase_started)
 
-        for entity_name in start_results.retryable_entities:
-            await self._schedule_bot_start_retry(entity_name)
+            for entity_name in start_results.retryable_entities:
+                await self._schedule_bot_start_retry(entity_name)
 
-        create_background_task(
-            check_embedder_health(config, self.runtime_paths, reason="startup"),
-            name="embedder_startup_health_check",
-        )
-        set_runtime_ready()
+            create_background_task(
+                check_embedder_health(config, self.runtime_paths, reason="startup"),
+                name="embedder_startup_health_check",
+            )
+            set_runtime_ready()
         # Stay alive until explicit shutdown. Hot reload replaces sync tasks in
         # self._sync_tasks, so awaiting the initial task generation would let a
         # config-triggered restart look like normal orchestrator completion.
@@ -1413,12 +1420,9 @@ class _MultiAgentOrchestrator:
                     self._start_sync_task(entity_name, bot)
             return True
 
-        self._response_admission_gate.close()
-        try:
-            self._start_sync_task(ROUTER_AGENT_NAME, router_bot)
-            router_ready = await self._wait_for_router_reply_memberships_or_shutdown(runtime_shutdown_event)
-        finally:
-            self._response_admission_gate.reopen()
+        assert self._response_admission_gate.closed, "startup publication must own response admission"
+        self._start_sync_task(ROUTER_AGENT_NAME, router_bot)
+        router_ready = await self._wait_for_router_reply_memberships_or_shutdown(runtime_shutdown_event)
         if not router_ready:
             return False
         for entity_name, bot in self.agent_bots.items():

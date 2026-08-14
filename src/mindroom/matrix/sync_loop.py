@@ -173,13 +173,16 @@ def own_membership_from_sliding_sync(
     )
 
 
-def negative_member_events_from_sync(
+def room_member_events_from_sync(
     response: nio.SyncResponse | nio.SlidingSyncResponse,
 ) -> tuple[tuple[str, nio.RoomMemberEvent], ...]:
-    """Return deduplicated non-join member events before cross-room fan-out."""
+    """Return deduplicated member events in their per-room sync order."""
     room_events: Iterable[tuple[str, Iterable[object]]]
     if isinstance(response, nio.SyncResponse):
-        room_events = ((room_id, (*room.state, *room.timeline.events)) for room_id, room in response.rooms.join.items())
+        room_events = (
+            (room_id, (*room.state, *room.timeline.events))
+            for room_id, room in (*response.rooms.join.items(), *response.rooms.leave.items())
+        )
     else:
         room_events = ((room_id, (*room.required_state, *room.timeline)) for room_id, room in response.rooms.items())
 
@@ -187,7 +190,7 @@ def negative_member_events_from_sync(
     transitions: list[tuple[str, nio.RoomMemberEvent]] = []
     for room_id, events in room_events:
         for event in events:
-            if not isinstance(event, nio.RoomMemberEvent) or event.membership == "join":
+            if not isinstance(event, nio.RoomMemberEvent):
                 continue
             identity = (room_id, event.event_id)
             if identity in seen:

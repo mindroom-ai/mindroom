@@ -63,7 +63,6 @@ from mindroom.matrix.sync_checkpoint_trust import SyncCheckpointTrust
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
 from mindroom.matrix.sync_loop import (
     OwnRoomMembership,
-    negative_member_events_from_sync,
     own_membership_from_sliding_sync,
     own_membership_from_sync,
     run_matrix_sync_forever,
@@ -174,6 +173,7 @@ if TYPE_CHECKING:
     import structlog
     from agno.agent import Agent
 
+    from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync, ReplyMembershipPreAdmission
     from mindroom.coalescing_batch import PreparedTurn
     from mindroom.config.main import Config
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
@@ -193,21 +193,8 @@ __all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 _SYNC_TIMEOUT_MS = 30000
 _CLASSIC_SYNC_REBUILD_BACKOFF_INITIAL_SECONDS = 1.0
 _CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS = 30.0
-_REPLY_MEMBERSHIP_REFRESH_BACKOFF_INITIAL_SECONDS = 5.0
-_REPLY_MEMBERSHIP_REFRESH_BACKOFF_MAX_SECONDS = 300.0
 _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
 _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
-
-
-def _sync_response_has_uncertain_membership(
-    response: nio.SyncResponse | nio.SlidingSyncResponse,
-) -> bool:
-    """Return whether a sync response cannot prove a complete membership view."""
-    if response.unrecovered_room_ids:
-        return True
-    if isinstance(response, nio.SyncResponse):
-        return any(join_info.timeline.limited for join_info in response.rooms.join.values())
-    return any(room.limited for room in response.rooms.values())
 
 
 _SYNC_FILTER: dict[str, object] = {
@@ -282,6 +269,7 @@ def create_bot_for_entity(
     config_path: Path | None = None,
     journal_store: EventJournalStore | None = None,
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
+    agent_reply_membership_sync: AgentReplyMembershipSync | None = None,
 ) -> AgentBot | TeamBot | None:
     """Create appropriate bot instance for an entity (agent, team, or router).
 
@@ -294,6 +282,7 @@ def create_bot_for_entity(
         config_path: Path to the YAML config file used by config-aware tools
         journal_store: Shared event-journal store to borrow, or None to open one
         agent_reply_memberships: Shared authoritative grant-room membership index
+        agent_reply_membership_sync: Shared router receive-lifecycle coordinator
 
     Returns:
         Bot instance or None if entity not found in config
@@ -301,6 +290,9 @@ def create_bot_for_entity(
     """
     enable_streaming = config.defaults.enable_streaming
     if entity_name == ROUTER_AGENT_NAME:
+        if agent_reply_membership_sync is None:
+            msg = "The managed router requires the orchestrator-owned reply-membership sync coordinator."
+            raise ValueError(msg)
         all_room_aliases = config.get_all_configured_rooms()
         rooms = resolve_room_aliases(list(all_room_aliases), runtime_paths)
         return AgentBot(
@@ -313,6 +305,7 @@ def create_bot_for_entity(
             enable_streaming=enable_streaming,
             journal_store=journal_store,
             agent_reply_memberships=agent_reply_memberships,
+            agent_reply_membership_sync=agent_reply_membership_sync,
         )
 
     if entity_name in config.teams:
@@ -398,11 +391,7 @@ class AgentBot:
     _room_member_callback_registered: bool
     _room_member_join_hooks_armed: bool
     _sliding_sync_startup_warning_emitted: bool
-    _reply_membership_refresh_pending: bool
-    _reply_membership_refresh_attempt: int
-    _reply_membership_refresh_retry_at: float
-    _preserve_reply_memberships_on_next_sync_start: bool
-    _preinvalidated_sync_response: nio.SyncResponse | nio.SlidingSyncResponse | None
+    _reply_membership_sync: AgentReplyMembershipSync | None
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
@@ -420,6 +409,7 @@ class AgentBot:
         enable_streaming: bool = True,
         journal_store: EventJournalStore | None = None,
         agent_reply_memberships: AgentReplyMembershipIndex | None = None,
+        agent_reply_membership_sync: AgentReplyMembershipSync | None = None,
     ) -> None:
         """Initialize the bot with canonical runtime-backed config state.
 
@@ -463,16 +453,20 @@ class AgentBot:
         self._room_member_join_hooks_armed = False
         self._room_member_join_lock = asyncio.Lock()
         self._sliding_sync_startup_warning_emitted = False
-        self._reply_membership_refresh_pending = False
-        self._reply_membership_refresh_attempt = 0
-        self._reply_membership_refresh_retry_at = 0.0
-        self._preserve_reply_memberships_on_next_sync_start = False
-        self._preinvalidated_sync_response = None
+        membership_index = agent_reply_memberships or (
+            agent_reply_membership_sync.memberships
+            if agent_reply_membership_sync is not None
+            else AgentReplyMembershipIndex()
+        )
+        if agent_reply_membership_sync is not None and agent_reply_membership_sync.memberships is not membership_index:
+            msg = "The reply-membership sync coordinator must control the bot's shared membership index."
+            raise ValueError(msg)
+        self._reply_membership_sync = agent_reply_membership_sync
         self._runtime_view = BotRuntimeState(
             client=None,
             config=config,
             runtime_paths=self.runtime_paths,
-            agent_reply_memberships=agent_reply_memberships or AgentReplyMembershipIndex(),
+            agent_reply_memberships=membership_index,
             enable_streaming=enable_streaming,
             orchestrator=None,
         )
@@ -1295,19 +1289,21 @@ class AgentBot:
         self._sync_shutting_down = False
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
-        preserve_reply_memberships = self._preserve_reply_memberships_on_next_sync_start
-        self._preserve_reply_memberships_on_next_sync_start = False
-        if self.agent_name == ROUTER_AGENT_NAME:
-            if preserve_reply_memberships:
-                self._schedule_agent_reply_membership_refresh()
-            else:
-                self._invalidate_agent_reply_memberships(reason="sync_loop_started")
+        if self.agent_name == ROUTER_AGENT_NAME and self._router_reply_membership_sync.sync_loop_started():
+            self._invalidate_agent_reply_memberships(reason="sync_loop_started")
         mark_matrix_sync_loop_started(self.agent_name)
 
     def preserve_reply_memberships_on_next_sync_start(self) -> None:
         """Carry the pre-sync authoritative snapshot into the first receive loop."""
         if self.agent_name == ROUTER_AGENT_NAME:
-            self._preserve_reply_memberships_on_next_sync_start = True
+            self._router_reply_membership_sync.preserve_on_next_sync_start()
+
+    @property
+    def _router_reply_membership_sync(self) -> AgentReplyMembershipSync:
+        """Return the router-only coordinator supplied by the orchestrator."""
+        assert self.agent_name == ROUTER_AGENT_NAME
+        assert self._reply_membership_sync is not None, "router membership sync coordinator is required"
+        return self._reply_membership_sync
 
     def _invalidate_agent_reply_memberships(self, *, reason: str) -> None:
         """Fail closed when the router's view of Matrix membership is uncertain."""
@@ -1315,18 +1311,9 @@ class AgentBot:
             return
         orchestrator = self.orchestrator
         if orchestrator is None:
-            self._runtime_view.agent_reply_memberships.invalidate(self.config, reason=reason)
+            self._router_reply_membership_sync.invalidate(self.config, reason=reason)
         else:
             orchestrator.invalidate_agent_reply_memberships(reason=reason)
-        self._schedule_agent_reply_membership_refresh()
-
-    def _schedule_agent_reply_membership_refresh(self) -> None:
-        """Request a fresh authoritative grant snapshot without resetting backoff."""
-        if self._reply_membership_refresh_pending:
-            return
-        self._reply_membership_refresh_pending = True
-        self._reply_membership_refresh_attempt = 0
-        self._reply_membership_refresh_retry_at = 0.0
 
     def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
         """Expose fail-closed router membership invalidation to the sync supervisor."""
@@ -1378,32 +1365,20 @@ class AgentBot:
         """Rebuild router-owned room grants after a receive-generation boundary."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
-        index = self._runtime_view.agent_reply_memberships
-        if not self._reply_membership_refresh_pending and not index.needs_refresh(self.config.authorization):
-            return
-        if time.monotonic() < self._reply_membership_refresh_retry_at:
-            return
         orchestrator = self.orchestrator
-        if orchestrator is None:
+
+        async def refresh() -> None:
+            if orchestrator is not None:
+                await orchestrator.refresh_agent_reply_memberships()
+                return
             client = self.client
             if client is None:
                 return
-            await index.refresh(self.config, self.runtime_paths, client)
+            await self._runtime_view.agent_reply_memberships.refresh(self.config, self.runtime_paths, client)
             await self.revoke_reply_authorized_calls()
             self.schedule_reply_authorized_call_reconciliation()
-        else:
-            await orchestrator.refresh_agent_reply_memberships()
-        self._reply_membership_refresh_pending = index.needs_refresh(self.config.authorization)
-        if not self._reply_membership_refresh_pending:
-            self._reply_membership_refresh_attempt = 0
-            self._reply_membership_refresh_retry_at = 0.0
-            return
-        self._reply_membership_refresh_attempt += 1
-        backoff_seconds = min(
-            _REPLY_MEMBERSHIP_REFRESH_BACKOFF_INITIAL_SECONDS * (2 ** (self._reply_membership_refresh_attempt - 1)),
-            _REPLY_MEMBERSHIP_REFRESH_BACKOFF_MAX_SECONDS,
-        )
-        self._reply_membership_refresh_retry_at = time.monotonic() + backoff_seconds
+
+        await self._router_reply_membership_sync.refresh_if_needed(self.config, refresh)
 
     def reset_watchdog_clock(self) -> None:
         """Reset the monotonic watchdog clock for a fresh sync iteration."""
@@ -1859,41 +1834,19 @@ class AgentBot:
         """Fail closed on a sync gap or router departure before timeline admission."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
-        if _sync_response_has_uncertain_membership(response):
-            self._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
-            self._preinvalidated_sync_response = response
-            return
-
-        membership = (
-            own_membership_from_sync(response, self_user_id=self.agent_user.user_id)
-            if isinstance(response, nio.SyncResponse)
-            else own_membership_from_sliding_sync(response, self_user_id=self.agent_user.user_id)
+        effects = self._router_reply_membership_sync.prepare_response(
+            self.config,
+            self.runtime_paths,
+            response,
+            control_user_id=self.agent_user.user_id,
         )
-        index = self._runtime_view.agent_reply_memberships
-        grant_authorization_changed = False
-        grant_room_continuity_lost = False
-        for room_id in membership.continuity_lost_room_ids:
-            room_was_grant = self._runtime_view.agent_reply_memberships.mark_control_room_unready(
-                self.config,
-                self.runtime_paths,
-                room_id,
-                reason="control_client_departed",
-            )
-            grant_room_continuity_lost = room_was_grant or grant_room_continuity_lost
-        if grant_room_continuity_lost:
-            self._schedule_agent_reply_membership_refresh()
-            grant_authorization_changed = True
+        self._apply_reply_membership_pre_admission(effects)
 
-        for room_id, event in negative_member_events_from_sync(response):
-            changed = index.apply_member_event(
-                self.config,
-                self.runtime_paths,
-                room_id,
-                event,
-                control_user_id=self.agent_user.user_id,
-            )
-            grant_authorization_changed = changed or grant_authorization_changed
-        if grant_authorization_changed:
+    def _apply_reply_membership_pre_admission(self, effects: ReplyMembershipPreAdmission) -> None:
+        """Publish one router sync batch's fail-closed effects."""
+        if effects.invalidate_reason is not None:
+            self._invalidate_agent_reply_memberships(reason=effects.invalidate_reason)
+        if effects.authorization_changed:
             self._schedule_reply_authorized_call_revocation()
 
     async def _apply_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
@@ -1907,10 +1860,15 @@ class AgentBot:
         if self._sync_shutting_down:
             return
 
-        preinvalidated = self._preinvalidated_sync_response is _response
-        self._preinvalidated_sync_response = None
-        if _sync_response_has_uncertain_membership(_response) and not preinvalidated:
-            self._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+        if self.agent_name == ROUTER_AGENT_NAME:
+            effects = self._router_reply_membership_sync.ensure_response_prepared(
+                self.config,
+                self.runtime_paths,
+                _response,
+                control_user_id=self.agent_user.user_id,
+            )
+            self._router_reply_membership_sync.finish_response(_response)
+            self._apply_reply_membership_pre_admission(effects)
 
         if isinstance(_response, nio.SyncResponse):
             (
@@ -2058,17 +2016,11 @@ class AgentBot:
         departed_room_ids = membership.departed_room_ids
         reply_grant_continuity_lost = False
         if self.agent_name == ROUTER_AGENT_NAME:
-            index = self._runtime_view.agent_reply_memberships
-            for room_id in membership.continuity_lost_room_ids:
-                room_was_grant = index.mark_control_room_unready(
-                    self.config,
-                    self.runtime_paths,
-                    room_id,
-                    reason="control_client_departed",
-                )
-                reply_grant_continuity_lost = room_was_grant or reply_grant_continuity_lost
-            if reply_grant_continuity_lost:
-                self._schedule_agent_reply_membership_refresh()
+            reply_grant_continuity_lost = self._router_reply_membership_sync.apply_own_membership(
+                self.config,
+                self.runtime_paths,
+                membership,
+            )
         await self._membership_fence.fence_reported_departures(membership.departures)
         for room_id in departed_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
@@ -2305,7 +2257,8 @@ class AgentBot:
         self.last_sync_time = None
         self._last_sync_monotonic = None
         self._first_sync_done = False
-        self._preserve_reply_memberships_on_next_sync_start = False
+        if self.agent_name == ROUTER_AGENT_NAME and self._reply_membership_sync is not None:
+            self._reply_membership_sync.reset_receive_generation()
         self._classic_sync_rebuild_pending = False
         self._classic_sync_rebuild_attempt = 0
         self._orchestrator_ready_handled = False
@@ -2688,7 +2641,7 @@ class AgentBot:
         """Update reply grants from one durably admitted live Matrix transition."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
-        changed = self._runtime_view.agent_reply_memberships.apply_member_event(
+        changed = self._router_reply_membership_sync.apply_live_transition(
             self.config,
             self.runtime_paths,
             room_id,
