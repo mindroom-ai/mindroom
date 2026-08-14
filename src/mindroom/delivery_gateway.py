@@ -54,10 +54,14 @@ from mindroom.matrix.client_delivery import (
     send_message_outcome,
     send_message_result,
 )
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
+from mindroom.matrix.room_history_reads import (
+    find_outbox_delivery_event_id_via_room_messages,
+    find_response_event_ids_via_room_messages,
+)
 from mindroom.matrix_delivery import (
     DeliveryStage,
     MatrixDeliveryWorker,
@@ -806,19 +810,31 @@ class DeliveryGateway:
         its own anchor event, which is the right question for the uncoalesced
         case and the only one available for the rest.
 
-        This finds answers, not every message. The scan matches a genuine
-        reply -- ``is_falling_back`` false, pointing at a source -- which is
-        what an agent answering a user sends. A delivery with no source to
-        reply to, a scheduled message or a hook-emitted notice, matches
-        nothing and reads as "not delivered", so it is sent. That is the same
-        blind resend as before this guard existed: unchanged for the cases it
-        cannot see, and correct for the ones it can.
+        Ordinary answers match their exact source relation. A standalone
+        delivery that replies outside the turn -- such as an unavailable-owner
+        notice -- instead matches its exact frozen payload. A miss in that
+        second path remains unresolved rather than authorizing a blind resend.
         """
         client = self._client()
         response_sender = client.user_id
         if not response_sender:
             return None
         source_event_ids = self.deps.turn_handoff.sources_for_turn(claimed.delivery_id)
+        reply_to_event_id = EventInfo.from_event(
+            {"type": claimed.event_type, "content": dict(claimed.payload)},
+        ).reply_to_event_id
+        if reply_to_event_id is not None and reply_to_event_id not in source_event_ids:
+            delivered = await find_outbox_delivery_event_id_via_room_messages(
+                client,
+                claimed.room_id,
+                delivery_sender=response_sender,
+                source_event_ids=(reply_to_event_id,),
+                delivery_content=claimed.payload,
+            )
+            if delivered is None:
+                msg = f"Exact Matrix delivery {claimed.delivery_id!r} was not found, so its absence is unproven"
+                raise RuntimeError(msg)
+            return delivered
         delivered = await find_response_event_ids_via_room_messages(
             client,
             claimed.room_id,

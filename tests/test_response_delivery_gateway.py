@@ -121,6 +121,7 @@ def _gateway(
     tmp_path: Path,
     outbox: MatrixDeliveryView | None = None,
     *,
+    sending_device_id: str | None = None,
     terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None,
     terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> DeliveryGateway:
@@ -156,6 +157,7 @@ def _gateway(
             response_hooks=MagicMock(_apply_before_response=AsyncMock(), emit_after_response=AsyncMock()),
             outbox=outbox if outbox is not None else make_outbox_mock(),
             turn_handoff=ignore_final_delivery_handoff,
+            sending_device_id=lambda: sending_device_id,
             terminal_turn_for=terminal_turn_for,
             terminal_turn_committed=terminal_turn_committed,
         ),
@@ -1878,6 +1880,73 @@ class TestGenericDeliveryDeviceChangePolicy:
         assert retained is not None
         assert retained.acknowledged_event_id is None
         assert retained.sending_device_id == "OLD-DEVICE"
+
+    @pytest.mark.parametrize("accepted_before_crash", [True, False], ids=["accepted", "history-miss"])
+    async def test_router_recovery_never_duplicates_an_unavailable_notice_after_device_change(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        *,
+        accepted_before_crash: bool,
+    ) -> None:
+        """Generic message recovery adopts the exact notice and treats a miss as uncertainty."""
+        delivery_id = "approval-unavailable:approval-1"
+        payload = {
+            "msgtype": "m.notice",
+            "body": "Requesting agent is unavailable.",
+            "io.mindroom.approval_unavailable_id": "approval-1",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$waiting"}},
+        }
+        await alice.enqueue_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload=payload,
+        )
+        await alice.claim_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=DeliveryStage.FINAL,
+            sending_device_id="OLD-DEVICE",
+        )
+        prior_notice = nio.Event.parse_event(
+            {
+                "event_id": "$notice-old-device",
+                "room_id": _ROOM_ID,
+                "sender": _AGENT_USER_ID,
+                "origin_server_ts": 2_000,
+                "type": "m.room.message",
+                "content": payload,
+            },
+        )
+        assert isinstance(prior_notice, nio.Event)
+        gateway = _gateway(tmp_path, alice, sending_device_id="NEW-DEVICE")
+        gateway.deps.runtime.client.room_messages = AsyncMock(
+            return_value=nio.RoomMessagesResponse(
+                room_id=_ROOM_ID,
+                chunk=[prior_notice] if accepted_before_crash else [],
+                start="start",
+                end=None,
+            ),
+        )
+        sent: list[MatrixDelivery] = []
+
+        async def send(delivery: MatrixDelivery) -> str:
+            sent.append(delivery)
+            return "$duplicate"
+
+        outcome = await gateway._response_delivery(send, handoff=None).recover()
+
+        assert sent == []
+        recovered = await alice.load_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+        assert recovered is not None
+        if accepted_before_crash:
+            assert outcome == RecoveryOutcome(recovered=1, failed=0)
+            assert recovered.acknowledged_event_id == "$notice-old-device"
+        else:
+            assert outcome == RecoveryOutcome(recovered=0, failed=1)
+            assert recovered.acknowledged_event_id is None
+            assert recovered.sending_device_id == "OLD-DEVICE"
 
 
 class TestTurnDeliverySerialization:

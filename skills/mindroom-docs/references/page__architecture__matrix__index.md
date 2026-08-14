@@ -173,6 +173,7 @@ Delivery itself is owned by the `matrix_delivery_outbox` table, keyed `(principa
 A `FINAL` stage edits an existing event when it has an edit target and otherwise publishes a standalone terminal event.
 Each row freezes its explicit Matrix event type, payload, and deterministic transaction ID before the first send attempt, so ordinary responses and tool-approval cards recover through the same worker after a crash between sending and recording.
 The claim also stores the sending device, because a transaction ID is only idempotent for the device that used it and a re-login would otherwise let a resend post a duplicate.
+After a device change, standalone deliveries that reply outside a journal turn reconcile by exact frozen content and retain their debt when history cannot prove which event won.
 
 ## Room Cleanup
 

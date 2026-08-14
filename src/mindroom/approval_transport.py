@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -22,7 +21,7 @@ from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_up
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
 from mindroom.matrix.room_history_reads import (
     find_approval_card_event_id_via_room_messages,
-    find_response_event_ids_via_room_messages,
+    find_outbox_delivery_event_id_via_room_messages,
 )
 from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.tool_approval import DEFAULT_ROUTER_MANAGED_ROOM_REASON, ToolApprovalTransportError
@@ -206,12 +205,6 @@ class ApprovalMatrixTransport:
                 break
         return complete
 
-    @staticmethod
-    def _is_unavailable_notice(event_source: Mapping[str, Any], *, approval_id: str) -> bool:
-        """Return whether one room event is the exact durable fallback notice."""
-        content = event_source.get("content")
-        return isinstance(content, Mapping) and content.get(_UNAVAILABLE_NOTICE_APPROVAL_ID_KEY) == approval_id
-
     async def _deliver_unavailable_notice(
         self,
         continuation: ApprovalContinuation,
@@ -253,28 +246,20 @@ class ApprovalMatrixTransport:
             response_sender = client.user_id
             if not response_sender:
                 return None
-            delivered = await find_response_event_ids_via_room_messages(
+            return await find_outbox_delivery_event_id_via_room_messages(
                 client,
                 claimed.room_id,
-                response_sender=response_sender,
+                delivery_sender=response_sender,
                 source_event_ids=(continuation.response_event_id,),
-                response_source_filter=lambda source: self._is_unavailable_notice(
-                    source,
-                    approval_id=continuation.approval_id,
-                ),
+                delivery_content=claimed.payload,
             )
-            if len(delivered) > 1:
-                msg = (
-                    f"Approval continuation {continuation.approval_id!r} has {len(delivered)} unavailable-owner notices"
-                )
-                raise RuntimeError(msg)
-            return next(iter(delivered), None)
 
         try:
             delivered = await MatrixDeliveryWorker(
                 store=store,
                 send=send,
                 event_type="m.room.message",
+                resend_after_reconciliation_miss=False,
                 sending_device_id=self.transport_device_id(),
                 resolve_delivered=resolve_delivered,
             ).deliver(

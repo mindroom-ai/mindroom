@@ -69,6 +69,7 @@ _APPROVAL_CARD_EVENT_TYPE = "io.mindroom.tool_approval"
 # chunk in place and the plaintext type reappears on the event source.
 _APPROVAL_CARD_HISTORY_TYPES = (_APPROVAL_CARD_EVENT_TYPE, "m.room.encrypted")
 _MAX_APPROVAL_CARD_SCAN_PAGES = 10
+_MAX_EXACT_DELIVERY_SCAN_PAGES = 10
 _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
 
@@ -79,6 +80,17 @@ class OpaqueEncryptedThreadHistoryError(RuntimeError):
 
 class UnresolvedOpaqueRoomHistoryError(OpaqueEncryptedThreadHistoryError):
     """Raised when opaque room history cannot be assigned to a specific thread."""
+
+
+def _require_exact_delivery_scan_within_bound(*, room_id: str, pages_fetched: int) -> None:
+    """Raise when recent history did not prove an exact frozen payload absent."""
+    if pages_fetched < _MAX_EXACT_DELIVERY_SCAN_PAGES:
+        return
+    msg = (
+        f"exact delivery room scan in {room_id} reached its "
+        f"{_MAX_EXACT_DELIVERY_SCAN_PAGES}-page bound with history left, so the delivery's absence is unproven"
+    )
+    raise RuntimeError(msg)
 
 
 @dataclass(slots=True)
@@ -216,15 +228,17 @@ async def find_response_event_ids_via_room_messages(
     response_sender: str,
     source_event_ids: Collection[str],
     response_source_filter: Callable[[Mapping[str, Any]], bool] | None = None,
+    response_content: Mapping[str, Any] | None = None,
 ) -> frozenset[str]:
-    """Find original responses to exact source events in recent room history."""
+    """Find responses by source relation or exact frozen content."""
     sources = set(source_event_ids)
     remaining_sources = set(sources)
     response_event_ids: set[str] = set()
     from_token: str | None = None
     seen_pagination_tokens: set[str] = set()
+    pages_fetched = 0
 
-    while remaining_sources:
+    while remaining_sources or (not sources and response_content is not None):
         response = await client.room_messages(
             room_id,
             start=from_token,
@@ -235,31 +249,58 @@ async def find_response_event_ids_via_room_messages(
         if not isinstance(response, nio.RoomMessagesResponse):
             msg = f"response recovery room scan failed for {room_id}: {response}"
             raise RuntimeError(msg)  # noqa: TRY004
-        if not response.chunk:
-            break
+        pages_fetched += 1
         for event in response.chunk:
             if not isinstance(event, nio.Event):
                 continue
             remaining_sources.discard(event.event_id)
             event_source = event.source if isinstance(event.source, dict) else {}
             event_info = EventInfo.from_event(event_source)
+            exact_content = response_content is not None and event_source.get("content") == response_content
+            replies_to_source = (
+                not event_info.is_edit and not event_info.is_thread_fallback and event_info.reply_to_event_id in sources
+            )
             if (
                 event_source.get("sender") == response_sender
-                and not event_info.is_edit
-                and not event_info.is_thread_fallback
-                and event_info.reply_to_event_id in sources
+                and (exact_content if response_content is not None else replies_to_source)
                 and (response_source_filter is None or response_source_filter(event_source))
             ):
                 response_event_ids.add(event.event_id)
+        if sources and not remaining_sources:
+            break
         if not response.end:
             break
         if response.end in seen_pagination_tokens:
             msg = f"response recovery room scan repeated pagination token for {room_id}"
             raise RuntimeError(msg)
+        if response_content is not None:
+            _require_exact_delivery_scan_within_bound(room_id=room_id, pages_fetched=pages_fetched)
         seen_pagination_tokens.add(response.end)
         from_token = response.end
 
     return frozenset(response_event_ids)
+
+
+async def find_outbox_delivery_event_id_via_room_messages(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    delivery_sender: str,
+    source_event_ids: Collection[str],
+    delivery_content: Mapping[str, Any],
+) -> str | None:
+    """Find the one event carrying a frozen outbox payload."""
+    delivered = await find_response_event_ids_via_room_messages(
+        client,
+        room_id,
+        response_sender=delivery_sender,
+        source_event_ids=source_event_ids,
+        response_content=delivery_content,
+    )
+    if len(delivered) > 1:
+        msg = f"Matrix delivery has {len(delivered)} exact copies in {room_id}"
+        raise RuntimeError(msg)
+    return next(iter(delivered), None)
 
 
 def _is_approval_card_for(event_source: Mapping[str, Any], *, card_sender: str, approval_id: str) -> bool:
