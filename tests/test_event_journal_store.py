@@ -5589,6 +5589,91 @@ class TestApprovalContinuations:
             "resolved_by": None,
         }
 
+    async def test_unacknowledged_card_deadline_expires_without_abandoning_unknown_send(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """An old-device history miss cannot strand the call or authorize a duplicate card."""
+        from mindroom.event_journal import (  # noqa: PLC0415
+            ApprovalCardReservation,
+            ApprovalDecision,
+        )
+
+        router = journal_store.principal("router@shared")
+        await self.admit_sources(alice)
+        expired = replace(
+            self.continuation(state="waiting"),
+            calls=(replace(self.continuation(state="waiting").calls[0], expires_at_ns=1),),
+            runtime_generation="runtime-a",
+        )
+        await alice.create_approval_continuation(expired)
+        assert await router.reserve_approval_card_deliveries(
+            continuation_principal_id="agent@alice",
+            continuation_id="approval-1",
+            expected_generation=0,
+            cards=(
+                ApprovalCardReservation(
+                    delivery_id="approval-card-1",
+                    tool_call_id="call-1",
+                    event_type="io.mindroom.tool_approval",
+                    payload={
+                        "approval_id": "approval-card-1",
+                        "continuation_id": "approval-1",
+                        "continuation_generation": 0,
+                        "tool_call_id": "call-1",
+                        "tool_name": "shell",
+                        "status": "pending",
+                    },
+                ),
+            ),
+        )
+        assert await router.claim_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+            sending_device_id="OLDDEVICE",
+        )
+
+        recorded = await router.expire_unacknowledged_approval_card(delivery_id="approval-card-1")
+
+        assert recorded.recorded is True
+        assert recorded.resolution is not None
+        assert recorded.resolution["status"] == "expired"
+        continuation = await alice.approval_continuation("approval-1")
+        assert continuation is not None
+        assert continuation.state == "ready"
+        assert continuation.calls[0].decision is ApprovalDecision.EXPIRED
+        initial = await router.load_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+        )
+        assert initial is not None
+        assert initial.attempted is True
+        assert initial.sending_device_id == "OLDDEVICE"
+        assert initial.acknowledged_event_id is None
+        assert (
+            await router.claim_matrix_delivery(
+                delivery_id="approval-card-1",
+                stage=DeliveryStage.FINAL,
+                sending_device_id="NEWDEVICE",
+            )
+            is None
+        )
+
+        await router.acknowledge_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+            event_id="$approval",
+            delivered_projections=(),
+        )
+        terminal = await router.claim_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            sending_device_id="NEWDEVICE",
+        )
+        assert terminal is not None
+        assert terminal.edits_event_id == "$approval"
+
     async def test_approval_cannot_authorize_a_failure_fenced_continuation(self, alice: PrincipalStore) -> None:
         """A late click terminalizes the card but cannot approve work fenced for failure."""
         from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415

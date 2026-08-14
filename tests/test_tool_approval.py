@@ -318,6 +318,36 @@ async def test_terminal_approval_action_is_not_blocked_by_unrelated_legacy_deliv
 
 
 @pytest.mark.asyncio
+async def test_action_consumes_tombstone_created_during_delivery_recovery(tmp_path: Path) -> None:
+    """Retirement racing recovery cannot leak a duplicate action into ordinary routing."""
+    cards = MagicMock()
+    cards.pending_approval_card = AsyncMock(side_effect=(None, None))
+    cards.is_terminal_approval_card = AsyncMock(side_effect=(False, True))
+    cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
+    manager = initialize_approval_store(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
+    worker = MagicMock(recover=AsyncMock())
+    before_consume = AsyncMock()
+
+    with patch.object(manager, "_worker", return_value=worker):
+        result = await handle_matrix_approval_action(
+            MatrixApprovalAction(
+                room_id="!room:localhost",
+                sender_id="@approver:localhost",
+                card_event_id="$approval",
+                status="approved",
+                reason=None,
+            ),
+            before_consume=before_consume,
+        )
+
+    assert result.consumed is True
+    assert result.resolved is False
+    assert cards.is_terminal_approval_card.await_count == 2
+    before_consume.assert_awaited_once_with()
+    cards.legacy_approval_delivery_pending.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_decided_card_action_is_consumed_before_transport_or_approver_validation(tmp_path: Path) -> None:
     """A duplicate click cannot escape while its deterministic terminal edit is still owed."""
     cards = MagicMock()
