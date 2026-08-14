@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import fcntl
 from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -15,12 +17,57 @@ if TYPE_CHECKING:
 _DEFAULT_POLL_SECONDS = 0.1
 
 __all__ = [
+    "InheritedFileLockCapability",
     "acquire_shared_file_lock",
     "advisory_file_lock",
     "async_exclusive_file_lock",
+    "current_inherited_file_lock",
+    "expose_inherited_file_lock",
     "file_lock_is_held",
     "release_file_lock",
 ]
+
+
+@dataclass
+class InheritedFileLockCapability:
+    """A task-local authority to pass one still-owned lock into a subprocess."""
+
+    scope: Path
+    lock_file: TextIO
+    active: bool = True
+
+    def fileno_for(self, scope: Path) -> int | None:
+        """Return the descriptor only while this capability owns the same scope."""
+        if not self.active or self.lock_file.closed or self.scope != scope.resolve():
+            return None
+        return self.lock_file.fileno()
+
+
+_inherited_file_lock: ContextVar[InheritedFileLockCapability | None] = ContextVar(
+    "inherited_file_lock",
+    default=None,
+)
+
+
+@contextmanager
+def expose_inherited_file_lock(
+    lock_file: TextIO,
+    *,
+    scope: Path,
+) -> Iterator[InheritedFileLockCapability]:
+    """Expose an owned lock to subprocess launchers in this task context."""
+    capability = InheritedFileLockCapability(scope=scope.resolve(), lock_file=lock_file)
+    token = _inherited_file_lock.set(capability)
+    try:
+        yield capability
+    finally:
+        capability.active = False
+        _inherited_file_lock.reset(token)
+
+
+def current_inherited_file_lock() -> InheritedFileLockCapability | None:
+    """Return the task-local capability; callers must validate it at point of use."""
+    return _inherited_file_lock.get()
 
 
 def _open_lock_file(lock_path: Path) -> TextIO:
@@ -91,7 +138,8 @@ async def async_exclusive_file_lock(
     lock_path: Path,
     *,
     poll_seconds: float = _DEFAULT_POLL_SECONDS,
-) -> AsyncIterator[None]:
+    retain_for_inherited_fds: bool = False,
+) -> AsyncIterator[TextIO]:
     """Acquire an exclusive advisory file lock without blocking the event loop."""
     lock_file = _open_lock_file(lock_path)
     acquired = False
@@ -102,8 +150,10 @@ async def async_exclusive_file_lock(
                 acquired = True
             except BlockingIOError:
                 await asyncio.sleep(poll_seconds)
-        yield
+        yield lock_file
     finally:
-        if acquired:
+        if acquired and not retain_for_inherited_fds:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        # With retention enabled, close without LOCK_UN: a subprocess may have
+        # inherited this open-file description and must keep the lock held.
         lock_file.close()

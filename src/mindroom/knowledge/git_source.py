@@ -17,12 +17,15 @@ import asyncio
 import base64
 import os
 import re
+import signal
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, TypeVar
 from urllib.parse import urlparse
 
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.file_locks import current_inherited_file_lock
 from mindroom.knowledge.file_listing import (
     git_checkout_present,
     git_tracked_relative_paths_from_checkout,
@@ -39,8 +42,6 @@ from mindroom.knowledge.redaction import (
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.config.knowledge import KnowledgeGitConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -48,6 +49,72 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = ["GitKnowledgeSource", "GitSyncResult"]
+
+_REFRESH_SUBPROCESS_ENV = "MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"
+_OwnedTaskResult = TypeVar("_OwnedTaskResult")
+
+
+def _git_process_group_is_owned_here() -> bool:
+    """Return whether this process, rather than an outer refresh, must reap Git."""
+    return os.name != "nt" and os.environ.get(_REFRESH_SUBPROCESS_ENV) != "1"
+
+
+def _process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _wait_for_process_group_exit(process_group_id: int, *, wait_seconds: float = 1.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait_seconds
+    while _process_group_exists(process_group_id) and loop.time() < deadline:  # noqa: ASYNC110
+        await asyncio.sleep(0.01)
+    if _process_group_exists(process_group_id):
+        logger.warning(
+            "Knowledge Git process group survived termination wait",
+            process_group_id=process_group_id,
+            wait_seconds=wait_seconds,
+        )
+
+
+async def _drain_owned_task(task: asyncio.Task[_OwnedTaskResult]) -> asyncio.CancelledError | None:
+    """Wait through repeated caller cancellation until owned work settles."""
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+    return cancellation
+
+
+async def _terminate_git_process(
+    process: asyncio.subprocess.Process,
+    *,
+    owned_process_group_id: int | None,
+) -> None:
+    group_signalled = False
+    if owned_process_group_id is None:
+        if process.returncode is not None:
+            return
+        with suppress(ProcessLookupError):
+            process.kill()
+    else:
+        try:
+            os.killpg(owned_process_group_id, signal.SIGKILL)
+            group_signalled = True
+        except ProcessLookupError:
+            pass
+    with suppress(ProcessLookupError):
+        await process.wait()
+    if group_signalled and owned_process_group_id is not None:
+        await _wait_for_process_group_exit(owned_process_group_id)
 
 
 def _http_credentials(
@@ -353,12 +420,19 @@ class GitKnowledgeSource:
         return await self._rev_parse("HEAD")
 
     async def sync(self) -> GitSyncResult:
-        """Fetch and force-align one configured Git repository checkout."""
+        """Fetch and force-align one configured Git repository checkout.
+
+        An existing index lock is recoverable only while this task holds the
+        source-root file lock whose descriptor every Git child inherits. A Git
+        descendant that outlives its Python parent therefore keeps later
+        refreshes outside this transaction boundary until it exits.
+        """
         git_config = self._git_config()
         if git_config is None:
             return GitSyncResult(head=None, updated=False)
 
         async with self._sync_lock:
+            self._clear_orphaned_index_lock()
             changed_files, removed_files, updated = await self._sync_once(git_config)
             current_head = await self._rev_parse("HEAD")
             self._last_synced_head = current_head
@@ -404,6 +478,49 @@ class GitKnowledgeSource:
     def _clear_lfs_hydrated_head(self) -> None:
         self.lfs_hydrated_head_path.unlink(missing_ok=True)
 
+    def _git_index_lock_path(self) -> Path | None:
+        """Resolve the index lock for a repository or linked worktree."""
+        dot_git = self.source_path / ".git"
+        if dot_git.is_dir():
+            return dot_git / "index.lock"
+        try:
+            git_file = dot_git.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        prefix, separator, raw_git_dir = git_file.partition(":")
+        if prefix.lower() != "gitdir" or not separator or not raw_git_dir.strip():
+            return None
+        git_dir = Path(raw_git_dir.strip())
+        if not git_dir.is_absolute():
+            git_dir = dot_git.parent / git_dir
+        return git_dir.resolve() / "index.lock"
+
+    def _clear_orphaned_index_lock(self) -> None:
+        """Remove a Git index lock left behind before this owned sync began."""
+        capability = current_inherited_file_lock()
+        if capability is None or capability.fileno_for(self.source_path) is None:
+            return
+        lock_path = self._git_index_lock_path()
+        if lock_path is None:
+            return
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning(
+                "Could not remove orphaned knowledge Git index lock",
+                base_id=self.base_id,
+                lock_path=str(lock_path),
+                error=str(exc),
+            )
+            return
+        logger.warning(
+            "Removed orphaned knowledge Git index lock",
+            base_id=self.base_id,
+            lock_path=str(lock_path),
+        )
+
     async def _checkout_present(self) -> bool:
         return await asyncio.to_thread(
             git_checkout_present,
@@ -419,34 +536,67 @@ class GitKnowledgeSource:
         env: dict[str, str] | None = None,
     ) -> str:
         repo_root = cwd or self.source_path
-        process = await asyncio.create_subprocess_exec(
-            "git",
-            *args,
-            cwd=str(repo_root),
-            env=None if env is None else {**os.environ, **env},
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        capability = current_inherited_file_lock()
+        inherited_lock_fd = None if capability is None else capability.fileno_for(self.source_path)
+        owns_process_group = _git_process_group_is_owned_here()
+        spawn_task = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                "git",
+                *args,
+                cwd=str(repo_root),
+                env=None if env is None else {**os.environ, **env},
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                pass_fds=(() if inherited_lock_fd is None else (inherited_lock_fd,)),
+                start_new_session=owns_process_group,
+            ),
         )
+        spawn_cancellation = await _drain_owned_task(spawn_task)
+        process = spawn_task.result()
+        owned_process_group_id = process.pid if owns_process_group else None
+        if spawn_cancellation is not None:
+            cleanup_task = asyncio.create_task(
+                _terminate_git_process(process, owned_process_group_id=owned_process_group_id),
+            )
+            await _drain_owned_task(cleanup_task)
+            cleanup_task.result()
+            raise spawn_cancellation from None
         try:
             timeout_seconds = self._sync_timeout_seconds()
             if timeout_seconds is None:
                 stdout, stderr = await process.communicate()
             else:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
-        except asyncio.CancelledError:
-            with suppress(ProcessLookupError):
-                process.kill()
-            with suppress(ProcessLookupError):
-                await process.wait()
-            raise
+        except asyncio.CancelledError as exc:
+            cleanup_task = asyncio.create_task(
+                _terminate_git_process(process, owned_process_group_id=owned_process_group_id),
+            )
+            await _drain_owned_task(cleanup_task)
+            cleanup_task.result()
+            raise exc from None
         except TimeoutError as exc:
-            with suppress(ProcessLookupError):
-                process.kill()
-            with suppress(ProcessLookupError):
-                await process.wait()
+            cleanup_task = asyncio.create_task(
+                _terminate_git_process(process, owned_process_group_id=owned_process_group_id),
+            )
+            cancellation = await _drain_owned_task(cleanup_task)
+            cleanup_task.result()
+            if cancellation is not None:
+                raise cancellation from None
             command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
             msg = f"Git command timed out after {timeout_seconds:.0f}s: {command}"
             raise RuntimeError(msg) from exc
+
+        # A completed Git leader may still leave a filter/helper behind. Direct
+        # refreshes own a private group and must drain it before releasing the
+        # inherited source lock. A refresh subprocess leaves this to its outer
+        # process-group supervisor instead.
+        cleanup_task = asyncio.create_task(
+            _terminate_git_process(process, owned_process_group_id=owned_process_group_id),
+        )
+        cancellation = await _drain_owned_task(cleanup_task)
+        cleanup_task.result()
+        if cancellation is not None:
+            raise cancellation from None
 
         if process.returncode == 0:
             return stdout.decode("utf-8", errors="replace")
