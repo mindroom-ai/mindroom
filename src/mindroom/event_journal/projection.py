@@ -1,7 +1,7 @@
 """The visible-message projection: one row per logical message.
 
-Every rule here runs inside the admission transaction, so the projection can
-never disagree with the journal about what was admitted.
+Every fold runs inside the journal transaction that admits, acknowledges, or
+installs its source facts, so projection and durable lifecycle truth agree.
 
 The projection deliberately keeps no edit-body history. An edit overwrites the
 visible row and the previous body is gone. Answer admission atomically snapshots

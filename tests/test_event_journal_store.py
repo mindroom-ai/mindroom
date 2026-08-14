@@ -1863,6 +1863,17 @@ class TestProjectedInteractivePrompts:
             thread_id="$thread",
             content=content,
         )
+        assert await alice.interactive_prompt_is_current(
+            room_id=ROOM,
+            question_event_id="$target",
+            expected=InteractivePrompt(
+                creator_agent="agent",
+                question_text="Large?",
+                options={"1": "large"},
+                option_labels={"1": "Large"},
+                source_event_id="$turn",
+            ),
+        )
         await admit(
             alice,
             "$reaction",

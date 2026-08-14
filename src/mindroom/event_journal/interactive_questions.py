@@ -130,14 +130,21 @@ def prompt_is_current(
         UPDATE visible_messages
         SET revision_event_id = revision_event_id
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
-        RETURNING content_json
+        RETURNING revision_event_id
         """,
         (principal_id, room_id, question_event_id),
     )
-    if row is None or row["content_json"] is None:
+    if row is None:
         return False
-    content = json.loads(str(row["content_json"]))
-    return isinstance(content, dict) and interactive_prompt_from_content(content) == expected
+    prompt = transaction.fetchone(
+        """
+        SELECT question_json
+        FROM interactive_questions
+        WHERE principal_id = ? AND question_event_id = ? AND revision_event_id = ?
+        """,
+        (principal_id, question_event_id, row["revision_event_id"]),
+    )
+    return prompt is not None and prompt["question_json"] == _prompt_json(expected)
 
 
 def record_projected_prompt(
