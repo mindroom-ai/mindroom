@@ -7,6 +7,7 @@ import json
 import threading
 from contextvars import copy_context
 from functools import wraps
+from html import unescape
 from typing import TYPE_CHECKING, cast
 
 from agno.tools.github import GithubTools as AgnoGithubTools
@@ -198,6 +199,34 @@ class GithubTools(AgnoGithubTools):
 
             function.entrypoint = oauth_entrypoint
             setattr(self, function.name, oauth_entrypoint)
+
+    @wraps(AgnoGithubTools.search_issues_and_prs)
+    def search_issues_and_prs(
+        self,
+        query: str,
+        state: str | None = None,
+        type_filter: str | None = None,
+        repo: str | None = None,
+        user: str | None = None,
+        label: str | None = None,
+        sort: str = "created",
+        order: str = "desc",
+        page: int = 1,
+        per_page: int = 30,
+    ) -> str:
+        """Search for issues and pull requests while restoring escaped operators."""
+        return super().search_issues_and_prs(
+            query=unescape(query),
+            state=state,
+            type_filter=type_filter,
+            repo=repo,
+            user=user,
+            label=label,
+            sort=sort,
+            order=order,
+            page=page,
+            per_page=per_page,
+        )
 
     def authenticate(self) -> Github:
         """Build the PyGithub client without logging credential values."""

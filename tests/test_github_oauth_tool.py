@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
-from github import BadCredentialsException
+from github import BadCredentialsException, Github
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
@@ -49,6 +49,25 @@ class _FakeUser:
 class _FakeGithub:
     def get_user(self) -> _FakeUser:
         return _FakeUser()
+
+
+class _FakeIssueSearchResults:
+    totalCount = 0  # noqa: N815
+
+    def get_page(self, page: int) -> list[object]:
+        assert page == 0
+        return []
+
+
+class _SearchGithub:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    def search_issues(self, query: str, *, sort: str, order: str) -> _FakeIssueSearchResults:
+        assert sort == "created"
+        assert order == "desc"
+        self.queries.append(query)
+        return _FakeIssueSearchResults()
 
 
 class _RevokedTokenGithub:
@@ -346,6 +365,38 @@ def test_base_url_is_forwarded_to_pygithub(tmp_path: Path) -> None:
 
     assert json.loads(tool.list_repositories()) == ["example/project"]
     assert captured["base_url"] == "https://github.example.test/api/v3"
+
+
+def test_pygithub_language_payload_remains_numeric_for_agno_stats() -> None:
+    client = Github(lazy=True)
+    try:
+        repo = client.get_repo("example/project", lazy=True)
+        with patch.object(
+            repo._requester,
+            "requestJson",
+            return_value=(200, {}, '{"Python": 123}'),
+        ):
+            assert repo.get_languages() == {"Python": 123}
+    finally:
+        client.close()
+
+
+def test_issue_search_decodes_html_escaped_comparison_operators(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    github = _SearchGithub()
+    tool.g = github
+
+    result = json.loads(tool.search_issues_and_prs("created:&gt;=2026-08-07"))
+
+    assert github.queries == ["created:>=2026-08-07"]
+    assert result["query"] == "created:>=2026-08-07"
 
 
 def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) -> None:
