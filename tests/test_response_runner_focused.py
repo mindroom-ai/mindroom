@@ -3420,10 +3420,9 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
     """Each outcome finalizes once and only a durable pause transfers source ownership."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    handoffs: list[str] = []
     request = replace(
         _plain_request(_target()),
-        on_durable_source_handoff=lambda: handoffs.append("handed_off"),
+        source_handoff=asyncio.Event(),
     )
     progress = response_runner._DeliveryProgress()
     post_effects = AsyncMock()
@@ -3471,7 +3470,8 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
         post_effects.assert_not_awaited()
     else:
         post_effects.assert_awaited_once()
-    assert handoffs == (["handed_off"] if hands_off else [])
+    assert request.source_handoff is not None
+    assert request.source_handoff.is_set() is hands_off
 
 
 @pytest.mark.asyncio

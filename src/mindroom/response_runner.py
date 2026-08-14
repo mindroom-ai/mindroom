@@ -353,8 +353,8 @@ class ResponseRequest:
     on_deferred_outcome_handled: Callable[[str], Awaitable[None]] | None = None
     on_user_stop_handled: Callable[[str, int], Awaitable[None]] | None = None
     on_visible_response: Callable[[str], Awaitable[None]] | None = None
-    # Another durable owner invokes this only after it can finish the source.
-    on_durable_source_handoff: Callable[[], None] | None = None
+    # Set only after another durable owner can finish the source.
+    source_handoff: asyncio.Event | None = None
 
     @property
     def room_id(self) -> str:
@@ -2690,8 +2690,8 @@ class ResponseRunner:
             post_response_outcome=build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
-        if final_outcome.terminal_status == "suspended" and request.on_durable_source_handoff is not None:
-            request.on_durable_source_handoff()
+        if final_outcome.terminal_status == "suspended" and request.source_handoff is not None:
+            request.source_handoff.set()
         interruption_recovery_registered = self._notify_interrupted_response_recoverable(request, final_outcome)
         cancel_source = final_outcome.resolved_cancel_source
         source_handled = final_outcome.mark_handled and (
