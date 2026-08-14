@@ -593,7 +593,7 @@ async def _interactive_selection_rows(store: EventJournalStore) -> list[dict[str
         lambda transaction: transaction.fetchall(
             """
             SELECT principal_id, source_event_id, question_event_id,
-                   revision_event_id, selection_json
+                   revision_event_id, selection_key
             FROM interactive_selections
             ORDER BY source_event_id
             """,
@@ -1597,8 +1597,6 @@ class TestProjectedInteractivePrompts:
 
         selection = await alice.claim_interactive_reaction(
             source_event_id="$reaction",
-            question_event_id="$target",
-            selection_key="1",
         )
 
         assert selection == InteractiveSelection(
@@ -1609,6 +1607,33 @@ class TestProjectedInteractivePrompts:
             selected_value="old",
             thread_id="$thread",
         )
+
+    async def test_admission_rejects_an_option_the_visible_prompt_does_not_offer(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """An invalid reaction never creates the source snapshot that claim trusts."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        await admit(
+            alice,
+            "$target",
+            sender="alice",
+            thread_id="$thread",
+            content=interactive_prompt("Choose?", "valid", source_event_id="$turn"),
+            event_class=EventClass.CONTEXT_ONLY,
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "missing"),
+        )
+
+        assert await alice.claim_interactive_reaction(source_event_id="$reaction") is None
+        assert await _interactive_selection_rows(journal_store) == []
+        assert [row["question_event_id"] for row in await _interactive_question_rows(journal_store)] == ["$target"]
 
     async def test_a_sidecar_prompt_activates_from_the_revision_admission_installed(
         self,
@@ -1639,8 +1664,6 @@ class TestProjectedInteractivePrompts:
 
         selection = await alice.claim_interactive_reaction(
             source_event_id="$reaction",
-            question_event_id="$target",
-            selection_key="1",
         )
 
         assert selection is not None
@@ -1683,8 +1706,6 @@ class TestProjectedInteractivePrompts:
 
         selection = await alice.claim_interactive_reaction(
             source_event_id="$reaction",
-            question_event_id="$target",
-            selection_key="1",
         )
 
         assert selection is not None
@@ -1720,8 +1741,6 @@ class TestProjectedInteractivePrompts:
 
         selection = await alice.claim_interactive_reaction(
             source_event_id="$reaction",
-            question_event_id="$target",
-            selection_key="1",
         )
 
         assert selection is not None
@@ -1757,8 +1776,6 @@ class TestProjectedInteractivePrompts:
 
         selection = await alice.claim_interactive_reaction(
             source_event_id="$reaction",
-            question_event_id="$target",
-            selection_key="1",
         )
 
         assert selection is not None
@@ -1864,8 +1881,6 @@ class TestProjectedInteractivePrompts:
 
         selection = await alice.claim_interactive_reaction(
             source_event_id="$reaction",
-            question_event_id="$historical-question",
-            selection_key="1",
         )
 
         assert selection is not None
@@ -1899,8 +1914,6 @@ class TestProjectedInteractivePrompts:
 
         selection = await alice.claim_interactive_reaction(
             source_event_id="$reaction",
-            question_event_id="$target",
-            selection_key="1",
         )
 
         assert selection is not None
@@ -1923,8 +1936,6 @@ class TestProjectedInteractivePrompts:
         )
         assert await alice.claim_interactive_reaction(
             source_event_id="$first-reaction",
-            question_event_id="$target",
-            selection_key="1",
         )
         await alice.settle("$first-reaction")
 
@@ -1948,8 +1959,6 @@ class TestProjectedInteractivePrompts:
         assert (
             await alice.claim_interactive_reaction(
                 source_event_id="$second-reaction",
-                question_event_id="$target",
-                selection_key="1",
             )
             is None
         )
@@ -1981,8 +1990,6 @@ class TestProjectedInteractivePrompts:
         assert (
             await alice.claim_interactive_reaction(
                 source_event_id="$reaction",
-                question_event_id="$target",
-                selection_key="1",
             )
             is None
         )
@@ -2010,8 +2017,6 @@ class TestInteractiveQuestionClaims:
         assert (
             await alice.claim_interactive_reaction(
                 source_event_id="$reaction",
-                question_event_id="$question",
-                selection_key="1",
             )
             == original
         )
@@ -2027,8 +2032,6 @@ class TestInteractiveQuestionClaims:
         assert (
             await alice.claim_interactive_reaction(
                 source_event_id="$reaction",
-                question_event_id="$question",
-                selection_key="1",
             )
             == original
         )
@@ -2042,8 +2045,6 @@ class TestInteractiveQuestionClaims:
         )
         selected_replacement = await alice.claim_interactive_reaction(
             source_event_id="$replacement-reaction",
-            question_event_id="$question",
-            selection_key="2",
         )
 
         assert selected_replacement == InteractiveSelection(
@@ -2086,8 +2087,6 @@ class TestInteractiveQuestionClaims:
 
         selected = await alice.claim_interactive_reaction(
             source_event_id="$reaction",
-            question_event_id="$question",
-            selection_key="1",
         )
 
         assert selected is not None
@@ -2108,8 +2107,6 @@ class TestInteractiveQuestionClaims:
         await alice.admit(replacement_reaction)
         replacement_selection = await alice.claim_interactive_reaction(
             source_event_id="$replacement-reaction",
-            question_event_id="$question",
-            selection_key="1",
         )
 
         assert replacement_selection is not None
@@ -2137,7 +2134,6 @@ class TestInteractiveQuestionClaims:
 
         selection = await alice.claim_interactive_text(
             source_event_id="$answer",
-            selection_key="1",
         )
 
         assert selection is not None
@@ -2164,16 +2160,12 @@ class TestInteractiveQuestionClaims:
         assert (
             await alice.claim_interactive_reaction(
                 source_event_id="$reaction",
-                question_event_id="$question",
-                selection_key="👍",
             )
             == expected
         )
         assert (
             await alice.claim_interactive_reaction(
                 source_event_id="$reaction",
-                question_event_id="$question",
-                selection_key="👍",
             )
             == expected
         )
@@ -2208,15 +2200,11 @@ class TestInteractiveQuestionClaims:
             await alice.admit(reaction)
         assert await alice.claim_interactive_reaction(
             source_event_id="$winner",
-            question_event_id="$question",
-            selection_key="1",
         )
 
         assert (
             await alice.claim_interactive_reaction(
                 source_event_id="$loser",
-                question_event_id="$question",
-                selection_key="1",
             )
             is None
         )
@@ -2227,32 +2215,6 @@ class TestInteractiveQuestionClaims:
         assert await _interactive_question_rows(journal_store) == []
         rows = await _interactive_selection_rows(journal_store)
         assert [row["source_event_id"] for row in rows] == ["$winner"]
-
-    async def test_invalid_reaction_claims_leave_both_records_unchanged(
-        self,
-        alice: PrincipalStore,
-        journal_store: EventJournalStore,
-    ) -> None:
-        """A wrong option cannot partially claim the source or question."""
-        await admit(alice, "$turn")
-        await _activate_interactive_question(alice, "$question")
-        await admit(alice, "$reaction", kind=EventKind.REACTION, content=reaction_content("$question", "1"))
-
-        assert (
-            await alice.claim_interactive_reaction(
-                source_event_id="$reaction",
-                question_event_id="$question",
-                selection_key="missing",
-            )
-            is None
-        )
-        reaction = await alice.load_event("$reaction")
-        assert reaction is not None
-        assert reaction.semantic_consumer is None
-        rows = await _interactive_question_rows(journal_store)
-        assert [row["question_event_id"] for row in rows] == ["$question"]
-        selection_rows = await _interactive_selection_rows(journal_store)
-        assert [row["source_event_id"] for row in selection_rows] == ["$reaction"]
 
     async def test_interactive_text_claim_chooses_the_oldest_question_and_replays_it(
         self,
@@ -2276,14 +2238,12 @@ class TestInteractiveQuestionClaims:
         assert (
             await alice.claim_interactive_text(
                 source_event_id="$answer",
-                selection_key="1",
             )
             == expected
         )
         assert (
             await alice.claim_interactive_text(
                 source_event_id="$answer",
-                selection_key="1",
             )
             == expected
         )
@@ -2304,7 +2264,6 @@ class TestInteractiveQuestionClaims:
 
         selection = await alice.claim_interactive_text(
             source_event_id="$answer",
-            selection_key="1",
         )
 
         assert selection is not None
@@ -2324,11 +2283,9 @@ class TestInteractiveQuestionClaims:
         claims = await asyncio.gather(
             alice.claim_interactive_text(
                 source_event_id="$first-answer",
-                selection_key="1",
             ),
             alice.claim_interactive_text(
                 source_event_id="$second-answer",
-                selection_key="1",
             ),
         )
 
@@ -2350,8 +2307,6 @@ class TestInteractiveQuestionConsumption:
         await admit(alice, "$reaction", kind=EventKind.REACTION, content=reaction_content("$claimed", "1"))
         assert await alice.claim_interactive_reaction(
             source_event_id="$reaction",
-            question_event_id="$claimed",
-            selection_key="1",
         )
 
         await alice.settle_many(("$reaction",))
@@ -2388,8 +2343,6 @@ class TestInteractiveQuestionConsumption:
         await admit(alice, "$reaction", kind=EventKind.REACTION, content=reaction_content("$claimed", "1"))
         assert await alice.claim_interactive_reaction(
             source_event_id="$reaction",
-            question_event_id="$claimed",
-            selection_key="1",
         )
 
         await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
@@ -2436,6 +2389,42 @@ class TestIncompatibleInteractiveSchemaRefusal:
             )
 
         with pytest.raises(RuntimeError, match="incompatible pre-selection schema"):
+            EventJournalStore.open_postgres(database_url)
+
+    async def test_sqlite_refuses_the_superseded_selection_payload(self, tmp_path: Path) -> None:
+        """SQLite rejects the interim duplicated selection snapshot shape."""
+        database_path = tmp_path / "legacy.db"
+        with sqlite3.connect(database_path) as database:
+            database.execute(
+                """
+                CREATE TABLE interactive_selections (
+                    principal_id TEXT NOT NULL,
+                    source_event_id TEXT NOT NULL,
+                    selection_json TEXT NOT NULL
+                )
+                """,
+            )
+
+        with pytest.raises(RuntimeError, match="incompatible interactive selection schema"):
+            EventJournalStore.open_sqlite(database_path)
+
+    async def test_postgres_refuses_the_superseded_selection_payload(self, postgres_journal_url: str) -> None:
+        """PostgreSQL rejects the same interim duplicated selection snapshot shape."""
+        import psycopg  # noqa: PLC0415
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        with psycopg.connect(database_url, autocommit=True) as database:
+            database.execute(
+                """
+                CREATE TABLE interactive_selections (
+                    principal_id TEXT NOT NULL,
+                    source_event_id TEXT NOT NULL,
+                    selection_json TEXT NOT NULL
+                )
+                """,
+            )
+
+        with pytest.raises(RuntimeError, match="incompatible interactive selection schema"):
             EventJournalStore.open_postgres(database_url)
 
 

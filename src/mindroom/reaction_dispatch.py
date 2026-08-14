@@ -158,10 +158,7 @@ class ReactionDispatcher:
             self.deps.runtime_paths,
         ).is_managed_user_id(event.sender):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED if interactive_claimed else None
-        selection = await self.deps.journal_dispatcher.claim_interactive_reaction(
-            question_event_id=event.reacts_to,
-            selection_key=event.key,
-        )
+        selection = await self.deps.journal_dispatcher.claim_interactive_reaction()
         if selection is None:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED if interactive_claimed else None
 

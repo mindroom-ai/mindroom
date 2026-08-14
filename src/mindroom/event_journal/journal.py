@@ -329,17 +329,6 @@ def _advance_membership_epoch(
             SemanticConsumer.INTERACTIVE_REACTION.value,
         ),
     )
-    transaction.execute(
-        """
-        DELETE FROM interactive_selections
-        WHERE principal_id = ? AND source_event_id IN (
-            SELECT event_id
-            FROM journal_events
-            WHERE principal_id = ? AND room_id = ? AND state = ?
-        )
-        """,
-        (principal_id, principal_id, room_id, SETTLED_STATE),
-    )
     return epoch
 
 

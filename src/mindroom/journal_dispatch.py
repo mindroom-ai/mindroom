@@ -439,9 +439,6 @@ class JournalDispatcher:
 
     async def claim_interactive_reaction(
         self,
-        *,
-        question_event_id: str,
-        selection_key: str,
     ) -> InteractiveSelection | None:
         """Atomically transfer one journal-owned selection to the running reaction."""
         event = _RUNNING_EVENT.get()
@@ -450,8 +447,6 @@ class JournalDispatcher:
             raise RuntimeError(msg)
         selection = await self.store.claim_interactive_reaction(
             source_event_id=event.event_id,
-            question_event_id=question_event_id,
-            selection_key=selection_key,
         )
         if selection is None:
             return None

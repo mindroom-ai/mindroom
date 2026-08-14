@@ -176,10 +176,13 @@ _TABLES = (
         source_event_id {ordered_text} NOT NULL,
         question_event_id {ordered_text} NOT NULL,
         revision_event_id {ordered_text} NOT NULL,
-        selection_json TEXT NOT NULL,
+        selection_key TEXT NOT NULL,
         PRIMARY KEY (principal_id, source_event_id),
         FOREIGN KEY (principal_id, source_event_id)
-            REFERENCES journal_events (principal_id, event_id)
+            REFERENCES journal_events (principal_id, event_id),
+        FOREIGN KEY (principal_id, question_event_id, revision_event_id)
+            REFERENCES interactive_questions (principal_id, question_event_id, revision_event_id)
+            ON DELETE CASCADE
     )
     """,
     """

@@ -331,7 +331,7 @@ class TestAgentBot(AgentBotTestBase):
         room.room_id = "!test:localhost"
         room.canonical_alias = None
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
-        replace_interactive_selection_handlers(bot, handle=AsyncMock())
+        replace_interactive_selection_handlers(bot, handle=AsyncMock(return_value=False))
         selection = interactive.InteractiveSelection(
             question_event_id="$question",
             question_text="Choose one",
@@ -548,9 +548,10 @@ class TestAgentBot(AgentBotTestBase):
         )
         selection_started = asyncio.Event()
 
-        async def handle_selection(*_args: object, **_kwargs: object) -> None:
+        async def handle_selection(*_args: object, **_kwargs: object) -> bool:
             selection_started.set()
             assert bot._coalescing_gate.lanes.unsettled_slots()
+            return False
 
         replace_interactive_selection_handlers(bot, handle=handle_selection)
         with _mock_interactive_claim(bot, selection):
@@ -641,7 +642,7 @@ class TestAgentBot(AgentBotTestBase):
             await original_dispatch(turn)
 
         async def start_selection(
-            _response_factory: Callable[[], Awaitable[None]],
+            _response_factory: Callable[[], Awaitable[bool]],
             **_kwargs: object,
         ) -> None:
             execution_order.append("reaction")
@@ -701,9 +702,10 @@ class TestAgentBot(AgentBotTestBase):
         release_selection = asyncio.Event()
         message_started = asyncio.Event()
 
-        async def blocked_selection(*_args: object, **_kwargs: object) -> None:
+        async def blocked_selection(*_args: object, **_kwargs: object) -> bool:
             selection_started.set()
             await release_selection.wait()
+            return False
 
         async def handle_other_thread(*_args: object, **_kwargs: object) -> TurnDispatchOutcome:
             message_started.set()
@@ -777,8 +779,9 @@ class TestAgentBot(AgentBotTestBase):
             await release_older.wait()
             return "$older-response"
 
-        async def handle_selection(*_args: object, **_kwargs: object) -> None:
+        async def handle_selection(*_args: object, **_kwargs: object) -> bool:
             preparation_started.set()
+            return False
 
         replace_interactive_selection_handlers(bot, handle=handle_selection)
         older: asyncio.Task[str | None] | None = None
@@ -860,8 +863,9 @@ class TestAgentBot(AgentBotTestBase):
         )
         response_completed = asyncio.Event()
 
-        async def response() -> None:
+        async def response() -> bool:
             response_completed.set()
+            return False
 
         target = bot._conversation_resolver.build_message_target(
             room_id="!test:localhost",
@@ -881,6 +885,40 @@ class TestAgentBot(AgentBotTestBase):
         settle_dispatch_sources.assert_awaited_once_with(("$reaction",))
         # The failed settlement must hand the exact journal source back for retry.
         retry_dispatch_sources.assert_called_once_with(("$reaction",))
+
+    @pytest.mark.asyncio
+    async def test_interactive_source_handoff_skips_fallback_settlement(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A durable continuation retains its source until that continuation finishes."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        settle_dispatch_sources = AsyncMock()
+        controller = replace_turn_controller_deps(
+            bot,
+            settle_dispatch_sources=settle_dispatch_sources,
+        )
+
+        async def handed_off_response() -> bool:
+            return True
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!test:localhost",
+            thread_id="$thread-a",
+            reply_to_event_id="$question",
+        )
+        await controller._start_interactive_selection(
+            handed_off_response,
+            response_target=target,
+            source_event_id="$reaction",
+            user_id="@user:localhost",
+            selected_value="Selected",
+        )
+        await bot._response_runner.drain_inbox_responses()
+
+        settle_dispatch_sources.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_terminal_interactive_selection_preserves_task_cancellation(
@@ -1186,12 +1224,13 @@ class TestAgentBot(AgentBotTestBase):
 
         lifecycle_lock.acquire = tracked_acquire  # type: ignore[method-assign]
 
-        async def handle_selection(*_args: object, **_kwargs: object) -> None:
+        async def handle_selection(*_args: object, **_kwargs: object) -> bool:
             preparation_started.set()
             await release_preparation.wait()
             await bot._response_runner.generate_response(
                 _direct_response_request(target, "interactive", reaction.event_id),
             )
+            return False
 
         async def generate_locked(
             _self: ResponseRunner,
@@ -1333,7 +1372,7 @@ class TestAgentBot(AgentBotTestBase):
             await release_approval.wait()
             return False
 
-        replace_interactive_selection_handlers(bot, handle=AsyncMock())
+        replace_interactive_selection_handlers(bot, handle=AsyncMock(return_value=False))
         with (
             patch("mindroom.reaction_dispatch.handle_tool_approval_action", side_effect=delayed_approval),
             _mock_interactive_claim(bot, selection),
@@ -2595,7 +2634,7 @@ class TestAgentBot(AgentBotTestBase):
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
-        replace_interactive_selection_handlers(restarted, handle=AsyncMock())
+        replace_interactive_selection_handlers(restarted, handle=AsyncMock(return_value=False))
         await restarted._journal_dispatcher.drain_once()
         await restarted._response_runner.drain_inbox_responses()
 

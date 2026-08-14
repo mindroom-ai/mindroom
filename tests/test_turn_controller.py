@@ -503,7 +503,6 @@ async def test_on_message_claims_interactive_text_by_durable_source_event(
 
     interactive_questions.claim_interactive_text.assert_awaited_once_with(
         source_event_id="$selection:localhost",
-        selection_key="1",
     )
     mock_dispatch_text.assert_awaited_once()
 
@@ -625,7 +624,6 @@ async def test_sidecar_preview_claims_interactive_text_by_durable_source_event(
 
     interactive_questions.claim_interactive_text.assert_awaited_once_with(
         source_event_id=prepared_event.event_id,
-        selection_key="1",
     )
     mock_enqueue.assert_awaited_once()
     assert mock_enqueue.await_args.kwargs["prepared_event"] is prepared_event

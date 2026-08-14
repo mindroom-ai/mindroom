@@ -216,22 +216,6 @@ def _selection_from_row(row: Row, selection_key: str) -> InteractiveSelection | 
     )
 
 
-def _selection_json(selection: InteractiveSelection) -> str:
-    """Serialize the immutable selection bound to one pending source."""
-    return json.dumps(
-        {
-            "question_text": selection.question_text,
-            "selected_label": selection.selected_label,
-            "selected_value": selection.selected_value,
-            "selection_key": selection.selection_key,
-            "thread_id": selection.thread_id,
-        },
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-
-
 def _stored_selection(
     transaction: Transaction,
     principal_id: str,
@@ -240,24 +224,28 @@ def _stored_selection(
     """Return the immutable prompt snapshot stored for one source."""
     row = transaction.fetchone(
         """
-        SELECT question_event_id, revision_event_id, selection_json
-        FROM interactive_selections
-        WHERE principal_id = ? AND source_event_id = ?
+        SELECT selected.question_event_id, selected.revision_event_id,
+               selected.selection_key, question.question_json, visible.thread_id
+        FROM interactive_selections AS selected
+        JOIN interactive_questions AS question
+          ON question.principal_id = selected.principal_id
+         AND question.question_event_id = selected.question_event_id
+         AND question.revision_event_id = selected.revision_event_id
+        JOIN visible_messages AS visible
+          ON visible.principal_id = question.principal_id
+         AND visible.room_id = question.room_id
+         AND visible.logical_event_id = question.question_event_id
+        WHERE selected.principal_id = ? AND selected.source_event_id = ?
         """,
         (principal_id, source_event_id),
     )
     if row is None:
         return None
-    payload = cast("dict[str, object]", json.loads(str(row["selection_json"])))
+    selection = _selection_from_row(row, str(row["selection_key"]))
+    if selection is None:
+        return None
     return _StoredSelection(
-        selection=InteractiveSelection(
-            question_event_id=str(row["question_event_id"]),
-            question_text=str(payload["question_text"]),
-            selection_key=str(payload["selection_key"]),
-            selected_label=str(payload["selected_label"]),
-            selected_value=str(payload["selected_value"]),
-            thread_id=cast("str | None", payload["thread_id"]),
-        ),
+        selection=selection,
         revision_event_id=str(row["revision_event_id"]),
     )
 
@@ -268,13 +256,13 @@ def _snapshot_selection(
     source_event_id: str,
     revision_event_id: str,
     selection: InteractiveSelection,
-) -> _StoredSelection:
-    """Store and return one source-bound prompt revision snapshot."""
+) -> None:
+    """Store one source-bound prompt revision snapshot."""
     transaction.execute(
         """
         INSERT INTO interactive_selections (
             principal_id, source_event_id, question_event_id,
-            revision_event_id, selection_json
+            revision_event_id, selection_key
         ) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, source_event_id) DO NOTHING
         """,
@@ -283,12 +271,8 @@ def _snapshot_selection(
             source_event_id,
             selection.question_event_id,
             revision_event_id,
-            _selection_json(selection),
+            selection.selection_key,
         ),
-    )
-    return _StoredSelection(
-        selection=selection,
-        revision_event_id=revision_event_id,
     )
 
 
@@ -482,13 +466,11 @@ def _active_question_row(
     )
 
 
-def claim_reaction(  # noqa: PLR0911 - every failed ownership predicate is terminal
+def claim_reaction(
     transaction: Transaction,
     principal_id: str,
     *,
     source_event_id: str,
-    question_event_id: str,
-    selection_key: str,
 ) -> InteractiveSelection | None:
     """Atomically transfer one valid question selection to its reaction source."""
     candidate = transaction.fetchone(
@@ -528,8 +510,6 @@ def claim_reaction(  # noqa: PLR0911 - every failed ownership predicate is termi
     if stored_selection is None:
         return None
     selection = stored_selection.selection
-    if selection.question_event_id != question_event_id or selection.selection_key != selection_key:
-        return None
     if not _consume_selection_revision(transaction, principal_id, source_event_id, stored_selection):
         return None
     if source["semantic_consumer"] is None:
@@ -549,7 +529,6 @@ def claim_text(
     principal_id: str,
     *,
     source_event_id: str,
-    selection_key: str,
 ) -> InteractiveSelection | None:
     """Atomically claim the oldest matching question for one text source."""
     candidate_source = transaction.fetchone(
@@ -588,7 +567,7 @@ def claim_text(
     ):
         return None
     stored_selection = _stored_selection(transaction, principal_id, source_event_id)
-    if stored_selection is None or stored_selection.selection.selection_key != selection_key:
+    if stored_selection is None:
         return None
     if not _consume_selection_revision(transaction, principal_id, source_event_id, stored_selection):
         return None

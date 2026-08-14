@@ -218,8 +218,6 @@ class PrincipalStore:
         self,
         *,
         source_event_id: str,
-        question_event_id: str,
-        selection_key: str,
     ) -> InteractiveSelection | None:
         """Atomically transfer one question selection to its reaction source."""
         return await self._backend.write(
@@ -227,8 +225,6 @@ class PrincipalStore:
                 transaction,
                 self._principal_id,
                 source_event_id=source_event_id,
-                question_event_id=question_event_id,
-                selection_key=selection_key,
             ),
         )
 
@@ -236,7 +232,6 @@ class PrincipalStore:
         self,
         *,
         source_event_id: str,
-        selection_key: str,
     ) -> InteractiveSelection | None:
         """Atomically transfer the oldest eligible selection to one text source."""
         return await self._backend.write(
@@ -244,7 +239,6 @@ class PrincipalStore:
                 transaction,
                 self._principal_id,
                 source_event_id=source_event_id,
-                selection_key=selection_key,
             ),
         )
 

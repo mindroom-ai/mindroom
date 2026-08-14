@@ -131,6 +131,7 @@ class _RecordingResponseRunner:
 
     response_event_id: str | None = "$response:localhost"
     visible_response_event_id: str | None = None
+    handoff_source: bool = False
     pre_lock_error: Exception | None = None
     deferred_sync_restart_error: asyncio.CancelledError | None = None
     requests: list[ResponseRequest] = field(default_factory=list)
@@ -185,6 +186,10 @@ class _RecordingResponseRunner:
             return None
         if self.visible_response_event_id is not None and request.on_visible_response is not None:
             await request.on_visible_response(self.visible_response_event_id)
+        if self.handoff_source:
+            assert request.on_durable_source_handoff is not None
+            request.on_durable_source_handoff()
+            return None
         if self.deferred_sync_restart_error is not None:
             assert self.response_event_id is not None
             assert request.on_interrupted_response_recoverable is not None
@@ -3187,6 +3192,65 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
     assert len(harness.runner.requests) == 1
     assert harness.turn_store.is_handled(selection.question_event_id) is False
     assert harness.turn_store.is_handled("$selection:localhost") is False
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_accepts_a_durable_source_handoff(config: Config, tmp_path: Path) -> None:
+    """A paused continuation, rather than this response task, retains settlement ownership."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.handoff_source = True
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+
+    source_handed_off = await harness.controller._handle_interactive_selection(
+        room,
+        selection=selection,
+        user_id=_SENDER,
+        source_event_id="$selection:localhost",
+    )
+
+    assert source_handed_off is True
+    assert harness.turn_store.is_handled("$selection:localhost") is False
+    record = harness.turn_store.get_turn_record("$selection:localhost")
+    assert record is not None
+    assert record.completed is False
+
+
+@pytest.mark.asyncio
+async def test_numeric_interactive_selection_defers_a_durably_handed_off_source(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A numeric answer remains journal-owned while an approval continuation holds it."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.handoff_source = True
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    harness.controller.deps.interactive_questions.claim_interactive_text.return_value = selection
+    room = _room_with_members(config, "general")
+
+    outcome = await harness.controller.handle_text_event(
+        room,
+        _text_event("1", event_id="$numeric-selection:localhost"),
+    )
+
+    assert outcome is TurnDispatchOutcome.DEFERRED
+    assert len(harness.runner.requests) == 1
+    assert harness.gate_batches == []
+    assert harness.turn_store.is_handled("$numeric-selection:localhost") is False
 
 
 @pytest.mark.asyncio

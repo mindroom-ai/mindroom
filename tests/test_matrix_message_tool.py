@@ -1581,8 +1581,6 @@ async def test_matrix_message_edit_replaces_a_question_without_losing_its_source
     assert (
         await principal.claim_interactive_reaction(
             source_event_id="$reaction",
-            question_event_id="$target",
-            selection_key="1",
         )
         == original
     )
@@ -1590,8 +1588,6 @@ async def test_matrix_message_edit_replaces_a_question_without_losing_its_source
     await admit("$replacement-reaction", EventKind.REACTION, content=reaction_content)
     selected_replacement = await principal.claim_interactive_reaction(
         source_event_id="$replacement-reaction",
-        question_event_id="$target",
-        selection_key="1",
     )
     assert payload["status"] == "ok"
     assert selected_replacement is not None

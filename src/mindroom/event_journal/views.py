@@ -117,8 +117,6 @@ class DispatchView(ReplayView, AdmissionView, Protocol):
         self,
         *,
         source_event_id: str,
-        question_event_id: str,
-        selection_key: str,
     ) -> InteractiveSelection | None:
         """Atomically transfer one validated selection to its reaction source."""
         ...
