@@ -137,6 +137,104 @@ class _StatsGithub:
         return _FakeRepositoryStats()
 
 
+@dataclass(frozen=True)
+class _FakeContentWriteResult:
+    path: str = "notes.txt"
+    sha: str = "content-sha"
+    html_url: str = "https://github.example.test/example/project/blob/main/notes.txt"
+
+
+@dataclass(frozen=True)
+class _FakeCommitWriteResult:
+    sha: str = "commit-sha"
+    html_url: str = "https://github.example.test/example/project/commit/commit-sha"
+    commit: None = None
+
+
+class _FakeWriteRepository:
+    def __init__(self) -> None:
+        self.update_calls: list[dict[str, object]] = []
+        self.delete_calls: list[dict[str, object]] = []
+
+    def update_file(self, **kwargs: object) -> dict[str, object]:
+        self.update_calls.append(kwargs)
+        return {
+            "content": _FakeContentWriteResult(),
+            "commit": _FakeCommitWriteResult(),
+        }
+
+    def delete_file(self, **kwargs: object) -> dict[str, object]:
+        self.delete_calls.append(kwargs)
+        return {
+            "content": None,
+            "commit": _FakeCommitWriteResult(),
+        }
+
+
+class _WriteGithub:
+    def __init__(self) -> None:
+        self.repo = _FakeWriteRepository()
+
+    def get_repo(self, repo_name: str) -> _FakeWriteRepository:
+        assert repo_name == "example/project"
+        return self.repo
+
+
+class _FakeEditableIssue:
+    def __init__(self) -> None:
+        self.edit_calls: list[dict[str, object]] = []
+
+    def edit(self, **kwargs: object) -> None:
+        self.edit_calls.append(kwargs)
+
+
+@dataclass(frozen=True)
+class _FakePullUser:
+    login: str
+
+
+@dataclass(frozen=True)
+class _FakePull:
+    user: _FakePullUser
+    state: str
+
+
+class _FakePullsWithoutTotal:
+    totalCount = None  # noqa: N815
+
+    def __init__(self) -> None:
+        self.items = [
+            _FakePull(user=_FakePullUser("alice"), state="open"),
+            _FakePull(user=_FakePullUser("bob"), state="open"),
+        ]
+
+    def __iter__(self) -> Iterator[_FakePull]:
+        return iter(self.items)
+
+
+class _FakeIssueAndPullRepository:
+    def __init__(self) -> None:
+        self.issue = _FakeEditableIssue()
+        self.pull_calls: list[dict[str, object]] = []
+
+    def get_issue(self, *, number: int) -> _FakeEditableIssue:
+        assert number == 7
+        return self.issue
+
+    def get_pulls(self, **kwargs: object) -> _FakePullsWithoutTotal:
+        self.pull_calls.append(kwargs)
+        return _FakePullsWithoutTotal()
+
+
+class _IssueAndPullGithub:
+    def __init__(self) -> None:
+        self.repo = _FakeIssueAndPullRepository()
+
+    def get_repo(self, repo_name: str) -> _FakeIssueAndPullRepository:
+        assert repo_name == "example/project"
+        return self.repo
+
+
 class _RevokedTokenGithub:
     def get_user(self) -> _FakeUser:
         raise BadCredentialsException(401, {"message": "Bad credentials"})
@@ -488,6 +586,150 @@ def test_issue_search_decodes_html_escaped_comparison_operators(tmp_path: Path) 
 
     assert github.queries == ["created:>=2026-08-07"]
     assert result["query"] == "created:>=2026-08-07"
+
+
+def test_update_file_reports_success_without_refetching_commit_details(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    github = _WriteGithub()
+    tool.g = github
+
+    result = json.loads(
+        tool.update_file(
+            repo_name="example/project",
+            path="notes.txt",
+            content="updated notes",
+            message="Update notes",
+            sha="old-content-sha",
+            branch="main",
+        ),
+    )
+
+    assert github.repo.update_calls == [
+        {
+            "path": "notes.txt",
+            "message": "Update notes",
+            "content": b"updated notes",
+            "sha": "old-content-sha",
+            "branch": "main",
+        },
+    ]
+    assert result == {
+        "path": "notes.txt",
+        "sha": "content-sha",
+        "url": "https://github.example.test/example/project/blob/main/notes.txt",
+        "commit": {
+            "sha": "commit-sha",
+            "message": "Update notes",
+            "url": "https://github.example.test/example/project/commit/commit-sha",
+        },
+    }
+
+
+def test_delete_file_reports_success_without_refetching_commit_details(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    github = _WriteGithub()
+    tool.g = github
+
+    result = json.loads(
+        tool.delete_file(
+            repo_name="example/project",
+            path="notes.txt",
+            message="Delete notes",
+            sha="content-sha",
+            branch="main",
+        ),
+    )
+
+    assert github.repo.delete_calls == [
+        {
+            "path": "notes.txt",
+            "message": "Delete notes",
+            "sha": "content-sha",
+            "branch": "main",
+        },
+    ]
+    assert result == {
+        "message": "File notes.txt deleted successfully",
+        "commit": {
+            "sha": "commit-sha",
+            "message": "Delete notes",
+            "url": "https://github.example.test/example/project/commit/commit-sha",
+        },
+    }
+
+
+def test_edit_issue_omits_unspecified_fields(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    github = _IssueAndPullGithub()
+    tool.g = github
+
+    result = json.loads(
+        tool.edit_issue(
+            repo_name="example/project",
+            issue_number=7,
+            title="Updated title",
+        ),
+    )
+
+    assert github.repo.issue.edit_calls == [{"title": "Updated title"}]
+    assert result == {"message": "Issue #7 updated."}
+
+
+def test_edit_issue_rejects_empty_update(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    github = _IssueAndPullGithub()
+    tool.g = github
+
+    result = json.loads(tool.edit_issue(repo_name="example/project", issue_number=7))
+
+    assert result == {"error": "Provide a title or body to update issue #7."}
+    assert github.repo.issue.edit_calls == []
+
+
+def test_pull_request_count_falls_back_when_total_count_is_missing(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    github = _IssueAndPullGithub()
+    tool.g = github
+
+    result = json.loads(tool.get_pull_request_count("example/project", state="open"))
+
+    assert result == {"count": 2}
+    assert github.repo.pull_calls == [{"state": "open"}]
 
 
 def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) -> None:
