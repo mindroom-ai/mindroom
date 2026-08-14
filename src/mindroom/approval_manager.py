@@ -61,8 +61,6 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "workspace file via `mindroom_output_path` or send it as a file attachment with a short message "
     "body — or auto-approve this tool via a script-based approval rule."
 )
-_STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
-_DETACHED_REQUEST_REASON = "Original tool request is no longer active."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
 _DETACHED_RETRY_INITIAL_SECONDS = 0.25
@@ -782,8 +780,8 @@ class _ApprovalManager:
         owed would keep the sweep asking forever.
 
         A transaction this process is still publishing or still waiting on is
-        left alone. Of the rest, a recorded resolution is redelivered, and an
-        ownerless card is expired through Matrix-only cleanup.
+        left alone. A recorded resolution is redelivered, while an unanswered
+        native card remains owned by the shared deadline sweep.
         """
         if self._send_is_in_flight(claimed.transaction_id):
             # A row whose send has not come back is indistinguishable, from
@@ -829,31 +827,10 @@ class _ApprovalManager:
             return None
         if identified.card.resolution is not None:
             return await self._redeliver_recorded_resolution(pending, identified.card)
-        if (
-            identified.card.continuation_id is not None
-            and identified.card.continuation_generation is not None
-            and identified.card.tool_call_id is not None
-        ):
-            self._ensure_detached_expiry_sweep()
-            if self._pending_expiry(pending) <= _utcnow():
-                self._detached_expiry_wakeup.set()
-            return None
-        content = identified.card.card.get("content")
-        if isinstance(content, dict) and isinstance(content.get("continuation_id"), str):
-            result = await self._discard_matrix_only_card(
-                pending=pending,
-                transaction_id=identified.card.transaction_id,
-                reason=_DETACHED_REQUEST_REASON,
-                resolved_by=transport_sender,
-            )
-            return result.resolved
-        result = await self._discard_matrix_only_card(
-            pending=pending,
-            transaction_id=identified.card.transaction_id,
-            reason=_STARTUP_DISCARD_REASON,
-            resolved_by=transport_sender,
-        )
-        return result.resolved
+        self._ensure_detached_expiry_sweep()
+        if self._pending_expiry(pending) <= _utcnow():
+            self._detached_expiry_wakeup.set()
+        return None
 
     async def _redeliver_recorded_resolution(self, pending: PendingApproval, stored: StoredApprovalCard) -> bool:
         """Show a decision a previous process committed to but may not have shown.
@@ -918,37 +895,26 @@ class _ApprovalManager:
             return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
         if before_consume is not None:
             await before_consume()
-        if (
-            stored.continuation_id is not None
-            and stored.continuation_generation is not None
-            and stored.tool_call_id is not None
-        ):
-            resolved_status, resolved_reason, resolution_was_truncated = self._normalized_resolution_request(
-                pending,
-                status=status,
-                reason=reason,
-            )
-            outcome = await self._emit_continuation_resolution(
-                pending,
-                transaction_id=stored.transaction_id,
-                status=resolved_status,
-                reason=resolved_reason,
-                resolved_by=sender_id if resolved_status == status else None,
-            )
-            if outcome is _ResolutionOutcome.RECORDED:
-                self._detached_expiry_wakeup.set()
-            return ApprovalActionResult(
-                consumed=True,
-                resolved=outcome is _ResolutionOutcome.DELIVERED,
-                error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON if resolution_was_truncated else None,
-                thread_id=pending.thread_id,
-                card_event_id=card_event_id,
-            )
-        return await self._discard_matrix_only_card(
-            pending=pending,
+        resolved_status, resolved_reason, resolution_was_truncated = self._normalized_resolution_request(
+            pending,
+            status=status,
+            reason=reason,
+        )
+        outcome = await self._emit_continuation_resolution(
+            pending,
             transaction_id=stored.transaction_id,
-            reason=_DETACHED_REQUEST_REASON,
-            resolved_by=sender_id,
+            status=resolved_status,
+            reason=resolved_reason,
+            resolved_by=sender_id if resolved_status == status else None,
+        )
+        if outcome is _ResolutionOutcome.RECORDED:
+            self._detached_expiry_wakeup.set()
+        return ApprovalActionResult(
+            consumed=True,
+            resolved=outcome is _ResolutionOutcome.DELIVERED,
+            error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON if resolution_was_truncated else None,
+            thread_id=pending.thread_id,
+            card_event_id=card_event_id,
         )
 
     async def _consume_terminal_card_action(
@@ -993,8 +959,6 @@ class _ApprovalManager:
             expected_card_event_id=card_event_id,
         )
         if pending is None:
-            return False
-        if stored.continuation_id is None or stored.continuation_generation is None or stored.tool_call_id is None:
             return False
         if stored.resolution is not None:
             return await self._redeliver_recorded_resolution(pending, stored)
@@ -1070,66 +1034,6 @@ class _ApprovalManager:
     def _current_shutdown_reason(self) -> str | None:
         with self._live_lock:
             return self._shutdown_reason
-
-    async def _discard_matrix_only_card(
-        self,
-        *,
-        pending: PendingApproval,
-        transaction_id: str,
-        reason: str,
-        resolved_by: str | None,
-    ) -> ApprovalActionResult:
-        if not self._claim_matrix_cleanup(pending.card_event_id):
-            return ApprovalActionResult(
-                consumed=True,
-                resolved=False,
-                thread_id=pending.thread_id,
-                card_event_id=pending.card_event_id,
-            )
-        with self._claimed_resolution(pending.card_event_id):
-            outcome = await self._emit_resolution(
-                pending,
-                transaction_id=transaction_id,
-                status="expired",
-                reason=reason,
-                resolved_by=resolved_by,
-            )
-            delivered = outcome is _ResolutionOutcome.DELIVERED
-            return ApprovalActionResult(
-                consumed=True,
-                resolved=delivered,
-                thread_id=pending.thread_id,
-                card_event_id=pending.card_event_id,
-            )
-
-    async def _emit_resolution(
-        self,
-        pending: PendingApproval,
-        *,
-        transaction_id: str,
-        status: _ApprovalStatus,
-        reason: str | None,
-        resolved_by: str | None,
-    ) -> _ResolutionOutcome:
-        if self._edit_event is None:
-            return _ResolutionOutcome.UNRECORDED
-        resolution = self._resolved_event_content(
-            pending,
-            status=status,
-            reason=reason,
-            resolved_by=resolved_by,
-            resolved_at=_utcnow(),
-        )
-        # Written before the edit is attempted. A crash in between then leaves
-        # a card that is answered but perhaps not shown, which startup can
-        # redeliver; recording it afterwards would leave one that looks
-        # unanswered, and startup would expire a decision the room already
-        # shows -- possibly an approval whose tool has already run.
-        if not await self._record_resolution(pending.card_event_id, resolution):
-            return _ResolutionOutcome.UNRECORDED
-        if await self._deliver_resolution(pending, resolution, transaction_id):
-            return _ResolutionOutcome.DELIVERED
-        return _ResolutionOutcome.RECORDED
 
     async def _emit_continuation_resolution(
         self,
@@ -1216,46 +1120,6 @@ class _ApprovalManager:
         # tombstone remains so another bot principal cannot treat a late reply
         # or reaction as ordinary input.
         return delivered and await self._finish_card(transaction_id, pending.card_event_id)
-
-    async def _record_resolution(self, card_event_id: str, resolution: dict[str, Any]) -> bool:
-        """Commit one decision, reporting whether the durable record now agrees.
-
-        A store that was never configured remembers no card, so it owes no
-        decision either and there is nothing left disagreeing. A configured
-        store that failed is the dangerous case: its row exists and still reads
-        as unanswered, so showing the decision anyway would let the next
-        startup expire a card whose tool has already run.
-
-        Failing is not only raising. The write is a guarded update that can
-        match no row and say nothing about it, so what the store reports the
-        row now carries -- not the absence of an exception -- is what decides
-        whether this decision was recorded.
-        """
-        if self._cards is None:
-            return True
-        try:
-            recorded = await self._cards.resolve_approval_card(card_event_id=card_event_id, resolution=resolution)
-        except Exception:
-            logger.warning(
-                "Failed to record an approval decision before showing it",
-                event_id=card_event_id,
-                exc_info=True,
-            )
-            return False
-        if recorded.recorded:
-            return True
-        # Nothing was written. Either no row exists, so no later process can
-        # ever account for this decision, or the row already carries an
-        # earlier one that stands. Both mean the durable record disagrees with
-        # the decision offered here, and a tool released on it would be
-        # released on nothing.
-        logger.warning(
-            "An approval decision was not recorded",
-            event_id=card_event_id,
-            cause="no_stored_card" if recorded.resolution is None else "already_decided",
-            stored_status=None if recorded.resolution is None else recorded.resolution.get("status"),
-        )
-        return False
 
     def _trusted_pending_from_card_event(
         self,

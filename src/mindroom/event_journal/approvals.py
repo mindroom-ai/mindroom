@@ -138,50 +138,6 @@ def _native_identity(card: Mapping[str, Any]) -> tuple[str, int, str]:
     return continuation_id, generation, tool_call_id
 
 
-def resolve(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    card_event_id: str,
-    resolution: Mapping[str, Any],
-) -> RecordedApprovalDecision:
-    """Record the decision this bot is about to show, before it shows it.
-
-    Written before the Matrix edit, so a crash between the two leaves an
-    answered card rather than a pending one. Startup then redelivers this exact
-    decision instead of expiring a card the room may already show as approved.
-
-    The update can match nothing, and the caller cannot act on a decision the
-    store did not take, so what the row actually ends up carrying is reported
-    rather than assumed.
-    """
-    offered = dict(resolution)
-    row = transaction.fetchone(
-        """
-        UPDATE approval_cards SET resolution_json = ?
-        WHERE principal_id = ? AND card_event_id = ? AND resolution_json IS NULL
-        RETURNING card_event_id
-        """,
-        (
-            json.dumps(offered, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
-            principal_id,
-            card_event_id,
-        ),
-    )
-    if row is not None:
-        return RecordedApprovalDecision(resolution=offered, recorded=True)
-    # Matching nothing has two causes that are not the same fact. Either no
-    # such card was ever stored, or the card already carries a decision that
-    # the ``resolution_json IS NULL`` guard exists to protect. Only the second
-    # leaves something a later startup will redeliver.
-    existing = transaction.fetchone(
-        "SELECT resolution_json FROM approval_cards WHERE principal_id = ? AND card_event_id = ?",
-        (principal_id, card_event_id),
-    )
-    stored = None if existing is None else _resolution(existing["resolution_json"])
-    return RecordedApprovalDecision(resolution=stored, recorded=False)
-
-
 def resolve_continuation(
     transaction: Transaction,
     principal_id: str,

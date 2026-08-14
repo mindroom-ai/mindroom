@@ -824,22 +824,6 @@ class PrincipalStore:
             ),
         )
 
-    async def resolve_approval_card(
-        self,
-        *,
-        card_event_id: str,
-        resolution: Mapping[str, Any],
-    ) -> RecordedApprovalDecision:
-        """Record the decision one card carries, before it is shown."""
-        return await self._backend.write(
-            lambda transaction: approvals.resolve(
-                transaction,
-                self._principal_id,
-                card_event_id=card_event_id,
-                resolution=resolution,
-            ),
-        )
-
     async def resolve_continuation_approval_card(
         self,
         *,
