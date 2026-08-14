@@ -27,6 +27,7 @@ from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.event_journal import (
+    AdmissionResult,
     EventClass,
     EventJournalStore,
     EventKind,
@@ -1508,16 +1509,19 @@ async def test_matrix_message_edit_replaces_a_question_without_losing_its_source
         )
 
     await admit("$turn", EventKind.MESSAGE)
-    assert await activate_interactive_prompt(
-        principal,
-        question_event_id="$target",
-        room_id=ctx.room_id,
-        thread_id=ctx.thread_id,
-        sender="mindroom",
-        creator_agent=ctx.agent_name,
-        question_text="Original question?",
-        options={"1": "original"},
-        option_labels={"1": "Original"},
+    assert (
+        await activate_interactive_prompt(
+            principal,
+            question_event_id="$target",
+            room_id=ctx.room_id,
+            thread_id=ctx.thread_id,
+            sender="mindroom",
+            creator_agent=ctx.agent_name,
+            question_text="Original question?",
+            options={"1": "original"},
+            option_labels={"1": "Original"},
+        )
+        is AdmissionResult.ADMITTED
     )
     reaction_content = {
         "m.relates_to": {

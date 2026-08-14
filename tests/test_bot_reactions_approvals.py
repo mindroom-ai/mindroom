@@ -28,6 +28,7 @@ from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import (
+    AdmissionResult,
     EventClass,
     EventKind,
     SemanticConsumer,
@@ -448,15 +449,18 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
         store = bot._journal_store.principal(bot._journal_principal_id)
-        assert await activate_interactive_prompt(
-            store,
-            question_event_id="$question",
-            room_id=room.room_id,
-            sender=bot.matrix_id.full_id,
-            creator_agent=bot.agent_name,
-            question_text="Choose one",
-            options={"👍": "approve"},
-            option_labels={"👍": "Approve"},
+        assert (
+            await activate_interactive_prompt(
+                store,
+                question_event_id="$question",
+                room_id=room.room_id,
+                sender=bot.matrix_id.full_id,
+                creator_agent=bot.agent_name,
+                question_text="Choose one",
+                options={"👍": "approve"},
+                option_labels={"👍": "Approve"},
+            )
+            is AdmissionResult.ADMITTED
         )
 
         execute = AsyncMock(side_effect=(OSError("pending write failed"), None))
@@ -493,15 +497,18 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
         store = bot._journal_store.principal(bot._journal_principal_id)
-        assert await activate_interactive_prompt(
-            store,
-            question_event_id="$question",
-            room_id=room.room_id,
-            sender=bot.matrix_id.full_id,
-            creator_agent=bot.agent_name,
-            question_text="Choose one",
-            options={"👍": "approve"},
-            option_labels={"👍": "Approve"},
+        assert (
+            await activate_interactive_prompt(
+                store,
+                question_event_id="$question",
+                room_id=room.room_id,
+                sender=bot.matrix_id.full_id,
+                creator_agent=bot.agent_name,
+                question_text="Choose one",
+                options={"👍": "approve"},
+                option_labels={"👍": "Approve"},
+            )
+            is AdmissionResult.ADMITTED
         )
 
         with patch.object(
@@ -2607,16 +2614,19 @@ class TestAgentBot(AgentBotTestBase):
             handle=AsyncMock(side_effect=failure),
         )
         store = bot._journal_store.principal(bot._journal_principal_id)
-        assert await activate_interactive_prompt(
-            store,
-            question_event_id=selection.question_event_id,
-            room_id=room.room_id,
-            sender=bot.matrix_id.full_id,
-            creator_agent=bot.agent_name,
-            thread_id=selection.thread_id,
-            question_text=selection.question_text,
-            options={selection.selection_key: selection.selected_value},
-            option_labels={selection.selection_key: selection.selected_label},
+        assert (
+            await activate_interactive_prompt(
+                store,
+                question_event_id=selection.question_event_id,
+                room_id=room.room_id,
+                sender=bot.matrix_id.full_id,
+                creator_agent=bot.agent_name,
+                thread_id=selection.thread_id,
+                question_text=selection.question_text,
+                options={selection.selection_key: selection.selected_value},
+                option_labels={selection.selection_key: selection.selected_label},
+            )
+            is AdmissionResult.ADMITTED
         )
 
         await bot._journal_dispatcher.admit_out_of_band(
