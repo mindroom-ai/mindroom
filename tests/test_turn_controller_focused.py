@@ -187,8 +187,8 @@ class _RecordingResponseRunner:
         if self.visible_response_event_id is not None and request.on_visible_response is not None:
             await request.on_visible_response(self.visible_response_event_id)
         if self.handoff_source:
-            assert request.on_durable_source_handoff is not None
-            request.on_durable_source_handoff()
+            assert request.source_handoff is not None
+            request.source_handoff.set()
             return None
         if self.deferred_sync_restart_error is not None:
             assert self.response_event_id is not None

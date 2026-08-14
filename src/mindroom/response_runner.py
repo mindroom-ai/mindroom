@@ -320,8 +320,8 @@ class ResponseRequest:
     on_deferred_outcome_handled: Callable[[str], Awaitable[None]] | None = None
     on_user_stop_handled: Callable[[str, int], Awaitable[None]] | None = None
     on_visible_response: Callable[[str], Awaitable[None]] | None = None
-    # Another durable owner invokes this only after it can finish the source.
-    on_durable_source_handoff: Callable[[], None] | None = None
+    # Set only after another durable owner can finish the source.
+    source_handoff: asyncio.Event | None = None
 
     @property
     def room_id(self) -> str:

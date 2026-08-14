@@ -1480,35 +1480,28 @@ class TurnController:
             handled_turn=selection_handled_turn,
         )
 
-        source_handed_off = False
-
-        def record_source_handoff() -> None:
-            nonlocal source_handed_off
-            source_handed_off = True
-
-        response_event_id = await self.deps.response_runner.generate_response(
-            ResponseRequest(
-                prompt=selection_payload.prompt,
-                model_prompt=selection_payload.model_prompt,
-                thread_history=thread_history,
-                existing_event_id=ack_event_id,
-                existing_event_is_placeholder=True,
-                user_id=user_id,
-                attachment_ids=selection_attachment_ids or None,
-                response_envelope=response_envelope,
-                matrix_run_metadata=selection_matrix_run_metadata,
-                prepare_source_turn=lambda: self.deps.turn_store.prepare_pending_response_source(
-                    target=response_target,
-                    source_event_ids=selection_handled_turn.indexed_event_ids,
-                    terminal_source_event_ids=selection_handled_turn.source_event_ids,
-                ),
-                on_interrupted_response_recoverable=record_interrupted_turn,
-                on_deferred_outcome_handled=record_deferred_outcome,
-                on_user_stop_handled=record_user_stop,
-                on_durable_source_handoff=record_source_handoff,
+        response_request = ResponseRequest(
+            prompt=selection_payload.prompt,
+            model_prompt=selection_payload.model_prompt,
+            thread_history=thread_history,
+            existing_event_id=ack_event_id,
+            existing_event_is_placeholder=True,
+            user_id=user_id,
+            attachment_ids=selection_attachment_ids or None,
+            response_envelope=response_envelope,
+            matrix_run_metadata=selection_matrix_run_metadata,
+            prepare_source_turn=lambda: self.deps.turn_store.prepare_pending_response_source(
+                target=response_target,
+                source_event_ids=selection_handled_turn.indexed_event_ids,
+                terminal_source_event_ids=selection_handled_turn.source_event_ids,
             ),
+            on_interrupted_response_recoverable=record_interrupted_turn,
+            on_deferred_outcome_handled=record_deferred_outcome,
+            on_user_stop_handled=record_user_stop,
+            source_handoff=asyncio.Event(),
         )
-        if source_handed_off:
+        response_event_id = await self.deps.response_runner.generate_response(response_request)
+        if response_request.source_handoff is not None and response_request.source_handoff.is_set():
             return True
         if response_event_id is not None:
             await self.deps.turn_store.record_responded_turn(
