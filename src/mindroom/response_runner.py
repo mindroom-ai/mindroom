@@ -2399,6 +2399,45 @@ class ResponseRunner:
         stop_receipt_order = max(stop_receipt_orders)
         await on_user_stop_handled(response_event_id, stop_receipt_order)
 
+    async def _request_remains_authorized(self, request: ResponseRequest) -> bool:
+        """Recheck one requester after serialized lifecycle admission."""
+        requester_id = request.response_envelope.requester_id
+        if is_sender_allowed_for_agent_reply_in_room(
+            requester_id,
+            self.deps.agent_name,
+            self.deps.runtime.config,
+            request.room_id,
+            self.deps.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
+        ):
+            return True
+        self.deps.logger.info(
+            "response_suppressed_after_authorization_revocation",
+            source_event_id=request.response_envelope.source_event_id,
+            requester_id=requester_id,
+            room_id=request.room_id,
+            entity_name=self.deps.agent_name,
+        )
+        if request.on_source_turn_suppressed is not None:
+            await request.on_source_turn_suppressed()
+        return False
+
+    async def _locked_turn_can_begin(
+        self,
+        request: ResponseRequest,
+        *,
+        history_scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity,
+    ) -> bool:
+        """Require current replay identity and requester authority under the lock."""
+        if not self._sync_restart_retry_is_current(
+            request,
+            history_scope=history_scope,
+            execution_identity=execution_identity,
+        ):
+            return False
+        return await self._request_remains_authorized(request)
+
     async def _begin_locked_turn(
         self,
         request: ResponseRequest,
@@ -2411,7 +2450,7 @@ class ResponseRunner:
     ) -> ResponseRequest | None:
         """Expose a locked turn before running its potentially slow preparation."""
         placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
-        if not self._sync_restart_retry_is_current(
+        if not await self._locked_turn_can_begin(
             request,
             history_scope=history_scope,
             execution_identity=execution_identity,

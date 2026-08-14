@@ -401,6 +401,7 @@ class AgentBot:
     _reply_membership_refresh_pending: bool
     _reply_membership_refresh_attempt: int
     _reply_membership_refresh_retry_at: float
+    _preserve_reply_memberships_on_next_sync_start: bool
     _preinvalidated_sync_response: nio.SyncResponse | nio.SlidingSyncResponse | None
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
@@ -465,6 +466,7 @@ class AgentBot:
         self._reply_membership_refresh_pending = False
         self._reply_membership_refresh_attempt = 0
         self._reply_membership_refresh_retry_at = 0.0
+        self._preserve_reply_memberships_on_next_sync_start = False
         self._preinvalidated_sync_response = None
         self._runtime_view = BotRuntimeState(
             client=None,
@@ -1293,9 +1295,16 @@ class AgentBot:
         self._sync_shutting_down = False
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
-        if self.agent_name == ROUTER_AGENT_NAME:
+        preserve_reply_memberships = self._preserve_reply_memberships_on_next_sync_start
+        self._preserve_reply_memberships_on_next_sync_start = False
+        if self.agent_name == ROUTER_AGENT_NAME and not preserve_reply_memberships:
             self._invalidate_agent_reply_memberships(reason="sync_loop_started")
         mark_matrix_sync_loop_started(self.agent_name)
+
+    def preserve_reply_memberships_on_next_sync_start(self) -> None:
+        """Carry the pre-sync authoritative snapshot into the first receive loop."""
+        if self.agent_name == ROUTER_AGENT_NAME:
+            self._preserve_reply_memberships_on_next_sync_start = True
 
     def _invalidate_agent_reply_memberships(self, *, reason: str) -> None:
         """Fail closed when the router's view of Matrix membership is uncertain."""
@@ -2292,6 +2301,7 @@ class AgentBot:
         self.last_sync_time = None
         self._last_sync_monotonic = None
         self._first_sync_done = False
+        self._preserve_reply_memberships_on_next_sync_start = False
         self._classic_sync_rebuild_pending = False
         self._classic_sync_rebuild_attempt = 0
         self._orchestrator_ready_handled = False

@@ -1349,19 +1349,28 @@ class _MultiAgentOrchestrator:
         self._bind_started_runtime_support_services(started_bots)
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
-        self._schedule_ready_turn_dispatch_recovery()
         self.running = True
 
-        # Create sync tasks for each bot with automatic restart on failure.
-        set_runtime_starting("Starting Matrix sync loops")
         startup_cutoff_ms = int(time.time() * 1000)
+        self._startup_maintenance.start(started_bots, config, startup_cutoff_ms=startup_cutoff_ms)
+        if self.agent_reply_memberships.needs_refresh(config.authorization):
+            set_runtime_starting("Establishing Matrix room memberships")
+            await self._startup_maintenance.wait_for_rooms_and_memberships()
+            router_bot.preserve_reply_memberships_on_next_sync_start()
+
+        if runtime_shutdown_event.is_set():
+            return
+
+        self._schedule_ready_turn_dispatch_recovery()
+
+        # Expose live sync callbacks only after room-backed reply grants have an
+        # authoritative startup snapshot.
+        set_runtime_starting("Starting Matrix sync loops")
         phase_started = log_startup_phase_started("start_matrix_sync_loops")
         for entity_name, bot in self.agent_bots.items():
             if bot.running:
                 self._start_sync_task(entity_name, bot)
         log_startup_phase_finished("start_matrix_sync_loops", phase_started)
-
-        self._startup_maintenance.start(started_bots, config, startup_cutoff_ms=startup_cutoff_ms)
 
         for entity_name in start_results.retryable_entities:
             await self._schedule_bot_start_retry(entity_name)

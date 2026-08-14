@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import nio
 import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.db.base import SessionType
@@ -63,6 +64,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
@@ -426,6 +428,96 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
     # Each turn's payload preparation consumed the history refreshed under its own lock.
     assert prepare_history_by_turn[1] is refreshed[0]
     assert prepare_history_by_turn[2] is refreshed[1]
+
+
+@pytest.mark.asyncio
+async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycle_lock(tmp_path: Path) -> None:
+    """A room-backed grant revoked during lock wait must prevent model execution."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    config = runner.deps.runtime.config
+    config.authorization = AuthorizationConfig(
+        default_room_access=True,
+        agent_reply_permissions={
+            "general": AgentReplyPermission(joined_rooms=["grant"]),
+        },
+    )
+    grant_room_id = "!grant:localhost"
+    state = MatrixState.load(runtime_paths=runner.deps.runtime_paths)
+    state.add_room("grant", grant_room_id, "#grant:localhost", "Grant")
+    state.save(runtime_paths=runner.deps.runtime_paths)
+    membership_client = AsyncMock()
+    membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+    membership_client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@user:localhost", None, None)],
+        room_id=grant_room_id,
+    )
+    memberships = runner.deps.runtime.agent_reply_memberships
+    await memberships.refresh(config, runner.deps.runtime_paths, membership_client)
+
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    model_sources: list[str] = []
+    second_suppressed = AsyncMock()
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = kwargs["response_function"]
+        await response_function(None)  # type: ignore[operator]
+        return "$response"
+
+    async def fake_process_and_respond(request: ResponseRequest, **_kwargs: object) -> _ResponseGenerationOutcome:
+        model_sources.append(request.response_envelope.source_event_id)
+        if request.response_envelope.source_event_id == "$first":
+            first_started.set()
+            await release_first.wait()
+        return _ResponseGenerationOutcome(delivery=_completed_outcome(), run_succeeded=True)
+
+    first_request = _plain_request(_target(thread_id="$thread"), source_event_id="$first")
+    second_request = replace(
+        _plain_request(_target(thread_id="$thread"), source_event_id="$second"),
+        on_source_turn_suppressed=second_suppressed,
+    )
+    with (
+        patch(
+            "mindroom.delivery_gateway.DeliveryGateway.send_text",
+            new=AsyncMock(return_value="$placeholder"),
+        ),
+        patch.object(runner, "_run_cancellable_response", new=AsyncMock(side_effect=fake_run_cancellable_response)),
+        patch.object(runner, "_process_and_respond", new=AsyncMock(side_effect=fake_process_and_respond)),
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            apply_post_response_effects=AsyncMock(),
+        ),
+    ):
+        first = asyncio.create_task(runner.generate_response(first_request))
+        await asyncio.wait_for(first_started.wait(), timeout=2)
+        second = asyncio.create_task(runner.generate_response(second_request))
+        await asyncio.sleep(0)
+        leave = nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": "$leave",
+                "sender": "@user:localhost",
+                "state_key": "@user:localhost",
+                "origin_server_ts": 1,
+                "content": {"membership": "leave"},
+                "unsigned": {"prev_content": {"membership": "join"}},
+            },
+        )
+        assert isinstance(leave, nio.RoomMemberEvent)
+        memberships.apply_member_event(
+            config,
+            grant_room_id,
+            leave,
+            control_user_id="@mindroom_router:localhost",
+        )
+        release_first.set()
+
+        assert await asyncio.wait_for(first, timeout=2) == "$response"
+        assert await asyncio.wait_for(second, timeout=2) is None
+
+    assert model_sources == ["$first"]
+    second_suppressed.assert_awaited_once_with()
 
 
 def _async_callback[**Args](callback: Callable[Args, object]) -> Callable[Args, Coroutine[Any, Any, None]]:

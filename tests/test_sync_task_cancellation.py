@@ -28,7 +28,7 @@ from mindroom.cancellation import (
     cancel_message_for_source,
 )
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
@@ -2454,12 +2454,18 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
 
 
 @pytest.mark.asyncio
-async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tmp_path: Path) -> None:
-    """Initial sync loops must not wait for room reconciliation or restart maintenance."""
+async def test_start_runtime_waits_for_authoritative_memberships_before_sync_and_readiness(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
+    """Live ingress and readiness must wait for initial room-backed grants."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     config = MagicMock(spec=Config)
-    config.authorization = AuthorizationConfig()
+    config.authorization = AuthorizationConfig(
+        agent_reply_permissions={
+            "general": AgentReplyPermission(joined_rooms=["grant"]),
+        },
+    )
     config.agents = {"general": MagicMock()}
     config.teams = {}
     config.mcp_servers = {}
@@ -2472,6 +2478,7 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
     router_bot.running = True
     router_bot.stop = AsyncMock()
     router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    router_bot.preserve_reply_memberships_on_next_sync_start = MagicMock()
 
     general_bot = AsyncMock()
     general_bot.agent_name = "general"
@@ -2488,6 +2495,7 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
         "router": asyncio.Event(),
         "general": asyncio.Event(),
     }
+    runtime_ready = asyncio.Event()
     call_order: list[str] = []
 
     async def blocked_setup(_: list[object]) -> None:
@@ -2512,17 +2520,25 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
         patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
+        patch("mindroom.orchestrator.set_runtime_ready", side_effect=runtime_ready.set),
     ):
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
         try:
             await asyncio.wait_for(setup_started.wait(), timeout=1.0)
+            await asyncio.sleep(0)
+            assert not any(event.is_set() for event in sync_started_by_entity.values())
+            assert not runtime_ready.is_set()
+
+            setup_can_finish.set()
             await asyncio.wait_for(
                 asyncio.gather(*(event.wait() for event in sync_started_by_entity.values())),
                 timeout=1.0,
             )
+            await asyncio.wait_for(runtime_ready.wait(), timeout=1.0)
 
-            assert "setup_finished" not in call_order
-            assert {"sync_started:router", "sync_started:general"} <= set(call_order)
+            setup_finished = call_order.index("setup_finished")
+            assert setup_finished < call_order.index("sync_started:router")
+            assert setup_finished < call_order.index("sync_started:general")
         finally:
             setup_can_finish.set()
             await orchestrator.stop()
