@@ -398,6 +398,7 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         after: tuple[int, str] | None = None,
     ) -> tuple[StoredApprovalCard, ...]: ...
 
+
 __all__ = [
     "AdmissionView",
     "ApprovalDeliveryView",
