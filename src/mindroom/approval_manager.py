@@ -351,26 +351,25 @@ class _ApprovalManager:
                 room_id=room_id,
                 card_event_id=card_event_id,
             )
-            if terminal and before_consume is not None:
-                await before_consume()
-            if terminal or cards is None or self.send_delivery is None:
-                return ApprovalActionResult(consumed=terminal, resolved=False, card_event_id=card_event_id)
-            # Matrix can expose a card whose send response died with its
-            # process. Let the shared delivery owner recover that event ID
-            # before deciding this reaction targets nothing durable.
-            await self._worker().recover()
-            stored = await cards.pending_approval_card(
-                room_id=room_id,
-                card_event_id=card_event_id,
-            )
-            if stored is None:
-                if await cards.is_terminal_approval_card(room_id=room_id, card_event_id=card_event_id):
-                    if before_consume is not None:
-                        await before_consume()
-                    return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
-                if await cards.legacy_approval_delivery_pending():
+            if not terminal and cards is not None and self.send_delivery is not None:
+                # Matrix can expose a card whose send response died with its
+                # process. Let the shared delivery owner recover that event ID
+                # before deciding this reaction targets nothing durable.
+                await self._worker().recover()
+                stored = await cards.pending_approval_card(
+                    room_id=room_id,
+                    card_event_id=card_event_id,
+                )
+                terminal = stored is None and await cards.is_terminal_approval_card(
+                    room_id=room_id,
+                    card_event_id=card_event_id,
+                )
+                if stored is None and not terminal and await cards.legacy_approval_delivery_pending():
                     raise RuntimeError(DELIVERY_MIGRATION_PENDING_REASON)
-                return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
+            if stored is None:
+                if terminal and before_consume is not None:
+                    await before_consume()
+                return ApprovalActionResult(consumed=terminal, resolved=False, card_event_id=card_event_id)
         if stored.resolution is not None:
             if before_consume is not None:
                 await before_consume()
@@ -438,9 +437,7 @@ class _ApprovalManager:
         )
         if recorded.resolution is None:
             return False
-        if (
-            recorded.recorded and recorded.continuation_ready
-        ):
+        if recorded.recorded and recorded.continuation_ready:
             await self._wake_continuation(recorded)
         try:
             edit_event_id = await self._worker().flush(
@@ -481,11 +478,9 @@ class _ApprovalManager:
         return complete
 
     async def _expire_stored(self, room_id: str, stored: StoredApprovalCard) -> bool:
-        if self.cards is None:
+        if self.cards is None or (stored.card_event_id is None and stored.resolution is not None):
             return False
         if stored.card_event_id is None:
-            if stored.resolution is not None:
-                return False
             recorded = await self.cards.expire_unacknowledged_approval_card(delivery_id=stored.delivery_id)
             if recorded.recorded and recorded.continuation_ready:
                 await self._wake_continuation(recorded)

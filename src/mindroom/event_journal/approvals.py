@@ -569,9 +569,7 @@ def resolve_continuation(
         room_id=str(card["room_id"]),
         thread_id=decode_thread_id(str(card["thread_id"])),
         payload=stored_resolution,
-        edits_event_id=(
-            None if card["acknowledged_event_id"] is None else str(card["acknowledged_event_id"])
-        ),
+        edits_event_id=(None if card["acknowledged_event_id"] is None else str(card["acknowledged_event_id"])),
         edit_target_pending=card["acknowledged_event_id"] is None,
     )
     transaction.execute(
