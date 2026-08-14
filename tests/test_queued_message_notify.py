@@ -3044,6 +3044,29 @@ async def test_model_call_hook_appends_one_trusted_approval_receipt_after_tool_r
         ("tool", "tool result"),
     ]
     assert model.seen_messages[0].provider_data == {"mindroom_approval_receipt": True}
+    assert [(message.role, message.content) for message in messages] == [
+        ("system", "base rules"),
+        ("assistant", "calling tool"),
+        ("tool", "tool result"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_approval_receipt_reaches_each_concurrent_model_once() -> None:
+    """Every model participating in one resumed team run must receive the trusted receipt."""
+    first = RecordingModel(id="first-member", provider="fake")
+    second = RecordingModel(id="second-member", provider="fake")
+    approval_receipt.install_approval_receipt_hook(first)
+    approval_receipt.install_approval_receipt_hook(second)
+
+    with approval_receipt.approval_receipt_context("trusted approval receipt"):
+        await asyncio.gather(
+            first.aresponse(messages=[Message(role="system", content="first rules")]),
+            second.aresponse(messages=[Message(role="system", content="second rules")]),
+        )
+
+    assert first.seen_messages[0].content == "first rules\n\ntrusted approval receipt"
+    assert second.seen_messages[0].content == "second rules\n\ntrusted approval receipt"
 
 
 def test_default_queued_notice_requires_pause_handoff() -> None:
