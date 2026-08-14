@@ -673,21 +673,32 @@ class TestRedactedPendingTurnSources:
     ) -> None:
         """Both arrival orders retire message ingress while preserving cleanup."""
         bot = _make_bot(tmp_path)
+        on_message = AsyncMock()
+        on_redaction = AsyncMock()
+        dispatcher = _dispatcher(bot, on_message, on_redaction=on_redaction)
+        source = text_event("$source")
         if source_first:
-            await admit(journal(bot), text_event("$source"))
+            await dispatcher._ingress._admit(
+                nio.MatrixRoom(ROOM, BOT),
+                source,
+                nio.TimelineEventProvenance.LIVE,
+            )
             await admit_redaction(journal(bot), "$redaction", redacts="$source")
         else:
             await admit_redaction(journal(bot), "$redaction", redacts="$source")
-            await admit(journal(bot), text_event("$source"))
-        on_message = AsyncMock()
-        on_redaction = AsyncMock()
+            await dispatcher._ingress._admit(
+                nio.MatrixRoom(ROOM, BOT),
+                source,
+                nio.TimelineEventProvenance.LIVE,
+            )
 
         assert await pending_ids(bot) == ["$redaction"]
-        await _dispatcher(bot, on_message, on_redaction=on_redaction).drain_once()
+        await dispatcher.drain_once()
 
         on_message.assert_not_awaited()
         on_redaction.assert_awaited_once()
         assert await pending_ids(bot) == []
+        assert dispatcher._live_events == {}
         assert (
             await bot._delivery_gateway.deps.outbox.load_delivery(
                 turn_id="$source",
