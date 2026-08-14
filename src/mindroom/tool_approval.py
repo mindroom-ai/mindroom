@@ -282,6 +282,9 @@ async def handle_matrix_approval_action(
     sanitized_reason = action.reason.strip() if isinstance(action.reason, str) and action.reason.strip() else None
     if action.card_event_id is None:
         return ApprovalActionResult(consumed=False, resolved=False)
+    if manager.cards is not None and await manager.cards.legacy_approval_delivery_pending():
+        msg = "Approval delivery migration has not established the generic card owner yet"
+        raise RuntimeError(msg)
     return await manager.handle_card_response(
         room_id=action.room_id,
         sender_id=action.sender_id,

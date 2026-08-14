@@ -25,6 +25,7 @@ from .approval_continuations import (  # noqa: TC001 - runtime return and input 
 )
 from .approvals import (  # noqa: TC001 - part of this module's runtime return types
     ApprovalCardReservation,
+    LegacyApprovalDelivery,
     RecordedApprovalDecision,
     StoredApprovalCard,
 )
@@ -864,6 +865,60 @@ class PrincipalStore:
                 room_id=room_id,
                 limit=limit,
                 after=after,
+            ),
+        )
+
+    async def legacy_approval_delivery_pending(self) -> bool:
+        """Return whether approval actions must wait for one-way delivery migration."""
+        return await self._backend.read(
+            lambda transaction: approvals.legacy_delivery_pending(transaction, self._principal_id),
+        )
+
+    async def claim_legacy_approval_delivery(
+        self,
+        *,
+        owner: str,
+        now_ns: int,
+        lease_until_ns: int,
+    ) -> LegacyApprovalDelivery | None:
+        """Lease the oldest available legacy approval delivery."""
+        return await self._backend.write(
+            lambda transaction: approvals.claim_legacy_delivery(
+                transaction,
+                self._principal_id,
+                owner=owner,
+                now_ns=now_ns,
+                lease_until_ns=lease_until_ns,
+            ),
+        )
+
+    async def release_legacy_approval_delivery(self, claim: LegacyApprovalDelivery) -> None:
+        """Release one migration lease if this claim still owns it."""
+        await self._backend.write(
+            lambda transaction: approvals.release_legacy_delivery(
+                transaction,
+                self._principal_id,
+                claim=claim,
+            ),
+        )
+
+    async def promote_legacy_approval_delivery(
+        self,
+        *,
+        delivery_id: str,
+        payload: Mapping[str, object],
+        acknowledged_event_id: str | None,
+        claim: LegacyApprovalDelivery,
+    ) -> bool:
+        """Atomically transfer one normalized legacy card to generic delivery ownership."""
+        return await self._backend.write(
+            lambda transaction: approvals.promote_legacy_delivery(
+                transaction,
+                self._principal_id,
+                delivery_id=delivery_id,
+                payload=payload,
+                acknowledged_event_id=acknowledged_event_id,
+                claim=claim,
             ),
         )
 

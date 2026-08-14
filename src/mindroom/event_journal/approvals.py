@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from .backend import Row, Transaction
 
 from . import approval_continuations, outbox, reads
-from .identity import decode_thread_id
+from .identity import decode_thread_id, encode_thread_id
 from .models import DeliveryStage
 
 _DEFAULT_ROOM_CARD_LIMIT = 256
@@ -65,6 +65,21 @@ class StoredApprovalCard:
 
 
 @dataclass(frozen=True, slots=True)
+class LegacyApprovalDelivery:
+    """One unacknowledged #1834 card awaiting one-way wire normalization."""
+
+    delivery_id: str
+    event_type: str
+    room_id: str
+    thread_id: str | None
+    payload: dict[str, Any]
+    attempted: bool
+    sending_device_id: str | None
+    migration_owner: str
+    migration_generation: int
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalCardReservation:
     """One exact-call approval card and its frozen Matrix payload."""
 
@@ -89,6 +104,218 @@ class RecordedApprovalDecision:
     continuation_ready: bool = False
     continuation_entity_name: str | None = None
     source_event_ids: tuple[str, ...] = ()
+
+
+def legacy_delivery_pending(transaction: Transaction, principal_id: str) -> bool:
+    """Return whether this principal still owns any #1834 delivery migration debt."""
+    return (
+        transaction.fetchone(
+            """
+            SELECT 1 AS present FROM approval_cards_legacy_delivery
+            WHERE principal_id = ?
+              AND continuation_id IS NOT NULL
+              AND continuation_generation IS NOT NULL
+              AND tool_call_id IS NOT NULL
+            LIMIT 1
+            """,
+            (principal_id,),
+        )
+        is not None
+    )
+
+
+def claim_legacy_delivery(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    owner: str,
+    now_ns: int,
+    lease_until_ns: int,
+) -> LegacyApprovalDelivery | None:
+    """Lease the oldest available legacy row for one cross-process upgrader."""
+    row = transaction.fetchone(
+        """
+        UPDATE approval_cards_legacy_delivery
+        SET migration_owner = ?,
+            migration_generation = migration_generation + 1,
+            migration_lease_until_ns = ?
+        WHERE principal_id = ?
+          AND transaction_id = (
+              SELECT transaction_id FROM approval_cards_legacy_delivery
+              WHERE principal_id = ?
+                AND continuation_id IS NOT NULL
+                AND continuation_generation IS NOT NULL
+                AND tool_call_id IS NOT NULL
+                AND (migration_owner IS NULL OR migration_lease_until_ns <= ?)
+              ORDER BY created_at_ns, transaction_id/*bytes*/
+              LIMIT 1
+          )
+          AND (migration_owner IS NULL OR migration_lease_until_ns <= ?)
+        RETURNING transaction_id, room_id, card_json, attempted,
+                  sending_device_id, migration_generation
+        """,
+        (owner, lease_until_ns, principal_id, principal_id, now_ns, now_ns),
+    )
+    if row is None:
+        return None
+    return _legacy_delivery(
+        row,
+        migration_owner=owner,
+        migration_generation=int(row["migration_generation"]),
+    )
+
+
+def release_legacy_delivery(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    claim: LegacyApprovalDelivery,
+) -> None:
+    """Release one exact migration lease without disturbing a newer claimant."""
+    transaction.execute(
+        """
+        UPDATE approval_cards_legacy_delivery
+        SET migration_owner = NULL, migration_lease_until_ns = NULL
+        WHERE principal_id = ? AND transaction_id = ?
+          AND migration_owner = ? AND migration_generation = ?
+        """,
+        (principal_id, claim.delivery_id, claim.migration_owner, claim.migration_generation),
+    )
+
+
+def promote_legacy_delivery(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    delivery_id: str,
+    payload: Mapping[str, object],
+    acknowledged_event_id: str | None,
+    claim: LegacyApprovalDelivery | None = None,
+) -> bool:
+    """Atomically move one normalized #1834 card into generic ownership."""
+    claim_clause = "" if claim is None else " AND migration_owner = ? AND migration_generation = ?"
+    claim_params: tuple[object, ...] = () if claim is None else (claim.migration_owner, claim.migration_generation)
+    row = transaction.fetchone(
+        f"""
+        DELETE FROM approval_cards_legacy_delivery
+        WHERE principal_id = ? AND transaction_id = ?{claim_clause}
+        RETURNING room_id, transaction_id, card_json, resolution_json, attempted,
+                  sending_device_id, continuation_id, continuation_generation,
+                  tool_call_id, membership_epoch, created_at_ns
+        """,  # noqa: S608 - fixed claim clause only
+        (principal_id, delivery_id, *claim_params),
+    )
+    if row is None:
+        return False
+    card = _object_json(row["card_json"], description="legacy approval card")
+    event_type = card.get("type")
+    if not isinstance(event_type, str) or not event_type:
+        event_type = "io.mindroom.tool_approval"
+    normalized_payload = dict(payload)
+    normalized_identity = _native_identity({"content": normalized_payload})
+    stored_identity = (
+        str(row["continuation_id"]),
+        int(row["continuation_generation"]),
+        str(row["tool_call_id"]),
+    )
+    if normalized_identity != stored_identity:
+        msg = f"Legacy approval delivery {delivery_id!r} changed exact-call identity"
+        raise ValueError(msg)
+    thread_id = normalized_payload.get("thread_id")
+    transaction.execute(
+        """
+        INSERT INTO matrix_delivery_outbox (
+            principal_id, delivery_id, stage, event_type, room_id, thread_id,
+            transaction_id, payload_json, edits_event_id, edit_target_pending,
+            attempted, sending_device_id, acknowledged_event_id, created_at_ns
+        ) VALUES (?, ?, 'initial', ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?)
+        ON CONFLICT (principal_id, delivery_id, stage) DO NOTHING
+        """,
+        (
+            principal_id,
+            delivery_id,
+            event_type,
+            str(row["room_id"]),
+            encode_thread_id(thread_id if isinstance(thread_id, str) and thread_id else None),
+            str(row["transaction_id"]),
+            _encoded(normalized_payload),
+            int(row["attempted"]),
+            row["sending_device_id"],
+            acknowledged_event_id,
+            int(row["created_at_ns"]),
+        ),
+    )
+    transaction.execute(
+        """
+        INSERT INTO approval_cards (
+            principal_id, delivery_id, continuation_id,
+            continuation_generation, tool_call_id, membership_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (principal_id, delivery_id) DO NOTHING
+        """,
+        (principal_id, delivery_id, *stored_identity, int(row["membership_epoch"])),
+    )
+    if row["resolution_json"] is not None:
+        resolution = _object_json(row["resolution_json"], description="legacy approval resolution")
+        for transport_key in (
+            "full_arguments",
+            "full_arguments_file",
+            "full_arguments_info",
+            "full_arguments_url",
+            "m.relates_to",
+        ):
+            resolution.pop(transport_key, None)
+        outbox.enqueue(
+            transaction,
+            principal_id,
+            delivery_id=delivery_id,
+            stage=DeliveryStage.FINAL,
+            event_type=event_type,
+            room_id=str(row["room_id"]),
+            thread_id=thread_id if isinstance(thread_id, str) and thread_id else None,
+            payload=resolution,
+            edits_event_id=acknowledged_event_id,
+            edit_target_pending=acknowledged_event_id is None,
+        )
+    return True
+
+
+def _legacy_delivery(
+    row: Row,
+    *,
+    migration_owner: str,
+    migration_generation: int,
+) -> LegacyApprovalDelivery:
+    card = _object_json(row["card_json"], description="legacy approval card")
+    content = card.get("content")
+    if not isinstance(content, dict):
+        msg = "Legacy approval card content is not an object"
+        raise TypeError(msg)
+    event_type = card.get("type")
+    thread_id = content.get("thread_id")
+    return LegacyApprovalDelivery(
+        delivery_id=str(row["transaction_id"]),
+        event_type=event_type if isinstance(event_type, str) and event_type else "io.mindroom.tool_approval",
+        room_id=str(row["room_id"]),
+        thread_id=thread_id if isinstance(thread_id, str) and thread_id else None,
+        payload=content,
+        attempted=bool(row["attempted"]),
+        sending_device_id=None if row["sending_device_id"] is None else str(row["sending_device_id"]),
+        migration_owner=migration_owner,
+        migration_generation=migration_generation,
+    )
+
+
+def _object_json(value: object, *, description: str) -> dict[str, Any]:
+    decoded = json.loads(str(value))
+    if not isinstance(decoded, dict):
+        msg = f"Stored {description} is not an object"
+        raise TypeError(msg)
+    return decoded
+
+
+def _encoded(value: Mapping[str, object]) -> str:
+    return json.dumps(dict(value), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
 def reserve_deliveries(
@@ -459,6 +686,12 @@ def expire_cards_for_departed_continuations(
     reason: str,
 ) -> None:
     """Preserve router-owned Matrix cleanup when a responder leaves the room."""
+    _expire_legacy_cards_for_departed_continuations(
+        transaction,
+        continuation_principal_id,
+        room_id=room_id,
+        reason=reason,
+    )
     rows = transaction.fetchall(
         """
         SELECT cards.principal_id, cards.delivery_id, initial.event_type,
@@ -499,20 +732,10 @@ def expire_cards_for_departed_continuations(
         if row["final_delivery_id"] is not None:
             continue
         try:
-            content = json.loads(str(row["payload_json"]))
+            content = _object_json(row["payload_json"], description="approval payload")
         except (json.JSONDecodeError, TypeError):
             continue
-        if not isinstance(content, dict):
-            continue
-        resolution = {
-            **content,
-            "status": "expired",
-            "approvable": False,
-            "resolution_reason": reason,
-            "resolved_by": None,
-        }
-        tool_name = resolution.get("tool_name")
-        resolution["body"] = f"Expired: {tool_name}" if isinstance(tool_name, str) else "Approval expired"
+        resolution = _terminal_content(content, status="expired", reason=reason)
         outbox.enqueue(
             transaction,
             card_principal_id,
@@ -535,6 +758,12 @@ def fail_continuations_for_departed_card_owner(
     reason: str,
 ) -> None:
     """Fail unresolved pauses and preserve attempted cards through terminal recovery."""
+    _fail_legacy_cards_for_departed_owner(
+        transaction,
+        card_principal_id,
+        room_id=room_id,
+        reason=reason,
+    )
     transaction.execute(
         """
         UPDATE approval_continuations
@@ -581,6 +810,8 @@ def fail_continuations_for_departed_card_owner(
     )
     for row in rows:
         delivery_id = str(row["delivery_id"])
+        if row["final_delivery_id"] is None:
+            _deny_call_if_undecided(transaction, row, reason=reason)
         if not bool(row["attempted"]):
             _delete_unattempted_card_delivery(transaction, card_principal_id, delivery_id)
             continue
@@ -593,33 +824,11 @@ def fail_continuations_for_departed_card_owner(
                 (int(row["membership_epoch"]), card_principal_id, delivery_id),
             )
             continue
-        transaction.execute(
-            """
-            UPDATE approval_continuation_calls SET decision = 'denied', reason = ?
-            WHERE approval_id = ? AND generation = ? AND tool_call_id = ? AND decision IS NULL
-            """,
-            (
-                reason,
-                str(row["continuation_id"]),
-                int(row["continuation_generation"]),
-                str(row["tool_call_id"]),
-            ),
-        )
         try:
-            content = json.loads(str(row["payload_json"]))
+            content = _object_json(row["payload_json"], description="approval payload")
         except (json.JSONDecodeError, TypeError):
             continue
-        if not isinstance(content, dict):
-            continue
-        resolution = {
-            **content,
-            "status": "denied",
-            "approvable": False,
-            "resolution_reason": reason,
-            "resolved_by": None,
-        }
-        tool_name = resolution.get("tool_name")
-        resolution["body"] = f"Denied: {tool_name}" if isinstance(tool_name, str) else "Approval denied"
+        resolution = _terminal_content(content, status="denied", reason=reason)
         outbox.enqueue(
             transaction,
             card_principal_id,
@@ -658,6 +867,156 @@ def _delete_unattempted_card_delivery(
         """,
         (principal_id, delivery_id),
     )
+
+
+def _expire_legacy_cards_for_departed_continuations(
+    transaction: Transaction,
+    continuation_principal_id: str,
+    *,
+    room_id: str,
+    reason: str,
+) -> None:
+    """Keep pre-upgrade attempted cards terminalizable after their continuation is deleted."""
+    rows = transaction.fetchall(
+        """
+        SELECT legacy.principal_id, legacy.transaction_id, legacy.attempted,
+               legacy.card_json, legacy.resolution_json
+        FROM approval_cards_legacy_delivery AS legacy
+        JOIN approval_continuations AS continuations
+          ON continuations.approval_id = legacy.continuation_id
+        WHERE continuations.principal_id = ?
+          AND EXISTS (
+              SELECT 1
+              FROM approval_continuation_sources AS sources
+              JOIN journal_events AS events
+                ON events.principal_id = sources.principal_id
+               AND events.event_id = sources.event_id
+              WHERE sources.principal_id = continuations.principal_id
+                AND sources.approval_id = continuations.approval_id
+                AND events.room_id = ?
+          )
+        """,
+        (continuation_principal_id, room_id),
+    )
+    for row in rows:
+        principal_id = str(row["principal_id"])
+        delivery_id = str(row["transaction_id"])
+        if not bool(row["attempted"]):
+            transaction.execute(
+                "DELETE FROM approval_cards_legacy_delivery WHERE principal_id = ? AND transaction_id = ?",
+                (principal_id, delivery_id),
+            )
+            continue
+        if row["resolution_json"] is None:
+            resolution = _legacy_terminal_content(row["card_json"], status="expired", reason=reason)
+            transaction.execute(
+                """
+                UPDATE approval_cards_legacy_delivery SET resolution_json = ?
+                WHERE principal_id = ? AND transaction_id = ? AND resolution_json IS NULL
+                """,
+                (_encoded(resolution), principal_id, delivery_id),
+            )
+
+
+def _fail_legacy_cards_for_departed_owner(
+    transaction: Transaction,
+    card_principal_id: str,
+    *,
+    room_id: str,
+    reason: str,
+) -> None:
+    """Fence pre-upgrade card decisions and retain only sends Matrix may have accepted."""
+    transaction.execute(
+        """
+        UPDATE approval_continuations
+        SET state = 'failing', failure_reason = ?, runtime_generation = NULL
+        WHERE state IN ('waiting', 'ready')
+          AND EXISTS (
+              SELECT 1 FROM approval_cards_legacy_delivery AS legacy
+              WHERE legacy.principal_id = ? AND legacy.room_id = ?
+                AND legacy.continuation_id = approval_continuations.approval_id
+          )
+        """,
+        (reason, card_principal_id, room_id),
+    )
+    rows = transaction.fetchall(
+        """
+        SELECT transaction_id, attempted, card_json, resolution_json,
+               continuation_id, continuation_generation, tool_call_id,
+               membership.membership_epoch
+        FROM approval_cards_legacy_delivery AS legacy
+        JOIN room_membership AS membership
+          ON membership.principal_id = legacy.principal_id
+         AND membership.room_id = legacy.room_id
+        WHERE legacy.principal_id = ? AND legacy.room_id = ?
+          AND legacy.continuation_id IS NOT NULL
+        """,
+        (card_principal_id, room_id),
+    )
+    for row in rows:
+        delivery_id = str(row["transaction_id"])
+        if row["resolution_json"] is None:
+            _deny_call_if_undecided(transaction, row, reason=reason)
+        if not bool(row["attempted"]):
+            transaction.execute(
+                "DELETE FROM approval_cards_legacy_delivery WHERE principal_id = ? AND transaction_id = ?",
+                (card_principal_id, delivery_id),
+            )
+            continue
+        resolution_json = row["resolution_json"]
+        if resolution_json is None:
+            resolution = _legacy_terminal_content(row["card_json"], status="denied", reason=reason)
+            resolution_json = _encoded(resolution)
+        transaction.execute(
+            """
+            UPDATE approval_cards_legacy_delivery
+            SET resolution_json = ?, membership_epoch = ?
+            WHERE principal_id = ? AND transaction_id = ?
+            """,
+            (resolution_json, int(row["membership_epoch"]), card_principal_id, delivery_id),
+        )
+
+
+def _deny_call_if_undecided(transaction: Transaction, row: Row, *, reason: str) -> None:
+    transaction.execute(
+        """
+        UPDATE approval_continuation_calls SET decision = 'denied', reason = ?
+        WHERE approval_id = ? AND generation = ? AND tool_call_id = ? AND decision IS NULL
+        """,
+        (reason, row["continuation_id"], row["continuation_generation"], row["tool_call_id"]),
+    )
+
+
+def _legacy_terminal_content(
+    stored_card: object,
+    *,
+    status: Literal["denied", "expired"],
+    reason: str,
+) -> dict[str, Any]:
+    card = _object_json(stored_card, description="legacy approval card")
+    content = card.get("content")
+    if not isinstance(content, dict):
+        msg = "Legacy approval card content is not an object"
+        raise TypeError(msg)
+    return _terminal_content(content, status=status, reason=reason)
+
+
+def _terminal_content(
+    content: Mapping[str, Any],
+    *,
+    status: Literal["denied", "expired"],
+    reason: str,
+) -> dict[str, Any]:
+    resolution = {
+        **content,
+        "status": status,
+        "approvable": False,
+        "resolution_reason": reason,
+        "resolved_by": None,
+    }
+    tool_name = resolution.get("tool_name")
+    resolution["body"] = f"{status.title()}: {tool_name}" if isinstance(tool_name, str) else f"Approval {status}"
+    return resolution
 
 
 def retire(

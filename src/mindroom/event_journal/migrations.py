@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from .identity import delivery_transaction_id, encode_thread_id
+from . import approvals
 
 if TYPE_CHECKING:
     from .backend import Transaction
@@ -66,6 +66,23 @@ def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: boo
     legacy_approvals = _column_exists(transaction, "approval_cards", "transaction_id", postgres=postgres)
     if legacy_approvals:
         transaction.execute("ALTER TABLE approval_cards RENAME TO approval_cards_legacy_delivery")
+        for column, definition in (
+            ("continuation_id", "TEXT"),
+            ("continuation_generation", "BIGINT"),
+            ("tool_call_id", "TEXT"),
+            ("migration_owner", "TEXT"),
+            ("migration_generation", "BIGINT NOT NULL DEFAULT 0"),
+            ("migration_lease_until_ns", "BIGINT"),
+        ):
+            if not _column_exists(
+                transaction,
+                "approval_cards_legacy_delivery",
+                column,
+                postgres=postgres,
+            ):
+                transaction.execute(
+                    f"ALTER TABLE approval_cards_legacy_delivery ADD COLUMN {column} {definition}",
+                )
     return legacy_approvals
 
 
@@ -103,7 +120,7 @@ def _migrate_unavailable_notice_delivery_ids(transaction: Transaction) -> None:
 
 
 def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approvals: bool) -> None:
-    """Copy every current-format approval owner into the generic outbox."""
+    """Promote legacy rows whose stored payload is already the acknowledged wire content."""
     if not migrate_approvals:
         return
     rows = transaction.fetchall(
@@ -112,88 +129,26 @@ def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approv
                sending_device_id, card_json, resolution_json, continuation_id,
                continuation_generation, tool_call_id, membership_epoch, created_at_ns
         FROM approval_cards_legacy_delivery
+        WHERE continuation_id IS NOT NULL
+          AND continuation_generation IS NOT NULL
+          AND tool_call_id IS NOT NULL
         """,
     )
     for row in rows:
+        if row["card_event_id"] is None:
+            continue
         card = _object_json(row["card_json"], description="approval card")
         content = card.get("content")
         if not isinstance(content, dict):
             msg = "Legacy approval card content is not an object"
             raise TypeError(msg)
-        event_type = card.get("type")
-        if not isinstance(event_type, str) or not event_type:
-            event_type = _APPROVAL_EVENT_TYPE
-        delivery_id = str(row["transaction_id"])
-        thread_id = content.get("thread_id")
-        transaction.execute(
-            """
-            INSERT INTO matrix_delivery_outbox (
-                principal_id, delivery_id, stage, event_type, room_id, thread_id,
-                transaction_id, payload_json, edits_event_id, attempted,
-                sending_device_id, acknowledged_event_id, created_at_ns
-            ) VALUES (?, ?, 'initial', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
-            ON CONFLICT (principal_id, delivery_id, stage) DO NOTHING
-            """,
-            (
-                str(row["principal_id"]),
-                delivery_id,
-                event_type,
-                str(row["room_id"]),
-                encode_thread_id(thread_id if isinstance(thread_id, str) and thread_id else None),
-                delivery_id,
-                _encoded(content),
-                int(row["attempted"]),
-                row["sending_device_id"],
-                row["card_event_id"],
-                int(row["created_at_ns"]),
-            ),
+        approvals.promote_legacy_delivery(
+            transaction,
+            str(row["principal_id"]),
+            delivery_id=str(row["transaction_id"]),
+            payload=content,
+            acknowledged_event_id=str(row["card_event_id"]),
         )
-        transaction.execute(
-            """
-            INSERT INTO approval_cards (
-                principal_id, delivery_id, continuation_id,
-                continuation_generation, tool_call_id, membership_epoch
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT (principal_id, delivery_id) DO NOTHING
-            """,
-            (
-                str(row["principal_id"]),
-                delivery_id,
-                str(row["continuation_id"]),
-                int(row["continuation_generation"]),
-                str(row["tool_call_id"]),
-                int(row["membership_epoch"]),
-            ),
-        )
-        if row["resolution_json"] is None:
-            continue
-        resolution = _object_json(row["resolution_json"], description="approval resolution")
-        # A departure could decide a legacy card before its first send. Recovery
-        # must publish that initial before this edit; ``final`` sorts before
-        # ``initial`` when scan timestamps tie, so preserve their causal order.
-        transaction.execute(
-            """
-            INSERT INTO matrix_delivery_outbox (
-                principal_id, delivery_id, stage, event_type, room_id, thread_id,
-                transaction_id, payload_json, edits_event_id, edit_target_pending, attempted,
-                sending_device_id, acknowledged_event_id, created_at_ns
-            ) VALUES (?, ?, 'final', ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?)
-            ON CONFLICT (principal_id, delivery_id, stage) DO NOTHING
-            """,
-            (
-                str(row["principal_id"]),
-                delivery_id,
-                event_type,
-                str(row["room_id"]),
-                encode_thread_id(thread_id if isinstance(thread_id, str) and thread_id else None),
-                delivery_transaction_id(str(row["principal_id"]), delivery_id, "final"),
-                _encoded(resolution),
-                row["card_event_id"],
-                int(row["card_event_id"] is None),
-                int(row["created_at_ns"]) + 1,
-            ),
-        )
-    transaction.execute("DROP TABLE approval_cards_legacy_delivery")
 
 
 def _table_exists(transaction: Transaction, table: str, *, postgres: bool) -> bool:

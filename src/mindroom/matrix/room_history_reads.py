@@ -107,6 +107,14 @@ class RoomThreadsPageError(ValueError):
         self.retry_after_ms = retry_after_ms
 
 
+@dataclass(frozen=True, slots=True)
+class LocatedApprovalCard:
+    """The exact decrypted Matrix event and content one approval ID names."""
+
+    event_id: str
+    content: dict[str, Any]
+
+
 def _room_threads_page_error_from_response(response: object) -> RoomThreadsPageError:
     """Preserve nio response details for /threads pagination failures."""
     if isinstance(response, nio.ErrorResponse):
@@ -303,6 +311,23 @@ async def find_approval_card_event_id_via_room_messages(
     ever means the walk saw all the history there was and the card was not in
     it.
     """
+    located = await find_approval_card_via_room_messages(
+        client,
+        room_id,
+        card_sender=card_sender,
+        approval_id=approval_id,
+    )
+    return None if located is None else located.event_id
+
+
+async def find_approval_card_via_room_messages(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    card_sender: str,
+    approval_id: str,
+) -> LocatedApprovalCard | None:
+    """Find one original approval card together with its decrypted wire content."""
     from_token: str | None = None
     seen_pagination_tokens: set[str] = set()
 
@@ -322,7 +347,11 @@ async def find_approval_card_event_id_via_room_messages(
                 continue
             event_source = event.source if isinstance(event.source, dict) else {}
             if _is_approval_card_for(event_source, card_sender=card_sender, approval_id=approval_id):
-                return event.event_id
+                content = event_source.get("content")
+                if not isinstance(content, dict):
+                    msg = f"approval card {event.event_id!r} has no object content"
+                    raise RuntimeError(msg)
+                return LocatedApprovalCard(event_id=event.event_id, content=dict(content))
         if not response.chunk or not response.end:
             return None
         if response.end in seen_pagination_tokens:

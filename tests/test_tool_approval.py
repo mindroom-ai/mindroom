@@ -41,10 +41,13 @@ from mindroom.event_journal import (
     MatrixDelivery,
     delivery_transaction_id,
 )
+from mindroom.event_journal.approvals import LegacyApprovalDelivery
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.tool_approval import (
+    MatrixApprovalAction,
     ToolApprovalScriptError,
     evaluate_tool_approval,
+    handle_matrix_approval_action,
     resolve_tool_approval_approver,
     shutdown_approval_runtime,
     tool_may_require_approval,
@@ -76,6 +79,192 @@ def _config(tmp_path: Path) -> Config:
     )
     persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router", "code": "mindroom_code"})
     return config
+
+
+def _legacy_delivery_claim(*, attempted: bool, sending_device_id: str | None) -> LegacyApprovalDelivery:
+    content = {
+        "approval_id": "approval-card-1",
+        "continuation_id": "approval-1",
+        "continuation_generation": 0,
+        "tool_call_id": "call-1",
+        "thread_id": "$thread",
+        "status": "pending",
+        "full_arguments": {"command": "x" * 60_000},
+    }
+    return LegacyApprovalDelivery(
+        delivery_id="legacy-transaction",
+        event_type="io.mindroom.tool_approval",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload=content,
+        attempted=attempted,
+        sending_device_id=sending_device_id,
+        migration_owner="migration-owner",
+        migration_generation=1,
+    )
+
+
+def _legacy_transport(tmp_path: Path, cards: MagicMock) -> approval_transport.ApprovalMatrixTransport:
+    client = MagicMock(user_id="@router:localhost", device_id="CURRENT")
+    router = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+        approval_store=cards,
+    )
+    return approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: router if name == "router" else None,
+        cards_provider=lambda: cards,
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_unattempted_card_is_wire_prepared_before_generic_promotion(tmp_path: Path) -> None:
+    """Raw oversized #1834 content cannot enter the generic outbox before sidecar preparation."""
+    claim = _legacy_delivery_claim(attempted=False, sending_device_id=None)
+    cards = MagicMock()
+    cards.claim_legacy_approval_delivery = AsyncMock(side_effect=(claim, None))
+    cards.legacy_approval_delivery_pending = AsyncMock(return_value=False)
+    cards.promote_legacy_approval_delivery = AsyncMock(return_value=True)
+    prepared = {key: value for key, value in claim.payload.items() if key != "full_arguments"}
+    prepared["full_arguments_url"] = "mxc://localhost/arguments"
+    prepared["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$thread"}
+    transport = _legacy_transport(tmp_path, cards)
+
+    with patch.object(transport, "prepare_approval_event", new=AsyncMock(return_value=prepared)) as prepare:
+        assert await transport._upgrade_legacy_approval_deliveries()
+
+    prepare.assert_awaited_once_with("!room:localhost", "$thread", claim.payload)
+    cards.promote_legacy_approval_delivery.assert_awaited_once_with(
+        delivery_id="legacy-transaction",
+        payload=prepared,
+        acknowledged_event_id=None,
+        claim=claim,
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_attempted_card_on_changed_device_keeps_staging_after_history_miss(tmp_path: Path) -> None:
+    """A changed device never converts a scan miss into permission to send."""
+    claim = _legacy_delivery_claim(attempted=True, sending_device_id="OLD")
+    cards = MagicMock()
+    cards.claim_legacy_approval_delivery = AsyncMock(side_effect=(claim, None))
+    cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
+    cards.release_legacy_approval_delivery = AsyncMock()
+    cards.promote_legacy_approval_delivery = AsyncMock()
+    transport = _legacy_transport(tmp_path, cards)
+
+    with (
+        patch(
+            "mindroom.approval_transport.find_approval_card_via_room_messages",
+            new=AsyncMock(return_value=None),
+        ),
+        patch.object(transport, "_send_legacy_approval_delivery", new=AsyncMock()) as send,
+    ):
+        assert not await transport._upgrade_legacy_approval_deliveries()
+
+    send.assert_not_awaited()
+    cards.promote_legacy_approval_delivery.assert_not_awaited()
+    cards.release_legacy_approval_delivery.assert_awaited_once_with(claim)
+
+
+@pytest.mark.asyncio
+async def test_legacy_attempted_card_adopts_actual_matrix_content_before_promotion(tmp_path: Path) -> None:
+    """Accepted-before-ack legacy cards promote the wire payload, not the pre-wire claim."""
+    claim = _legacy_delivery_claim(attempted=True, sending_device_id="OLD")
+    actual = MagicMock(
+        event_id="$approval",
+        content={
+            **{key: value for key, value in claim.payload.items() if key != "full_arguments"},
+            "full_arguments_url": "mxc://localhost/original",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+        },
+    )
+    cards = MagicMock()
+    cards.claim_legacy_approval_delivery = AsyncMock(side_effect=(claim, None))
+    cards.legacy_approval_delivery_pending = AsyncMock(return_value=False)
+    cards.promote_legacy_approval_delivery = AsyncMock(return_value=True)
+    transport = _legacy_transport(tmp_path, cards)
+
+    with (
+        patch(
+            "mindroom.approval_transport.find_approval_card_via_room_messages",
+            new=AsyncMock(return_value=actual),
+        ),
+        patch.object(transport, "_send_legacy_approval_delivery", new=AsyncMock()) as send,
+    ):
+        assert await transport._upgrade_legacy_approval_deliveries()
+
+    send.assert_not_awaited()
+    cards.promote_legacy_approval_delivery.assert_awaited_once_with(
+        delivery_id="legacy-transaction",
+        payload=actual.content,
+        acknowledged_event_id="$approval",
+        claim=claim,
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_same_device_retry_fetches_the_transaction_winner_before_promotion(tmp_path: Path) -> None:
+    """A deduplicated resend records the old event's content rather than its newly uploaded sidecar."""
+    claim = _legacy_delivery_claim(attempted=True, sending_device_id="CURRENT")
+    prepared = {key: value for key, value in claim.payload.items() if key != "full_arguments"}
+    prepared["full_arguments_url"] = "mxc://localhost/new-orphan"
+    actual = MagicMock(
+        event_id="$approval",
+        content={**prepared, "full_arguments_url": "mxc://localhost/original"},
+    )
+    cards = MagicMock()
+    cards.claim_legacy_approval_delivery = AsyncMock(side_effect=(claim, None))
+    cards.legacy_approval_delivery_pending = AsyncMock(return_value=False)
+    cards.promote_legacy_approval_delivery = AsyncMock(return_value=True)
+    transport = _legacy_transport(tmp_path, cards)
+
+    with (
+        patch(
+            "mindroom.approval_transport.find_approval_card_via_room_messages",
+            new=AsyncMock(return_value=None),
+        ),
+        patch.object(transport, "prepare_approval_event", new=AsyncMock(return_value=prepared)),
+        patch.object(
+            transport,
+            "_send_legacy_approval_delivery",
+            new=AsyncMock(return_value="$approval"),
+        ) as send,
+        patch.object(transport, "_fetch_approval_card_event", new=AsyncMock(return_value=actual)),
+    ):
+        assert await transport._upgrade_legacy_approval_deliveries()
+
+    send.assert_awaited_once_with(claim, prepared)
+    cards.promote_legacy_approval_delivery.assert_awaited_once_with(
+        delivery_id="legacy-transaction",
+        payload=actual.content,
+        acknowledged_event_id="$approval",
+        claim=claim,
+    )
+
+
+@pytest.mark.asyncio
+async def test_approval_action_waits_while_legacy_delivery_ownership_is_being_migrated(tmp_path: Path) -> None:
+    """A click admitted during startup remains journal work until its exact card owner is promoted."""
+    cards = MagicMock()
+    cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
+    initialize_approval_store(test_runtime_paths(tmp_path), cards=cards)
+
+    with pytest.raises(RuntimeError, match="migration has not established"):
+        await handle_matrix_approval_action(
+            MatrixApprovalAction(
+                room_id="!room:localhost",
+                sender_id="@approver:localhost",
+                card_event_id="$approval",
+                status="approved",
+                reason=None,
+            ),
+        )
+
+    cards.pending_approval_card.assert_not_called()
 
 
 def test_tool_approval_config_coerces_numeric_timeout_strings() -> None:
@@ -353,6 +542,38 @@ async def test_startup_unavailable_owner_cleanup_walks_cursor_pages(tmp_path: Pa
         "approval-1",
         "approval-2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_startup_unavailable_cleanup_waits_for_legacy_card_upgrade(tmp_path: Path) -> None:
+    """Unavailable-owner cleanup cannot delete a continuation still owned by legacy delivery debt."""
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: None,
+        journal_provider=lambda: None,
+    )
+    transport._startup_router_ready_for_cleanup = True
+    transport._startup_runtime_support_ready_for_cleanup = True
+
+    with (
+        patch.object(
+            transport,
+            "_recover_approval_cards_on_startup",
+            new=AsyncMock(return_value=False),
+        ),
+        patch.object(
+            transport,
+            "_reconcile_startup_unavailable",
+            new=AsyncMock(return_value=True),
+        ) as reconcile,
+        patch.object(transport, "_schedule_startup_cleanup_retry") as schedule_retry,
+    ):
+        await transport._run_startup_cleanup_if_ready()
+
+    reconcile.assert_not_awaited()
+    schedule_retry.assert_called_once_with()
+    assert transport._startup_cleanup_done is False
 
 
 @pytest.mark.asyncio

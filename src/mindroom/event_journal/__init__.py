@@ -20,7 +20,11 @@ from .approval_continuations import (
     ApprovalDecision,
     ApprovalMemoryTurn,
 )
-from .approvals import ApprovalCardReservation, RecordedApprovalDecision, StoredApprovalCard
+from .approvals import (
+    ApprovalCardReservation,
+    RecordedApprovalDecision,
+    StoredApprovalCard,
+)
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership import MembershipFence, MembershipView
 from .models import (
