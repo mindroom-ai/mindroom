@@ -40,7 +40,7 @@ from mindroom.entity_resolution import current_internal_sender_ids, entity_ident
 from mindroom.event_journal import (
     ApprovalContinuation,
     ApprovalMemoryTurn,
-    OutboxDelivery,
+    MatrixDelivery,
 )
 from mindroom.event_journal import (
     ApprovalDecision as ContinuationDecision,
@@ -1069,7 +1069,7 @@ class ResponseRunner:
         return outcome
 
     @staticmethod
-    def _approval_outcome_from_delivery(delivery: OutboxDelivery) -> FinalDeliveryOutcome:
+    def _approval_outcome_from_delivery(delivery: MatrixDelivery) -> FinalDeliveryOutcome:
         """Restore semantic lifecycle facts from one frozen approval FINAL."""
         acknowledged_event_id = delivery.acknowledged_event_id
         if acknowledged_event_id is None:
@@ -1685,8 +1685,8 @@ class ResponseRunner:
         """Settle a stopped approval, returning ``None`` while frozen success remains unresolved."""
         continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
         if continuation is None:
-            final_delivery = await self.deps.approval_store.load_delivery(
-                turn_id=source_event_id,
+            final_delivery = await self.deps.approval_store.load_matrix_delivery(
+                delivery_id=source_event_id,
                 stage=DeliveryStage.FINAL,
             )
             return bool(

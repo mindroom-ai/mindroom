@@ -16,8 +16,8 @@ from nio.exceptions import SendRetryError
 from mindroom import constants, interactive
 from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, SKIP_MENTIONS_KEY
 from mindroom.event_journal import (
-    OutboxDelivery,
-    OutboxView,
+    MatrixDelivery,
+    MatrixDeliveryView,
     ProjectedEvent,
     TerminalTurnWrite,
     replacement_target,
@@ -54,14 +54,18 @@ from mindroom.matrix.client_delivery import (
     send_message_outcome,
     send_message_result,
 )
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
-from mindroom.response_delivery import (
+from mindroom.matrix.room_history_reads import (
+    find_outbox_delivery_event_id_via_room_messages,
+    find_response_event_ids_via_room_messages,
+)
+from mindroom.matrix_delivery import (
     DeliveryStage,
+    MatrixDeliveryWorker,
     RecoveryOutcome,
-    ResponseDelivery,
     SendDelivery,
     TurnHandoff,
 )
@@ -381,7 +385,7 @@ class DeliveryGatewayDeps:
     redact_message_event: Callable[..., Awaitable[bool]]
     resolver: ConversationResolver
     response_hooks: ResponseHookService
-    outbox: OutboxView
+    outbox: MatrixDeliveryView
     # Contract 2's handoff: the journal owns an actionable source until the
     # turn's answer is durably owed to a room, and this is where that becomes
     # true. Everything after it is the outbox's to recover.
@@ -646,13 +650,13 @@ class DeliveryGateway:
         would tell every downstream consumer that the event says something it
         does not -- under the event ID of the message that really was sent.
         """
-        row = await self.deps.outbox.load_delivery(turn_id=turn_id, stage=stage)
+        row = await self.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=stage)
         content = dict(row.payload) if row is not None else fallback
         return DeliveredMatrixEvent(event_id=event_id, content_sent=content)
 
     async def _send_claimed(
         self,
-        claimed: OutboxDelivery,
+        claimed: MatrixDelivery,
         *,
         retry_sync_recovery: bool,
     ) -> DeliveredMatrixEvent:
@@ -675,7 +679,7 @@ class DeliveryGateway:
         )
         if isinstance(outcome, MatrixDeliveryFailure):
             detail = _matrix_delivery_failure_reason(outcome)
-            msg = f"Matrix refused delivery for turn {claimed.turn_id!r} stage {claimed.stage.value!r}: {detail}"
+            msg = f"Matrix refused delivery for turn {claimed.delivery_id!r} stage {claimed.stage.value!r}: {detail}"
             raise _DeliveryRefusedError(msg)
         return outcome
 
@@ -725,7 +729,7 @@ class DeliveryGateway:
             redacts_event_id=None,
         )
 
-    async def _observe_delivered(self, claimed: OutboxDelivery, event_id: str) -> tuple[ProjectedEvent, ...]:
+    async def _observe_delivered(self, claimed: MatrixDelivery, event_id: str) -> tuple[ProjectedEvent, ...]:
         """Return the target and result one delivered outbox row made visible."""
         if claimed.edits_event_id is None and not claimed.has_interactive_prompt:
             return ()
@@ -747,7 +751,7 @@ class DeliveryGateway:
         projections.append(delivered)
         return tuple(projections)
 
-    def _response_delivery(self, send: SendDelivery, *, handoff: TurnHandoff | None) -> ResponseDelivery:
+    def _response_delivery(self, send: SendDelivery, *, handoff: TurnHandoff | None) -> MatrixDeliveryWorker:
         """Return the outbox writer, for a live delivery or for recovery.
 
         Both go through here so they cannot drift. They did: recovery was built
@@ -759,16 +763,17 @@ class DeliveryGateway:
         it resends rows that already exist, and the sources those rows answer
         were handed over when the rows were first recorded.
         """
-        return ResponseDelivery(
+        return MatrixDeliveryWorker(
             store=self.deps.outbox,
             send=send,
             observe_delivered=self._observe_delivered,
+            event_type="m.room.message",
             sending_device_id=self.deps.sending_device_id(),
             resolve_delivered=self._delivered_under_a_previous_device,
             handoff=handoff,
             terminal_turn_for=self._terminal_turn_write,
             terminal_turn_committed=self.deps.terminal_turn_committed,
-            turn_locks=self._delivery_turn_locks,
+            delivery_locks=self._delivery_turn_locks,
         )
 
     def _terminal_turn_write(self, turn_id: str, event_id: str) -> TerminalTurnWrite | None:
@@ -790,7 +795,7 @@ class DeliveryGateway:
             record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
         )
 
-    async def _delivered_under_a_previous_device(self, claimed: OutboxDelivery) -> str | None:
+    async def _delivered_under_a_previous_device(self, claimed: MatrixDelivery) -> str | None:
         """Return the answer an earlier device already put in the room, if it did.
 
         Reached only when the frozen transaction ID has stopped being proof,
@@ -805,19 +810,32 @@ class DeliveryGateway:
         its own anchor event, which is the right question for the uncoalesced
         case and the only one available for the rest.
 
-        This finds answers, not every message. The scan matches a genuine
-        reply -- ``is_falling_back`` false, pointing at a source -- which is
-        what an agent answering a user sends. A delivery with no source to
-        reply to, a scheduled message or a hook-emitted notice, matches
-        nothing and reads as "not delivered", so it is sent. That is the same
-        blind resend as before this guard existed: unchanged for the cases it
-        cannot see, and correct for the ones it can.
+        Ordinary answers match their exact source relation. A standalone
+        delivery that replies outside the turn -- such as an unavailable-owner
+        notice -- instead matches its exact frozen payload. A miss in that
+        second path remains unresolved rather than authorizing a blind resend.
         """
         client = self._client()
         response_sender = client.user_id
         if not response_sender:
             return None
-        source_event_ids = self.deps.turn_handoff.sources_for_turn(claimed.turn_id)
+        source_event_ids = self.deps.turn_handoff.sources_for_turn(claimed.delivery_id)
+        reply_to_event_id = EventInfo.from_event(
+            {"type": claimed.event_type, "content": dict(claimed.payload)},
+        ).reply_to_event_id
+        if reply_to_event_id is not None and reply_to_event_id not in source_event_ids:
+            delivered = await find_outbox_delivery_event_id_via_room_messages(
+                client,
+                claimed.room_id,
+                delivery_sender=response_sender,
+                source_event_ids=(reply_to_event_id,),
+                delivery_content=claimed.payload,
+                delivery_event_type=claimed.event_type,
+            )
+            if delivered is None:
+                msg = f"Exact Matrix delivery {claimed.delivery_id!r} was not found, so its absence is unproven"
+                raise RuntimeError(msg)
+            return delivered
         delivered = await find_response_event_ids_via_room_messages(
             client,
             claimed.room_id,
@@ -831,7 +849,7 @@ class DeliveryGateway:
             # stays unacknowledged and a human-visible error is raised rather
             # than a third answer sent.
             msg = (
-                f"Turn {claimed.turn_id!r} has {len(delivered)} visible answers in {claimed.room_id}, "
+                f"Turn {claimed.delivery_id!r} has {len(delivered)} visible answers in {claimed.room_id}, "
                 f"so no single one can be adopted after the sending device changed"
             )
             raise RuntimeError(msg)
@@ -853,7 +871,7 @@ class DeliveryGateway:
         Nothing escapes here.
         """
 
-        async def send(claimed: OutboxDelivery) -> str:
+        async def send(claimed: MatrixDelivery) -> str:
             delivered = await self._send_claimed(claimed, retry_sync_recovery=True)
             return delivered.event_id
 
@@ -896,7 +914,7 @@ class DeliveryGateway:
         )
         requested_delivery: DeliveredMatrixEvent | None = None
 
-        async def send(claimed: OutboxDelivery) -> str:
+        async def send(claimed: MatrixDelivery) -> str:
             nonlocal requested_delivery
             delivered = await self._send_claimed(claimed, retry_sync_recovery=request.retry_sync_recovery)
             if claimed.stage is request.delivery_stage:
@@ -906,7 +924,7 @@ class DeliveryGateway:
         try:
             handoff = None if request.defer_source_handoff else self.deps.turn_handoff
             event_id = await self._response_delivery(send, handoff=handoff).deliver(
-                turn_id=request.delivery_turn_id,
+                delivery_id=request.delivery_turn_id,
                 stage=request.delivery_stage,
                 room_id=room_id,
                 thread_id=request.target.resolved_thread_id,
@@ -1036,7 +1054,7 @@ class DeliveryGateway:
         )
         delivered: DeliveredMatrixEvent | None = None
 
-        async def send(claimed: OutboxDelivery) -> str:
+        async def send(claimed: MatrixDelivery) -> str:
             # The frozen row, not the request that produced it. `edit_message_result`
             # would rebuild the envelope from the current closure, which is the same
             # bytes on a first attempt and the wrong ones on a second: a row is frozen
@@ -1056,7 +1074,7 @@ class DeliveryGateway:
             )
             if isinstance(outcome, MatrixDeliveryFailure):
                 detail = _matrix_delivery_failure_reason(outcome)
-                msg = f"Matrix refused the final edit for turn {claimed.turn_id!r}: {detail}"
+                msg = f"Matrix refused the final edit for turn {claimed.delivery_id!r}: {detail}"
                 raise _DeliveryRefusedError(msg)
             delivered = outcome
             return outcome.event_id
@@ -1064,7 +1082,7 @@ class DeliveryGateway:
         try:
             handoff = None if request.defer_source_handoff else self.deps.turn_handoff
             event_id = await self._response_delivery(send, handoff=handoff).deliver(
-                turn_id=request.delivery_turn_id,
+                delivery_id=request.delivery_turn_id,
                 stage=DeliveryStage.FINAL,
                 room_id=room_id,
                 thread_id=request.target.resolved_thread_id,
@@ -1673,7 +1691,7 @@ class DeliveryGateway:
         nothing can ever reference -- or fail before the durable payload gets
         another chance to reach Matrix.
         """
-        existing = await self.deps.outbox.load_delivery(turn_id=turn_id, stage=stage)
+        existing = await self.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=stage)
         if existing is not None and existing.attempted:
             return content
         return await prepare_large_message(self._client(), room_id, content)

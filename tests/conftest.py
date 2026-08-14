@@ -72,8 +72,8 @@ from mindroom.event_journal import (
     EventKind,
     InboundEvent,
     JournalEvent,
-    OutboxDelivery,
-    OutboxView,
+    MatrixDelivery,
+    MatrixDeliveryView,
     PendingTurnView,
     PrincipalStore,
     ProjectedEvent,
@@ -110,10 +110,10 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.matrix_delivery import TurnHandoff
 from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
 from mindroom.reaction_dispatch import ReactionDispatcher
-from mindroom.response_delivery import TurnHandoff
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
@@ -1268,7 +1268,7 @@ class FakeOutbox:
     """
 
     def __init__(self) -> None:
-        self.rows: dict[tuple[str, str], OutboxDelivery] = {}
+        self.rows: dict[tuple[str, str], MatrixDelivery] = {}
         # What each acknowledgement carried alongside it, so a test can
         # assert the terminal record and the acknowledgement are one write.
         self.acknowledged_terminal_turns: list[tuple[str, TerminalTurnWrite | None]] = []
@@ -1284,14 +1284,15 @@ class FakeOutbox:
         del room_id
         return turn_id not in self.ended_membership_turn_ids
 
-    async def enqueue_delivery(
+    async def enqueue_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
     ) -> str | None:
@@ -1316,7 +1317,7 @@ class FakeOutbox:
         """
         if settle_source_event_ids:
             self.handed_over.append(settle_source_event_ids)
-        key = (turn_id, stage.value)
+        key = (delivery_id, stage.value)
         existing = self.rows.get(key)
         if existing is not None:
             if key in self.attempted:
@@ -1326,15 +1327,17 @@ class FakeOutbox:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=dict(payload),
+                event_type=event_type,
                 edits_event_id=edits_event_id,
             )
             return existing.transaction_id
-        if turn_id in self.ended_membership_turn_ids:
+        if delivery_id in self.ended_membership_turn_ids:
             return None
-        transaction_id = f"tx-{turn_id}-{stage.value}"
-        self.rows[key] = OutboxDelivery(
-            turn_id=turn_id,
+        transaction_id = f"tx-{delivery_id}-{stage.value}"
+        self.rows[key] = MatrixDelivery(
+            delivery_id=delivery_id,
             stage=stage,
+            event_type=event_type,
             room_id=room_id,
             thread_id=thread_id,
             transaction_id=transaction_id,
@@ -1345,22 +1348,29 @@ class FakeOutbox:
         )
         return transaction_id
 
-    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def claim_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        sending_device_id: str | None = None,
+    ) -> MatrixDelivery | None:
         """Freeze one delivery before any network call, returning its prior state.
 
-        The pre-claim row is what comes back, exactly as the real outbox does:
-        a caller has to be able to see whether *someone else* attempted this
-        and from which device, and reading after the mark would report this
-        attempt back to itself. The device is not written here -- claiming does
-        not mean this device is going to send.
+        The prior attempted state comes back while the first device intent is
+        committed atomically, exactly as the real outbox does.
         """
-        key = (turn_id, stage.value)
+        key = (delivery_id, stage.value)
         row = self.rows.get(key)
         if row is None:
             return None
-        if stage is DeliveryStage.INITIAL and not row.attempted and (turn_id, DeliveryStage.FINAL.value) in self.rows:
+        if (
+            stage is DeliveryStage.INITIAL
+            and not row.attempted
+            and (delivery_id, DeliveryStage.FINAL.value) in self.rows
+        ):
             return None
-        initial = self.rows.get((turn_id, DeliveryStage.INITIAL.value))
+        initial = self.rows.get((delivery_id, DeliveryStage.INITIAL.value))
         if (
             stage is DeliveryStage.FINAL
             and row.edits_event_id is None
@@ -1370,29 +1380,34 @@ class FakeOutbox:
         ):
             return None
         self.attempted.add(key)
-        self.rows[key] = replace(row, attempted=True)
-        return row
+        claimed = replace(
+            row,
+            attempted=True,
+            sending_device_id=sending_device_id if not row.attempted else row.sending_device_id,
+        )
+        self.rows[key] = claimed
+        return replace(claimed, attempted=row.attempted)
 
-    async def record_sending_device(
+    async def record_matrix_delivery_device(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         device_id: str | None,
     ) -> None:
         """Record the device namespace this delivery is about to send under."""
-        key = (turn_id, stage.value)
+        key = (delivery_id, stage.value)
         if key in self.rows:
             self.rows[key] = replace(self.rows[key], sending_device_id=device_id)
 
-    async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
-        return self.rows.get((turn_id, stage.value))
+        return self.rows.get((delivery_id, stage.value))
 
-    async def acknowledge_delivery(
+    async def acknowledge_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
@@ -1404,7 +1419,7 @@ class FakeOutbox:
         it travelled *with* the acknowledgement. Dropping it here would let the
         two drift apart again without anything noticing.
         """
-        key = (turn_id, stage.value)
+        key = (delivery_id, stage.value)
         already = self.rows[key].acknowledged_event_id
         if already is not None:
             # First-writer-wins, like the real store: a loser is told the event
@@ -1412,16 +1427,17 @@ class FakeOutbox:
             # nothing -- which stays true even when the two events are equal.
             return DeliveryAcknowledgement(settled_event_id=already, bound=False)
         self.rows[key] = replace(self.rows[key], acknowledged_event_id=event_id)
-        self.acknowledged_terminal_turns.append((turn_id, terminal_turn))
+        self.acknowledged_terminal_turns.append((delivery_id, terminal_turn))
         self.acknowledged_projections.append(delivered_projections)
         return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
 
-    async def unacknowledged_deliveries(
+    async def unacknowledged_matrix_deliveries(
         self,
         *,
+        event_type: str = "m.room.message",
         limit: int = 256,
         after: tuple[int, str, str] | None = None,
-    ) -> tuple[OutboxDelivery, ...]:
+    ) -> tuple[MatrixDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first.
 
         The cursor is honoured, because recovery relies on it to make
@@ -1430,17 +1446,17 @@ class FakeOutbox:
         page, or the scan never ends.
         """
         pending = sorted(
-            (row for row in self.rows.values() if row.acknowledged_event_id is None),
-            key=lambda row: (row.created_at_ns, row.turn_id, row.stage.value),
+            (row for row in self.rows.values() if row.event_type == event_type and row.acknowledged_event_id is None),
+            key=lambda row: (row.created_at_ns, row.delivery_id, row.stage.value),
         )
         if after is not None:
-            pending = [row for row in pending if (row.created_at_ns, row.turn_id, row.stage.value) > after]
+            pending = [row for row in pending if (row.created_at_ns, row.delivery_id, row.stage.value) > after]
         return tuple(pending[:limit])
 
 
-def make_outbox_mock() -> OutboxView:
+def make_outbox_mock() -> MatrixDeliveryView:
     """Return an outbox a delivery test can actually send through."""
-    return cast("OutboxView", FakeOutbox())
+    return cast("MatrixDeliveryView", FakeOutbox())
 
 
 class CrashError(RuntimeError):
@@ -1492,26 +1508,28 @@ class DiesAfterAcknowledgement:
     ``DiesAfterNextWriteCommit`` instead.
     """
 
-    inner: OutboxView
+    inner: MatrixDeliveryView
 
-    async def enqueue_delivery(
+    async def enqueue_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
     ) -> str | None:
         """Record delivery intent."""
-        return await self.inner.enqueue_delivery(
-            turn_id=turn_id,
+        return await self.inner.enqueue_matrix_delivery(
+            delivery_id=delivery_id,
             stage=stage,
             room_id=room_id,
             thread_id=thread_id,
             payload=payload,
+            event_type=event_type,
             edits_event_id=edits_event_id,
             settle_source_event_ids=settle_source_event_ids,
         )
@@ -1520,36 +1538,50 @@ class DiesAfterAcknowledgement:
         """Return whether a turn still speaks for the room's current membership."""
         return await self.inner.turn_membership_is_current(turn_id=turn_id, room_id=room_id)
 
-    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
-        """Freeze one delivery before network I/O and return what to send."""
-        return await self.inner.claim_delivery(turn_id=turn_id, stage=stage)
-
-    async def record_sending_device(
+    async def claim_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
+        stage: DeliveryStage,
+        sending_device_id: str | None = None,
+    ) -> MatrixDelivery | None:
+        """Freeze one delivery before network I/O and return what to send."""
+        return await self.inner.claim_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=stage,
+            sending_device_id=sending_device_id,
+        )
+
+    async def record_matrix_delivery_device(
+        self,
+        *,
+        delivery_id: str,
         stage: DeliveryStage,
         device_id: str | None,
     ) -> None:
         """Record the device namespace this delivery is about to send under."""
-        await self.inner.record_sending_device(turn_id=turn_id, stage=stage, device_id=device_id)
+        await self.inner.record_matrix_delivery_device(
+            delivery_id=delivery_id,
+            stage=stage,
+            device_id=device_id,
+        )
 
-    async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
-        return await self.inner.load_delivery(turn_id=turn_id, stage=stage)
+        return await self.inner.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
 
-    async def acknowledge_delivery(
+    async def acknowledge_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
         terminal_turn: TerminalTurnWrite | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix outcome, then die before anything else can run."""
-        await self.inner.acknowledge_delivery(
-            turn_id=turn_id,
+        await self.inner.acknowledge_matrix_delivery(
+            delivery_id=delivery_id,
             stage=stage,
             event_id=event_id,
             delivered_projections=delivered_projections,
@@ -1558,14 +1590,19 @@ class DiesAfterAcknowledgement:
         msg = "crashed the instant the outcome was recorded"
         raise CrashError(msg)
 
-    async def unacknowledged_deliveries(
+    async def unacknowledged_matrix_deliveries(
         self,
         *,
+        event_type: str = "m.room.message",
         limit: int = 256,
         after: tuple[int, str, str] | None = None,
-    ) -> tuple[OutboxDelivery, ...]:
+    ) -> tuple[MatrixDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first."""
-        return await self.inner.unacknowledged_deliveries(limit=limit, after=after)
+        return await self.inner.unacknowledged_matrix_deliveries(
+            event_type=event_type,
+            limit=limit,
+            after=after,
+        )
 
 
 # Drops contract 2's journal handoff, for tests that are not about it. Named
@@ -1579,7 +1616,7 @@ ignore_final_delivery_handoff = TurnHandoff(
 
 
 async def ignore_delivered_projection(
-    _delivery: OutboxDelivery,
+    _delivery: MatrixDelivery,
     _event_id: str,
 ) -> tuple[ProjectedEvent, ...]:
     """Return no projection for outbox-only tests."""

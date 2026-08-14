@@ -134,7 +134,7 @@ visibility = [
     "mindroom.matrix.transport_progress",
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
-    "mindroom.response_delivery",
+    "mindroom.matrix_delivery",
     "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
     "mindroom.turn_controller",
@@ -277,12 +277,17 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.response_delivery"
+path = "mindroom.matrix_delivery"
 depends_on = [
     "mindroom.event_journal",
     "mindroom.logging_config",
 ]
-visibility = ["mindroom.approval_transport", "mindroom.bot", "mindroom.delivery_gateway"]
+visibility = [
+    "mindroom.approval_manager",
+    "mindroom.approval_transport",
+    "mindroom.bot",
+    "mindroom.delivery_gateway",
+]
 
 [[modules]]
 path = "mindroom.reaction_dispatch"
@@ -585,9 +590,14 @@ depends_on = [
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.logging_config",
+    "mindroom.matrix_delivery",
     "mindroom.tool_system.tool_calls",
 ]
-visibility = ["mindroom.tool_approval"]
+visibility = [
+    "mindroom.approval_response",
+    "mindroom.approval_transport",
+    "mindroom.tool_approval",
+]
 
 [[modules]]
 path = "mindroom.approval_events"
@@ -600,13 +610,14 @@ visibility = ["mindroom.approval_manager"]
 [[modules]]
 path = "mindroom.approval_transport"
 depends_on = [
+    "mindroom.approval_manager",
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.message_builder",
     "mindroom.matrix.room_history_reads",
-    "mindroom.response_delivery",
+    "mindroom.matrix_delivery",
     "mindroom.tool_approval",
 ]
 visibility = ["mindroom.orchestrator"]
@@ -631,6 +642,7 @@ visibility = ["mindroom.response_runner"]
 [[modules]]
 path = "mindroom.approval_response"
 depends_on = [
+    "mindroom.approval_manager",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.event_journal",
@@ -1232,7 +1244,7 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.event_info",
     "mindroom.matrix.room_history_reads",
-    "mindroom.response_delivery",
+    "mindroom.matrix_delivery",
     "mindroom.runtime_protocols",
     "mindroom.streaming",
 ]
@@ -2802,7 +2814,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.post_response_effects",
     "mindroom.reaction_dispatch",
-    "mindroom.response_delivery",
+    "mindroom.matrix_delivery",
     "mindroom.response_admission",
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
@@ -4621,18 +4633,12 @@ expose = [
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
     "MatrixApprovalAction",
-    "SentApprovalEvent",
-    "ToolApprovalCall",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "evaluate_tool_approval",
-    "expire_continuation_approval_cards",
     "handle_matrix_approval_action",
-    "initialize_approval_runtime",
     "is_process_active_approval_card",
-    "recover_approval_cards_on_startup",
     "resolve_tool_approval_approver",
-    "send_suspended_tool_approval",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
 ]

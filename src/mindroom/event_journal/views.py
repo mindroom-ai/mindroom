@@ -16,17 +16,23 @@ type-check.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from typing import Any, Literal
 
     from mindroom.history_recovery import (
         HistoryRecoveryOutcome,
         RoomHistoryRecovery,
     )
 
-    from .approvals import RecordedApprovalDecision, StoredApprovalCard
+    from .approvals import (
+        ApprovalCardReservation,
+        RecordedApprovalDecision,
+        StoredApprovalCard,
+        UnreadableApprovalCard,
+    )
     from .interactive_questions import InteractiveSelection
     from .models import (
         AdmissionResult,
@@ -38,11 +44,12 @@ if TYPE_CHECKING:
         HydrationCoverage,
         InboundEvent,
         JournalEvent,
-        OutboxDelivery,
+        MatrixDelivery,
         PendingPage,
         RefreshRequest,
         SemanticConsumer,
         TerminalTurnWrite,
+        UnreadableMatrixDelivery,
     )
     from .projection import ProjectedEvent
 
@@ -274,7 +281,7 @@ class HydrationView(Protocol):
         ...
 
 
-class OutboxView(Protocol):
+class MatrixDeliveryView(Protocol):
     """Delivering what was generated, plus the one journal fact delivery owns.
 
     That exception is the handoff, and it is narrower than it looks: the only
@@ -284,14 +291,15 @@ class OutboxView(Protocol):
     delivery accounts for.
     """
 
-    async def enqueue_delivery(
+    async def enqueue_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
     ) -> str | None:
@@ -302,28 +310,34 @@ class OutboxView(Protocol):
         """Return whether a turn still speaks for the room's current membership."""
         ...
 
-    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def claim_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        sending_device_id: str | None = None,
+    ) -> MatrixDelivery | None:
         """Freeze one delivery before network I/O and return the row as it stood."""
         ...
 
-    async def record_sending_device(
+    async def record_matrix_delivery_device(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         device_id: str | None,
     ) -> None:
         """Record the device namespace this delivery is about to send under."""
         ...
 
-    async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
         ...
 
-    async def acknowledge_delivery(
+    async def acknowledge_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
@@ -332,115 +346,69 @@ class OutboxView(Protocol):
         """Atomically record and project the delivery, plus the turn it completes."""
         ...
 
-    async def unacknowledged_deliveries(
+    async def unacknowledged_matrix_deliveries(
         self,
         *,
+        event_type: str = "m.room.message",
         limit: int = ...,
         after: tuple[int, str, str] | None = None,
-    ) -> tuple[OutboxDelivery, ...]:
+    ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first."""
         ...
 
 
-class ApprovalView(Protocol):
-    """The approval cards this bot owes a decision on, and nothing else."""
+class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
+    """Approval-domain state plus the generic delivery operations it uses."""
 
-    async def claim_approval_card(
+    @property
+    def principal_id(self) -> str: ...  # noqa: D102
+
+    async def reserve_approval_card_deliveries(  # noqa: D102
         self,
         *,
-        room_id: str,
-        transaction_id: str,
-        card: Mapping[str, Any],
-    ) -> None:
-        """Record one approval card as awaiting a decision, before it is sent.
+        continuation_principal_id: str,
+        continuation_id: str,
+        expected_generation: int,
+        cards: tuple[ApprovalCardReservation, ...],
+    ) -> bool: ...
 
-        Committed ahead of the send so that nothing clickable can exist without
-        a row that accounts for it. The row is unattempted until the send is
-        actually about to run, because a claim alone proves nothing reached the
-        room.
-        """
-        ...
-
-    async def mark_approval_card_attempted(
-        self,
-        *,
-        transaction_id: str,
-        sending_device_id: str | None,
-    ) -> bool:
-        """Record that one claimed card is about to be offered, and from which device.
-
-        Committed before the send, because the fact that has to survive a crash
-        is that something may already be in the room under this transaction.
-        Returns whether a row was still there to mark; nothing may be sent for
-        one that has gone.
-        """
-        ...
-
-    async def acknowledge_approval_card(
-        self,
-        *,
-        transaction_id: str,
-        card_event_id: str,
-        card: Mapping[str, Any],
-    ) -> None:
-        """Record the Matrix event one claimed approval card became."""
-        ...
-
-    async def resolve_continuation_approval_card(
+    async def resolve_continuation_approval_card(  # noqa: D102
         self,
         *,
         card_event_id: str,
         requested_status: Literal["approved", "denied", "expired"],
         reason: str | None,
         resolution: Mapping[str, Any],
-    ) -> RecordedApprovalDecision:
-        """Atomically record one native card and its exact-call decision."""
-        ...
+    ) -> RecordedApprovalDecision: ...
 
-    async def forget_approval_card(self, *, transaction_id: str) -> None:
-        """Drop one approval card whose decision the room now shows, or that was never sent."""
-        ...
-
-    async def finish_approval_card(self, *, transaction_id: str, card_event_id: str) -> bool:
-        """Retire delivered payload while preserving durable approval-only classification."""
-        ...
-
-    async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool:
-        """Return whether one delivered approval action is durably terminal."""
-        ...
-
-    async def pending_approval_card(
+    async def expire_unacknowledged_approval_card(  # noqa: D102
         self,
         *,
-        room_id: str,
-        card_event_id: str,
-    ) -> StoredApprovalCard | None:
-        """Return one card this bot still owes work on under this membership."""
-        ...
+        delivery_id: str,
+    ) -> RecordedApprovalDecision: ...
 
-    async def pending_approval_room_ids(self) -> tuple[str, ...]:
-        """Return current-membership rooms containing unfinished approval cards."""
-        ...
+    async def retire_approval_card(self, *, delivery_id: str, card_event_id: str) -> bool: ...  # noqa: D102
+    async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool: ...  # noqa: D102
+    async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> StoredApprovalCard | None: ...  # noqa: D102
 
-    async def pending_approval_cards(
+    async def pending_approval_room_ids(self) -> tuple[str, ...]: ...  # noqa: D102
+    async def pending_approval_cards(  # noqa: D102
         self,
         *,
         room_id: str,
         limit: int = ...,
         after: tuple[int, str] | None = None,
-    ) -> tuple[StoredApprovalCard, ...]:
-        """Return one room's unfinished cards, oldest first."""
-        ...
+    ) -> tuple[StoredApprovalCard | UnreadableApprovalCard, ...]: ...
 
 
 __all__ = [
     "AdmissionView",
-    "ApprovalView",
+    "ApprovalDeliveryView",
     "ConversationReadView",
     "DispatchView",
     "HistoryRecoveryRecordView",
     "HydrationView",
-    "OutboxView",
+    "MatrixDeliveryView",
     "PendingTurnView",
     "RelationView",
     "ReplayView",

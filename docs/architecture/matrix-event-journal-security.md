@@ -46,9 +46,15 @@ The projection keeps no edit history, so an edit overwrites the body and the pre
 
 `unresolved_edits.content_json` holds an edit whose target has not arrived yet, and it is deleted the moment the target lands or is redacted.
 
-`response_outbox.payload_json` holds an answer frozen before it was sent, and it survives until the delivery is acknowledged.
+`matrix_delivery_outbox.payload_json` holds each ordinary response or tool-approval event frozen before it is sent.
 
-`approval_cards.card_json` and `approval_cards.resolution_json` hold one tool-approval prompt and the decision taken on it.
+`approval_cards` retains only the durable delivery reference, exact continuation and tool-call identity, and membership epoch while a card is actionable.
+
+The decision remains in the exact-call continuation ledger, the terminal edit is another frozen outbox stage, and `approval_action_tombstones` retains the acknowledged card event ID after retirement so duplicate clicks remain consumed.
+
+During the delivery-outbox schema upgrade, already-decided legacy calls keep their first decision and undecided calls expire atomically.
+Known card event IDs are tombstoned so every late click remains inert.
+All legacy approval delivery debt is dropped because its Matrix outcome cannot be reconciled safely without retaining the removed delivery protocol.
 
 ## Sidecar previews are never stored as bodies
 

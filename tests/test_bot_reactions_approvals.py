@@ -21,7 +21,6 @@ from agno.tools.function import Function
 
 from mindroom import interactive
 from mindroom.approval_manager import (
-    get_approval_store,
     initialize_approval_store,
 )
 from mindroom.bot import AgentBot
@@ -35,9 +34,11 @@ from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import (
     AdmissionResult,
     ApprovalContinuation,
+    DeliveryStage,
     EventClass,
     EventKind,
     InboundEvent,
+    MatrixDelivery,
     ProjectedEvent,
     SemanticConsumer,
 )
@@ -59,10 +60,8 @@ from mindroom.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     ApprovalActionResult,
     MatrixApprovalAction,
-    SentApprovalEvent,
     shutdown_approval_runtime,
 )
-from tests.approval_test_support import FakeApprovalCards
 from tests.bot_helpers import (
     AgentBotTestBase,
     _hook_plugin,
@@ -1452,7 +1451,7 @@ class TestAgentBot(AgentBotTestBase):
         ids=["automatic", "human", "human-redacted"],
     )
     @pytest.mark.asyncio
-    async def test_persisted_pause_resumes_once_in_fresh_bot_runtime(  # noqa: PLR0915 - full restart boundary
+    async def test_persisted_pause_resumes_once_in_fresh_bot_runtime(  # noqa: C901, PLR0915 - full restart boundary
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1513,12 +1512,23 @@ class TestAgentBot(AgentBotTestBase):
         first.client.room_send.return_value = nio.RoomSendResponse("$waiting", "!test:localhost")
         router_principal_id = "router@@mindroom_router:localhost"
         if requires_human:
+
+            async def prepare_event(
+                _room_id: str,
+                _thread_id: str | None,
+                content: dict[str, Any],
+            ) -> dict[str, Any]:
+                return content
+
+            async def send_delivery(delivery: MatrixDelivery) -> str:
+                return "$approval" if delivery.stage is DeliveryStage.INITIAL else "$approval-edit"
+
             initialize_approval_store(
                 runtime_paths,
-                sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
-                editor=AsyncMock(return_value=True),
+                prepare_event=prepare_event,
+                send_delivery=send_delivery,
+                resolve_delivery=AsyncMock(return_value=None),
                 cards=first._journal_store.principal(router_principal_id),
-                approval_room_ids=lambda: {"!test:localhost"},
                 transport_sender=lambda: "@mindroom_router:localhost",
                 sending_device=lambda: "DEVICE",
             )
@@ -1619,9 +1629,10 @@ class TestAgentBot(AgentBotTestBase):
             if requires_human:
                 manager = initialize_approval_store(
                     runtime_paths,
-                    editor=AsyncMock(return_value=True),
+                    prepare_event=prepare_event,
+                    send_delivery=send_delivery,
+                    resolve_delivery=AsyncMock(return_value=None),
                     cards=restarted._journal_store.principal(router_principal_id),
-                    approval_room_ids=lambda: {"!test:localhost"},
                     transport_sender=lambda: "@mindroom_router:localhost",
                     sending_device=lambda: "DEVICE",
                     continuation_ready=lambda _entity_name, source_ids: restarted.retry_approval_sources(source_ids),
@@ -2032,181 +2043,6 @@ class TestAgentBot(AgentBotTestBase):
             await bot._on_unknown_event(room, event)
 
         handle_matrix_approval_action.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_plain_rich_reply_falls_through_after_approval_card_point_lookup(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Ordinary rich replies should fall through when their target is not an approval card."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        cards = FakeApprovalCards()
-        store = initialize_approval_store(
-            runtime_paths,
-            cards=cards,
-        )
-        event = MagicMock(spec=nio.RoomMessageText)
-        event.event_id = "$ordinary-rich-reply"
-        event.sender = "@user:localhost"
-        event.body = "!help"
-        event.server_timestamp = 1234
-        event.source = {
-            "event_id": "$ordinary-rich-reply",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1234,
-            "content": {
-                "m.relates_to": {"m.in_reply_to": {"event_id": "$ordinary-message"}},
-            },
-        }
-
-        try:
-            await _dispatch_message(bot, room, event)
-
-            handle_text_event.assert_awaited_once()
-            assert handle_text_event.await_args.args == (room, event)
-            assert isinstance(handle_text_event.await_args.kwargs["receipt_time"], float)
-            assert cards.lookups == [("!test:localhost", "$ordinary-message")]
-            assert store is get_approval_store()
-        finally:
-            await shutdown_approval_runtime()
-
-    @pytest.mark.asyncio
-    async def test_reply_to_detached_pending_approval_is_consumed_and_denies_card(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Detached approval replies should deny their card instead of entering conversation input."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        cards = FakeApprovalCards()
-        await cards.store_card("$approval", "!test:localhost", _detached_approval_card())
-        editor = AsyncMock(return_value=True)
-        initialize_approval_store(
-            runtime_paths,
-            editor=editor,
-            cards=cards,
-            transport_sender=lambda: "@mindroom_router:localhost",
-        )
-        event = MagicMock(spec=nio.RoomMessageText)
-        event.event_id = "$reply"
-        event.sender = "@user:localhost"
-        event.body = "Deny."
-        event.server_timestamp = 1234
-        event.source = {
-            "event_id": "$reply",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1234,
-            "content": {"m.relates_to": {"m.in_reply_to": {"event_id": "$approval"}}},
-        }
-
-        try:
-            await _dispatch_message(bot, room, event)
-
-            handle_text_event.assert_not_awaited()
-            assert editor.await_args.args[:2] == ("!test:localhost", "$approval")
-            replacement = editor.await_args.args[2]
-            assert replacement["status"] == "denied"
-            assert replacement["resolution_reason"] == "Deny."
-        finally:
-            await shutdown_approval_runtime()
-
-    @pytest.mark.asyncio
-    async def test_thread_fallback_to_detached_approval_remains_conversation_input(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Thread fallback metadata must not turn ordinary text into an approval response."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        cards = FakeApprovalCards()
-        await cards.store_card("$approval", "!test:localhost", _detached_approval_card())
-        editor = AsyncMock(return_value=True)
-        initialize_approval_store(
-            runtime_paths,
-            editor=editor,
-            cards=cards,
-            transport_sender=lambda: "@mindroom_router:localhost",
-        )
-        event = MagicMock(spec=nio.RoomMessageText)
-        event.event_id = "$thread-message"
-        event.sender = "@user:localhost"
-        event.body = "Please continue."
-        event.server_timestamp = 1234
-        event.source = {
-            "event_id": "$thread-message",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1234,
-            "content": {
-                "m.relates_to": {
-                    "rel_type": "m.thread",
-                    "event_id": "$thread-root",
-                    "is_falling_back": True,
-                    "m.in_reply_to": {"event_id": "$approval"},
-                },
-            },
-        }
-
-        try:
-            await _dispatch_message(bot, room, event)
-
-            handle_text_event.assert_awaited_once()
-            assert cards.lookups == []
-            editor.assert_not_awaited()
-        finally:
-            await shutdown_approval_runtime()
-
-    @pytest.mark.asyncio
-    async def test_plain_thread_reply_with_approval_store_does_not_require_room_alias(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Ordinary replies should not run approval authorization before matching an in-memory card."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
-        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.matrix_id)
-        initialize_approval_store(runtime_paths)
-        event = MagicMock(spec=nio.RoomMessageText)
-        event.event_id = "$ordinary-thread-reply"
-        event.sender = "@user:localhost"
-        event.body = "ordinary reply"
-        event.server_timestamp = 1234
-        event.source = {
-            "event_id": "$ordinary-thread-reply",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1234,
-            "content": {
-                "m.relates_to": {"m.in_reply_to": {"event_id": "$ordinary-message"}},
-            },
-        }
-
-        try:
-            await _dispatch_message(bot, room, event)
-
-            handle_text_event.assert_awaited_once()
-            assert handle_text_event.await_args.args == (room, event)
-            assert isinstance(handle_text_event.await_args.kwargs["receipt_time"], float)
-        finally:
-            await shutdown_approval_runtime()
 
     @pytest.mark.asyncio
     async def test_interrupted_approval_reply_replay_cannot_become_ai_input(

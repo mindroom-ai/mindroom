@@ -27,6 +27,11 @@ _CONTINUATION_COLUMNS = """
 """
 
 
+def unavailable_notice_delivery_id(approval_id: str) -> str:
+    """Return the durable delivery identity for an unavailable-owner notice."""
+    return f"approval-unavailable:{approval_id}"
+
+
 class ApprovalDecision(StrEnum):
     """One terminal decision for an exact paused tool call."""
 
@@ -470,11 +475,6 @@ def all_owners(
     return _load_owners(transaction, rows)
 
 
-def unavailable_notice_turn_id(approval_id: str) -> str:
-    """Return the outbox turn that durably terminalizes an unavailable owner."""
-    return f"approval-unavailable:{approval_id}"
-
-
 def claim(
     transaction: Transaction,
     principal_id: str,
@@ -594,9 +594,9 @@ def request_failure(
         WHERE principal_id = ? AND approval_id = ? AND state = ? AND generation = ?
           AND runtime_generation IS NOT DISTINCT FROM ?
           AND NOT EXISTS (
-            SELECT 1 FROM response_outbox AS final
+            SELECT 1 FROM matrix_delivery_outbox AS final
             WHERE final.principal_id = approval_continuations.principal_id
-              AND final.turn_id = (
+              AND final.delivery_id = (
                 SELECT source.event_id FROM approval_continuation_sources AS source
                 WHERE source.principal_id = approval_continuations.principal_id
                   AND source.approval_id = approval_continuations.approval_id
@@ -625,13 +625,13 @@ def finish(
     approval_id: str,
 ) -> bool:
     """Release sources only after the continuation's FINAL delivery is acknowledged."""
-    continuation = get(transaction, principal_id, approval_id=approval_id)
+    continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return False
     delivered = transaction.fetchone(
         """
-        SELECT 1 AS present FROM response_outbox
-        WHERE principal_id = ? AND turn_id = ? AND stage = ?
+        SELECT 1 AS present FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
           AND acknowledged_event_id IS NOT NULL
         """,
         (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
@@ -654,16 +654,16 @@ def discard_unavailable(
     notice_principal_id: str,
 ) -> bool:
     """Release a permanently unavailable owner's sources after visible card cleanup."""
-    continuation = get(transaction, principal_id, approval_id=approval_id)
+    continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None or continuation.state != "failing":
         return False
     delivered = transaction.fetchone(
         """
-        SELECT 1 AS present FROM response_outbox
-        WHERE principal_id = ? AND turn_id = ? AND stage = ?
+        SELECT 1 AS present FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
           AND acknowledged_event_id IS NOT NULL
         """,
-        (notice_principal_id, unavailable_notice_turn_id(approval_id), DeliveryStage.FINAL.value),
+        (notice_principal_id, unavailable_notice_delivery_id(approval_id), DeliveryStage.FINAL.value),
     )
     if delivered is None:
         return False
@@ -673,3 +673,20 @@ def discard_unavailable(
         (principal_id, approval_id),
     )
     return True
+
+
+def _get_locked(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+) -> ApprovalContinuation | None:
+    """Lock one aggregate before terminal paths settle its journal sources."""
+    transaction.execute(
+        """
+        UPDATE approval_continuations SET state = state
+        WHERE principal_id = ? AND approval_id = ?
+        """,
+        (principal_id, approval_id),
+    )
+    return get(transaction, principal_id, approval_id=approval_id)

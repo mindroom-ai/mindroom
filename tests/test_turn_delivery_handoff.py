@@ -38,9 +38,9 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
+from mindroom.matrix_delivery import MatrixDeliveryWorker, TurnHandoff
 from mindroom.message_target import MessageTarget
 from mindroom.pending_event_worker import PendingEventWorker
-from mindroom.response_delivery import ResponseDelivery, TurnHandoff
 from mindroom.turn_record import canonicalize_turn_record
 from tests.conftest import CrashError, DiesAfterNextWriteCommit, ignore_delivered_projection
 from tests.test_live_message_coalescing import _make_bot
@@ -49,8 +49,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.event_journal import JournalEvent, OutboxDelivery, PrincipalStore
-    from mindroom.event_journal.views import OutboxView
+    from mindroom.event_journal import JournalEvent, MatrixDelivery, PrincipalStore
+    from mindroom.event_journal.views import MatrixDeliveryView
     from mindroom.journal_dispatch import _MessageCallback, _RedactionCallback
 
 pytestmark = pytest.mark.asyncio
@@ -134,7 +134,7 @@ async def deliver_answer(
     body: str = "the answer",
     stage: DeliveryStage = DeliveryStage.FINAL,
     sends: list[str] | None = None,
-    outbox: OutboxView | None = None,
+    outbox: MatrixDeliveryView | None = None,
 ) -> str | None:
     """Run one delivery through the production outbox path and its handoff.
 
@@ -142,19 +142,19 @@ async def deliver_answer(
     one the gateway wires rather than one this test invented.
     """
 
-    async def send(claimed: OutboxDelivery) -> str:
+    async def send(claimed: MatrixDelivery) -> str:
         if sends is not None:
             sends.append(claimed.transaction_id)
         return f"$sent-{claimed.transaction_id}"
 
-    delivery = ResponseDelivery(
+    delivery = MatrixDeliveryWorker(
         store=outbox if outbox is not None else bot._delivery_gateway.deps.outbox,
         send=send,
         observe_delivered=ignore_delivered_projection,
         handoff=bot._delivery_gateway.deps.turn_handoff,
     )
     return await delivery.deliver(
-        turn_id=turn_id,
+        delivery_id=turn_id,
         stage=stage,
         room_id=ROOM,
         thread_id=None,
@@ -254,18 +254,18 @@ class TestTheHandoffIsTheDurableEnqueue:
         await adopt(bot, ["$cause"])
         pending_at_send: list[list[str]] = []
 
-        async def send(claimed: OutboxDelivery) -> str:
+        async def send(claimed: MatrixDelivery) -> str:
             pending_at_send.append(await pending_ids(bot))
             return f"$sent-{claimed.transaction_id}"
 
-        delivery = ResponseDelivery(
+        delivery = MatrixDeliveryWorker(
             store=bot._delivery_gateway.deps.outbox,
             send=send,
             observe_delivered=ignore_delivered_projection,
             handoff=bot._delivery_gateway.deps.turn_handoff,
         )
         await delivery.deliver(
-            turn_id="$cause",
+            delivery_id="$cause",
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
@@ -379,11 +379,11 @@ class TestWhatARestartOwesAfterTheHandoff:
         await adopt(bot, ["$cause"])
         outbox = bot._delivery_gateway.deps.outbox
 
-        async def crash(_claimed: OutboxDelivery) -> str:
+        async def crash(_claimed: MatrixDelivery) -> str:
             msg = "crashed after the claim committed"
             raise RuntimeError(msg)
 
-        delivery = ResponseDelivery(
+        delivery = MatrixDeliveryWorker(
             store=outbox,
             send=crash,
             observe_delivered=ignore_delivered_projection,
@@ -391,7 +391,7 @@ class TestWhatARestartOwesAfterTheHandoff:
         )
         with pytest.raises(RuntimeError, match="crashed after the claim committed"):
             await delivery.deliver(
-                turn_id="$cause",
+                delivery_id="$cause",
                 stage=DeliveryStage.FINAL,
                 room_id=ROOM,
                 thread_id=None,
@@ -401,12 +401,12 @@ class TestWhatARestartOwesAfterTheHandoff:
         assert await self._replayed_sources(bot) == []
         sends: list[str] = []
 
-        async def send(claimed: OutboxDelivery) -> str:
+        async def send(claimed: MatrixDelivery) -> str:
             sends.append(str(claimed.payload["body"]))
             return "$sent"
 
         assert (
-            await ResponseDelivery(
+            await MatrixDeliveryWorker(
                 store=outbox,
                 send=send,
                 observe_delivered=ignore_delivered_projection,
@@ -436,7 +436,10 @@ class TestWhatARestartOwesAfterTheHandoff:
 
         assert first == second
         assert len(set(transactions)) == 1
-        row = await bot._delivery_gateway.deps.outbox.load_delivery(turn_id="$cause", stage=DeliveryStage.FINAL)
+        row = await bot._delivery_gateway.deps.outbox.load_matrix_delivery(
+            delivery_id="$cause",
+            stage=DeliveryStage.FINAL,
+        )
         assert row is not None
         assert row.payload["body"] == "first answer"
 
@@ -580,11 +583,11 @@ class TestTheHandoffIsOneCommit:
             await run_turn(cast("Any", None))
 
         # The restart: nothing in memory survives, and both recoveries run.
-        async def send(claimed: OutboxDelivery) -> str:
+        async def send(claimed: MatrixDelivery) -> str:
             sends.append(claimed.transaction_id)
             return f"$sent-{claimed.transaction_id}"
 
-        await ResponseDelivery(
+        await MatrixDeliveryWorker(
             store=bot._delivery_gateway.deps.outbox,
             send=send,
             observe_delivered=ignore_delivered_projection,
@@ -610,10 +613,10 @@ class TestTheHandoffIsOneCommit:
         handoff = bot._delivery_gateway.deps.turn_handoff
         commits_when_released: list[int] = []
 
-        async def send(claimed: OutboxDelivery) -> str:
+        async def send(claimed: MatrixDelivery) -> str:
             return f"$sent-{claimed.transaction_id}"
 
-        await ResponseDelivery(
+        await MatrixDeliveryWorker(
             store=EventJournalStore(backend=cast("Any", backend)).principal(bot._journal_principal_id),
             send=send,
             observe_delivered=ignore_delivered_projection,
@@ -622,7 +625,7 @@ class TestTheHandoffIsOneCommit:
                 released=lambda event_ids: commits_when_released.append(backend.commits) or handoff.released(event_ids),
             ),
         ).deliver(
-            turn_id="$cause",
+            delivery_id="$cause",
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
@@ -695,8 +698,8 @@ class TestRedactedPendingTurnSources:
         assert await pending_ids(bot) == []
         assert dispatcher._live_events == {}
         assert (
-            await bot._delivery_gateway.deps.outbox.load_delivery(
-                turn_id="$source",
+            await bot._delivery_gateway.deps.outbox.load_matrix_delivery(
+                delivery_id="$source",
                 stage=DeliveryStage.FINAL,
             )
             is None
@@ -789,9 +792,9 @@ class _RefusesTheFirstAttempts:
         return DeliveredMatrixEvent(event_id, content)
 
 
-async def final_row(bot: AgentBot, turn_id: str) -> OutboxDelivery | None:
+async def final_row(bot: AgentBot, turn_id: str) -> MatrixDelivery | None:
     """Return the FINAL outbox row for one turn, without claiming it."""
-    return await bot._delivery_gateway.deps.outbox.load_delivery(turn_id=turn_id, stage=DeliveryStage.FINAL)
+    return await bot._delivery_gateway.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.FINAL)
 
 
 class TestAFailedFinalEditLeavesOneOwner:
