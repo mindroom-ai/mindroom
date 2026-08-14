@@ -607,14 +607,21 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ):
             reaction = asyncio.create_task(_dispatch_reaction(bot, room, event))
-            await asyncio.wait_for(resolution_started.wait(), timeout=1)
-            assert gate.close_if_idle()
-            bot.config = replacement
-            release_resolution.set()
-            await asyncio.sleep(0)
-            handler.assert_not_awaited()
-            gate.reopen()
-            await reaction
+            try:
+                await asyncio.wait_for(resolution_started.wait(), timeout=1)
+                assert gate.close_if_idle()
+                bot.config = replacement
+                release_resolution.set()
+                await asyncio.sleep(0)
+                handler.assert_not_awaited()
+                gate.reopen()
+                await reaction
+            finally:
+                release_resolution.set()
+                gate.reopen()
+                if not reaction.done():
+                    reaction.cancel()
+                await asyncio.gather(reaction, return_exceptions=True)
 
         handler.assert_not_awaited()
 

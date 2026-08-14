@@ -308,14 +308,16 @@ async def test_authoritative_control_departure_fences_inflight_initial_snapshot(
     refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
     await query_started.wait()
 
-    assert index.mark_control_room_unready(
-        config,
-        runtime_paths,
-        room_id,
-        reason="control_client_departed",
-    )
-    release_query.set()
-    await refresh_task
+    try:
+        assert index.mark_control_room_unready(
+            config,
+            runtime_paths,
+            room_id,
+            reason="control_client_departed",
+        )
+    finally:
+        release_query.set()
+        await refresh_task
 
     assert index.needs_refresh(config.authorization)
     assert not index.is_allowed("@alice:example.com", ["project"], config.authorization)

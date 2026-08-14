@@ -705,6 +705,7 @@ async def test_trigger_waiting_for_reload_rebinds_and_rechecks_current_authoriza
     execute = AsyncMock(return_value="$matrix-event")
     monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute)
     body = _body()
+    request_task = None
 
     try:
         async with AsyncClient(
@@ -735,6 +736,10 @@ async def test_trigger_waiting_for_reload_rebinds_and_rechecks_current_authoriza
         assert not (runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
     finally:
         gate.reopen()
+        if request_task is not None:
+            if not request_task.done():
+                request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
         api_main.unbind_external_trigger_runtime(api_main.app)
 
 
