@@ -71,6 +71,8 @@ class OwnRoomMembership:
     identifies a visible transition; the response token identifies a leave
     section whose truncated timeline omitted it. ``rejoined_after`` records
     where the same response proves a later membership already began.
+    ``invited_room_ids`` also contains other non-joined or unresolved initial
+    Sliding Sync states because all of them require the same continuity fence.
     """
 
     joined_room_ids: frozenset[str]
@@ -139,8 +141,8 @@ def own_membership_from_sliding_sync(
     invited_room_ids: set[str] = set()
     departures: list[ReportedDeparture] = []
     for room_id, room in response.rooms.items():
-        is_invite = room.membership == "invite" or (room.membership is None and bool(room.stripped_state))
-        final_membership_is_joined = room.membership not in _DEPARTED_MEMBERSHIPS and not is_invite
+        membership_unchanged = room.membership is None and not room.initial and not room.stripped_state
+        final_membership_is_joined = room.membership == "join" or membership_unchanged
         observed = _own_departures_in(
             room_id,
             room.timeline,
@@ -158,10 +160,10 @@ def own_membership_from_sliding_sync(
                 )
             departures.extend(observed)
             continue
-        if is_invite:
-            invited_room_ids.add(room_id)
-        else:
+        if final_membership_is_joined:
             joined_room_ids.add(room_id)
+        else:
+            invited_room_ids.add(room_id)
         departures.extend(observed)
     return OwnRoomMembership(
         joined_room_ids=frozenset(joined_room_ids),

@@ -1764,6 +1764,8 @@ def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> Non
             "!window:localhost": nio.SlidingSyncRoom(),
             "!invited:localhost": nio.SlidingSyncRoom(membership="invite"),
             "!stripped:localhost": nio.SlidingSyncRoom(stripped_state=[MagicMock()]),
+            "!knocking:localhost": nio.SlidingSyncRoom(membership="knock"),
+            "!peek:localhost": nio.SlidingSyncRoom(initial=True),
             "!kicked:localhost": nio.SlidingSyncRoom(membership="leave"),
             "!banned:localhost": nio.SlidingSyncRoom(membership="ban"),
         },
@@ -1772,6 +1774,20 @@ def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> Non
     membership = own_membership_from_sliding_sync(response, self_user_id="@mindroom_code:localhost")
 
     assert membership.joined_room_ids == {"!joined:localhost", "!window:localhost"}
+    assert membership.invited_room_ids == {
+        "!invited:localhost",
+        "!stripped:localhost",
+        "!knocking:localhost",
+        "!peek:localhost",
+    }
+    assert membership.continuity_lost_room_ids == {
+        "!invited:localhost",
+        "!stripped:localhost",
+        "!knocking:localhost",
+        "!peek:localhost",
+        "!kicked:localhost",
+        "!banned:localhost",
+    }
     assert membership.departed_room_ids == {"!kicked:localhost", "!banned:localhost"}
     assert membership.departures == (
         ReportedDeparture(
