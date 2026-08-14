@@ -29,8 +29,8 @@ from mindroom.tool_approval import (
     SentApprovalEvent,
     ToolApprovalTransportError,
     expire_continuation_approval_cards,
-    expire_orphaned_approval_cards_on_startup,
     initialize_approval_runtime,
+    recover_approval_cards_on_startup,
 )
 
 if TYPE_CHECKING:
@@ -560,7 +560,7 @@ class ApprovalMatrixTransport:
         await self._run_startup_cleanup_if_ready()
 
     async def _run_startup_cleanup_if_ready(self) -> None:
-        """Retry legacy-card and unavailable-owner cleanup until both finish."""
+        """Retry approval-card recovery and unavailable-owner cleanup until both finish."""
         if (
             self._startup_cleanup_done
             or not self._startup_router_ready_for_cleanup
@@ -571,7 +571,7 @@ class ApprovalMatrixTransport:
             if self._startup_cleanup_done:
                 return
             self._startup_cleanup_attempts += 1
-            cards_settled = await self._discard_orphaned_approval_cards_on_startup()
+            cards_recovered = await self._recover_approval_cards_on_startup()
             try:
                 owners_settled = await self._reconcile_startup_unavailable()
             except Exception:
@@ -581,26 +581,26 @@ class ApprovalMatrixTransport:
                     exc_info=True,
                 )
                 owners_settled = False
-            if not cards_settled or not owners_settled:
+            if not cards_recovered or not owners_settled:
                 self._schedule_startup_cleanup_retry()
                 return
             self._startup_cleanup_done = True
             self._retire_startup_cleanup_retry()
 
-    async def _discard_orphaned_approval_cards_on_startup(self) -> bool:
-        """Run the retained one-cycle legacy-card settlement."""
+    async def _recover_approval_cards_on_startup(self) -> bool:
+        """Recover current approval-card transport obligations."""
         try:
-            sweep = await expire_orphaned_approval_cards_on_startup()
+            sweep = await recover_approval_cards_on_startup()
         except Exception as exc:
             logger.warning(
-                "tool_approval_startup_discard_failed",
+                "tool_approval_startup_recovery_failed",
                 error=str(exc),
                 attempt=self._startup_cleanup_attempts,
                 exc_info=True,
             )
             return False
         logger.info(
-            "approval_startup_sweep_finished",
+            "approval_startup_recovery_finished",
             attempt=self._startup_cleanup_attempts,
             scanned=sweep.scanned,
             discarded=sweep.discarded,
@@ -617,7 +617,7 @@ class ApprovalMatrixTransport:
                 else logger.warning
             )
             incomplete(
-                "tool_approval_startup_discard_incomplete",
+                "tool_approval_startup_recovery_incomplete",
                 owed_count=sweep.failed,
                 attempt=self._startup_cleanup_attempts,
             )

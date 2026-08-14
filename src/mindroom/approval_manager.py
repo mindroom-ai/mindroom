@@ -43,7 +43,7 @@ SendingDeviceProvider = Callable[[], str | None]
 ApprovalCardLocator = Callable[[str, str, str], Awaitable[str | None]]
 ContinuationReadyHandler = Callable[[str, tuple[str, ...]], Awaitable[None] | None]
 
-_STARTUP_DISCARD_SCAN_PAGE = 256
+_STARTUP_RECOVERY_SCAN_PAGE = 256
 # How long shutdown waits on work it does not own. Every such wait is on a
 # Matrix round trip, which is the thing most likely to never come back while
 # the runtime is tearing down around it.
@@ -324,8 +324,8 @@ class _ActiveApprovalSend:
 class _ApprovalManager:
     """Publish and settle durable Matrix cards for paused Agno continuations.
 
-    Current-format cards reconnect to persisted continuations after restart.
-    Legacy and orphan cards are terminally settled and never authorize execution.
+    Cards reconnect to their exact persisted continuation after restart, and
+    malformed rows remain fail-closed without authorizing execution.
     """
 
     def __init__(
@@ -705,20 +705,13 @@ class _ApprovalManager:
                         card_event_id=stored.card_event_id,
                     )
 
-    async def discard_pending_on_startup(self) -> ApprovalStartupSweep:
-        """Settle every router-authored card this bot restarted holding.
+    async def recover_cards_on_startup(self) -> ApprovalStartupSweep:
+        """Recover every durable native approval card after a restart.
 
-        A card whose decision was already recorded is redelivered rather than
-        expired: the previous process committed to it, its tool may already
-        have run, and the room may already show it. Only a card nobody ever
-        answered is expired, because its requester is gone with the process
-        that asked.
-
-        Every card is walked, not one page of them, and what could not be
-        settled is counted rather than swallowed. Both matter for the same
-        reason: a card left behind here is one the user can still click, whose
-        answer no live waiter and no later pass would otherwise come back for.
-        The count is what the caller schedules that later pass on.
+        Recorded decisions are redelivered, unanswered cards remain owned by
+        the shared deadline sweep, and interrupted publications are adopted or
+        retried. Every card is walked so one failed recovery cannot hide later
+        work; the returned tally tells the caller whether another pass is owed.
         """
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
@@ -1270,7 +1263,7 @@ class _ApprovalManager:
             return ()
         return await self._cards.pending_approval_cards(
             room_id=room_id,
-            limit=_STARTUP_DISCARD_SCAN_PAGE,
+            limit=_STARTUP_RECOVERY_SCAN_PAGE,
             after=after,
         )
 
@@ -1319,8 +1312,8 @@ class _ApprovalManager:
         finds. A lost answer is unacceptable, so the outbox reconciles and then
         sends anyway. A card is a prompt for a human decision: two of them ask
         a question that has one answer, and answering the copy resolves
-        nothing. So a card found in the room is adopted and expired where it
-        stands, and never resent.
+        nothing. So a card found in the room is adopted, returned to the shared
+        deadline owner, and never resent.
 
         Only after that does a row become safe to forget. Forgetting one whose
         card is still in the room retires the only thing that could expire it
@@ -1446,11 +1439,11 @@ class _ApprovalManager:
         room carries it.
 
         Three outcomes, and they are three because a missing card and an
-        unanswered question are not the same thing. Found is adopted, so the
-        caller expires it where it stands. Established as absent retires the
-        row. Anything else -- no way to ask, or an ask that failed -- keeps the
-        row and reports it owed, because dropping it on a guess is precisely
-        how a clickable card ends up with nothing behind it.
+        unanswered question are not the same thing. Found is adopted so the
+        caller can re-arm its deadline. Established as absent retires the row.
+        Anything else -- no way to ask, or an ask that failed -- keeps the row
+        and reports it owed, because dropping it on a guess is precisely how a
+        clickable card ends up with nothing behind it.
         """
         approval_id = self._stored_card_approval_id(stored)
         card_sender = stored.card.get("sender")
