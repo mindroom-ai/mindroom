@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 
 from .identity import encode_thread_id
+from .interactive_questions import reconcile_visible_prompt
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -202,33 +203,13 @@ def project(
         )
         question_event_id = replaces
     if installed_content is not None:
-        _reconcile_visible_prompt(
+        reconcile_visible_prompt(
             transaction,
             principal_id,
             room_id=event.room_id,
             question_event_id=question_event_id,
             content=installed_content,
         )
-
-
-def _reconcile_visible_prompt(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    room_id: str,
-    question_event_id: str,
-    content: Mapping[str, object],
-) -> None:
-    """Keep prompt projection inseparable from visible-message projection."""
-    from .interactive_questions import reconcile_visible_prompt  # noqa: PLC0415 - reads imports projection
-
-    reconcile_visible_prompt(
-        transaction,
-        principal_id,
-        room_id=room_id,
-        question_event_id=question_event_id,
-        content=content,
-    )
 
 
 def _project_original(
@@ -594,7 +575,7 @@ def install_refetched_revision(
     )
     if row is None:
         return False
-    _reconcile_visible_prompt(
+    reconcile_visible_prompt(
         transaction,
         principal_id,
         room_id=room_id,

@@ -687,6 +687,7 @@ class AgentBot:
             logger=self.logger,
             runtime_paths=self.runtime_paths,
             conversation_reader=self._conversation_reader,
+            membership=self._journal_store.principal(self._journal_principal_id),
         )
         self._ingress_hook_runner = IngressHookRunner(
             hook_context=self._hook_context_support,

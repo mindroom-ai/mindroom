@@ -121,6 +121,7 @@ def _make_context(
     if membership is None:
         membership = MagicMock()
         membership.membership_epoch = AsyncMock(return_value=0)
+        membership.interactive_prompt_membership_is_current = AsyncMock(return_value=True)
     return ToolRuntimeContext(
         agent_name="general",
         target=MessageTarget(
@@ -643,6 +644,9 @@ async def test_matrix_message_embeds_membership_proof_before_transport(
 
     membership = MagicMock()
     membership.membership_epoch = AsyncMock(side_effect=membership_epoch)
+    membership.interactive_prompt_membership_is_current = AsyncMock(
+        side_effect=lambda **_kwargs: operation_order.append("revalidate") or True,
+    )
     ctx = _make_context(
         thread_id="$ctx-thread:localhost",
         membership=membership,
@@ -684,7 +688,66 @@ async def test_matrix_message_embeds_membership_proof_before_transport(
     assert payload["status"] == "ok"
     add_reactions.assert_awaited_once()
     membership.membership_epoch.assert_awaited_once_with(ctx.room_id)
-    assert operation_order == ["epoch", "transport"]
+    assert operation_order == ["epoch", "transport", "revalidate"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["send", "edit"])
+@pytest.mark.parametrize("source_turn", [True, False])
+async def test_matrix_message_skips_buttons_when_prompt_membership_ends_during_transport(
+    action: str,
+    source_turn: bool,
+) -> None:
+    """A prompt rejected by the membership fence must not expose dead buttons."""
+    tool = MatrixMessageTools()
+    membership = MagicMock()
+    membership.membership_epoch = AsyncMock(return_value=7)
+    membership.interactive_prompt_membership_is_current = AsyncMock(return_value=False)
+    ctx = _make_context(
+        thread_id="$ctx-thread:localhost",
+        membership=membership,
+        membership_turn_id="$source" if source_turn else None,
+    )
+    serve_conversation_reader(
+        ctx.conversation_reader,
+        [make_visible_message(event_id="$latest", timestamp=1, sender="@alice:localhost", body="latest")],
+    )
+    interactive_message = """Please choose.
+
+```interactive
+{"question":"Pick","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
+```"""
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
+        ),
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
+        ),
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
+            new_callable=AsyncMock,
+        ) as add_reactions,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action=action,
+                message=interactive_message,
+                target="$target" if action == "edit" else None,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    membership.interactive_prompt_membership_is_current.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        source_event_id="$source" if source_turn else None,
+        fallback_membership_epoch=7,
+    )
+    add_reactions.assert_not_awaited()
 
 
 @pytest.mark.asyncio

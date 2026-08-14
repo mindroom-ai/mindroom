@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from agno.db.base import SessionType
 
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal.store import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_reads import ConversationReader
@@ -66,6 +67,7 @@ class PostResponseEffectsSupport:
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     conversation_reader: ConversationReader
+    membership: PrincipalStore
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client for interactive follow-up effects."""
@@ -129,6 +131,7 @@ class PostResponseEffectsSupport:
         self,
         *,
         room_id: str,
+        membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], None] | None = None,
     ) -> PostResponseEffectsDeps:
@@ -138,6 +141,12 @@ class PostResponseEffectsSupport:
             event_id: str,
             interactive_metadata: interactive.InteractiveMetadata,
         ) -> None:
+            if not await self.membership.interactive_prompt_membership_is_current(
+                room_id=room_id,
+                source_event_id=membership_turn_id,
+                fallback_membership_epoch=None,
+            ):
+                return
             await interactive.add_reaction_buttons(
                 self._client(),
                 room_id,

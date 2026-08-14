@@ -196,6 +196,24 @@ class PrincipalStore:
             lambda transaction: journal.current_membership_epoch(transaction, self._principal_id, room_id),
         )
 
+    async def interactive_prompt_membership_is_current(
+        self,
+        *,
+        room_id: str,
+        source_event_id: str | None,
+        fallback_membership_epoch: int | None,
+    ) -> bool:
+        """Return whether one prompt proof still names the active room membership."""
+        return await self._backend.write(
+            lambda transaction: interactive_questions.prompt_membership_is_current(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                source_event_id=source_event_id,
+                fallback_membership_epoch=fallback_membership_epoch,
+            ),
+        )
+
     async def fence_departure(
         self,
         room_id: str,

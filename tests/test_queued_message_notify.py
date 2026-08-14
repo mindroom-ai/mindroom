@@ -90,6 +90,7 @@ from tests.conftest import (
     install_runtime_journal_support,
     make_conversation_reader_mock,
     make_matrix_client_mock,
+    make_membership_stub,
     make_pending_event,
     make_turn_context,
     message_origin,
@@ -829,6 +830,58 @@ async def test_post_response_effects_skip_buttons_for_preserved_stream_error() -
 
 
 @pytest.mark.asyncio
+async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(tmp_path: Path) -> None:
+    """A response prompt rejected during transport must not expose dead buttons."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    client = make_matrix_client_mock()
+    runtime = BotRuntimeState(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        enable_streaming=False,
+        orchestrator=None,
+    )
+    membership = make_membership_stub()
+    membership.interactive_prompt_membership_is_current.return_value = False
+    support = PostResponseEffectsSupport(
+        runtime=runtime,
+        logger=MagicMock(),
+        runtime_paths=runtime_paths,
+        conversation_reader=make_conversation_reader_mock(),
+        membership=membership,
+    )
+    interactive_metadata = InteractiveMetadata._from_parts(
+        {"1": "yes"},
+        ({"emoji": "1", "label": "Yes", "value": "yes"},),
+    )
+    assert interactive_metadata is not None
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="Choose",
+            delivery_kind="sent",
+            interactive_metadata=interactive_metadata,
+        ),
+        ResponseOutcome(),
+        support.build_deps(
+            room_id="!room:localhost",
+            membership_turn_id="$turn",
+        ),
+    )
+
+    membership.interactive_prompt_membership_is_current.assert_awaited_once_with(
+        room_id="!room:localhost",
+        source_event_id="$turn",
+        fallback_membership_epoch=None,
+    )
+    client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(tmp_path: Path) -> None:
     """A stale hint just below threshold should still reach the live summary check."""
     config = _config(tmp_path)
@@ -847,9 +900,11 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         logger=MagicMock(),
         runtime_paths=runtime_paths,
         conversation_reader=conversation_reader,
+        membership=make_membership_stub(),
     )
     deps = support.build_deps(
         room_id="!room:localhost",
+        membership_turn_id="$turn",
     )
     thread_history = [
         ResolvedVisibleMessage.synthetic(
@@ -949,9 +1004,11 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         logger=MagicMock(),
         runtime_paths=runtime_paths,
         conversation_reader=conversation_reader,
+        membership=make_membership_stub(),
     )
     deps = support.build_deps(
         room_id="!adhoc:localhost",
+        membership_turn_id="$turn",
     )
     thread_history = [
         ResolvedVisibleMessage.synthetic(

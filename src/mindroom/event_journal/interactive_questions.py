@@ -12,8 +12,8 @@ from mindroom.interactive_models import (
     interactive_prompt_from_content,
 )
 
-from . import reads
 from .identity import decode_thread_id
+from .membership_state import claim_membership_epoch
 from .models import EventClass, EventKind, SemanticConsumer
 from .schema import PENDING_STATE
 
@@ -87,21 +87,46 @@ def _prompt_membership_epoch(
     principal_id: str,
     *,
     room_id: str,
-    prompt: InteractivePrompt,
+    source_event_id: str | None,
+    fallback_membership_epoch: int | None,
 ) -> int | None:
     """Resolve the membership proof embedded in one prompt revision."""
-    if prompt.source_event_id is not None:
+    if source_event_id is not None:
         source = transaction.fetchone(
             """
             SELECT room_id, membership_epoch
             FROM journal_events
             WHERE principal_id = ? AND event_id = ?
             """,
-            (principal_id, prompt.source_event_id),
+            (principal_id, source_event_id),
         )
         if source is not None:
             return int(source["membership_epoch"]) if source["room_id"] == room_id else None
-    return prompt.membership_epoch
+    return fallback_membership_epoch
+
+
+def prompt_membership_is_current(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    source_event_id: str | None,
+    fallback_membership_epoch: int | None,
+) -> bool:
+    """Claim the active membership named by one projected prompt proof."""
+    membership_epoch = _prompt_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        source_event_id=source_event_id,
+        fallback_membership_epoch=fallback_membership_epoch,
+    )
+    return membership_epoch is not None and claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        expected_membership_epoch=membership_epoch,
+    )
 
 
 def _visible_prompt_row(
@@ -138,12 +163,13 @@ def _activate_projected_prompt(
         transaction,
         principal_id,
         room_id=room_id,
-        prompt=prompt,
+        source_event_id=prompt.source_event_id,
+        fallback_membership_epoch=prompt.membership_epoch,
     )
     if (
         membership_epoch is None
         or int(row["membership_epoch"]) != membership_epoch
-        or not reads.claim_membership_epoch(
+        or not claim_membership_epoch(
             transaction,
             principal_id,
             room_id=room_id,
@@ -489,7 +515,7 @@ def claim_reaction(
         return None
     room_id = str(candidate["room_id"])
     membership_epoch = int(candidate["membership_epoch"])
-    if not reads.claim_membership_epoch(
+    if not claim_membership_epoch(
         transaction,
         principal_id,
         room_id=room_id,
@@ -549,7 +575,7 @@ def claim_text(
     stored_thread_id = str(candidate_source["thread_id"])
     thread_id = decode_thread_id(stored_thread_id)
     membership_epoch = int(candidate_source["membership_epoch"])
-    if not reads.claim_membership_epoch(
+    if not claim_membership_epoch(
         transaction,
         principal_id,
         room_id=room_id,

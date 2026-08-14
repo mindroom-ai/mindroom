@@ -596,6 +596,7 @@ class ResponseRunner:
         """Build post-response effect deps bound to one request's room."""
         return self.deps.post_response_effects.build_deps(
             room_id=request.room_id,
+            membership_turn_id=request.response_envelope.source_event_id,
             queue_memory_persistence=queue_memory_persistence,
             persist_response_event_id=persist_response_event_id,
         )

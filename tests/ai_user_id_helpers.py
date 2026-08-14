@@ -436,6 +436,7 @@ def _build_response_runner(
     )
     _set_gateway_method(delivery_gateway, "edit_text", AsyncMock(return_value=True))
     _set_gateway_method(delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
+    membership = make_membership_stub()
     tool_runtime = ToolRuntimeSupport(
         runtime=runtime,
         logger=bot.logger,
@@ -445,7 +446,7 @@ def _build_response_runner(
         matrix_id=bot.matrix_id,
         resolver=bot._conversation_resolver,
         hook_context=hook_context,
-        membership=make_membership_stub(),
+        membership=membership,
     )
 
     post_response_effects = PostResponseEffectsSupport(
@@ -453,6 +454,7 @@ def _build_response_runner(
         logger=bot.logger,
         runtime_paths=runtime_paths,
         conversation_reader=make_conversation_reader_mock(),
+        membership=membership,
     )
     bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
 
@@ -523,10 +525,11 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
         self,
         *,
         room_id: str,
+        membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], None] | None = None,
     ) -> PostResponseEffectsDeps:
-        del room_id, queue_memory_persistence, persist_response_event_id
+        del room_id, membership_turn_id, queue_memory_persistence, persist_response_event_id
         return PostResponseEffectsDeps(logger=self.logger)
 
 
@@ -540,5 +543,6 @@ def _install_inert_post_response_effects(coordinator: ResponseRunner) -> None:
             logger=support.logger,
             runtime_paths=support.runtime_paths,
             conversation_reader=support.conversation_reader,
+            membership=support.membership,
         ),
     )

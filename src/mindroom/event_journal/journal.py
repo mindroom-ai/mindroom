@@ -245,7 +245,6 @@ def _advance_membership_epoch(
         "unresolved_edits",
         "redaction_tombstones",
         "room_history_recovery",
-        "interactive_questions",
     ):
         transaction.execute(
             f"DELETE FROM {table} WHERE principal_id = ? AND room_id = ?",  # noqa: S608 - a fixed table list

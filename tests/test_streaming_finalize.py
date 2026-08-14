@@ -42,6 +42,7 @@ from tests.conftest import (
     ignore_final_delivery_handoff,
     make_conversation_reader_mock,
     make_matrix_client_mock,
+    make_membership_stub,
     make_outbox_mock,
     message_origin,
     runtime_paths_for,
@@ -907,12 +908,14 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
         logger=get_logger("tests.post_response"),
         runtime_paths=runtime_paths_for(config),
         conversation_reader=make_conversation_reader_mock(),
+        membership=make_membership_stub(),
     )
     await apply_post_response_effects(
         final_outcome,
         ResponseOutcome(response_target=target),
         support.build_deps(
             room_id=target.room_id,
+            membership_turn_id="$turn",
         ),
     )
 

@@ -1699,6 +1699,7 @@ def make_membership_stub() -> PrincipalStore:
         "PrincipalStore",
         SimpleNamespace(
             membership_epoch=AsyncMock(return_value=0),
+            interactive_prompt_membership_is_current=AsyncMock(return_value=True),
         ),
     )
 

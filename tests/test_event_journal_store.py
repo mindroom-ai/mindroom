@@ -1839,6 +1839,41 @@ class TestProjectedInteractivePrompts:
 
         assert await _interactive_question_rows(journal_store) == []
 
+    async def test_button_membership_check_rejects_a_fenced_prompt(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Post-transport button delivery must obey the same fence as projection."""
+        epoch = await alice.membership_epoch(ROOM)
+        assert await alice.interactive_prompt_membership_is_current(
+            room_id=ROOM,
+            source_event_id=None,
+            fallback_membership_epoch=epoch,
+        )
+
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+
+        assert not await alice.interactive_prompt_membership_is_current(
+            room_id=ROOM,
+            source_event_id=None,
+            fallback_membership_epoch=epoch,
+        )
+
+    async def test_button_membership_check_prefers_an_admitted_source_proof(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A stale admitted source cannot borrow a newer fallback membership."""
+        await admit(alice, "$old-turn", sender=BOB)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+
+        assert not await alice.interactive_prompt_membership_is_current(
+            room_id=ROOM,
+            source_event_id="$old-turn",
+            fallback_membership_epoch=await alice.membership_epoch(ROOM),
+        )
+
     @pytest.mark.parametrize("installer", ["hydration", "recovery"])
     async def test_history_install_activates_the_projected_prompt(
         self,
