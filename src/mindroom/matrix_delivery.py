@@ -267,8 +267,9 @@ class MatrixDeliveryWorker:
         scan nothing, and the rows that do reach here are the rare ones --
         attempted, unacknowledged, and older than the column or sent by a
         process mid-login. Reconciling them costs one scan and cannot lose an
-        answer, because a lookup that finds nothing still sends and a lookup
-        that cannot run at all sends too.
+        ordinary answer because ordinary workers resend after a miss. Workers
+        for actionable events instead retain the debt when a miss cannot prove
+        the earlier event absent.
 
         An edit is exempt. A second ``m.replace`` carrying identical content
         resolves to the same visible message as the first, so the duplicate a
@@ -446,8 +447,9 @@ class MatrixDeliveryWorker:
 
         Failing to find one is not the same as there not being one, and the
         difference decides between a duplicate and a lost answer. Both are bad;
-        a duplicate is the one the user can act on, so a lookup that cannot run
-        at all sends anyway.
+        ordinary-output workers resend after a miss, while actionable-event
+        workers retain the debt rather than risk a duplicate. An unavailable
+        resolver follows that same configured policy.
 
         A lookup that runs and *raises* is different: it propagates, the row
         stays unacknowledged, and -- because the device marker has not moved --

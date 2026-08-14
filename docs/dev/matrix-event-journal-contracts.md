@@ -191,7 +191,7 @@ Failure stays a visible readiness or request failure rather than reviving room-w
 
 ## Deterministic delivery
 
-Initial and final delivery stages use deterministic transaction IDs derived from principal, turn, and stage.
+Initial and final delivery stages use deterministic transaction IDs derived from principal, delivery ID, and stage.
 
 The completed model result is durable in `TurnStore` before final outbox enqueue, so recovery does not rerun a completed model call merely to rebuild delivery content.
 
