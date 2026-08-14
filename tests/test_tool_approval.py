@@ -467,9 +467,46 @@ async def test_startup_recovery_skips_a_malformed_expiry_without_starving_later_
 
         assert sweep.scanned == 2
         assert sweep.discarded == 1
-        assert sweep.failed == 0
+        assert sweep.failed == 1
         expire.assert_awaited_once()
         assert expire.await_args.args[1].delivery_id == "recoverable-card"
+    finally:
+        await manager.shutdown(reason="test complete")
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_logs_a_deferred_terminal_flush(tmp_path: Path) -> None:
+    """A retryable terminal delivery failure retains its exact recovery context in logs."""
+    card_event_id = "$approval"
+    room_id = "!room:localhost"
+    stored = MagicMock(
+        delivery_id="approval-card-1",
+        card_event_id=card_event_id,
+        card={},
+        resolution={"status": "denied"},
+    )
+    manager = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        cards=MagicMock(),
+        send_delivery=AsyncMock(),
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    worker = MagicMock(flush=AsyncMock(side_effect=RuntimeError("homeserver unavailable")))
+
+    try:
+        with (
+            patch.object(manager, "_trusted_pending_from_card_event", return_value=MagicMock()),
+            patch.object(manager, "_worker", return_value=worker),
+            patch("mindroom.approval_manager.logger.warning") as warning,
+        ):
+            assert await manager._expire_stored(room_id, stored) is False
+
+        warning.assert_called_once_with(
+            "approval_terminal_delivery_deferred",
+            delivery_id="approval-card-1",
+            room_id=room_id,
+            exc_info=True,
+        )
     finally:
         await manager.shutdown(reason="test complete")
 

@@ -33,6 +33,9 @@ import pytest_asyncio
 
 from mindroom.event_journal import (
     AdmissionResult,
+    ApprovalCall,
+    ApprovalCardReservation,
+    ApprovalContinuation,
     ApprovalDecision,
     ConversationCursor,
     DeliveryAcknowledgement,
@@ -70,7 +73,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.event_journal import (
-        ApprovalContinuation,
         MatrixDelivery,
         PrincipalStore,
         RefreshRequest,
@@ -334,8 +336,6 @@ def _install_legacy_delivery_state(connection: object, *, postgres: bool) -> Non
 
 async def _assert_legacy_delivery_state_migrated(store: EventJournalStore) -> None:
     """Assert response debt survives while legacy approval debt expires closed."""
-    from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
-
     response = await store.principal("agent@alice").load_matrix_delivery(
         delivery_id="$response",
         stage=DeliveryStage.FINAL,
@@ -1834,10 +1834,8 @@ class TestStoreGeneration:
         tmp_path: Path,
     ) -> None:
         """Two stores must not agree, or the check proves nothing."""
-        from mindroom.event_journal import EventJournalStore as Store  # noqa: PLC0415
-
         mine = await journal_store.generation(new_generation="mine")
-        replacement = Store.open_sqlite(tmp_path / "replacement.db")
+        replacement = EventJournalStore.open_sqlite(tmp_path / "replacement.db")
         try:
             theirs = await replacement.generation(new_generation="theirs")
         finally:
@@ -4850,13 +4848,7 @@ class TestApprovalContinuations:
 
     @staticmethod
     def continuation(*, state: str = "ready") -> ApprovalContinuation:
-        """Return one exact paused-run owner without importing it at collection time."""
-        from mindroom.event_journal import (  # noqa: PLC0415
-            ApprovalCall,
-            ApprovalContinuation,
-            ApprovalDecision,
-        )
-
+        """Return one exact paused-run owner."""
         return ApprovalContinuation(
             approval_id="approval-1",
             run_id="run-1",
@@ -4895,8 +4887,6 @@ class TestApprovalContinuations:
         continuation_principal_id: str = "agent@alice",
     ) -> None:
         """Persist one current-format card for the first continuation generation."""
-        from mindroom.event_journal import ApprovalCardReservation  # noqa: PLC0415
-
         reserved = await store.reserve_approval_card_deliveries(
             continuation_principal_id=continuation_principal_id,
             continuation_id="approval-1",
@@ -5022,8 +5012,6 @@ class TestApprovalContinuations:
         alice: PrincipalStore,
     ) -> None:
         """A stale lifecycle cannot replace a newer chained approval pause."""
-        from mindroom.event_journal import ApprovalCall  # noqa: PLC0415
-
         await self.admit_sources(alice)
         await alice.create_approval_continuation(self.continuation())
         await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
@@ -5064,8 +5052,6 @@ class TestApprovalContinuations:
         journal_store: EventJournalStore,
     ) -> None:
         """One commit owns every exact call and its frozen Matrix delivery."""
-        from mindroom.event_journal import ApprovalCall, ApprovalCardReservation  # noqa: PLC0415
-
         responder = journal_store.principal("agent@alice")
         router = journal_store.principal("router")
         await self.admit_sources(responder)
@@ -5137,8 +5123,6 @@ class TestApprovalContinuations:
         journal_store: EventJournalStore,
     ) -> None:
         """A malformed multi-card batch owns no delivery and leaves publication fenced."""
-        from mindroom.event_journal import ApprovalCardReservation  # noqa: PLC0415
-
         responder = journal_store.principal("agent@alice")
         router = journal_store.principal("router")
         await self.admit_sources(responder)
@@ -5192,8 +5176,6 @@ class TestApprovalContinuations:
         journal_store: EventJournalStore,
     ) -> None:
         """A clickable payload cannot name a different exact call than its domain row."""
-        from mindroom.event_journal import ApprovalCardReservation  # noqa: PLC0415
-
         responder = journal_store.principal("agent@alice")
         router = journal_store.principal("router@shared")
         await self.admit_sources(responder)
@@ -5237,8 +5219,6 @@ class TestApprovalContinuations:
         journal_store: EventJournalStore,
     ) -> None:
         """A departed sender cannot reserve cards after its cleanup fence already ran."""
-        from mindroom.event_journal import ApprovalCardReservation  # noqa: PLC0415
-
         responder = journal_store.principal("agent@alice")
         router = journal_store.principal("router@shared")
         await self.admit_sources(responder)
@@ -5284,8 +5264,6 @@ class TestApprovalContinuations:
         rival_stores: RivalStores,
     ) -> None:
         """Publication and failure choose one continuation state before delivery rows commit."""
-        from mindroom.event_journal import ApprovalCardReservation  # noqa: PLC0415
-
         principal_id = "agent@alice"
         responder = rival_stores.first.principal(principal_id)
         await self.admit_sources(responder)
@@ -5491,8 +5469,6 @@ class TestApprovalContinuations:
 
     async def test_card_decision_atomically_readies_the_exact_call(self, alice: PrincipalStore) -> None:
         """The card and final call decision become durable in one transaction."""
-        from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
-
         await self.admit_sources(alice)
         await alice.create_approval_continuation(
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
@@ -5586,8 +5562,6 @@ class TestApprovalContinuations:
 
     async def test_late_approval_atomically_expires_the_call_and_card(self, alice: PrincipalStore) -> None:
         """A click at or after the exact deadline cannot authorize execution."""
-        from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
-
         await self.admit_sources(alice)
         expired = replace(
             self.continuation(state="waiting"),
@@ -5648,11 +5622,6 @@ class TestApprovalContinuations:
         alice: PrincipalStore,
     ) -> None:
         """An old-device history miss cannot strand the call or authorize a duplicate card."""
-        from mindroom.event_journal import (  # noqa: PLC0415
-            ApprovalCardReservation,
-            ApprovalDecision,
-        )
-
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
         expired = replace(
@@ -5729,8 +5698,6 @@ class TestApprovalContinuations:
 
     async def test_approval_cannot_authorize_a_failure_fenced_continuation(self, alice: PrincipalStore) -> None:
         """A late click terminalizes the card but cannot approve work fenced for failure."""
-        from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
-
         await self.admit_sources(alice)
         waiting = replace(self.continuation(state="waiting"), runtime_generation="runtime-a")
         await alice.create_approval_continuation(waiting)
@@ -6015,8 +5982,6 @@ class TestApprovalContinuations:
         alice: PrincipalStore,
     ) -> None:
         """A provably invisible card cannot turn into a standalone terminal event after departure."""
-        from mindroom.event_journal import ApprovalCardReservation  # noqa: PLC0415
-
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
         await alice.create_approval_continuation(
@@ -6067,8 +6032,6 @@ class TestApprovalContinuations:
         alice: PrincipalStore,
     ) -> None:
         """A reserved INITIAL and FINAL that Matrix never saw cannot outlive their continuation."""
-        from mindroom.event_journal import ApprovalCardReservation  # noqa: PLC0415
-
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
         await alice.create_approval_continuation(
@@ -6127,8 +6090,6 @@ class TestApprovalContinuations:
         alice: PrincipalStore,
     ) -> None:
         """A decision committed during an unknown send outcome still edits that exact card."""
-        from mindroom.event_journal import ApprovalCardReservation  # noqa: PLC0415
-
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
         await alice.create_approval_continuation(
@@ -6295,8 +6256,6 @@ class TestApprovalContinuations:
         alice: PrincipalStore,
     ) -> None:
         """An invisible card is retired while its exact call still records the fail-closed decision."""
-        from mindroom.event_journal import ApprovalCardReservation  # noqa: PLC0415
-
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
         await alice.create_approval_continuation(

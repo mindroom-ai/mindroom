@@ -552,6 +552,12 @@ class _ApprovalManager:
             try:
                 edit_event_id = await self._worker().flush(delivery_id=stored.delivery_id, stage=DeliveryStage.FINAL)
             except Exception:
+                logger.warning(
+                    "approval_terminal_delivery_deferred",
+                    delivery_id=stored.delivery_id,
+                    room_id=room_id,
+                    exc_info=True,
+                )
                 return False
             return edit_event_id is not None and await self.cards.retire_approval_card(
                 delivery_id=stored.delivery_id,
@@ -607,6 +613,7 @@ class _ApprovalManager:
                             "approval_card_expiry_unreadable",
                             delivery_id=stored.delivery_id,
                         )
+                        failed += 1
                         continue
                     if expires_at is not None and expires_at <= _utcnow():
                         settled = await self._expire_stored(room_id, stored)

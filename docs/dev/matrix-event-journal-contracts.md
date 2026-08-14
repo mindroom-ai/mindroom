@@ -111,7 +111,9 @@ An epoch advance drops conversation projections, reconciles approval cards and c
 
 The same transaction also **force-settles pending turn-backed events** for that room, clearing `source_json` and `semantic_consumer` while keeping the rows.
 This is what makes the enqueue refusal below *final* rather than permanent: left pending, the worker would offer the source again on every replay, the model would run again, and enqueue would refuse again, forever.
-Only turn-backed kinds are swept. A redaction, reaction, approval reply, or decryption failure enqueues no answer, so the epoch predicate never blocks it — and a redaction in particular still owes real cleanup, which sweeping it here would drop silently.
+Only turn-backed kinds and reactions already claimed by `INTERACTIVE_REACTION` are swept.
+Other reactions, redactions, approval replies, and decryption failures enqueue no answer, so the epoch predicate does not retire them; a redaction in particular still owes real cleanup that sweeping would drop silently.
+An interactive-reaction claim that races after departure is rejected and settles that stale reaction against the new membership epoch.
 
 The in-flight turn is fenced at enqueue: `_enqueue_matrix_delivery` compares the epoch that admitted the turn against the room's current one and refuses to write the row when they differ.
 
