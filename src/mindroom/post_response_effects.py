@@ -99,21 +99,6 @@ class PostResponseEffectsSupport:
         """Run thread-summary generation with duration logging."""
         await summary_coro
 
-    async def _add_interactive_buttons(
-        self,
-        *,
-        event_id: str,
-        room_id: str,
-        interactive_metadata: interactive.InteractiveMetadata,
-    ) -> None:
-        """Add best-effort reaction buttons to an already durable prompt."""
-        await interactive.add_reaction_buttons(
-            self._client(),
-            room_id,
-            event_id,
-            interactive_metadata.options_as_list(),
-        )
-
     def _queue_thread_summary(
         self,
         room_id: str,
@@ -153,10 +138,11 @@ class PostResponseEffectsSupport:
             event_id: str,
             interactive_metadata: interactive.InteractiveMetadata,
         ) -> None:
-            await self._add_interactive_buttons(
-                event_id=event_id,
-                room_id=room_id,
-                interactive_metadata=interactive_metadata,
+            await interactive.add_reaction_buttons(
+                self._client(),
+                room_id,
+                event_id,
+                interactive_metadata.options_as_list(),
             )
 
         return PostResponseEffectsDeps(
