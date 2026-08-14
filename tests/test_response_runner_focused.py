@@ -31,7 +31,12 @@ from mindroom import response_runner
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.approval import ApprovalRuleConfig
-from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
+from mindroom.constants import (
+    DURABLE_FINAL_OUTCOME_KEY,
+    STREAM_STATUS_APPROVAL_PENDING,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+)
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import (
     DeliveryGateway,
@@ -1774,6 +1779,389 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path) -> None:
+    """An automatically decided sibling must stay out of both waiting text and approval cards."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    automatic = ToolExecution(tool_call_id="call-auto", tool_name="conditional_read", tool_args={})
+    gated = ToolExecution(tool_call_id="call-gated", tool_name="conditional_write", tool_args={})
+
+    async def evaluate(_config: object, _paths: object, tool_name: str, *_args: object) -> tuple[bool, float]:
+        return tool_name == "conditional_write", 60.0
+
+    with (
+        patch(
+            "mindroom.approval_response.resolve_tool_approval_approver",
+            return_value="@user:localhost",
+        ),
+        patch("mindroom.approval_response.evaluate_tool_approval", side_effect=evaluate),
+    ):
+        plan = await runner._approval_responses.plan_pause(
+            (
+                (automatic, "call-auto", "conditional_read", "general"),
+                (gated, "call-gated", "conditional_write", "general"),
+            ),
+            requester_id="@user:localhost",
+        )
+
+    continuation = ApprovalContinuation(
+        approval_id="approval-mixed",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$thinking",
+        source_event_ids=("$source",),
+        calls=plan.calls,
+        state="waiting",
+    )
+    send_card = AsyncMock(return_value=object())
+    with patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card):
+        await runner._approval_responses._publish_cards(
+            continuation,
+            plan,
+            target=_target(thread_id="$thread"),
+            failure_reason="card failed",
+        )
+
+    assert plan.waiting_text == "Waiting for approval: `conditional_write`"
+    assert [call.decision for call in plan.calls] == [ApprovalDecision.APPROVED, None]
+    send_card.assert_awaited_once()
+    assert send_card.await_args.args[0].tool_name == "conditional_write"
+
+
+@pytest.mark.asyncio
+async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path: Path) -> None:
+    """A fully gated batch must retain its current visible approval behavior."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    first = ToolExecution(tool_call_id="call-1", tool_name="dangerous_one", tool_args={})
+    second = ToolExecution(tool_call_id="call-2", tool_name="dangerous_two", tool_args={})
+
+    with (
+        patch(
+            "mindroom.approval_response.resolve_tool_approval_approver",
+            return_value="@user:localhost",
+        ),
+        patch(
+            "mindroom.approval_response.evaluate_tool_approval",
+            new=AsyncMock(return_value=(True, 60.0)),
+        ),
+    ):
+        plan = await runner._approval_responses.plan_pause(
+            (
+                (first, "call-1", "dangerous_one", "general"),
+                (second, "call-2", "dangerous_two", "general"),
+            ),
+            requester_id="@user:localhost",
+        )
+
+    continuation = ApprovalContinuation(
+        approval_id="approval-gated",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$thinking",
+        source_event_ids=("$source",),
+        calls=plan.calls,
+        state="waiting",
+    )
+    send_card = AsyncMock(return_value=object())
+    with patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card):
+        await runner._approval_responses._publish_cards(
+            continuation,
+            plan,
+            target=_target(thread_id="$thread"),
+            failure_reason="card failed",
+        )
+
+    assert plan.waiting_text == "Waiting for approval: `dangerous_one`, `dangerous_two`"
+    assert [call.decision for call in plan.calls] == [None, None]
+    assert [awaited.args[0].tool_name for awaited in send_card.await_args_list] == ["dangerous_one", "dangerous_two"]
+
+
+@pytest.mark.asyncio
+async def test_automatic_pause_preserves_thinking_placeholder_and_wakes_continuation(tmp_path: Path) -> None:
+    """A fully automatic pause must stay neutral while its durable continuation is scheduled."""
+    script_path = tmp_path / "conditional_approval.py"
+    script_path.write_text(
+        "def check(tool_name, arguments, agent_name):\n    return arguments['requires_approval']\n",
+        encoding="utf-8",
+    )
+    bot = _bot(tmp_path)
+    bot.config.tool_approval = bot.config.tool_approval.model_copy(
+        update={"rules": [ApprovalRuleConfig(match="conditional_tool", script=str(script_path))]},
+    )
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(
+            ToolExecution(
+                tool_call_id="call-auto-1",
+                tool_name="conditional_tool",
+                tool_args={"requires_approval": False},
+            ),
+            ToolExecution(
+                tool_call_id="call-auto-2",
+                tool_name="conditional_tool",
+                tool_args={"requires_approval": False},
+            ),
+        ),
+    )
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=request.response_envelope.target,
+        user_id=request.user_id,
+    )
+    edit_text = AsyncMock(return_value=True)
+    send_text = AsyncMock(return_value="$unexpected")
+    send_card = AsyncMock(return_value=object())
+    retry_sources = Mock()
+    runner._approval_responses.retry_sources = retry_sources
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        patch.object(DeliveryGateway, "send_text", new=send_text),
+        patch(
+            "mindroom.approval_response.resolve_tool_approval_approver",
+            return_value="@user:localhost",
+        ),
+        patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card),
+    ):
+        outcome = await runner._suspend_for_approval(
+            paused,
+            request=request,
+            target=request.response_envelope.target,
+            progress=response_runner._DeliveryProgress(tracked_event_id="$thinking"),
+            execution_identity=identity,
+            entity_kind="agent",
+            history_scope=runner.deps.state_writer.history_scope(),
+        )
+
+    edit_text.assert_not_awaited()
+    send_text.assert_not_awaited()
+    send_card.assert_not_awaited()
+    retry_sources.assert_called_once_with(("$source",))
+    assert outcome.final_visible_body is None
+    assert outcome.delivery_kind is None
+    assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
+
+
+@pytest.mark.asyncio
+async def test_automatic_pause_without_visible_event_sends_neutral_placeholder(tmp_path: Path) -> None:
+    """A direct automatic pause still needs neutral visible identity for durable final delivery."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(ToolExecution(tool_call_id="call-auto", tool_name="conditional_read", tool_args={}),),
+    )
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=request.response_envelope.target,
+        user_id=request.user_id,
+    )
+    send_text = AsyncMock(return_value="$thinking")
+    retry_sources = Mock()
+    runner._approval_responses.retry_sources = retry_sources
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=send_text),
+        patch(
+            "mindroom.approval_response.resolve_tool_approval_approver",
+            return_value="@user:localhost",
+        ),
+        patch(
+            "mindroom.approval_response.evaluate_tool_approval",
+            new=AsyncMock(return_value=(False, 60.0)),
+        ),
+    ):
+        outcome = await runner._suspend_for_approval(
+            paused,
+            request=request,
+            target=request.response_envelope.target,
+            progress=response_runner._DeliveryProgress(),
+            execution_identity=identity,
+            entity_kind="agent",
+            history_scope=runner.deps.state_writer.history_scope(),
+        )
+
+    send_request = send_text.await_args.args[0]
+    assert send_request.response_text == "Thinking..."
+    assert send_request.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
+    retry_sources.assert_called_once_with(("$source",))
+    assert outcome.final_visible_body == "Thinking..."
+    assert outcome.delivery_kind == "sent"
+    assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
+
+
+@pytest.mark.asyncio
+async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_path: Path) -> None:
+    """Fail-closed automatic denial must not claim that a nonexistent recipient can approve it."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(ToolExecution(tool_call_id="call-denied", tool_name="dangerous", tool_args={}),),
+    )
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=request.response_envelope.target,
+        user_id=request.user_id,
+    )
+    edit_text = AsyncMock(return_value=True)
+    send_card = AsyncMock(return_value=object())
+    retry_sources = Mock()
+    runner._approval_responses.retry_sources = retry_sources
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value=None),
+        patch(
+            "mindroom.approval_response.evaluate_tool_approval",
+            new=AsyncMock(return_value=(True, 60.0)),
+        ),
+        patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card),
+    ):
+        outcome = await runner._suspend_for_approval(
+            paused,
+            request=request,
+            target=request.response_envelope.target,
+            progress=response_runner._DeliveryProgress(tracked_event_id="$thinking"),
+            execution_identity=identity,
+            entity_kind="agent",
+            history_scope=runner.deps.state_writer.history_scope(),
+        )
+
+    continuation = await runner.deps.approval_store.approval_continuation_for_source("$source")
+    assert continuation is not None
+    assert continuation.state == "ready"
+    assert continuation.calls[0].decision is ApprovalDecision.DENIED
+    edit_text.assert_not_awaited()
+    send_card.assert_not_awaited()
+    retry_sources.assert_called_once_with(("$source",))
+    assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
+
+
+@pytest.mark.parametrize(
+    ("gated_tools", "expected_text", "expected_state", "expected_cards"),
+    [
+        (set(), None, "ready", []),
+        ({"conditional_write"}, "Waiting for approval: `conditional_write`", "waiting", ["conditional_write"]),
+        (
+            {"conditional_read", "conditional_write"},
+            "Waiting for approval: `conditional_read`, `conditional_write`",
+            "waiting",
+            ["conditional_read", "conditional_write"],
+        ),
+    ],
+    ids=["automatic", "mixed", "human"],
+)
+@pytest.mark.asyncio
+async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
+    tmp_path: Path,
+    gated_tools: set[str],
+    expected_text: str | None,
+    expected_state: str,
+    expected_cards: list[str],
+) -> None:
+    """Every chained generation must durably expose only its unresolved calls."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-chain",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    current = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert current is not None
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-2",
+        tools=(
+            ToolExecution(tool_call_id="call-read", tool_name="conditional_read", tool_args={}),
+            ToolExecution(tool_call_id="call-write", tool_name="conditional_write", tool_args={}),
+        ),
+    )
+    edit_text = AsyncMock(return_value=True)
+    send_card = AsyncMock(return_value=object())
+    retry_sources = Mock()
+    runner._approval_responses.retry_sources = retry_sources
+
+    async def evaluate(_config: object, _paths: object, tool_name: str, *_args: object) -> tuple[bool, float]:
+        return tool_name in gated_tools, 60.0
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        patch(
+            "mindroom.approval_response.resolve_tool_approval_approver",
+            return_value="@user:localhost",
+        ),
+        patch("mindroom.approval_response.evaluate_tool_approval", side_effect=evaluate),
+        patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card),
+    ):
+        waiting_text = await runner._approval_responses.advance_pause(
+            current,
+            paused,
+            target=_target(thread_id="$thread"),
+            tool_trace=[],
+            pending_text="Thinking...",
+        )
+
+    persisted = await store.approval_continuation(continuation.approval_id)
+    assert persisted is not None
+    assert persisted.generation == 1
+    assert persisted.state == expected_state
+    assert waiting_text == expected_text
+    edit_request = edit_text.await_args.args[0]
+    assert edit_request.new_text == (expected_text or "Thinking...")
+    assert edit_request.extra_content == {
+        STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING if expected_text else STREAM_STATUS_PENDING,
+    }
+    assert [awaited.args[0].tool_name for awaited in send_card.await_args_list] == expected_cards
+    if expected_state == "ready":
+        retry_sources.assert_called_once_with(("$source",))
+        restarted = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+        claimed = await restarted.deps.approval_store.claim_approval_continuation(
+            continuation.approval_id,
+            runtime_generation=restarted.deps.approval_runtime_generation,
+        )
+        assert claimed is not None
+        assert (
+            await store.claim_approval_continuation(
+                continuation.approval_id,
+                runtime_generation=runner.deps.approval_runtime_generation,
+            )
+            is None
+        )
+    else:
+        retry_sources.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_default(tmp_path: Path) -> None:
     """An authored Agno confirmation still requires the requester when MindRoom has no gating rule."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -1832,6 +2220,7 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
         )
 
     assert plan.calls[0].decision is ApprovalDecision.APPROVED
+    assert plan.waiting_text is None
 
 
 @pytest.mark.asyncio
@@ -1882,6 +2271,7 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
         )
 
     assert plan.calls[0].decision is ApprovalDecision.APPROVED
+    assert plan.waiting_text is None
 
 
 @pytest.mark.asyncio
