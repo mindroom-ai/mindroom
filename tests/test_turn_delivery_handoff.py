@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.event_journal import JournalEvent, OutboxDelivery, PrincipalStore
     from mindroom.event_journal.views import OutboxView
-    from mindroom.journal_dispatch import _MessageCallback
+    from mindroom.journal_dispatch import _MessageCallback, _RedactionCallback
 
 pytestmark = pytest.mark.asyncio
 
@@ -99,7 +99,10 @@ async def admit_redaction(store: PrincipalStore, event_id: str, *, redacts: str)
         },
     )
     assert isinstance(parsed, nio.Event)
-    await store.admit(inbound_event(ROOM, parsed, EventKind.REDACTION, EventClass.ACTIONABLE), None)
+    await store.admit(
+        inbound_event(ROOM, parsed, EventKind.REDACTION, EventClass.ACTIONABLE),
+        projected_event(ROOM, parsed, EventKind.REDACTION, self_sender=BOT),
+    )
 
 
 def journal(bot: AgentBot) -> PrincipalStore:
@@ -163,6 +166,7 @@ def _dispatcher(
     bot: AgentBot,
     on_message: _MessageCallback,
     *,
+    on_redaction: _RedactionCallback | None = None,
     owner_is_live: bool = False,
 ) -> JournalDispatcher:
     """Return a dispatcher over this bot's journal with one watched callback.
@@ -187,7 +191,7 @@ def _dispatcher(
             on_reaction=cast("Any", unused),
             on_approval=cast("Any", unused),
             on_room_lifecycle=cast("Any", unused),
-            on_redaction=cast("Any", unused),
+            on_redaction=on_redaction if on_redaction is not None else cast("Any", unused),
             on_decryption_failure=cast("Any", unused),
             on_approval_continuation=AsyncMock(return_value=None),
             source_has_live_owner=lambda _event_id: owner_is_live,
@@ -657,6 +661,42 @@ class TestTheGatewayWiresTheHandoff:
         assert await pending_ids(bot) == []
 
 
+class TestRedactedPendingTurnSources:
+    """Projection tombstones retire pending turn ingress before replay can reach it."""
+
+    @pytest.mark.parametrize("source_first", [True, False], ids=["source-first", "redaction-first"])
+    async def test_only_redaction_cleanup_runs_for_a_tombstoned_source(
+        self,
+        tmp_path: Path,
+        *,
+        source_first: bool,
+    ) -> None:
+        """Both arrival orders retire message ingress while preserving cleanup."""
+        bot = _make_bot(tmp_path)
+        if source_first:
+            await admit(journal(bot), text_event("$source"))
+            await admit_redaction(journal(bot), "$redaction", redacts="$source")
+        else:
+            await admit_redaction(journal(bot), "$redaction", redacts="$source")
+            await admit(journal(bot), text_event("$source"))
+        on_message = AsyncMock()
+        on_redaction = AsyncMock()
+
+        assert await pending_ids(bot) == ["$redaction"]
+        await _dispatcher(bot, on_message, on_redaction=on_redaction).drain_once()
+
+        on_message.assert_not_awaited()
+        on_redaction.assert_awaited_once()
+        assert await pending_ids(bot) == []
+        assert (
+            await bot._delivery_gateway.deps.outbox.load_delivery(
+                turn_id="$source",
+                stage=DeliveryStage.FINAL,
+            )
+            is None
+        )
+
+
 class TestAFenceRetiresWhatItMakesUnanswerable:
     """Membership fencing has to be terminal, not merely obstructive.
 
@@ -693,7 +733,7 @@ class TestAFenceRetiresWhatItMakesUnanswerable:
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
         await admit_redaction(journal(bot), "$redaction", redacts="$cause")
-        assert sorted(await pending_ids(bot)) == ["$cause", "$redaction"]
+        assert await pending_ids(bot) == ["$redaction"]
 
         await journal(bot).fence_departure(ROOM, source=DepartureSource.LOCAL)
 

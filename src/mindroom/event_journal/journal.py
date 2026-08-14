@@ -843,15 +843,44 @@ def admit(
     )
     if row is None:
         return AdmissionResult.DUPLICATE
+    tombstoned_event_id = None
     if projected is not None:
-        project(
+        tombstoned_event_id = project(
             transaction,
             principal_id,
             projected,
             receipt_order=int(row["receipt_order"]),
             membership_epoch=epoch,
         )
+    if tombstoned_event_id is not None:
+        _settle_tombstoned_turn_source(
+            transaction,
+            principal_id,
+            room_id=event.room_id,
+            event_id=tombstoned_event_id,
+        )
     return AdmissionResult.ADMITTED
+
+
+def _settle_tombstoned_turn_source(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    event_id: str,
+) -> None:
+    """Retire pending turn ingress whose tombstone is authoritative."""
+    kinds = tuple(sorted(kind.value for kind in TURN_BACKED_KINDS))
+    kind_placeholders = ", ".join("?" for _ in kinds)
+    transaction.execute(
+        f"""
+        UPDATE journal_events
+        SET state = ?, source_json = '', semantic_consumer = NULL
+        WHERE principal_id = ? AND room_id = ? AND event_id = ? AND state = ?
+          AND kind IN ({kind_placeholders})
+        """,  # noqa: S608 - placeholders are generated, values are still bound
+        (SETTLED_STATE, principal_id, room_id, event_id, PENDING_STATE, *kinds),
+    )
 
 
 def admitted_thread_id(

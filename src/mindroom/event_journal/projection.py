@@ -172,8 +172,8 @@ def project(
     *,
     receipt_order: int,
     membership_epoch: int,
-) -> None:
-    """Fold one event and reconcile any prompt carried by its visible revision."""
+) -> str | None:
+    """Fold one event and return the event ID whose tombstone became authoritative."""
     if event.redacts_event_id is not None:
         _project_redaction(
             transaction,
@@ -181,9 +181,9 @@ def project(
             event,
             receipt_order=receipt_order,
         )
-        return
+        return event.redacts_event_id
     if _is_tombstoned(transaction, principal_id, event.room_id, event.event_id):
-        return
+        return event.event_id
     replaces = replacement_target(event.content)
     if replaces is None:
         _project_original(
@@ -202,6 +202,7 @@ def project(
             receipt_order=receipt_order,
             membership_epoch=membership_epoch,
         )
+    return None
 
 
 def _project_original(
