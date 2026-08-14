@@ -35,7 +35,7 @@ from mindroom.runtime_resolution import (
     resolve_private_requester_scope_root,
 )
 from mindroom.timing import timed, timed_block
-from mindroom.tool_approval import tool_requires_approval_for_openai_compat
+from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     default_worker_routed_tools,
@@ -1253,38 +1253,6 @@ def _build_agent_tool_hook_bridge(
     )
 
 
-def _prune_openai_incompatible_tools(
-    toolkit: Toolkit,
-    *,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-) -> Toolkit | None:
-    """Hide tools from OpenAI-compatible agents when `/v1` cannot run them."""
-    if execution_identity is None or execution_identity.channel != "openai_compat":
-        return toolkit
-
-    hidden_tool_names = {
-        tool_name
-        for tool_name in (*toolkit.functions, *toolkit.async_functions)
-        if tool_requires_approval_for_openai_compat(config, tool_name)
-    }
-    if not hidden_tool_names:
-        return toolkit
-
-    toolkit.functions = {
-        tool_name: function for tool_name, function in toolkit.functions.items() if tool_name not in hidden_tool_names
-    }
-    toolkit.async_functions = {
-        tool_name: function
-        for tool_name, function in toolkit.async_functions.items()
-        if tool_name not in hidden_tool_names
-    }
-
-    if toolkit.functions or toolkit.async_functions:
-        return toolkit
-    return None
-
-
 def _prune_toolkit_functions(
     toolkit: Toolkit,
     tool_function_filter: Callable[[Function], bool] | None,
@@ -1297,6 +1265,34 @@ def _prune_toolkit_functions(
         toolkit.async_functions = {
             name: function for name, function in toolkit.async_functions.items() if tool_function_filter(function)
         }
+    return toolkit if toolkit.functions or toolkit.async_functions else None
+
+
+def apply_tool_approval_capability(
+    toolkit: Toolkit | None,
+    config: Config,
+    *,
+    supports_native_tool_approval: bool,
+) -> Toolkit | None:
+    """Expose gated functions only where an Agno paused run can be resumed."""
+    if toolkit is None:
+        return None
+    if supports_native_tool_approval:
+        for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
+            if tool_may_require_approval(config, function.name) and function.requires_confirmation is not True:
+                function.requires_confirmation = True
+                function.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
+        return toolkit
+    toolkit.functions = {
+        name: function
+        for name, function in toolkit.functions.items()
+        if function.requires_confirmation is not True and not tool_may_require_approval(config, function.name)
+    }
+    toolkit.async_functions = {
+        name: function
+        for name, function in toolkit.async_functions.items()
+        if function.requires_confirmation is not True and not tool_may_require_approval(config, function.name)
+    }
     return toolkit if toolkit.functions or toolkit.async_functions else None
 
 
@@ -1427,6 +1423,7 @@ def _assemble_agent_toolkits(
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     dynamic_tool_continuation: bool,
+    supports_native_tool_approval: bool,
     native_deferred_tools: bool,
     eager_deferred_tools: bool,
 ) -> _AgentToolAssembly:
@@ -1510,13 +1507,12 @@ def _assemble_agent_toolkits(
                     dynamic_tool_continuation=dynamic_tool_continuation,
                 )
             if toolkit:
-                toolkit = _prune_openai_incompatible_tools(
-                    toolkit,
-                    config=config,
-                    execution_identity=execution_identity,
-                )
-            if toolkit:
                 toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
+            toolkit = apply_tool_approval_capability(
+                toolkit,
+                config,
+                supports_native_tool_approval=supports_native_tool_approval,
+            )
             if toolkit:
                 toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
                 tools.append(toolkit)
@@ -1802,6 +1798,7 @@ def create_agent(
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     dynamic_tool_continuation: bool = False,
+    supports_native_tool_approval: bool = False,
     eager_deferred_tools: bool = False,
 ) -> Agent:
     """Create an agent instance from configuration.
@@ -1840,6 +1837,8 @@ def create_agent(
             envelope and materialized team members both do). Embedded agents
             without such a loop leave it False so a load/unload takes effect on
             the next request instead of truncating the run.
+        supports_native_tool_approval: Whether the caller can persist and resume
+            Agno confirmation pauses. Gated functions are hidden when false.
         eager_deferred_tools: Whether to materialize every deferred toolkit and
             omit the dynamic-tools manager for a runtime with an immutable tool
             schema.
@@ -1893,6 +1892,7 @@ def create_agent(
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
         dynamic_tool_continuation=dynamic_tool_continuation,
+        supports_native_tool_approval=supports_native_tool_approval,
         native_deferred_tools=native_deferred_tools,
         eager_deferred_tools=eager_deferred_tools,
     )
@@ -2042,6 +2042,7 @@ def create_agent(
 
 __all__ = [
     "agent_build_can_overlap_file_memory",
+    "apply_tool_approval_capability",
     "build_agent_toolkit",
     "create_agent",
     "describe_agent",

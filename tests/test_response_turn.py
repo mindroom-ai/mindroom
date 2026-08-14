@@ -11,7 +11,10 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
+from agno.run.requirement import RunRequirement
+from agno.run.team import TeamRunOutput
 
+from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.response_turn import (
     AttemptResolved,
@@ -108,6 +111,10 @@ class _FakeTurnRecorder:
             },
         )
 
+    def mark_suspended(self) -> None:
+        """Record a native pause without classifying it as terminal."""
+        self.outcome = "suspended"
+
 
 def _trace(tool_name: str) -> ToolTraceEntry:
     return ToolTraceEntry(type="tool_call_completed", tool_name=tool_name)
@@ -196,6 +203,222 @@ def _blocking_adapter(
         unexpected_error_text=unexpected_error_text,
         persist_standalone_replay=_persist if with_standalone_replay else None,
     )
+
+
+@pytest.mark.asyncio
+async def test_blocking_paused_attempt_escapes_without_recording_terminal_interruption() -> None:
+    """Treating an approval pause as an error would settle the source before it can resume."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="dangerous",
+        tool_args={"value": 1},
+        requires_confirmation=True,
+    )
+
+    async def paused_attempt(
+        _run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> object:
+        return response_turn_module.PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+        )
+
+    with pytest.raises(response_turn_module.ResponsePausedForApproval) as raised:
+        await run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, paused_attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        )
+
+    assert raised.value.paused.tools == (tool,)
+    assert recorder.outcome == "suspended"
+    assert log.closed == 1
+
+
+def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -> None:
+    """Dropping the member requirement would evaluate and resume a team call under the wrong agent."""
+    tool = ToolExecution(
+        tool_call_id="call-member",
+        tool_name="dangerous",
+        tool_args={"value": 1},
+        requires_confirmation=True,
+    )
+    requirement = RunRequirement(tool)
+    requirement.member_agent_id = "member-id"
+    requirement.member_agent_name = "researcher"
+    requirement.member_run_id = "member-run"
+    response = TeamRunOutput(
+        status=RunStatus.paused,
+        session_id="team-session",
+        run_id="team-run",
+        tools=[],
+        requirements=[requirement],
+    )
+
+    paused = response_turn_module.paused_attempt_from_response(
+        response,
+        fallback_session_id="fallback-session",
+        fallback_run_id="fallback-run",
+    )
+
+    assert paused is not None
+    assert paused.tools == (tool,)
+    assert paused.requirements == (requirement,)
+    assert paused.requirements[0].member_agent_name == "researcher"
+
+
+def test_paused_attempt_rejects_confirmation_entries_without_call_ids() -> None:
+    """A paused call without durable identity must fail closed instead of being silently skipped."""
+    invalid_tool = ToolExecution(tool_name="missing-id", requires_confirmation=True)
+    invalid_requirement = RunRequirement(invalid_tool)
+    valid_tool = ToolExecution(
+        tool_call_id="call-valid",
+        tool_name="dangerous",
+        requires_confirmation=True,
+    )
+
+    with pytest.raises(RuntimeError, match="missing its exact tool-call ID"):
+        response_turn_module._paused_attempt(
+            tools=(invalid_tool, valid_tool),
+            requirements=(invalid_requirement,),
+            session_id="session-1",
+            run_id="run-1",
+        )
+
+
+def test_paused_attempt_rejects_duplicate_requirement_call_ids() -> None:
+    """One approval decision must never authorize two requirements sharing an ID."""
+    requirements = tuple(
+        RunRequirement(
+            ToolExecution(
+                tool_call_id="duplicate-call",
+                tool_name=tool_name,
+                requires_confirmation=True,
+            ),
+        )
+        for tool_name in ("first", "second")
+    )
+
+    with pytest.raises(RuntimeError, match="duplicate tool-call IDs"):
+        response_turn_module._paused_attempt(
+            tools=(),
+            requirements=requirements,
+            session_id="session-1",
+            run_id="run-1",
+        )
+
+
+def test_paused_attempt_rejects_mixed_unresolved_hitl_requirements() -> None:
+    """MindRoom must not show an approval card when the same run also needs unsupported user input."""
+    confirmation = RunRequirement(
+        ToolExecution(
+            tool_call_id="confirm-call",
+            tool_name="dangerous",
+            requires_confirmation=True,
+        ),
+    )
+    user_input = RunRequirement(
+        ToolExecution(
+            tool_call_id="input-call",
+            tool_name="needs_input",
+            requires_user_input=True,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported non-confirmation"):
+        response_turn_module._paused_attempt(
+            tools=(),
+            requirements=(confirmation, user_input),
+            session_id="session-1",
+            run_id="run-1",
+        )
+
+
+def test_exact_approval_decisions_reject_mixed_unresolved_hitl_requirements() -> None:
+    """A persisted mixed pause must fail closed instead of executing a tool with missing input."""
+    confirmation = RunRequirement(
+        ToolExecution(
+            tool_call_id="confirm-call",
+            tool_name="dangerous",
+            requires_confirmation=True,
+        ),
+    )
+    user_input = RunRequirement(
+        ToolExecution(
+            tool_call_id="input-call",
+            tool_name="needs_input",
+            requires_user_input=True,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported non-confirmation"):
+        response_turn_module.apply_exact_approval_decisions(
+            (confirmation, user_input),
+            decisions={"confirm-call": True},
+            denial_reasons={"confirm-call": None},
+        )
+
+
+def test_exact_approval_decisions_reject_one_call_with_confirmation_and_input() -> None:
+    """Confirmation must not execute a call that still needs a separate input answer."""
+    mixed = RunRequirement(
+        ToolExecution(
+            tool_call_id="mixed-call",
+            tool_name="dangerous_with_input",
+            requires_confirmation=True,
+            requires_user_input=True,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported non-confirmation"):
+        response_turn_module.apply_exact_approval_decisions(
+            (mixed,),
+            decisions={"mixed-call": True},
+            denial_reasons={"mixed-call": None},
+        )
+
+
+@pytest.mark.asyncio
+async def test_streaming_paused_attempt_escapes_without_recording_terminal_interruption() -> None:
+    """Streaming must release the response lifecycle at the same persisted pause boundary."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    tool = ToolExecution(
+        tool_call_id="call-stream",
+        tool_name="dangerous",
+        tool_args={"value": 1},
+        requires_confirmation=True,
+    )
+    paused = response_turn_module.PausedAttempt(
+        session_id="session-1",
+        run_id="run-stream",
+        tools=(tool,),
+    )
+
+    async def paused_attempt(
+        _run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(paused)
+
+    with pytest.raises(response_turn_module.ResponsePausedForApproval) as raised:
+        await _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(log, paused_attempt),
+                TurnSinks(turn_recorder=cast("Any", recorder)),
+                continuation=_continuation(),
+            ),
+        )
+
+    assert raised.value.paused.run_id == "run-stream"
+    assert recorder.outcome == "suspended"
+    assert log.closed == 1
 
 
 def _streaming_adapter(

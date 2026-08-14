@@ -7,27 +7,33 @@ import inspect
 import tempfile
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent as AgnoAgent
+from agno.db.base import SessionType
+from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunContentEvent as AgentRunContentEvent
 from agno.run.agent import RunOutput
 from agno.run.agent import ToolCallCompletedEvent as AgentToolCallCompletedEvent
 from agno.run.agent import ToolCallStartedEvent as AgentToolCallStartedEvent
-from agno.run.base import RunStatus
+from agno.run.base import RunContext, RunStatus
+from agno.run.requirement import RunRequirement
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunCompletedEvent as TeamRunCompletedEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
+from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team as AgnoTeam
 from agno.team._run import _cleanup_and_store
+from agno.tools.function import Function
 from agno.utils.message import get_text_from_message
 
 from mindroom.agents import create_agent
@@ -52,7 +58,7 @@ from mindroom.history.interrupted_replay import _render_interrupted_replay_conte
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import CompactionDecision, CompactionReplyOutcome, PreparedHistoryState
+from mindroom.history.types import CompactionDecision, CompactionReplyOutcome, HistoryScope, PreparedHistoryState
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.media_fallback import (
@@ -63,6 +69,8 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
+from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
     materialize_exact_requested_team_members,
@@ -74,6 +82,7 @@ from mindroom.teams import (
     _PreparedMaterializedTeamExecution,
     _team_response_stream_raw,
     build_materialized_team_instance,
+    continue_paused_team_run,
     materialize_exact_team_members,
     prepare_materialized_team_execution,
     team_response,
@@ -298,6 +307,280 @@ def test_materialize_exact_requested_team_members_short_circuits_missing_live_me
     assert team_members.materialized_agent_names == set()
     assert team_members.failed_agent_names == ["research"]
     build_member.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_paused_team_scope_open_failure_closes_materialized_member_databases() -> None:
+    """A scope __enter__ failure must still release every newly materialized member DB."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    agent = _make_test_agent("GeneralAgent")
+    members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[agent],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    class ThrowingScope:
+        def __enter__(self) -> None:
+            msg = "scope open failed"
+            raise RuntimeError(msg)
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    with (
+        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
+        patch("mindroom.teams.open_bound_scope_session_context", return_value=ThrowingScope()),
+        patch("mindroom.teams.close_team_runtime_state_dbs") as close_dbs,
+        pytest.raises(RuntimeError, match="scope open failed"),
+    ):
+        await continue_paused_team_run(
+            member_names=("general",),
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            session_id="session-1",
+            run_id="run-1",
+            user_id="@user:localhost",
+            configured_team_name="research",
+            model_name="default",
+            decisions={"call-1": True},
+            denial_reasons={"call-1": None},
+            refresh_scheduler=None,
+        )
+
+    close_dbs.assert_called_once_with(
+        agents=[agent],
+        team_db=None,
+        shared_scope_storage=None,
+    )
+
+
+@pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
+@pytest.mark.asyncio
+async def test_team_continuation_executes_real_agno_confirmation(
+    tmp_path: Path,
+    approved: bool,
+    reason: str | None,
+) -> None:
+    """Exercise the real persisted Agno team pause and continuation spine."""
+    executed: list[list[str]] = []
+    observed_metadata: list[dict[str, object] | None] = []
+    original_metadata = {
+        "room_id": "!room:localhost",
+        "thread_id": "$thread",
+        "correlation_id": "team-approval-metadata",
+    }
+
+    def run_shell_command(args: list[str], run_context: RunContext) -> str:
+        executed.append(args)
+        observed_metadata.append(run_context.metadata)
+        return "ok"
+
+    team = AgnoTeam(
+        id="research",
+        name="Research",
+        members=[],
+        model=SyntheticModel(
+            id="synthetic",
+            seed=1,
+            min_response_chars=20,
+            max_response_chars=20,
+            chars_per_second=0,
+            tool_call_probability=1,
+        ),
+        tools=[
+            Function(
+                name="run_shell_command",
+                entrypoint=run_shell_command,
+                requires_confirmation=True,
+            ),
+        ],
+        db=SqliteDb(db_file=str(tmp_path / "team-continuation.db"), session_table="sessions"),
+    )
+    paused = await team.arun(
+        "exercise the tool",
+        session_id="session-1",
+        user_id="@user:localhost",
+        metadata=original_metadata,
+        stream=False,
+    )
+    continue_run = MagicMock(wraps=team.acontinue_run)
+    requirement = (paused.requirements or [])[0]
+    assert requirement.tool_execution is not None
+    tool_call_id = requirement.tool_execution.tool_call_id
+    assert tool_call_id is not None
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    members = ResolvedExactTeamMembers(
+        requested_agent_names=[],
+        agents=[],
+        display_names=[],
+        materialized_agent_names=set(),
+        failed_agent_names=[],
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="research",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    persisted_scope = HistoryScope(kind="team", scope_id="ad_hoc_original_scope")
+    storage_factory = MagicMock()
+    scope_context = SimpleNamespace(storage=None, storage_factory=storage_factory)
+
+    with (
+        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
+        patch(
+            "mindroom.teams.open_bound_scope_session_context",
+            return_value=nullcontext(scope_context),
+        ) as open_scope,
+        patch("mindroom.teams.build_materialized_team_instance", return_value=team),
+        patch.object(team, "acontinue_run", new=continue_run),
+        patch("mindroom.teams.close_team_runtime_state_dbs"),
+        patch("mindroom.teams.ai_runtime.register_queued_notice_storage") as register_notice,
+    ):
+        result = await continue_paused_team_run(
+            member_names=(),
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            session_id="session-1",
+            run_id=paused.run_id,
+            user_id="@user:localhost",
+            configured_team_name="research",
+            model_name="default",
+            decisions={tool_call_id: approved},
+            denial_reasons={tool_call_id: reason},
+            refresh_scheduler=None,
+            history_scope=persisted_scope,
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert AI_RUN_METADATA_KEY in result.metadata_content
+    assert bool(executed) is approved
+    assert observed_metadata == ([original_metadata] if approved else [])
+    continued_requirement = continue_run.call_args.kwargs["requirements"][0]
+    assert continue_run.call_args.kwargs["metadata"] == original_metadata
+    assert continue_run.call_args.kwargs["metadata"] is not paused.metadata
+    assert continued_requirement.tool_execution is not None
+    assert continued_requirement.tool_execution.confirmed is approved
+    assert continued_requirement.tool_execution.confirmation_note == (None if approved else reason)
+    assert open_scope.call_args.kwargs["scope"] == persisted_scope
+    register_notice.assert_called_once_with(
+        storage_factory=storage_factory,
+        session_id="session-1",
+        session_type=SessionType.TEAM,
+        entity_name="research",
+    )
+
+
+@pytest.mark.parametrize(
+    ("persisted_call_ids", "decision_call_ids"),
+    [
+        pytest.param((None,), ("call-1",), id="missing"),
+        pytest.param(("call-1", "call-1"), ("call-1",), id="duplicate"),
+        pytest.param(("call-1",), ("call-1", "call-extra"), id="extra"),
+        pytest.param(("call-new",), ("call-stale",), id="stale"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_team_continuation_rejects_non_exact_persisted_call_ids(
+    persisted_call_ids: tuple[str | None, ...],
+    decision_call_ids: tuple[str, ...],
+) -> None:
+    """A malformed persisted team pause must never reach Agno continuation execution."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    requirements = [
+        RunRequirement(
+            ToolExecution(
+                tool_call_id=call_id,
+                tool_name="dangerous",
+                requires_confirmation=True,
+            ),
+        )
+        for call_id in persisted_call_ids
+    ]
+    persisted = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        requirements=requirements,
+    )
+    team = MagicMock()
+    team.db = None
+    team.aget_session = AsyncMock(return_value=SimpleNamespace(get_run=lambda _run_id: persisted))
+    team.acontinue_run = AsyncMock(
+        return_value=TeamRunOutput(
+            run_id="run-1",
+            session_id="session-1",
+            status=RunStatus.completed,
+        ),
+    )
+    members = ResolvedExactTeamMembers(
+        requested_agent_names=[],
+        agents=[],
+        display_names=[],
+        materialized_agent_names=set(),
+        failed_agent_names=[],
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="research",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    decisions = dict.fromkeys(decision_call_ids, True)
+    denial_reasons = dict.fromkeys(decision_call_ids)
+
+    with (
+        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
+        patch(
+            "mindroom.teams.open_bound_scope_session_context",
+            return_value=nullcontext(SimpleNamespace(storage=None, storage_factory=None)),
+        ),
+        patch("mindroom.teams.build_materialized_team_instance", return_value=team),
+        patch("mindroom.teams.close_team_runtime_state_dbs"),
+        pytest.raises(RuntimeError, match="no longer match the approval continuation"),
+    ):
+        await continue_paused_team_run(
+            member_names=(),
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            session_id="session-1",
+            run_id="run-1",
+            user_id="@user:localhost",
+            configured_team_name="research",
+            model_name="default",
+            decisions=decisions,
+            denial_reasons=denial_reasons,
+            refresh_scheduler=None,
+        )
+
+    team.acontinue_run.assert_not_awaited()
 
 
 def test_materialize_exact_team_members_closes_partial_agents_on_failure() -> None:
@@ -2459,6 +2742,71 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
         if isinstance(chunk, TeamRunContentEvent)
     ]
     assert any("partial consensus" in chunk for chunk in streamed_text)
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_suspends_for_confirmation_pause_event() -> None:
+    """A streamed team confirmation pause must escape to the lifecycle suspension handler."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+    tool = ToolExecution(
+        tool_call_id="call-team-stream-approval",
+        tool_name="dangerous",
+        tool_args={"value": 1},
+        requires_confirmation=True,
+    )
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield TeamRunPausedEvent(
+            run_id="run-paused",
+            session_id="session-team",
+            content="Approval required",
+            tools=[tool],
+            requirements=[RunRequirement(tool)],
+        )
+
+    team_agent_ids = [
+        fixture_entity_matrix_id(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+    with (
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=_KnowledgeResolution(knowledge=None)),
+        ),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        pytest.raises(ResponsePausedForApproval) as raised,
+    ):
+        async for _chunk in team_response_stream(
+            agent_ids=team_agent_ids,
+            message="Analyze this.",
+            turn_recorder=TurnRecorder(user_message="Analyze this."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(run_id="run-paused", session_id="session-team"),
+            mode=TeamMode.COORDINATE,
+        ):
+            pass
+
+    assert raised.value.paused.run_id == "run-paused"
+    assert raised.value.paused.tools == (tool,)
 
 
 @pytest.mark.asyncio

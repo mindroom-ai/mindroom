@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
@@ -1492,10 +1493,15 @@ class TestPendingEventWorker:
                 *,
                 limit: int = 256,
                 after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
             ) -> PendingPage:
                 self.pending_calls += 1
                 if self.pending_calls == 1:
-                    page = await self.inner.pending(limit=limit, after_receipt_order=after_receipt_order)
+                    page = await self.inner.pending(
+                        limit=limit,
+                        after_receipt_order=after_receipt_order,
+                        runtime_generation=runtime_generation,
+                    )
                     first_read_started.set()
                     await release_first_read.wait()
                     return page
@@ -1942,6 +1948,7 @@ class TestOutOfBandDispatch:
                 on_room_lifecycle=on_room_lifecycle,
                 on_redaction=cast("Any", noop),
                 on_decryption_failure=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
             ),
@@ -2031,6 +2038,7 @@ class TestDeferralOwnership:
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
                 on_decryption_failure=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda _event_id: turn_claimed,
             ),
@@ -2057,6 +2065,25 @@ class TestDeferralOwnership:
         reaction = await self._admitted(alice, reaction_event("$r"), EventKind.REACTION)
 
         assert dispatcher._deferral_is_live(reaction) is True
+
+    async def test_approval_owned_source_bypasses_normal_ingress(self, alice: PrincipalStore) -> None:
+        """A prepared paused run resumes before hooks, routing, or ignore settlement can reinterpret it."""
+        dispatcher = self._dispatcher(alice)
+        continuation = AsyncMock(return_value=False)
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher.callbacks = replace(
+            dispatcher.callbacks,
+            on_message=on_message,
+            on_approval_continuation=continuation,
+        )
+        dispatcher.release_turn_replay()
+        message = await self._admitted(alice, text_event("$approval-source"), EventKind.MESSAGE)
+
+        assert not await dispatcher._run_event(message)
+
+        continuation.assert_awaited_once_with("$approval-source")
+        on_message.assert_not_awaited()
+        assert await alice.is_pending("$approval-source")
 
     async def test_replay_parked_on_the_fleet_is_not_a_lost_owner(self, alice: PrincipalStore) -> None:
         """Turn replay waits for responders to exist, and is released by draining.
@@ -2136,6 +2163,7 @@ class TestUnsettledLifecycleIdentities:
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
                 on_decryption_failure=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
             ),
@@ -2573,8 +2601,13 @@ class _FlakyReplayView:
         *,
         limit: int = 256,
         after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
     ) -> PendingPage:
-        return await self.inner.pending(limit=limit, after_receipt_order=after_receipt_order)
+        return await self.inner.pending(
+            limit=limit,
+            after_receipt_order=after_receipt_order,
+            runtime_generation=runtime_generation,
+        )
 
     async def is_pending(self, event_id: str) -> bool:
         if event_id in self.fail_is_pending:
@@ -2688,6 +2721,7 @@ class TestRecoveryDoesNotReenterALiveTurn:
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
                 on_decryption_failure=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda event_id: event_id in live_claims,
             ),
@@ -2989,6 +3023,7 @@ class TestAdmittedWorkReachesItsCallback:
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
                 on_decryption_failure=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
             ),

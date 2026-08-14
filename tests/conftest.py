@@ -2211,7 +2211,7 @@ def replace_reaction_dispatcher_deps(bot: RuntimeBot, **changes: object) -> Reac
 def replace_interactive_selection_handlers(
     bot: RuntimeBot,
     *,
-    handle: Callable[..., Awaitable[None]] | None = None,
+    handle: Callable[..., Awaitable[bool]] | None = None,
     start: Callable[..., Awaitable[None]] | None = None,
 ) -> None:
     """Replace controller-owned interactive handlers for one test bot."""

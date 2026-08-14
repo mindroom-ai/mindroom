@@ -46,7 +46,7 @@ from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_k
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
-from mindroom.tool_approval import tool_requires_approval_for_openai_compat
+from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
@@ -670,7 +670,7 @@ def _function_requires_text_chat(function: Function, config: Config) -> bool:
         or function.external_execution
         or function.approval_type == "required"
         or function.name in _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS
-        or tool_requires_approval_for_openai_compat(config, function.name)
+        or tool_may_require_approval(config, function.name)
     )
 
 

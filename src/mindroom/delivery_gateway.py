@@ -14,7 +14,7 @@ import nio
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, SKIP_MENTIONS_KEY
 from mindroom.event_journal import (
     OutboxDelivery,
     OutboxView,
@@ -254,6 +254,7 @@ class SendTextRequest:  # noqa: D101
     # text by editing that message; the placeholder is therefore the delivery
     # whose duplication a reader would see, and it is the initial stage.
     delivery_stage: DeliveryStage = DeliveryStage.FINAL
+    defer_source_handoff: bool = False
 
 
 @dataclass(frozen=True)
@@ -268,6 +269,7 @@ class EditTextRequest:  # noqa: D101
     # the answer reaches the room as an edit of it, so this is the delivery
     # whose loss leaves a user looking at "Thinking..." for good.
     delivery_turn_id: str | None = None
+    defer_source_handoff: bool = False
 
 
 @dataclass(frozen=True)
@@ -280,6 +282,7 @@ class FinalDeliveryRequest:  # noqa: D101
     extra_content: dict[str, Any] | None
     existing_event_is_placeholder: bool = False
     skip_mentions: bool = False
+    defer_source_handoff: bool = False
 
 
 @dataclass(frozen=True)
@@ -724,6 +727,8 @@ class DeliveryGateway:
 
     async def _observe_delivered(self, claimed: OutboxDelivery, event_id: str) -> tuple[ProjectedEvent, ...]:
         """Return the target and result one delivered outbox row made visible."""
+        if claimed.edits_event_id is None and "io.mindroom.interactive" not in claimed.payload:
+            return ()
         projections: list[ProjectedEvent] = []
         if claimed.edits_event_id is not None:
             target = await self._observe_matrix_event(
@@ -901,7 +906,8 @@ class DeliveryGateway:
             return delivered.event_id
 
         try:
-            event_id = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver(
+            handoff = None if request.defer_source_handoff else self.deps.turn_handoff
+            event_id = await self._response_delivery(send, handoff=handoff).deliver(
                 turn_id=request.delivery_turn_id,
                 stage=request.delivery_stage,
                 room_id=room_id,
@@ -1058,7 +1064,8 @@ class DeliveryGateway:
             return outcome.event_id
 
         try:
-            event_id = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver(
+            handoff = None if request.defer_source_handoff else self.deps.turn_handoff
+            event_id = await self._response_delivery(send, handoff=handoff).deliver(
                 turn_id=request.delivery_turn_id,
                 stage=DeliveryStage.FINAL,
                 room_id=room_id,
@@ -1245,6 +1252,12 @@ class DeliveryGateway:
                     source_event_id=request.identity.response_envelope.source_event_id,
                 ),
             )
+        if request.defer_source_handoff:
+            metadata = interactive_response.interactive_metadata
+            delivery_extra_content[DURABLE_FINAL_OUTCOME_KEY] = {
+                "body": display_text,
+                "interactive": metadata.to_metadata() if metadata is not None else None,
+            }
 
         if request.existing_event_id is not None:
             edited = await self.edit_text(
@@ -1256,6 +1269,7 @@ class DeliveryGateway:
                     extra_content=delivery_extra_content,
                     delivery_turn_id=request.identity.response_envelope.source_event_id,
                     retry_sync_recovery=True,
+                    defer_source_handoff=request.defer_source_handoff,
                 ),
             )
             if edited:
@@ -1266,7 +1280,7 @@ class DeliveryGateway:
                     final_visible_body=display_text,
                     delivery_kind="edited",
                     tool_trace=tuple(draft.tool_trace or ()),
-                    extra_content=draft.extra_content,
+                    extra_content=delivery_extra_content,
                     interactive_metadata=interactive_response.interactive_metadata,
                 )
 
@@ -1278,7 +1292,7 @@ class DeliveryGateway:
                         identity=request.identity,
                         failure_reason="delivery_failed",
                         tool_trace=draft.tool_trace,
-                        extra_content=draft.extra_content,
+                        extra_content=delivery_extra_content,
                     ),
                 )
             return FinalDeliveryOutcome(
@@ -1287,7 +1301,7 @@ class DeliveryGateway:
                 is_visible_response=True,
                 failure_reason="delivery_failed",
                 tool_trace=tuple(draft.tool_trace or ()),
-                extra_content=draft.extra_content,
+                extra_content=delivery_extra_content,
             )
         event_id = await self.send_text(
             SendTextRequest(
@@ -1301,6 +1315,7 @@ class DeliveryGateway:
                 # ledger already keys on it, and it re-derives to the same
                 # value after a restart, which a generated ID would not.
                 delivery_turn_id=request.identity.response_envelope.source_event_id,
+                defer_source_handoff=request.defer_source_handoff,
             ),
         )
         if event_id is None:
@@ -1309,7 +1324,7 @@ class DeliveryGateway:
                 event_id=None,
                 failure_reason="delivery_failed",
                 tool_trace=tuple(draft.tool_trace or ()),
-                extra_content=draft.extra_content,
+                extra_content=delivery_extra_content,
             )
         return FinalDeliveryOutcome(
             terminal_status="completed",
@@ -1318,7 +1333,7 @@ class DeliveryGateway:
             final_visible_body=display_text,
             delivery_kind="sent",
             tool_trace=tuple(draft.tool_trace or ()),
-            extra_content=draft.extra_content,
+            extra_content=delivery_extra_content,
             interactive_metadata=interactive_response.interactive_metadata,
         )
 

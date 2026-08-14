@@ -28,7 +28,7 @@ from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError, collect_workflow_spec_errors
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.tool_approval import ToolCallWorkflowOrigin
+from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -49,8 +49,8 @@ _WORKFLOW_RESTRICTED_TOOLS = frozenset(
 )
 
 # Tools that mutate the MindRoom system itself (rewrite config.yaml, spawn agents, create
-# cron jobs, run an autonomous coding agent). Participants may be granted these, but every
-# call needs a human decision: allowed_tools (including "*") never pre-approves them.
+# cron jobs, run an autonomous coding agent). Embedded participants cannot suspend for
+# approval, so allowed_tools (including "*") never makes these tools available.
 _WORKFLOW_NO_PREAPPROVAL_TOOLS = frozenset({"claude_agent", "config_manager", "scheduler", "subagents"})
 
 _MINIMAL_SPEC_EXAMPLE = (
@@ -72,10 +72,9 @@ _TOOL_DESCRIPTIONS = {
         "Create a Dynamic Workflow from a declarative workflow spec. "
         f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE} "
         "Ephemeral participants may declare any registered tool when it is also granted in "
-        "permissions.tools; participant tool calls require per-call user approval unless the "
-        "tool is pre-approved by the dynamic_workflow allowed_tools config. System-mutating "
-        "tools (claude_agent, config_manager, scheduler, subagents) always require per-call "
-        "approval and can never be pre-approved."
+        "permissions.tools and can run without approval under the caller's policy plus the "
+        "dynamic_workflow allowed_tools config. A workflow that grants any tool requiring "
+        "approval is rejected because embedded participants cannot suspend and resume."
     ),
     "validate_workflow": (
         "Validate a declarative Dynamic Workflow spec without saving it. "
@@ -485,7 +484,7 @@ def _participant_executor(context: ToolRuntimeContext, workflow_id: str) -> Part
         step_outputs: dict[str, object],
     ) -> object:
         del input_data, step_outputs
-        return _execute_participant(context, participant, prompt, run_scope=run_scope, workflow_id=workflow_id)
+        return _execute_participant(context, participant, prompt, run_scope=run_scope)
 
     return execute
 
@@ -501,7 +500,7 @@ def _aparticipant_executor(context: ToolRuntimeContext, workflow_id: str) -> Asy
         step_outputs: dict[str, object],
     ) -> object:
         del input_data, step_outputs
-        return await _aexecute_participant(context, participant, prompt, run_scope=run_scope, workflow_id=workflow_id)
+        return await _aexecute_participant(context, participant, prompt, run_scope=run_scope)
 
     return execute
 
@@ -512,7 +511,6 @@ def _execute_participant(
     prompt: str,
     *,
     run_scope: str,
-    workflow_id: str,
 ) -> object:
     participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
     if participant_kind == "room_agent":
@@ -523,7 +521,6 @@ def _execute_participant(
             participant,
             prompt,
             run_scope=run_scope,
-            workflow_id=workflow_id,
         )
     msg = f"Unsupported Dynamic Workflow participant kind '{participant_kind}'."
     raise DynamicWorkflowError(msg)
@@ -535,7 +532,6 @@ async def _aexecute_participant(
     prompt: str,
     *,
     run_scope: str,
-    workflow_id: str,
 ) -> object:
     participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
     if participant_kind == "room_agent":
@@ -546,7 +542,6 @@ async def _aexecute_participant(
             participant,
             prompt,
             run_scope=run_scope,
-            workflow_id=workflow_id,
         )
     msg = f"Unsupported Dynamic Workflow participant kind '{participant_kind}'."
     raise DynamicWorkflowError(msg)
@@ -660,7 +655,6 @@ def _execute_ephemeral_agent_participant(
     prompt: str,
     *,
     run_scope: str,
-    workflow_id: str,
 ) -> object:
     return asyncio.run(
         _aexecute_ephemeral_agent_participant(
@@ -668,7 +662,6 @@ def _execute_ephemeral_agent_participant(
             participant,
             prompt,
             run_scope=run_scope,
-            workflow_id=workflow_id,
         ),
     )
 
@@ -679,7 +672,6 @@ async def _aexecute_ephemeral_agent_participant(
     prompt: str,
     *,
     run_scope: str,
-    workflow_id: str,
 ) -> object:
     toolkits_by_name = _resolve_participant_toolkits(context, participant)
     participant_id = _required_participant_text(participant, "id")
@@ -691,12 +683,12 @@ async def _aexecute_ephemeral_agent_participant(
     execution_identity = build_execution_identity_from_runtime_context(context)
     model = model_loading.get_model_instance(context.config, context.runtime_paths, model_name, execution_identity)
     run_config = _participant_run_config(context, toolkits_by_name)
+    _reject_nonresumable_toolkits(toolkits_by_name, run_config)
     bridge = build_tool_hook_bridge(
         context.hook_registry,
         agent_name=context.agent_name,
         config=run_config,
         runtime_paths=context.runtime_paths,
-        workflow_origin=ToolCallWorkflowOrigin(workflow_id=workflow_id, participant_id=participant_id),
     )
     agent = Agent(
         id=f"dynamic_workflow_{participant_id}",
@@ -718,6 +710,22 @@ async def _aexecute_ephemeral_agent_participant(
         ),
     )
     return await _arun_agent(participant_context, agent, prompt)
+
+
+def _reject_nonresumable_toolkits(toolkits: dict[str, Toolkit], config: Config) -> None:
+    """Reject gated functions for embedded agents that cannot resume paused runs."""
+    unavailable = sorted(
+        {
+            function.name
+            for toolkit in toolkits.values()
+            for function in (*toolkit.functions.values(), *toolkit.async_functions.values())
+            if function.requires_confirmation is True or tool_may_require_approval(config, function.name)
+        },
+    )
+    if unavailable:
+        names = ", ".join(unavailable)
+        msg = f"Dynamic Workflow participant functions {names} require approval and cannot suspend for approval."
+        raise DynamicWorkflowExecutionError(msg)
 
 
 def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict[str, object]) -> dict[str, Toolkit]:
@@ -786,7 +794,7 @@ def _reject_unavailable_workflow_tools(tool_names: list[str]) -> None:
 
 
 def _participant_run_config(context: ToolRuntimeContext, toolkits_by_name: dict[str, Toolkit]) -> Config:
-    """Return a config that requires per-call approval for granted tools that are not pre-approved."""
+    """Return the policy used to reject granted tools that would require suspension."""
     if not toolkits_by_name:
         return context.config
     allowed_tools = _workflow_allowed_tools(context)
@@ -845,8 +853,8 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
 async def _arun_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) -> object:
     # Stream the run: the participant inherits the caller's model and the workflow's runtime
     # budget, and the Anthropic/Vertex SDK refuses a non-streaming request whose budget could
-    # exceed 10 minutes. Consuming the event stream drives tool calls and their approval gating;
-    # yield_run_output makes the final RunOutput the last streamed item, which works without a db.
+    # exceed 10 minutes. Consuming the event stream drives tool calls; yield_run_output makes
+    # the final RunOutput the last streamed item, which works without a db.
     final_output: RunOutput | None = None
     with tool_runtime_context(context):
         event_stream = agent.arun(

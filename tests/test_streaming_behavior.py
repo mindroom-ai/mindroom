@@ -50,6 +50,7 @@ from mindroom.streaming import (
     _PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
+    StreamingLifecycleSuspensionError,
     StreamingResponse,
     _DeliveryRequest,
     _drive_stream_delivery,
@@ -3213,6 +3214,65 @@ class TestStreamingBehavior:
 
         assert isinstance(exc_info.value.error, TimeoutError)
         assert finalize_calls == []
+
+    @pytest.mark.asyncio
+    async def test_approval_pause_fails_when_stream_delivery_refuses_to_stop(self) -> None:
+        """A live delivery owner must block approval handoff instead of escaping unowned."""
+        mock_client = _make_matrix_client_mock()
+        suspension = StreamingLifecycleSuspensionError("paused")
+        delivery_started = asyncio.Event()
+        release_delivery = asyncio.Event()
+        shutdown_attempts = 0
+        original_shutdown = _shutdown_stream_delivery
+
+        async def stubborn_delivery(
+            _client: nio.AsyncClient,
+            _streaming: StreamingResponse,
+            delivery_queue: asyncio.Queue[object | None],
+        ) -> None:
+            await delivery_queue.get()
+            delivery_started.set()
+            while not release_delivery.is_set():
+                try:
+                    await release_delivery.wait()
+                except asyncio.CancelledError:
+                    continue
+
+        async def short_shutdown(
+            delivery_queue: asyncio.Queue[object | None],
+            delivery_task: asyncio.Task[None] | None,
+        ) -> Exception | None:
+            nonlocal shutdown_attempts
+            shutdown_attempts += 1
+            if shutdown_attempts == 2:
+                release_delivery.set()
+            return await original_shutdown(
+                delivery_queue,
+                delivery_task,
+                drain_timeout_seconds=0.01,
+                cancel_timeout_seconds=0.01,
+            )
+
+        async def paused_stream() -> AsyncIterator[str]:
+            yield "partial"
+            await delivery_started.wait()
+            raise suspension
+
+        with (
+            patch("mindroom.streaming._drive_stream_delivery", new=stubborn_delivery),
+            patch("mindroom.streaming._shutdown_stream_delivery", new=short_shutdown),
+            pytest.raises(StreamingDeliveryError) as exc_info,
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=paused_stream(),
+            )
+
+        assert isinstance(exc_info.value.error, TimeoutError)
+        assert shutdown_attempts == 2
 
     @pytest.mark.asyncio
     async def test_worker_progress_and_content_updates_do_not_overlap_edits(self) -> None:

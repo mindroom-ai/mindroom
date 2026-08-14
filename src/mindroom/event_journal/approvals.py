@@ -44,7 +44,9 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
+
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -52,12 +54,17 @@ if TYPE_CHECKING:
     from .backend import Row, Transaction
 
 _DEFAULT_ROOM_CARD_LIMIT = 256
+logger = get_logger(__name__)
 _CARD_COLUMNS = """
     cards.card_json AS card_json, cards.resolution_json AS resolution_json,
     cards.transaction_id AS transaction_id, cards.card_event_id AS card_event_id,
     cards.attempted AS attempted, cards.sending_device_id AS sending_device_id,
-    cards.created_at_ns AS created_at_ns
+    cards.created_at_ns AS created_at_ns,
+    cards.continuation_id AS continuation_id,
+    cards.continuation_generation AS continuation_generation,
+    cards.tool_call_id AS tool_call_id
 """
+_TIMEOUT_REASON = "Tool approval request timed out."
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +94,9 @@ class StoredApprovalCard:
     # When the row was claimed. Half of the room scan's ordering, and therefore
     # half of the cursor a caller resumes that scan from.
     created_at_ns: int
+    continuation_id: str | None = None
+    continuation_generation: int | None = None
+    tool_call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +111,27 @@ class RecordedApprovalDecision:
     # Whether this call is what committed the decision it offered. False both
     # when there was no row to write and when the row refused the write.
     recorded: bool
+    continuation_ready: bool = False
+    continuation_entity_name: str | None = None
+    source_event_ids: tuple[str, ...] = ()
+
+
+def _native_identity(card: Mapping[str, Any]) -> tuple[str | None, int | None, str | None]:
+    """Extract strict native-continuation identity from one Matrix card body."""
+    content = card.get("content")
+    if not isinstance(content, dict):
+        return None, None, None
+    continuation_id = content.get("continuation_id")
+    generation = content.get("continuation_generation")
+    tool_call_id = content.get("tool_call_id")
+    if (
+        not isinstance(continuation_id, str)
+        or not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or not isinstance(tool_call_id, str)
+    ):
+        return None, None, None
+    return continuation_id, generation, tool_call_id
 
 
 def resolve(
@@ -147,6 +178,263 @@ def resolve(
     return RecordedApprovalDecision(resolution=stored, recorded=False)
 
 
+def resolve_continuation(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    card_event_id: str,
+    requested_status: Literal["approved", "denied", "expired"],
+    reason: str | None,
+    resolution: Mapping[str, Any],
+) -> RecordedApprovalDecision:
+    """Commit one current-format card and exact-call decision atomically."""
+    card = transaction.fetchone(
+        """
+        SELECT resolution_json, continuation_id, continuation_generation, tool_call_id
+        FROM approval_cards
+        WHERE principal_id = ? AND card_event_id = ?
+        """,
+        (principal_id, card_event_id),
+    )
+    if card is None:
+        return RecordedApprovalDecision(resolution=None, recorded=False)
+    existing = _resolution(cast("str | None", card["resolution_json"]))
+    continuation_id = cast("str | None", card["continuation_id"])
+    generation_value = card["continuation_generation"]
+    tool_call_id = cast("str | None", card["tool_call_id"])
+    if existing is not None:
+        return RecordedApprovalDecision(resolution=existing, recorded=False)
+    if continuation_id is None or generation_value is None or tool_call_id is None:
+        return RecordedApprovalDecision(resolution=None, recorded=False)
+    generation = int(generation_value)
+    continuation = transaction.fetchone(
+        """
+        SELECT principal_id, entity_name, state, generation, failure_reason
+        FROM approval_continuations WHERE approval_id = ?
+        """,
+        (continuation_id,),
+    )
+    if continuation is None or int(continuation["generation"]) != generation:
+        return RecordedApprovalDecision(resolution=None, recorded=False)
+    continuation_principal_id = str(continuation["principal_id"])
+    entity_name = str(continuation["entity_name"])
+    call = transaction.fetchone(
+        """
+        SELECT calls.expires_at_ns
+        FROM approval_continuation_calls AS calls
+        JOIN approval_continuations AS continuations
+          ON continuations.principal_id = calls.principal_id
+         AND continuations.approval_id = calls.approval_id
+        WHERE calls.principal_id = ? AND calls.approval_id = ?
+          AND calls.generation = ? AND calls.tool_call_id = ?
+          AND calls.decision IS NULL
+          AND continuations.state IN ('waiting', 'failing')
+          AND continuations.generation = ?
+        """,
+        (continuation_principal_id, continuation_id, generation, tool_call_id, generation),
+    )
+    if call is None:
+        return RecordedApprovalDecision(resolution=None, recorded=False)
+    failure_reason = cast("str | None", continuation["failure_reason"])
+    decision, decision_reason = _effective_continuation_decision(
+        requested_status=requested_status,
+        requested_reason=reason,
+        expired=time.time_ns() >= int(call["expires_at_ns"]),
+        failure_reason=(failure_reason or "Tool approval continuation failed safely.")
+        if continuation["state"] == "failing"
+        else None,
+    )
+    stored_resolution = _resolved_continuation_content(
+        resolution,
+        requested_status=requested_status,
+        decision=decision,
+        reason=decision_reason,
+    )
+    decided = transaction.fetchone(
+        """
+        UPDATE approval_continuation_calls
+        SET decision = ?, reason = ?
+        WHERE principal_id = ? AND approval_id = ? AND generation = ?
+          AND tool_call_id = ? AND decision IS NULL
+        RETURNING tool_call_id
+        """,
+        (decision, decision_reason, continuation_principal_id, continuation_id, generation, tool_call_id),
+    )
+    if decided is None:
+        msg = f"Approval call {tool_call_id!r} changed during its exact-call decision"
+        raise RuntimeError(msg)
+    encoded = json.dumps(stored_resolution, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    recorded = transaction.fetchone(
+        """
+        UPDATE approval_cards SET resolution_json = ?
+        WHERE principal_id = ? AND card_event_id = ? AND resolution_json IS NULL
+        RETURNING card_event_id
+        """,
+        (encoded, principal_id, card_event_id),
+    )
+    if recorded is None:
+        msg = f"Approval card {card_event_id!r} changed during its exact-call decision"
+        raise RuntimeError(msg)
+    transaction.execute(
+        """
+        UPDATE approval_continuations SET state = 'ready'
+        WHERE principal_id = ? AND approval_id = ? AND generation = ? AND state = 'waiting'
+          AND runtime_generation IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_continuation_calls
+              WHERE principal_id = ? AND approval_id = ? AND generation = ? AND decision IS NULL
+          )
+        """,
+        (
+            continuation_principal_id,
+            continuation_id,
+            generation,
+            continuation_principal_id,
+            continuation_id,
+            generation,
+        ),
+    )
+    state = transaction.fetchone(
+        """
+        SELECT state FROM approval_continuations
+        WHERE principal_id = ? AND approval_id = ? AND generation = ?
+        """,
+        (continuation_principal_id, continuation_id, generation),
+    )
+    source_rows = transaction.fetchall(
+        """
+        SELECT event_id FROM approval_continuation_sources
+        WHERE principal_id = ? AND approval_id = ? ORDER BY source_ordinal
+        """,
+        (continuation_principal_id, continuation_id),
+    )
+    return RecordedApprovalDecision(
+        resolution=stored_resolution,
+        recorded=True,
+        continuation_ready=state is not None and state["state"] == "ready",
+        continuation_entity_name=entity_name,
+        source_event_ids=tuple(str(row["event_id"]) for row in source_rows),
+    )
+
+
+def _effective_continuation_decision(
+    *,
+    requested_status: Literal["approved", "denied", "expired"],
+    requested_reason: str | None,
+    expired: bool,
+    failure_reason: str | None,
+) -> tuple[Literal["approved", "denied", "expired"], str | None]:
+    """Apply deadline and failure fences to one requested decision."""
+    if requested_status == "expired" or expired:
+        return "expired", _TIMEOUT_REASON
+    if requested_status == "approved" and failure_reason is not None:
+        return "denied", failure_reason
+    return requested_status, requested_reason
+
+
+def _resolved_continuation_content(
+    resolution: Mapping[str, Any],
+    *,
+    requested_status: Literal["approved", "denied", "expired"],
+    decision: Literal["approved", "denied", "expired"],
+    reason: str | None,
+) -> dict[str, Any]:
+    """Rewrite visible content when a durable fence overrides an approval."""
+    stored = dict(resolution)
+    if decision == requested_status:
+        return stored
+    stored["status"] = decision
+    stored["resolution_reason"] = reason
+    stored["resolved_by"] = None
+    body = stored.get("body")
+    requested_prefix = f"{requested_status.title()}:"
+    if isinstance(body, str) and body.startswith(requested_prefix):
+        stored["body"] = f"{decision.title()}:{body.removeprefix(requested_prefix)}"
+    return stored
+
+
+def expire_cards_for_departed_continuations(
+    transaction: Transaction,
+    continuation_principal_id: str,
+    *,
+    room_id: str,
+    reason: str,
+) -> None:
+    """Preserve router-owned Matrix cleanup when a responder leaves the room."""
+    rows = transaction.fetchall(
+        """
+        SELECT cards.principal_id, cards.transaction_id, cards.card_json
+        FROM approval_cards AS cards
+        JOIN approval_continuations AS continuations
+          ON continuations.approval_id = cards.continuation_id
+        WHERE continuations.principal_id = ? AND cards.resolution_json IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM approval_continuation_sources AS sources
+              JOIN journal_events AS events
+                ON events.principal_id = sources.principal_id
+               AND events.event_id = sources.event_id
+              WHERE sources.principal_id = continuations.principal_id
+                AND sources.approval_id = continuations.approval_id
+                AND events.room_id = ?
+          )
+        """,
+        (continuation_principal_id, room_id),
+    )
+    for row in rows:
+        try:
+            card = json.loads(str(row["card_json"]))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        content = card.get("content") if isinstance(card, dict) else None
+        if not isinstance(content, dict):
+            continue
+        resolution = {
+            **content,
+            "status": "expired",
+            "approvable": False,
+            "resolution_reason": reason,
+            "resolved_by": None,
+        }
+        tool_name = resolution.get("tool_name")
+        resolution["body"] = f"Expired: {tool_name}" if isinstance(tool_name, str) else "Approval expired"
+        transaction.execute(
+            """
+            UPDATE approval_cards SET resolution_json = ?
+            WHERE principal_id = ? AND transaction_id = ? AND resolution_json IS NULL
+            """,
+            (
+                json.dumps(resolution, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+                str(row["principal_id"]),
+                str(row["transaction_id"]),
+            ),
+        )
+
+
+def fail_continuations_for_departed_card_owner(
+    transaction: Transaction,
+    card_principal_id: str,
+    *,
+    room_id: str,
+    reason: str,
+) -> None:
+    """Wake responder-owned pauses before their departed transport's cards disappear."""
+    transaction.execute(
+        """
+        UPDATE approval_continuations
+        SET state = 'failing', failure_reason = ?, runtime_generation = NULL
+        WHERE state IN ('waiting', 'ready')
+          AND EXISTS (
+              SELECT 1 FROM approval_cards AS cards
+              WHERE cards.principal_id = ? AND cards.room_id = ?
+                AND cards.continuation_id = approval_continuations.approval_id
+                AND cards.resolution_json IS NULL
+          )
+        """,
+        (reason, card_principal_id, room_id),
+    )
+
+
 def claim(
     transaction: Transaction,
     principal_id: str,
@@ -179,12 +467,14 @@ def claim(
         "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
         (principal_id, room_id),
     )
+    continuation_id, continuation_generation, tool_call_id = _native_identity(card)
     transaction.execute(
         """
         INSERT INTO approval_cards (
             principal_id, room_id, transaction_id, attempted, sending_device_id,
-            card_json, membership_epoch, created_at_ns
-        ) VALUES (?, ?, ?, 0, NULL, ?, ?, ?)
+            card_json, continuation_id, continuation_generation, tool_call_id,
+            membership_epoch, created_at_ns
+        ) VALUES (?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, transaction_id) DO NOTHING
         """,
         (
@@ -192,6 +482,9 @@ def claim(
             room_id,
             transaction_id,
             json.dumps(dict(card), ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+            continuation_id,
+            continuation_generation,
+            tool_call_id,
             0 if epoch is None else int(epoch["membership_epoch"]),
             time.time_ns(),
         ),
@@ -284,6 +577,59 @@ def forget(
     )
 
 
+def finish(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    transaction_id: str,
+    card_event_id: str,
+) -> bool:
+    """Retire delivered card payload while keeping its shared approval-only identity."""
+    remembered = transaction.fetchone(
+        """
+        INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
+        SELECT principal_id, room_id, card_event_id
+        FROM approval_cards
+        WHERE principal_id = ? AND transaction_id = ? AND card_event_id = ?
+        ON CONFLICT (principal_id, card_event_id) DO NOTHING
+        RETURNING card_event_id
+        """,
+        (principal_id, transaction_id, card_event_id),
+    )
+    existing = transaction.fetchone(
+        """
+        SELECT 1 AS present FROM approval_action_tombstones
+        WHERE principal_id = ? AND card_event_id = ?
+        """,
+        (principal_id, card_event_id),
+    )
+    if remembered is None and existing is None:
+        return False
+    transaction.execute(
+        "DELETE FROM approval_cards WHERE principal_id = ? AND transaction_id = ? AND card_event_id = ?",
+        (principal_id, transaction_id, card_event_id),
+    )
+    return True
+
+
+def is_terminal_card(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    card_event_id: str,
+) -> bool:
+    """Return whether a delivered terminal approval owns this Matrix event."""
+    row = transaction.fetchone(
+        """
+        SELECT 1 AS present FROM approval_action_tombstones
+        WHERE principal_id = ? AND room_id = ? AND card_event_id = ?
+        """,
+        (principal_id, room_id, card_event_id),
+    )
+    return row is not None
+
+
 def pending_card(
     transaction: Transaction,
     principal_id: str,
@@ -309,6 +655,24 @@ def pending_card(
     return None if row is None else _card(row)
 
 
+def pending_room_ids(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
+    """Return every current-membership room with recoverable approval cards."""
+    rows = transaction.fetchall(
+        """
+        SELECT DISTINCT cards.room_id/*bytes*/ AS room_id
+        FROM approval_cards AS cards
+        LEFT JOIN room_membership AS membership
+          ON membership.principal_id = cards.principal_id
+         AND membership.room_id = cards.room_id
+        WHERE cards.principal_id = ?
+          AND cards.membership_epoch = COALESCE(membership.membership_epoch, 0)
+        ORDER BY cards.room_id/*bytes*/
+        """,
+        (principal_id,),
+    )
+    return tuple(str(row["room_id"]) for row in rows)
+
+
 def pending_cards(
     transaction: Transaction,
     principal_id: str,
@@ -331,42 +695,77 @@ def pending_cards(
     # the comparison itself. A server whose collation is not byte order would
     # otherwise order the rows differently from the cursor that walks them, and
     # the scan would skip rows or revisit them.
-    cursor_clause = "" if after is None else " AND (cards.created_at_ns, cards.transaction_id/*bytes*/) > (?, ?)"
-    cursor_params: tuple[object, ...] = () if after is None else after
-    rows = transaction.fetchall(
-        f"""
-        SELECT {_CARD_COLUMNS}
-        FROM approval_cards AS cards
-        LEFT JOIN room_membership AS membership
-          ON membership.principal_id = cards.principal_id
-         AND membership.room_id = cards.room_id
-        WHERE cards.principal_id = ?
-          AND cards.room_id = ?
-          AND cards.membership_epoch = COALESCE(membership.membership_epoch, 0){cursor_clause}
-        -- Two cards sent in the same nanosecond would otherwise come back in
-        -- whatever order each backend felt like, and the caller expires them
-        -- in the order it reads them.
-        ORDER BY cards.created_at_ns, cards.transaction_id/*bytes*/
-        LIMIT ?
-        """,  # noqa: S608 - a fixed column list and a fixed clause, not input
-        (principal_id, room_id, *cursor_params, limit),
-    )
-    return tuple(_card(row) for row in rows)
+    cards: list[StoredApprovalCard] = []
+    scan_after = after
+    while len(cards) < limit:
+        cursor_clause = (
+            "" if scan_after is None else " AND (cards.created_at_ns, cards.transaction_id/*bytes*/) > (?, ?)"
+        )
+        cursor_params: tuple[object, ...] = () if scan_after is None else scan_after
+        raw_limit = limit - len(cards)
+        rows = transaction.fetchall(
+            f"""
+            SELECT {_CARD_COLUMNS}
+            FROM approval_cards AS cards
+            LEFT JOIN room_membership AS membership
+              ON membership.principal_id = cards.principal_id
+             AND membership.room_id = cards.room_id
+            WHERE cards.principal_id = ?
+              AND cards.room_id = ?
+              AND cards.membership_epoch = COALESCE(membership.membership_epoch, 0){cursor_clause}
+            -- Two cards sent in the same nanosecond would otherwise come back in
+            -- whatever order each backend felt like, and the caller expires them
+            -- in the order it reads them.
+            ORDER BY cards.created_at_ns, cards.transaction_id/*bytes*/
+            LIMIT ?
+            """,  # noqa: S608 - a fixed column list and a fixed clause, not input
+            (principal_id, room_id, *cursor_params, raw_limit),
+        )
+        if not rows:
+            break
+        last = rows[-1]
+        scan_after = (int(last["created_at_ns"]), str(last["transaction_id"]))
+        cards.extend(card for row in rows if (card := _card(row)) is not None)
+        if len(rows) < raw_limit:
+            break
+    return tuple(cards)
 
 
-def _card(row: Row) -> StoredApprovalCard:
-    card = json.loads(row["card_json"])
+def _card(row: Row) -> StoredApprovalCard | None:
+    """Decode one durable card, skipping corrupt legacy rows fail-closed."""
+    try:
+        card = json.loads(row["card_json"])
+    except (json.JSONDecodeError, TypeError):
+        _log_unreadable_card(row)
+        return None
     if not isinstance(card, dict):
-        msg = "Stored approval card is not an object"
-        raise TypeError(msg)
-    return StoredApprovalCard(
-        card=card,
-        resolution=_resolution(row["resolution_json"]),
+        _log_unreadable_card(row)
+        return None
+    try:
+        return StoredApprovalCard(
+            card=card,
+            resolution=_resolution(row["resolution_json"]),
+            transaction_id=str(row["transaction_id"]),
+            card_event_id=row["card_event_id"],
+            attempted=bool(row["attempted"]),
+            sending_device_id=row["sending_device_id"],
+            created_at_ns=int(row["created_at_ns"]),
+            continuation_id=cast("str | None", row["continuation_id"]),
+            continuation_generation=(
+                int(row["continuation_generation"]) if row["continuation_generation"] is not None else None
+            ),
+            tool_call_id=cast("str | None", row["tool_call_id"]),
+        )
+    except (json.JSONDecodeError, TypeError, ValueError):
+        _log_unreadable_card(row)
+        return None
+
+
+def _log_unreadable_card(row: Row) -> None:
+    logger.warning(
+        "approval_card_row_unreadable",
         transaction_id=str(row["transaction_id"]),
         card_event_id=row["card_event_id"],
-        attempted=bool(row["attempted"]),
-        sending_device_id=row["sending_device_id"],
-        created_at_ns=int(row["created_at_ns"]),
     )
 
 

@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.logging_config import get_logger
 
 from .offloading import ThreadOffload, settled
-from .schema import SQLITE_DIALECT, render, schema_statements
+from .schema import SQLITE_DIALECT, approval_card_upgrade_statements, render, schema_statements
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -211,6 +211,14 @@ class SqliteBackend:
             raise RuntimeError(msg)
         connection.execute("BEGIN IMMEDIATE")
         for statement in schema_statements(SQLITE_DIALECT):
+            connection.execute(statement)
+        approval_card_columns = frozenset(
+            str(row[1]) for row in connection.execute("PRAGMA table_info(approval_cards)")
+        )
+        for statement in approval_card_upgrade_statements(
+            SQLITE_DIALECT,
+            existing_columns=approval_card_columns,
+        ):
             connection.execute(statement)
         connection.execute("COMMIT")
         return connection

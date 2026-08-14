@@ -575,6 +575,7 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
         on_room_lifecycle=cast("Callable", noop),
         on_redaction=cast("Callable", noop),
         on_decryption_failure=cast("Callable", noop),
+        on_approval_continuation=AsyncMock(return_value=None),
         source_has_live_owner=gate.has_pending_source_event,
         turn_has_live_claim=lambda _event_id: False,
     )
@@ -1029,9 +1030,10 @@ async def test_edit_and_reaction_slots_settle_before_their_execution_finishes(tm
         edit_started.set()
         await release_handlers.wait()
 
-    async def blocked_selection(*_args: object, **_kwargs: object) -> None:
+    async def blocked_selection(*_args: object, **_kwargs: object) -> bool:
         selection_started.set()
         await release_handlers.wait()
+        return False
 
     edit_event = cast(
         "nio.RoomMessageText",

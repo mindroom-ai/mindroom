@@ -336,21 +336,25 @@ def unacknowledged(
     return tuple(_delivery(row) for row in rows)
 
 
-def has_attempted_unacknowledged_delivery(
+def has_attempted_unacknowledged_prompt_delivery(
     transaction: Transaction,
     principal_id: str,
     *,
     room_id: str,
 ) -> bool:
-    """Return whether Matrix may already show a delivery not yet projected."""
+    """Return whether Matrix may show an unprojected prompt or prompt edit."""
     row = transaction.fetchone(
         """
         SELECT 1 AS present FROM response_outbox
         WHERE principal_id = ? AND room_id = ?
           AND attempted = 1 AND acknowledged_event_id IS NULL
+          AND (
+              edits_event_id IS NOT NULL
+              OR payload_json LIKE ?
+          )
         LIMIT 1
         """,
-        (principal_id, room_id),
+        (principal_id, room_id, '%"io.mindroom.interactive"%'),
     )
     return row is not None
 

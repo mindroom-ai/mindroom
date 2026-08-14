@@ -10,25 +10,50 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from agno.agent import Agent as AgnoAgent
+from agno.db.base import SessionType
+from agno.db.sqlite import SqliteDb
+from agno.models.response import ToolExecution
+from agno.run.agent import RunOutput
+from agno.run.base import RunContext, RunStatus
+from agno.run.requirement import RunRequirement
+from agno.tools.function import Function
+from agno.tools.toolkit import Toolkit
 
+from mindroom import agents as agents_module
 from mindroom import background_tasks as background_tasks_module
 from mindroom import response_runner
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
-from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
+from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import (
     DeliveryGateway,
+    EditTextRequest,
     FinalizeStreamedResponseRequest,
     SendTextRequest,
 )
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import current_internal_sender_ids
+from mindroom.event_journal import (
+    ApprovalCall,
+    ApprovalContinuation,
+    ApprovalDecision,
+    DeliveryStage,
+    EventClass,
+    EventKind,
+    InboundEvent,
+    PrincipalStore,
+    ProjectedEvent,
+)
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.handled_turns import TurnRecord
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -49,6 +74,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     prepare_memory_and_model_context,
 )
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.stop import StopManager
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
@@ -56,9 +82,14 @@ from mindroom.streaming import (
     StreamingDeliveryError,
     StreamingResponse,
 )
+from mindroom.synthetic_model import SyntheticModel
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
+from mindroom.tool_system.runtime_context import ToolDispatchContext
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
+from mindroom.turn_record import canonicalize_turn_record
 from tests.conftest import (
     make_matrix_client_mock,
     make_visible_message,
@@ -122,6 +153,32 @@ def _completed_outcome(event_id: str = "$response", body: str = "ok") -> FinalDe
         is_visible_response=True,
         final_visible_body=body,
         delivery_kind="sent",
+    )
+
+
+async def _admit_approval_source(store: PrincipalStore, *, event_id: str = "$source") -> None:
+    """Admit one actionable source for journal-owned approval tests."""
+    await store.admit(
+        InboundEvent(
+            event_id=event_id,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1,
+            source={"event_id": event_id, "content": {"body": "run it"}},
+        ),
+        ProjectedEvent(
+            event_id=event_id,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            sender="@user:localhost",
+            origin_server_ts=1,
+            content={"body": "run it"},
+            replaces_event_id=None,
+            redacts_event_id=None,
+        ),
     )
 
 
@@ -491,7 +548,7 @@ async def test_user_stop_cancels_live_response_before_terminalizing_under_its_lo
     finalize = AsyncMock(return_value=True)
 
     stop_task = asyncio.create_task(
-        runner.finalize_user_stop("$response", target, 7, Mock(return_value=True), finalize),
+        runner.finalize_user_stop("$response", "$source", target, 7, Mock(return_value=True), finalize),
     )
     await asyncio.gather(response_task, return_exceptions=True)
 
@@ -499,7 +556,7 @@ async def test_user_stop_cancels_live_response_before_terminalizing_under_its_lo
     lifecycle_lock.release()
 
     assert await stop_task is True
-    finalize.assert_awaited_once_with()
+    finalize.assert_awaited_once_with(False)
 
 
 @pytest.mark.asyncio
@@ -524,7 +581,7 @@ async def test_user_stop_guard_and_cancellation_do_not_yield_between_each_other(
         return True
 
     stop_task = asyncio.create_task(
-        runner.finalize_user_stop("$response", target, 2, should_cancel, AsyncMock(return_value=True)),
+        runner.finalize_user_stop("$response", "$source", target, 2, should_cancel, AsyncMock(return_value=True)),
     )
     await asyncio.gather(old_response_task, return_exceptions=True)
     await asyncio.sleep(0)
@@ -551,7 +608,7 @@ async def test_settled_stop_retry_does_not_cancel_later_live_response(tmp_path: 
     finalize = AsyncMock(return_value=True)
 
     stop_task = asyncio.create_task(
-        runner.finalize_user_stop("$response", target, 2, should_cancel, finalize),
+        runner.finalize_user_stop("$response", "$source", target, 2, should_cancel, finalize),
     )
     await asyncio.sleep(0)
 
@@ -560,10 +617,471 @@ async def test_settled_stop_retry_does_not_cancel_later_live_response(tmp_path: 
 
     assert await stop_task is True
     should_cancel.assert_called()
-    finalize.assert_awaited_once_with()
+    finalize.assert_awaited_once_with(False)
     assert response_task.done() is False
     response_task.cancel()
     await asyncio.gather(response_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_user_stop_fences_waiting_approval_before_terminal_turn_record(tmp_path: Path) -> None:
+    """STOP settles the paused-run owner instead of leaving its cards executable."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
+    waiting = ApprovalContinuation(
+        approval_id="approval-stop",
+        run_id="run-paused",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+            ),
+        ),
+        state="waiting",
+    )
+    assert await runner.deps.approval_store.create_approval_continuation(waiting) == waiting
+
+    async def acknowledge_stop_edit(request: EditTextRequest) -> bool:
+        assert request.delivery_turn_id == "$source"
+        await runner.deps.approval_store.enqueue_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            payload={"body": "Stopped by user."},
+            edits_event_id="$waiting",
+        )
+        await runner.deps.approval_store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL)
+        await runner.deps.approval_store.acknowledge_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$waiting",
+            delivered_projections=(),
+        )
+        return True
+
+    async def finalize(approval_settled: bool) -> bool:
+        assert approval_settled
+        assert await runner.deps.approval_store.approval_continuation("approval-stop") is None
+        assert not await runner.deps.approval_store.is_pending("$source")
+        return True
+
+    with (
+        patch("mindroom.approval_response.expire_continuation_approval_cards", new=AsyncMock(return_value=True)),
+        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(side_effect=acknowledge_stop_edit)),
+    ):
+        stopped = await runner.finalize_user_stop(
+            "$waiting",
+            "$source",
+            _target(thread_id="$thread"),
+            7,
+            Mock(return_value=True),
+            finalize,
+        )
+
+    assert stopped
+    assert await runner.deps.approval_store.approval_continuation("approval-stop") is None
+    assert not await runner.deps.approval_store.is_pending("$source")
+
+
+@pytest.mark.asyncio
+async def test_user_stop_preserves_a_claimed_frozen_final_until_success_recovery(tmp_path: Path) -> None:
+    """STOP cannot reclassify an attempted successful FINAL while its acknowledgement is unresolved."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-stop-final",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    await store.enqueue_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "finished", "formatted_body": "finished"},
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+
+    acknowledge_final = False
+
+    async def recover_final() -> None:
+        if acknowledge_final:
+            await store.acknowledge_delivery(
+                turn_id="$source",
+                stage=DeliveryStage.FINAL,
+                event_id="$final",
+                delivered_projections=(),
+            )
+
+    lifecycle = MagicMock(finalize=AsyncMock())
+    finalize_stop = AsyncMock(return_value=True)
+    expire_cards = AsyncMock(return_value=True)
+    with (
+        patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock(side_effect=recover_final)),
+        patch.object(runner, "_build_lifecycle", return_value=lifecycle),
+        patch("mindroom.approval_response.expire_continuation_approval_cards", new=expire_cards),
+    ):
+        assert not await runner.finalize_user_stop(
+            "$waiting",
+            "$source",
+            _target(thread_id="$thread"),
+            7,
+            Mock(return_value=True),
+            finalize_stop,
+        )
+        still_claimed = await store.approval_continuation(continuation.approval_id)
+        assert still_claimed is not None
+        assert still_claimed.state == "claimed"
+        finalize_stop.assert_not_awaited()
+        lifecycle.finalize.assert_not_awaited()
+
+        acknowledge_final = True
+        assert await runner.finalize_user_stop(
+            "$waiting",
+            "$source",
+            _target(thread_id="$thread"),
+            7,
+            Mock(return_value=True),
+            finalize_stop,
+        )
+
+    finalize_stop.assert_awaited_once_with(True)
+    lifecycle.finalize.assert_awaited_once()
+    expire_cards.assert_not_awaited()
+    assert await store.approval_continuation(continuation.approval_id) is None
+    assert not await store.is_pending("$source")
+
+
+@pytest.mark.asyncio
+async def test_user_stop_retry_preserves_success_completed_by_source_worker(tmp_path: Path) -> None:
+    """A STOP retry cannot overwrite a frozen FINAL that another worker finished between attempts."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-stop-worker-final",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    await store.enqueue_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "finished", "formatted_body": "finished"},
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+
+    finalize_stop = AsyncMock(return_value=True)
+    lifecycle = MagicMock(finalize=AsyncMock())
+    with (
+        patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock()),
+        patch.object(runner, "_build_lifecycle", return_value=lifecycle),
+    ):
+        assert not await runner.finalize_user_stop(
+            "$waiting",
+            "$source",
+            _target(thread_id="$thread"),
+            7,
+            Mock(return_value=True),
+            finalize_stop,
+        )
+        await store.acknowledge_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$final",
+            delivered_projections=(),
+        )
+        assert (
+            await runner._recover_claimed_approval_lifecycle(
+                claimed,
+                target=_target(thread_id="$thread"),
+            )
+            == "$waiting"
+        )
+        assert await runner.finalize_user_stop(
+            "$waiting",
+            "$source",
+            _target(thread_id="$thread"),
+            7,
+            Mock(return_value=True),
+            finalize_stop,
+        )
+
+    finalize_stop.assert_awaited_once_with(True)
+    lifecycle.finalize.assert_awaited_once()
+    assert await store.approval_continuation(continuation.approval_id) is None
+
+
+@pytest.mark.asyncio
+async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_path: Path) -> None:
+    """A recovered edit remains owned by the response bubble targeted by the pending STOP."""
+    bot = _bot(tmp_path)
+    await bot._turn_store.warm()
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    turn_store = unwrap_extracted_collaborator(bot._turn_store)
+    store = runner.deps.approval_store
+    target = _target(thread_id="$thread", reply_to_event_id="$source")
+    pending_turn = TurnRecord.create(
+        ("$source",),
+        response_event_id="$waiting",
+        completed=False,
+        response_owner="general",
+        requester_id="@user:localhost",
+        conversation_target=target,
+    )
+    await turn_store.record_pending_turn(pending_turn)
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-stop-turn-owner",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    await store.enqueue_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "finished", "formatted_body": "finished"},
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+
+    lifecycle = MagicMock(finalize=AsyncMock())
+    finalize_stopped_response = AsyncMock(return_value=True)
+    on_current_stop_finalized = AsyncMock()
+    with (
+        patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock()),
+        patch.object(runner, "_build_lifecycle", return_value=lifecycle),
+        patch.object(
+            DeliveryGateway,
+            "finalize_user_stopped_response",
+            new=finalize_stopped_response,
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="did not become durable"):
+            await bot._user_stop_reconciler.finalize(
+                "$waiting",
+                7,
+                on_current_stop_finalized,
+            )
+
+        await store.acknowledge_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$final-edit",
+            delivered_projections=(),
+        )
+        recovered_response_event_id = await runner._recover_claimed_approval_lifecycle(
+            claimed,
+            target=target,
+        )
+        assert recovered_response_event_id == "$waiting"
+        await turn_store.record_responded_turn(
+            canonicalize_turn_record(
+                pending_turn,
+                response_event_id=recovered_response_event_id,
+                completed=True,
+            ),
+        )
+
+        assert await bot._user_stop_reconciler.finalize(
+            "$waiting",
+            7,
+            on_current_stop_finalized,
+        )
+
+    finalize_stopped_response.assert_not_awaited()
+    on_current_stop_finalized.assert_awaited_once()
+    stopped_turn = turn_store.get_turn_record("$source")
+    assert stopped_turn is not None
+    assert stopped_turn.response_event_id == "$waiting"
+    assert stopped_turn.user_stop_settled_receipt_order == 7
+
+
+@pytest.mark.asyncio
+async def test_failing_continuation_recovers_frozen_success_before_failure_settlement(tmp_path: Path) -> None:
+    """A failure fence racing a generated answer cannot retire that answer as a denial."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-failing-final",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    failing = await store.request_approval_failure(
+        claimed.approval_id,
+        "entity removed",
+        expected_state="claimed",
+        expected_generation=claimed.generation,
+        expected_runtime_generation=claimed.runtime_generation,
+    )
+    assert failing is not None
+    await store.enqueue_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={
+            "body": "* finished",
+            "m.new_content": {
+                "body": "finished",
+                DURABLE_FINAL_OUTCOME_KEY: {"body": "finished", "interactive": None},
+            },
+        },
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    await store.acknowledge_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        event_id="$final-edit",
+        delivered_projections=(),
+    )
+    lifecycle = MagicMock(finalize=AsyncMock())
+
+    with patch.object(runner, "_build_lifecycle", return_value=lifecycle):
+        recovered, event_id = await runner._recover_nonready_approval(
+            failing,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert recovered
+    assert event_id == "$waiting"
+    lifecycle.finalize.assert_awaited_once()
+    assert await store.approval_continuation(continuation.approval_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True], ids=("error", "cancellation"))
+async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, cancelled: bool) -> None:
+    """A failed outbox read cannot hide a same-runtime claim until restart."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id=f"approval-recovery-error-{cancelled}",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    failure = asyncio.CancelledError() if cancelled else RuntimeError("Agno continuation failed")
+
+    with (
+        patch.object(runner, "_run_claimed_approval_lifecycle", new=AsyncMock(side_effect=failure)),
+        patch.object(
+            runner._approval_responses,
+            "final_delivery",
+            new=AsyncMock(side_effect=RuntimeError("outbox temporarily unavailable")),
+        ),
+        patch.object(runner._approval_responses, "settle_failure", new=AsyncMock(return_value=False)),
+    ):
+        if cancelled:
+            with pytest.raises(asyncio.CancelledError):
+                await runner._run_owned_or_locked_response(
+                    _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
+                    target=_target(thread_id="$thread"),
+                    early_placeholder=response_runner._EarlyPlaceholderState(),
+                    locked_operation=AsyncMock(),
+                )
+        else:
+            assert (
+                await runner._run_owned_or_locked_response(
+                    _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
+                    target=_target(thread_id="$thread"),
+                    early_placeholder=response_runner._EarlyPlaceholderState(),
+                    locked_operation=AsyncMock(),
+                )
+                is None
+            )
+
+    retained = await store.approval_continuation(continuation.approval_id)
+    assert retained is not None
+    assert retained.state == "failing"
 
 
 @pytest.mark.asyncio
@@ -737,6 +1255,1186 @@ async def test_early_placeholder_failure_preserves_non_preparation_error_cause(t
 
 
 @pytest.mark.asyncio
+async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_path: Path) -> None:
+    """A crash after suspension persistence must not execute the inbound source a second time."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    await _admit_approval_source(runner.deps.approval_store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-replay",
+        run_id="run-paused",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id=request.room_id,
+        thread_id=request.thread_id,
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+            ),
+        ),
+        execution_identity={
+            "channel": "matrix",
+            "agent_name": "general",
+            "requester_id": "@user:localhost",
+            "room_id": "!room:localhost",
+            "thread_id": "$thread",
+            "resolved_thread_id": "$thread",
+            "session_id": "session-1",
+        },
+        source_event_ids=(request.response_envelope.source_event_id,),
+        state="waiting",
+    )
+    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    locked_operation = AsyncMock(return_value="$duplicate")
+
+    event_id = await runner._run_owned_or_locked_response(
+        request,
+        target=request.response_envelope.target,
+        early_placeholder=response_runner._EarlyPlaceholderState(),
+        locked_operation=locked_operation,
+    )
+
+    assert event_id is None
+    locked_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Path) -> None:
+    """A visible error is not terminal while its continuation still owns the source."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    await _admit_approval_source(runner.deps.approval_store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-incomplete-failure",
+        run_id="run-paused",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id=request.room_id,
+        thread_id=request.thread_id,
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        ),
+        state="ready",
+    )
+    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    incomplete = FinalDeliveryOutcome(
+        terminal_status="error",
+        event_id="$waiting",
+        is_visible_response=True,
+        failure_reason="Matrix unavailable",
+    )
+
+    with patch.object(
+        runner,
+        "_run_claimed_approval_lifecycle",
+        new=AsyncMock(return_value=incomplete),
+    ):
+        event_id = await runner._run_owned_or_locked_response(
+            request,
+            target=request.response_envelope.target,
+            early_placeholder=response_runner._EarlyPlaceholderState(),
+            locked_operation=AsyncMock(return_value="$duplicate"),
+        )
+
+    retained = await runner.deps.approval_store.approval_continuation(continuation.approval_id)
+    assert event_id is None
+    assert retained is not None
+    assert retained.state == "claimed"
+    assert await runner.deps.approval_store.is_pending("$source")
+
+
+@pytest.mark.asyncio
+async def test_waiting_message_without_continuation_replays_the_safe_paused_turn(tmp_path: Path) -> None:
+    """A crash before row creation replays because the paused tool has not executed."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    await _admit_approval_source(runner.deps.approval_store)
+
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-paused",
+        tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id=request.room_id,
+        thread_id=request.thread_id,
+        resolved_thread_id=request.response_envelope.target.resolved_thread_id,
+        session_id=paused.session_id,
+    )
+    with (
+        patch.object(
+            DeliveryGateway,
+            "send_text",
+            new=AsyncMock(return_value="$waiting"),
+        ),
+        patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-cancel")),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch(
+            "mindroom.approval_response.ApprovalResponseCoordinator.create",
+            new=AsyncMock(side_effect=RuntimeError("crash before continuation commit")),
+        ),
+        pytest.raises(RuntimeError, match="crash before continuation commit"),
+    ):
+        await runner._suspend_for_approval(
+            paused,
+            request=request,
+            target=request.response_envelope.target,
+            progress=response_runner._DeliveryProgress(),
+            execution_identity=identity,
+            entity_kind="agent",
+            history_scope=runner.deps.state_writer.history_scope(),
+        )
+
+    assert await runner.deps.approval_store.approval_continuation("approval-cancel") is None
+    pending = await runner.deps.approval_store.pending(runtime_generation=runner.deps.approval_runtime_generation)
+    assert [event.event_id for event in pending] == ["$source"]
+
+
+@pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
+@pytest.mark.asyncio
+async def test_agent_continuation_executes_real_agno_confirmation(
+    tmp_path: Path,
+    approved: bool,
+    reason: str | None,
+) -> None:
+    """Exercise the real persisted Agno pause and continuation spine without mocking it."""
+    executed: list[list[str]] = []
+    observed_metadata: list[dict[str, object] | None] = []
+    original_metadata = {
+        "room_id": "!room:localhost",
+        "thread_id": "$thread",
+        "correlation_id": "approval-metadata",
+    }
+
+    def run_shell_command(args: list[str], run_context: RunContext) -> str:
+        executed.append(args)
+        observed_metadata.append(run_context.metadata)
+        return "ok"
+
+    agent = AgnoAgent(
+        id="general",
+        model=SyntheticModel(
+            id="synthetic",
+            seed=1,
+            min_response_chars=20,
+            max_response_chars=20,
+            chars_per_second=0,
+            tool_call_probability=1,
+        ),
+        tools=[
+            Function(
+                name="run_shell_command",
+                entrypoint=run_shell_command,
+                requires_confirmation=True,
+            ),
+        ],
+        db=SqliteDb(db_file=str(tmp_path / "agent-continuation.db"), session_table="sessions"),
+    )
+    paused = await agent.arun(
+        "exercise the tool",
+        session_id="session-1",
+        user_id="@user:localhost",
+        metadata=original_metadata,
+        stream=False,
+    )
+    requirement = (paused.requirements or [])[0]
+    assert requirement.tool_execution is not None
+    tool_call_id = requirement.tool_execution.tool_call_id
+    assert tool_call_id is not None
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-real-agent",
+        run_id=paused.run_id,
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="claimed",
+    )
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continue_run = MagicMock(wraps=agent.acontinue_run)
+    knowledge = MagicMock()
+    refresh_scheduler = MagicMock()
+    runner.deps.runtime.orchestrator = SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler)
+
+    with (
+        patch.object(
+            runner.deps.knowledge_access,
+            "for_agent",
+            return_value=knowledge,
+        ) as resolve_knowledge,
+        patch("mindroom.approval_execution.create_agent", return_value=agent) as create_agent,
+        patch.object(agent, "acontinue_run", new=continue_run),
+        patch("mindroom.approval_execution.typing_indicator", _noop_typing),
+        patch("mindroom.approval_execution.close_agent_runtime_state_dbs"),
+        patch("mindroom.approval_execution.ai_runtime.install_queued_message_notice_hook") as install_notice,
+        patch("mindroom.approval_execution.ai_runtime.register_queued_notice_storage") as register_notice,
+    ):
+        result = await runner._approval_execution.continue_run(
+            continuation,
+            execution_identity=identity,
+            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            decisions={tool_call_id: approved},
+            denial_reasons={tool_call_id: reason},
+            tool_trace_collector=[],
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert "io.mindroom.ai_run" in result.metadata_content
+    assert bool(executed) is approved
+    assert observed_metadata == ([original_metadata] if approved else [])
+    resolve_knowledge.assert_called_once_with("general", execution_identity=identity)
+    assert create_agent.call_args.kwargs["knowledge"] is knowledge
+    assert create_agent.call_args.kwargs["refresh_scheduler"] is refresh_scheduler
+    continued_requirement = continue_run.call_args.kwargs["requirements"][0]
+    assert continue_run.call_args.kwargs["metadata"] == original_metadata
+    assert continue_run.call_args.kwargs["metadata"] is not paused.metadata
+    assert continued_requirement.tool_execution.confirmed is approved
+    assert continued_requirement.tool_execution.confirmation_note == (None if approved else reason)
+    install_notice.assert_called_once_with(
+        agent.model,
+        notice_text=runner.deps.runtime.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
+    )
+    register_notice.assert_called_once()
+    assert register_notice.call_args.kwargs["session_id"] == "session-1"
+    assert register_notice.call_args.kwargs["session_type"] is SessionType.AGENT
+    assert register_notice.call_args.kwargs["entity_name"] == "general"
+    assert callable(register_notice.call_args.kwargs["storage_factory"])
+
+
+@pytest.mark.parametrize(
+    ("persisted_call_ids", "decision_call_ids"),
+    [
+        pytest.param((None,), ("call-1",), id="missing"),
+        pytest.param(("call-1", "call-1"), ("call-1",), id="duplicate"),
+        pytest.param(("call-1",), ("call-1", "call-extra"), id="extra"),
+        pytest.param(("call-new",), ("call-stale",), id="stale"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
+    tmp_path: Path,
+    persisted_call_ids: tuple[str | None, ...],
+    decision_call_ids: tuple[str, ...],
+) -> None:
+    """A malformed persisted pause must never reach Agno continuation execution."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    requirements = [
+        RunRequirement(
+            ToolExecution(
+                tool_call_id=call_id,
+                tool_name="dangerous",
+                requires_confirmation=True,
+            ),
+        )
+        for call_id in persisted_call_ids
+    ]
+    persisted = RunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        requirements=requirements,
+    )
+    agent = MagicMock()
+    agent.aget_session = AsyncMock(return_value=SimpleNamespace(get_run=lambda _run_id: persisted))
+    agent.acontinue_run = AsyncMock(
+        return_value=RunOutput(
+            run_id="run-1",
+            session_id="session-1",
+            status=RunStatus.completed,
+        ),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-invalid-agent",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="claimed",
+    )
+    decisions = dict.fromkeys(decision_call_ids, True)
+    denial_reasons = dict.fromkeys(decision_call_ids)
+
+    with (
+        patch.object(runner.deps.knowledge_access, "for_agent", return_value=MagicMock()),
+        patch("mindroom.approval_execution.create_agent", return_value=agent),
+        patch("mindroom.approval_execution.close_agent_runtime_state_dbs"),
+        pytest.raises(RuntimeError, match="no longer match the approval continuation"),
+    ):
+        await runner._approval_execution.continue_run(
+            continuation,
+            execution_identity=identity,
+            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            decisions=decisions,
+            denial_reasons=denial_reasons,
+            tool_trace_collector=[],
+        )
+
+    agent.acontinue_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agent_continuation_closes_runtime_when_notice_hook_setup_fails(tmp_path: Path) -> None:
+    """Reconstructed storage must close even if pre-continuation model setup raises."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    storage = MagicMock()
+    agent = MagicMock()
+    agent.model = MagicMock()
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-hook-error",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="claimed",
+    )
+
+    with (
+        patch.object(runner.deps.knowledge_access, "for_agent", return_value=MagicMock()),
+        patch("mindroom.approval_execution.create_session_storage", return_value=storage),
+        patch("mindroom.approval_execution.create_agent", return_value=agent),
+        patch(
+            "mindroom.approval_execution.ai_runtime.install_queued_message_notice_hook",
+            side_effect=RuntimeError("hook setup failed"),
+        ),
+        patch("mindroom.approval_execution.close_agent_runtime_state_dbs") as close_runtime,
+        pytest.raises(RuntimeError, match="hook setup failed"),
+    ):
+        await runner._approval_execution.continue_run(
+            continuation,
+            execution_identity=identity,
+            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            decisions={},
+            denial_reasons={},
+            tool_trace_collector=[],
+        )
+
+    close_runtime.assert_called_once_with(agent, shared_scope_storage=storage)
+    storage.close.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path: Path) -> None:
+    """Unchanged bots must apply reloaded approval policy and agent configuration."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    reloaded = bot.config.model_copy(deep=True)
+    bot.config = reloaded
+    tool = ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={})
+
+    def resolve_approver(config: object, *_args: object) -> None:
+        assert config is reloaded
+
+    async def evaluate_policy(config: object, *_args: object) -> tuple[bool, float]:
+        assert config is reloaded
+        return False, 60.0
+
+    with (
+        patch("mindroom.approval_response.resolve_tool_approval_approver", side_effect=resolve_approver),
+        patch("mindroom.approval_response.evaluate_tool_approval", side_effect=evaluate_policy),
+    ):
+        await runner._approval_responses.plan_pause(
+            ((tool, "call-1", "dangerous", "general"),),
+            requester_id="@user:localhost",
+        )
+
+    continuation = ApprovalContinuation(
+        approval_id="approval-live-config",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="claimed",
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    def create_from_live_config(_name: str, config: object, *_args: object, **_kwargs: object) -> None:
+        assert config is reloaded
+        msg = "live config observed"
+        raise RuntimeError(msg)
+
+    with (
+        patch("mindroom.approval_execution.create_agent", side_effect=create_from_live_config),
+        pytest.raises(RuntimeError, match="live config observed"),
+    ):
+        await runner._approval_execution.continue_run(
+            continuation,
+            execution_identity=identity,
+            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            decisions={},
+            denial_reasons={},
+            tool_trace_collector=[],
+        )
+
+
+@pytest.mark.asyncio
+async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Path) -> None:
+    """A policy denial must explain that no human approval recipient was available."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    tool = ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={})
+
+    with (
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value=None),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+    ):
+        plan = await runner._approval_responses.plan_pause(
+            ((tool, "call-1", "dangerous", "general"),),
+            requester_id="@user:localhost",
+        )
+
+    assert plan.calls[0].decision is response_runner.ContinuationDecision.DENIED
+    assert plan.calls[0].reason == "No approval recipient is configured; the tool was denied safely."
+
+
+@pytest.mark.asyncio
+async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_default(tmp_path: Path) -> None:
+    """An authored Agno confirmation still requires the requester when MindRoom has no gating rule."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    assert runner.deps.runtime.config.tool_approval.default == "auto_approve"
+    tool = ToolExecution(
+        tool_call_id="call-native",
+        tool_name="native_confirmation",
+        tool_args={},
+        requires_confirmation=True,
+    )
+
+    with patch(
+        "mindroom.approval_response.resolve_tool_approval_approver",
+        return_value="@user:localhost",
+    ):
+        plan = await runner._approval_responses.plan_pause(
+            ((tool, "call-native", "native_confirmation", "general"),),
+            requester_id="@user:localhost",
+        )
+
+    assert plan.calls[0].decision is None
+
+
+@pytest.mark.asyncio
+async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Path) -> None:
+    """The synthetic Agno pause marker must not turn an exempt policy call into human approval."""
+    register_tool_approval_exemption("synthetic_exempt", lambda arguments: arguments.get("dry_run") is True)
+    bot = _bot(tmp_path)
+    bot.config.tool_approval = bot.config.tool_approval.model_copy(update={"default": "require_approval"})
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    toolkit = Toolkit(
+        name="approval-test",
+        tools=[Function(name="synthetic_exempt", entrypoint=lambda: None)],
+    )
+    agents_module.apply_tool_approval_capability(
+        toolkit,
+        bot.config,
+        supports_native_tool_approval=True,
+    )
+    function = toolkit.functions["synthetic_exempt"]
+    tool = ToolExecution(
+        tool_call_id="call-exempt",
+        tool_name=function.name,
+        tool_args={"dry_run": True},
+        requires_confirmation=function.requires_confirmation,
+        approval_type=function.approval_type,
+    )
+
+    with patch(
+        "mindroom.approval_response.resolve_tool_approval_approver",
+        return_value="@user:localhost",
+    ):
+        plan = await runner._approval_responses.plan_pause(
+            ((tool, "call-exempt", function.name, "general"),),
+            requester_id="@user:localhost",
+        )
+
+    assert plan.calls[0].decision is ApprovalDecision.APPROVED
+
+
+@pytest.mark.asyncio
+async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -> None:
+    """An exact-call script decision remains authoritative after Agno pauses a potentially gated tool."""
+    script_path = tmp_path / "approval.py"
+    script_path.write_text(
+        "def check(tool_name, arguments, agent_name):\n    return arguments['requires_approval']\n",
+        encoding="utf-8",
+    )
+    bot = _bot(tmp_path)
+    bot.config.tool_approval = bot.config.tool_approval.model_copy(
+        update={
+            "rules": [
+                ApprovalRuleConfig(
+                    match="scripted_tool",
+                    script=str(script_path),
+                ),
+            ],
+        },
+    )
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    toolkit = Toolkit(
+        name="approval-test",
+        tools=[Function(name="scripted_tool", entrypoint=lambda: None)],
+    )
+    agents_module.apply_tool_approval_capability(
+        toolkit,
+        bot.config,
+        supports_native_tool_approval=True,
+    )
+    function = toolkit.functions["scripted_tool"]
+    tool = ToolExecution(
+        tool_call_id="call-script",
+        tool_name=function.name,
+        tool_args={"requires_approval": False},
+        requires_confirmation=function.requires_confirmation,
+        approval_type=function.approval_type,
+    )
+
+    with patch(
+        "mindroom.approval_response.resolve_tool_approval_approver",
+        return_value="@user:localhost",
+    ):
+        plan = await runner._approval_responses.plan_pause(
+            ((tool, "call-script", function.name, "general"),),
+            requester_id="@user:localhost",
+        )
+
+    assert plan.calls[0].decision is ApprovalDecision.APPROVED
+
+
+@pytest.mark.asyncio
+async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_path: Path) -> None:
+    """An attempted FINAL is recovered and completed without invoking Agno twice."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-final-acked",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    await store.enqueue_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "finished", "formatted_body": "finished"},
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+
+    async def acknowledge_frozen_final() -> None:
+        await store.acknowledge_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$final",
+            delivered_projections=(),
+        )
+
+    with (
+        patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock(side_effect=acknowledge_frozen_final)),
+        patch.object(runner, "_continue_entity_call", new=AsyncMock()) as continue_entity,
+        patch.object(runner, "_build_lifecycle", return_value=MagicMock(finalize=AsyncMock())) as build_lifecycle,
+    ):
+        event_id = await runner._recover_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert event_id == "$waiting"
+    continue_entity.assert_not_awaited()
+    build_lifecycle.return_value.finalize.assert_awaited_once()
+    assert await store.approval_continuation(continuation.approval_id) is None
+    assert not await store.is_pending("$source")
+
+
+@pytest.mark.asyncio
+async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_path: Path) -> None:
+    """Restart recovery must replay semantic final facts, not rendered Matrix HTML."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-final-semantic",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    await store.enqueue_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={
+            "body": "plain fallback",
+            "formatted_body": "<strong>rendered html</strong>",
+            "io.mindroom.final_delivery": {
+                "body": "plain final",
+                "interactive": {
+                    "question_text": "Pick",
+                    "option_map": {"1": "yes", "✅": "yes"},
+                    "option_labels": {"1": "Yes", "✅": "Yes"},
+                    "options_list": [{"emoji": "✅", "label": "Yes", "value": "yes"}],
+                },
+            },
+        },
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    await store.acknowledge_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        event_id="$final",
+        delivered_projections=(),
+    )
+    lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
+
+    with patch.object(runner, "_build_lifecycle", return_value=lifecycle):
+        event_id = await runner._recover_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert event_id == "$waiting"
+    final = lifecycle.finalize.await_args.args[0]
+    assert final.final_visible_body == "plain final"
+    assert final.interactive_metadata is not None
+    assert final.interactive_metadata.question_text == "Pick"
+    assert final.option_map == {"1": "yes", "✅": "yes"}
+
+
+@pytest.mark.asyncio
+async def test_original_owner_recovery_retires_acknowledged_failure_without_success_effects(tmp_path: Path) -> None:
+    """A frozen failure FINAL must not be replayed through the successful response lifecycle."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-failure-final",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="failing",
+        failure_reason="Tool approval continuation failed safely.",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    await store.enqueue_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "Tool approval continuation failed safely."},
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    await store.acknowledge_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        event_id="$failure-edit",
+        delivered_projections=(),
+    )
+
+    with patch.object(runner, "_build_lifecycle", return_value=MagicMock(finalize=AsyncMock())) as build_lifecycle:
+        assert await runner.recover_approval_final(continuation.approval_id)
+
+    build_lifecycle.assert_not_called()
+    assert await store.approval_continuation(continuation.approval_id) is None
+    assert not await store.is_pending("$source")
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_path: Path) -> None:
+    """A visible successful FINAL must complete even if the live caller is cancelled afterward."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-final-cancelled-return",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+
+    async def acknowledge_then_cancel(*_args: object, **_kwargs: object) -> tuple[object, object]:
+        await store.enqueue_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            payload={
+                "body": "plain final",
+                "io.mindroom.final_delivery": {"body": "plain final", "interactive": None},
+            },
+            edits_event_id="$waiting",
+        )
+        assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+        await store.acknowledge_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$final",
+            delivered_projections=(),
+        )
+        raise asyncio.CancelledError
+
+    lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
+    with (
+        patch.object(runner, "_execute_claimed_approval", side_effect=acknowledge_then_cancel),
+        patch.object(runner, "_build_lifecycle", return_value=lifecycle),
+        patch.object(runner, "_approval_post_response_outcome", return_value=ResponseOutcome()),
+    ):
+        outcome = await runner._run_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert outcome.terminal_status == "completed"
+    assert outcome.event_id == "$waiting"
+    assert await store.approval_continuation(continuation.approval_id) is None
+    finalized = [call.args[0] for call in lifecycle.finalize.await_args_list]
+    assert [item.terminal_status for item in finalized] == ["completed"]
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp_path: Path) -> None:
+    """Late lifecycle cancellation must adopt the visible success before failure fencing."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-final-late-cancel",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+
+    async def acknowledge_then_cancel(claimed: ApprovalContinuation, **_kwargs: object) -> None:
+        await store.enqueue_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            payload={
+                "body": "plain final",
+                "io.mindroom.final_delivery": {"body": "plain final", "interactive": None},
+            },
+            edits_event_id="$waiting",
+        )
+        assert claimed.state == "claimed"
+        assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+        await store.acknowledge_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$final",
+            delivered_projections=(),
+        )
+        raise asyncio.CancelledError
+
+    lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
+    with (
+        patch.object(runner, "_run_claimed_approval_lifecycle", side_effect=acknowledge_then_cancel),
+        patch.object(runner, "_build_lifecycle", return_value=lifecycle),
+        patch.object(runner, "_approval_post_response_outcome", return_value=ResponseOutcome()),
+    ):
+        event_id = await runner._run_owned_or_locked_response(
+            request,
+            target=request.response_envelope.target,
+            early_placeholder=response_runner._EarlyPlaceholderState(),
+            locked_operation=AsyncMock(return_value="$duplicate"),
+        )
+
+    assert event_id == "$waiting"
+    assert await store.approval_continuation(continuation.approval_id) is None
+    assert not await store.is_pending("$source")
+
+
+@pytest.mark.asyncio
+async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: Path) -> None:
+    """An inconclusive FINAL retry must retain the exact paused-run ownership."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-final-unacknowledged",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="dangerous",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        ),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    await store.enqueue_delivery(
+        turn_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "finished", "formatted_body": "finished"},
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+
+    with patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock()):
+        event_id = await runner._recover_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    retained = await store.approval_continuation(continuation.approval_id)
+    assert event_id is None
+    assert retained is not None
+    assert retained.state == "claimed"
+    assert retained.runtime_generation == runner.deps.approval_runtime_generation
+    assert await store.is_pending("$source")
+    final = await store.load_delivery(turn_id="$source", stage=DeliveryStage.FINAL)
+    assert final is not None
+    assert final.attempted
+    assert final.acknowledged_event_id is None
+
+
+@pytest.mark.asyncio
+async def test_continuation_rejects_missing_persisted_execution_identity(tmp_path: Path) -> None:
+    """Malformed durable identity must fail explicitly even when Python assertions are disabled."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-missing-identity",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="claimed",
+    )
+
+    with (
+        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=None),
+        pytest.raises(RuntimeError, match=r"approval-missing-identity.*execution identity"),
+    ):
+        await runner._continue_entity_call(
+            continuation,
+            request=_plain_request(_target()),
+            target=_target(),
+            tool_trace_collector=[],
+        )
+
+
+@pytest.mark.asyncio
+async def test_approval_request_restores_exact_hook_envelope_after_store_reload(tmp_path: Path) -> None:
+    """Resume hooks must observe the same ingress identity and correlation as suspension."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    original_envelope = replace(
+        _envelope(_target(thread_id="$thread"), source_event_id="$source"),
+        mentioned_agents=("research", "general"),
+        hook_source="plugin:message_received",
+        dispatch_policy_source_kind="plugin",
+        message_received_depth=3,
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-hook-context",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+        request_body=original_envelope.body,
+        origin=original_envelope.origin,
+        mentioned_agents=original_envelope.mentioned_agents,
+        hook_source=original_envelope.hook_source,
+        dispatch_policy_source_kind=original_envelope.dispatch_policy_source_kind,
+        message_received_depth=original_envelope.message_received_depth,
+        correlation_id="correlation-original",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    reloaded = await store.approval_continuation(continuation.approval_id)
+    assert reloaded is not None
+
+    restored = runner._approval_response_request(
+        reloaded,
+        target=_target(thread_id="$thread", reply_to_event_id="$source"),
+    )
+
+    assert restored.correlation_id == "correlation-original"
+    assert restored.response_envelope.mentioned_agents == ("research", "general")
+    assert restored.response_envelope.hook_source == "plugin:message_received"
+    assert restored.response_envelope.dispatch_policy_source_kind == "plugin"
+    assert restored.response_envelope.message_received_depth == 3
+
+
+@pytest.mark.asyncio
+async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_path: Path) -> None:
+    """Resumed tool hooks and runtime events stay correlated with the originating Matrix turn."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-correlation",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="claimed",
+        execution_identity={},
+        correlation_id="correlation-original",
+    )
+    request = replace(
+        _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
+        correlation_id="correlation-original",
+    )
+    observed: list[str | None] = []
+
+    def build_dispatch_context(
+        *_args: object,
+        correlation_id: str | None = None,
+        **_kwargs: object,
+    ) -> ToolDispatchContext:
+        observed.append(correlation_id)
+        return ToolDispatchContext(execution_identity=identity)
+
+    with (
+        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
+        patch.object(runner.deps.tool_runtime, "build_dispatch_context", side_effect=build_dispatch_context),
+        patch(
+            "mindroom.approval_execution.AgentApprovalExecution.continue_run",
+            new=AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={})),
+        ),
+    ):
+        await runner._continue_entity_call(
+            continuation,
+            request=request,
+            target=request.response_envelope.target,
+            tool_trace_collector=[],
+        )
+
+    assert observed == ["correlation-original"]
+
+
+@pytest.mark.asyncio
+async def test_suspension_rejects_missing_requester_before_persistence(tmp_path: Path) -> None:
+    """A continuation without the original session user cannot be resumed against the same Agno run."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = replace(_plain_request(_target()), user_id=None)
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=None,
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+    )
+
+    with pytest.raises(RuntimeError, match="requester identity"):
+        await runner._suspend_for_approval(
+            paused,
+            request=request,
+            target=_target(),
+            progress=response_runner._DeliveryProgress(),
+            execution_identity=identity,
+            entity_kind="agent",
+            history_scope=runner.deps.state_writer.history_scope(),
+        )
+
+
+@pytest.mark.asyncio
 async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_side_effects(tmp_path: Path) -> None:
     """The runner keeps full history until execution preparation builds model context."""
     bot = _bot(tmp_path)
@@ -869,6 +2567,33 @@ async def test_stop_tracking_cleared_on_failure(tmp_path: Path) -> None:
 
     assert stop_manager.cleared == ["$placeholder"]
     assert stop_manager.tracked_messages == {}
+
+
+@pytest.mark.asyncio
+async def test_approval_suspension_is_not_logged_as_generation_failure(tmp_path: Path) -> None:
+    """A native pause is a lifecycle handoff, not an exceptional generation failure."""
+    stop_manager = RecordingStopManager()
+    logger = MagicMock()
+    runner = ResponseAttemptRunner(replace(_attempt_runner(tmp_path, stop_manager).deps, logger=logger))
+    suspension = ResponsePausedForApproval(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-paused",
+            tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+        ),
+    )
+
+    async def respond(_message_id: str | None) -> None:
+        raise suspension
+
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await runner.run(
+            ResponseAttemptRequest(target=_target(), response_function=respond, existing_event_id="$placeholder"),
+        )
+
+    assert raised.value is suspension
+    logger.exception.assert_not_called()
+    assert stop_manager.cleared == ["$placeholder"]
 
 
 @pytest.mark.asyncio
@@ -1059,6 +2784,67 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
     assert finalize_request.stream_transport_outcome is transport
     assert finalize_request.initial_delivery_kind == "sent"
     assert finalize_request.identity.response_kind == "ai"
+
+
+@pytest.mark.asyncio
+async def test_streaming_approval_pause_reaches_outer_lifecycle(tmp_path: Path) -> None:
+    """The agent streaming wrapper must preserve the visible event when it propagates a pause."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    pause = ResponsePausedForApproval(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-paused",
+            tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+        ),
+    )
+    finalize = AsyncMock()
+    visible_events: list[str] = []
+
+    async def pause_after_visible_event(*_args: object, **kwargs: object) -> None:
+        callback = cast("Callable[[str], None]", kwargs["visible_event_id_callback"])
+        callback("$stream")
+        raise pause
+
+    with (
+        patch.object(
+            coordinator,
+            "generate_streaming_ai_response",
+            new=AsyncMock(side_effect=pause_after_visible_event),
+        ),
+        patch.object(DeliveryGateway, "finalize_streamed_response", new=finalize),
+        pytest.raises(ResponsePausedForApproval) as raised,
+    ):
+        await coordinator._process_and_respond_streaming(
+            _plain_request(_target()),
+            on_delivery_started=visible_events.append,
+        )
+
+    assert raised.value is pause
+    assert visible_events == ["$stream"]
+    finalize.assert_not_awaited()
+
+
+@pytest.mark.parametrize("is_team", [False, True])
+@pytest.mark.asyncio
+async def test_suspended_turn_is_never_persisted_as_failed(tmp_path: Path, *, is_team: bool) -> None:
+    """Failure cleanup must not overwrite the Agno run that owns a native pause."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    recorder = TurnRecorder(user_message="Run it")
+    recorder.mark_suspended()
+    persist = AsyncMock()
+
+    with patch.object(coordinator, "_persist_interrupted_recorder_off_loop", new=persist):
+        await coordinator._persist_failed_turn(
+            recorder,
+            is_team=is_team,
+            session_scope=coordinator.deps.state_writer.history_scope(),
+            session_id="session-1",
+            execution_identity=None,
+            run_id="run-paused",
+            response_event_id="$waiting",
+        )
+
+    persist.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1620,32 +3406,50 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "delivery_outcome",
+    ("delivery_outcome", "hands_off"),
     [
-        _completed_outcome(),
-        FinalDeliveryOutcome(
-            terminal_status="cancelled",
-            event_id="$response",
-            is_visible_response=True,
-            failure_reason="cancelled_by_user",
+        (_completed_outcome(), False),
+        (
+            FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                event_id="$response",
+                is_visible_response=True,
+                failure_reason="cancelled_by_user",
+            ),
+            False,
         ),
-        FinalDeliveryOutcome(
-            terminal_status="error",
-            event_id="$response",
-            is_visible_response=True,
-            failure_reason="delivery_failed",
+        (
+            FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id="$response",
+                is_visible_response=True,
+                failure_reason="delivery_failed",
+            ),
+            False,
+        ),
+        (
+            FinalDeliveryOutcome(
+                terminal_status="suspended",
+                event_id="$response",
+                is_visible_response=True,
+            ),
+            True,
         ),
     ],
-    ids=["completed", "cancelled", "error"],
+    ids=["completed", "cancelled", "error", "suspended"],
 )
-async def test_terminal_settlement_finalizes_and_runs_post_effects_once(
+async def test_response_settlement_finalizes_and_transfers_ownership_once(
     tmp_path: Path,
     delivery_outcome: FinalDeliveryOutcome,
+    hands_off: bool,
 ) -> None:
-    """Every canonical terminal status should cross finalization and post-effects exactly once."""
+    """Each outcome finalizes once and only a durable pause transfers source ownership."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    request = _plain_request(_target())
+    request = replace(
+        _plain_request(_target()),
+        source_handoff=asyncio.Event(),
+    )
     progress = response_runner._DeliveryProgress()
     post_effects = AsyncMock()
     build_post_outcome = MagicMock(return_value=ResponseOutcome())
@@ -1684,11 +3488,16 @@ async def test_terminal_settlement_finalizes_and_runs_post_effects_once(
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
-    assert result == "$response"
+    assert result == (None if hands_off else "$response")
     assert progress.delivery_outcome is delivery_outcome
     build_post_outcome.assert_called_once_with(delivery_outcome)
     finalize.assert_awaited_once()
-    post_effects.assert_awaited_once()
+    if hands_off:
+        post_effects.assert_not_awaited()
+    else:
+        post_effects.assert_awaited_once()
+    assert request.source_handoff is not None
+    assert request.source_handoff.is_set() is hands_off
 
 
 @pytest.mark.asyncio

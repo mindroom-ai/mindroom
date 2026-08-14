@@ -206,8 +206,9 @@ Participants can be `ephemeral_agent` or `room_agent`.
 An `ephemeral_agent` can declare `id`, `name`, `role`, `description`, `model`, `tools`, and `instructions`.
 Ephemeral participant `tools` may grant any registered tool except agent-infrastructure tools (`memory`, `delegate`, `self_config`, `compact_context`, `dynamic_workflow`, `dynamic_tools`).
 Every participant tool must also be listed in `permissions.tools`.
-Participant tool calls require per-call user approval in the originating room unless the tool is pre-approved by the caller's `dynamic_workflow` `allowed_tools` config.
-Setting `allowed_tools` to `["*"]` pre-approves every granted tool.
+Dynamic Workflow participants cannot suspend and resume a model run for human approval.
+A participant grant is rejected when any exposed function would require approval under the operator's `tool_approval` policy and the caller's `dynamic_workflow` `allowed_tools` config.
+Setting `allowed_tools` to `["*"]` makes every granted tool eligible except system-mutating tools and functions still gated by an operator-authored approval rule.
 A `room_agent` can declare `id`, `agent`, and an empty `tools` list.
 Room-agent participants must already be available to the requester in the current room, use their configured model, and run without tools, skills, knowledge, durable state, or preloaded context files.
 Step types are `transform_step`, `agent_step`, and `report_step`.
@@ -268,9 +269,9 @@ list_workflows()
 get_workflow_run("brief-report", "run_...")
 ```
 
-### Pre-approving participant tools
+### Allowing participant tools
 
-Configure `allowed_tools` on the calling agent's `dynamic_workflow` tool entry to skip per-call approval for trusted tools.
+Configure `allowed_tools` on the calling agent's `dynamic_workflow` tool entry to make trusted tools eligible for embedded participants.
 
 ```yaml
 agents:
@@ -281,15 +282,17 @@ agents:
           allowed_tools: [duckduckgo, website]
 ```
 
-Use `allowed_tools: ["*"]` to pre-approve every tool a workflow grants.
-Tools outside `allowed_tools` still run, but each call posts an approval card in the originating room and waits for the requester's decision.
+Use `allowed_tools: ["*"]` to make every granted non-system-mutating tool eligible.
+Tools outside `allowed_tools` are rejected because Dynamic Workflow has no resumable Matrix approval lifecycle.
+Operator-authored approval rules retain precedence, so a matching `require_approval` rule still makes that function unavailable.
+System-mutating tools (`claude_agent`, `config_manager`, `scheduler`, and `subagents`) are always unavailable to embedded participants.
 
 ### Notes
 
 - Dynamic Workflow runs execute synchronously on the current tool call path today.
 - Long-running background workflow management, workflow-activation approval cards, Matrix history grants, attachment grants, and knowledge-base grants are future work.
 - Ephemeral agents can only use models allowed by both the workflow permissions and the caller's current model policy.
-- Granted tools run with the calling agent's tool routing (credentials, worker sandboxing, and egress proxying), and the tool-hook bridge applies plugin gating plus the per-call approval flow.
+- Granted tools run with the calling agent's tool routing (credentials, worker sandboxing, and egress proxying), and the tool-hook bridge applies plugin gating.
 - Room-agent participants can reuse only agents that normal room routing would expose to the requester.
 - Runtime caps are enforced for sync and async runs, and async runs are marked failed at the deadline even if participant cancellation is delayed.
 

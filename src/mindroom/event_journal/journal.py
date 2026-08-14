@@ -23,6 +23,7 @@ from mindroom.history_recovery import (
 )
 from mindroom.logging_config import get_logger
 
+from . import approvals
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
@@ -48,6 +49,12 @@ logger = get_logger(__name__)
 _JOURNAL_COLUMNS = """
     event_id, room_id, thread_id, kind, sender,
     origin_server_ts, source_json, receipt_order, semantic_consumer
+"""
+_EVENT_JOURNAL_COLUMNS = """
+    events.event_id AS event_id, events.room_id AS room_id,
+    events.thread_id AS thread_id, events.kind AS kind, events.sender AS sender,
+    events.origin_server_ts AS origin_server_ts, events.source_json AS source_json,
+    events.receipt_order AS receipt_order, events.semantic_consumer AS semantic_consumer
 """
 # Successful repair is hidden from callers but retained as the revision carrier,
 # so a later gap cannot reuse the identity of an old in-flight walk.
@@ -285,8 +292,43 @@ def _advance_membership_epoch(
     # rows with no reader and no other remover, still answering writes keyed on
     # the card's event rather than on the epoch. Dropped, they simply stop
     # existing at the same moment they stopped meaning anything.
+    approvals.fail_continuations_for_departed_card_owner(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        reason="Approval transport left the room.",
+    )
+    # Approval cards are authored by the router principal, while the paused
+    # run belongs to the responding entity principal. Preserve the router's
+    # terminal Matrix edit debt before this fence removes the continuation.
+    approvals.expire_cards_for_departed_continuations(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        reason="Requesting agent left the room.",
+    )
     transaction.execute(
         "DELETE FROM approval_cards WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
+    # A paused run owns exactly the source rows this fence is about to settle.
+    # Delete the aggregate first so no durable continuation survives with no
+    # runnable source. Its call and source rows cascade.
+    transaction.execute(
+        """
+        DELETE FROM approval_continuations
+        WHERE principal_id = ?
+          AND EXISTS (
+              SELECT 1
+              FROM approval_continuation_sources AS sources
+              JOIN journal_events AS events
+                ON events.principal_id = sources.principal_id
+               AND events.event_id = sources.event_id
+              WHERE sources.principal_id = approval_continuations.principal_id
+                AND sources.approval_id = approval_continuations.approval_id
+                AND events.room_id = ?
+          )
+        """,
         (principal_id, room_id),
     )
     # Turn-backed work still pending from the membership that just ended can
@@ -867,6 +909,7 @@ def pending(
     *,
     limit: int,
     after_receipt_order: int | None = None,
+    runtime_generation: str = "unmanaged",
 ) -> PendingPage:
     """Return actionable events awaiting semantic work, in receipt order.
 
@@ -882,7 +925,13 @@ def pending(
     nothing behind this page, and ``resume_after`` is where the next pass
     starts, counted in rows looked at rather than events returned.
     """
-    return _pending_page(transaction, principal_id, limit=limit, after_receipt_order=after_receipt_order)
+    return _pending_page(
+        transaction,
+        principal_id,
+        limit=limit,
+        after_receipt_order=after_receipt_order,
+        runtime_generation=runtime_generation,
+    )
 
 
 def _pending_page(
@@ -892,6 +941,7 @@ def _pending_page(
     limit: int,
     after_receipt_order: int | None,
     kind: EventKind | None = None,
+    runtime_generation: str = "unmanaged",
 ) -> PendingPage:
     """Return whatever decoded from one page of at most ``limit`` raw rows.
 
@@ -906,6 +956,7 @@ def _pending_page(
         limit=limit,
         after_receipt_order=after_receipt_order,
         kind=kind,
+        runtime_generation=runtime_generation,
     )
     events = _decode_rows(rows)
     return PendingPage(
@@ -928,20 +979,61 @@ def _pending_rows(
     limit: int,
     after_receipt_order: int | None,
     kind: EventKind | None = None,
+    runtime_generation: str = "unmanaged",
 ) -> tuple[Row, ...]:
     """Return one raw page of pending rows, in receipt order."""
     cursor_clause = "" if after_receipt_order is None else " AND receipt_order > ?"
     cursor_params: tuple[object, ...] = () if after_receipt_order is None else (after_receipt_order,)
     kind_clause = "" if kind is None else " AND kind = ?"
     kind_params: tuple[object, ...] = () if kind is None else (kind.value,)
+    continuation_joins = """
+        LEFT JOIN approval_continuation_sources AS approval_sources
+          ON approval_sources.principal_id = events.principal_id
+         AND approval_sources.event_id = events.event_id
+        LEFT JOIN approval_continuations AS continuations
+         ON continuations.principal_id = approval_sources.principal_id
+         AND continuations.approval_id = approval_sources.approval_id
+    """
+    continuation_clause = """
+          AND (
+            approval_sources.approval_id IS NULL
+            OR (
+              approval_sources.source_ordinal = 0
+              AND (
+                continuations.state IN ('ready', 'failing')
+                OR (
+                  continuations.state = 'waiting'
+                  AND continuations.runtime_generation IS NOT NULL
+                  AND continuations.runtime_generation <> ?
+                )
+                OR (
+                  continuations.state = 'claimed'
+                  AND (
+                    continuations.runtime_generation IS NULL
+                    OR continuations.runtime_generation <> ?
+                    OR EXISTS (
+                      SELECT 1 FROM response_outbox AS approval_final
+                      WHERE approval_final.principal_id = events.principal_id
+                        AND approval_final.turn_id = events.event_id
+                        AND approval_final.stage = 'final'
+                    )
+                  )
+                )
+              )
+            )
+          )
+    """
+    continuation_params = (runtime_generation, runtime_generation)
     return transaction.fetchall(
         f"""
-        SELECT {_JOURNAL_COLUMNS} FROM journal_events
-        WHERE principal_id = ? AND state = 'pending'{kind_clause}{cursor_clause}
-        ORDER BY receipt_order
+        SELECT {_EVENT_JOURNAL_COLUMNS} FROM journal_events AS events
+        {continuation_joins}
+        WHERE events.principal_id = ? AND events.state = 'pending'
+          {continuation_clause}{kind_clause}{cursor_clause}
+        ORDER BY events.receipt_order
         LIMIT ?
         """,  # noqa: S608 - a fixed column list and fixed clauses, not input
-        (principal_id, *kind_params, *cursor_params, limit),
+        (principal_id, *continuation_params, *kind_params, *cursor_params, limit),
     )
 
 

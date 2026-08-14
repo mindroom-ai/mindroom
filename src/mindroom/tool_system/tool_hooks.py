@@ -27,14 +27,7 @@ from mindroom.hooks import (
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
-from mindroom.sync_bridge_state import sync_tool_bridge_blocked_loop
 from mindroom.timing import elapsed_ms_since, emit_timing_event
-from mindroom.tool_approval import (
-    ToolApprovalCall,
-    ToolApprovalScriptError,
-    ToolCallWorkflowOrigin,
-    request_tool_approval_for_call,
-)
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -67,7 +60,6 @@ _DECLINED_RESULT_TEMPLATE = (
     "Reason: {reason}\n\n"
     "Adjust your approach — try a different tool or different arguments."
 )
-_APPROVAL_POLICY_FAILURE_REASON = "Tool approval policy failed."
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
 _ToolHookResult = Any
 # Agno does not currently expose a hook-chain extension point for unwrapping MindRoom's
@@ -281,18 +273,6 @@ def _format_declined_result(tool_name: str, reason: str) -> str:
     return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
 
 
-def _approval_status_reason(status: str, reason: str | None) -> str:
-    if reason:
-        return reason
-    if status == "approved":
-        return "Tool approval was granted."
-    if status == "denied":
-        return "Tool approval was denied."
-    if status == "expired":
-        return "Tool approval request expired."
-    return "Tool approval request is pending."
-
-
 async def _await_result(awaitable: Awaitable[_ToolHookResult]) -> _ToolHookResult:
     return await awaitable
 
@@ -323,7 +303,7 @@ def _run_coroutine_from_sync(coroutine: _ToolHookResult) -> _ToolHookResult:
 def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> _ToolHookResult:
     """Run a deferred async hook result for Agno's synchronous execute() chain."""
     try:
-        running_loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(_await_result(deferred.awaitable))
 
@@ -337,10 +317,9 @@ def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> _T
         except BaseException as exc:
             error_box.append(exc)
 
-    with sync_tool_bridge_blocked_loop(running_loop):
-        thread = threading.Thread(target=runner, name="mindroom-tool-hook-sync-bridge")
-        thread.start()
-        thread.join()
+    thread = threading.Thread(target=runner, name="mindroom-tool-hook-sync-bridge")
+    thread.start()
+    thread.join()
     if error_box:
         raise error_box[0]
     return result_box[0]
@@ -454,43 +433,6 @@ async def _emit_after_call(
     await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
 
 
-async def _maybe_block_for_tool_approval(
-    *,
-    resolved_context: _ResolvedToolContext,
-    args: dict[str, Any],
-    tool_name: str,
-    workflow_origin: ToolCallWorkflowOrigin | None,
-) -> str | None:
-    if resolved_context.config is None or resolved_context.runtime_paths is None:
-        return None
-
-    try:
-        approval_decision = await request_tool_approval_for_call(
-            ToolApprovalCall(
-                config=resolved_context.config,
-                runtime_paths=resolved_context.runtime_paths,
-                tool_name=tool_name,
-                arguments=args,
-                agent_name=resolved_context.agent_name,
-                room_id=resolved_context.room_id,
-                thread_id=resolved_context.thread_id,
-                requester_id=resolved_context.requester_id,
-                workflow_origin=workflow_origin,
-            ),
-        )
-    except ToolApprovalScriptError:
-        logger.warning("Tool approval policy failed", exc_info=True)
-        return _format_declined_result(tool_name, _APPROVAL_POLICY_FAILURE_REASON)
-
-    if approval_decision is None or approval_decision.status == "approved":
-        return None
-
-    return _format_declined_result(
-        tool_name,
-        _approval_status_reason(approval_decision.status, approval_decision.reason),
-    )
-
-
 async def _maybe_block_for_before_hooks(
     *,
     hook_registry: HookRegistry,
@@ -567,7 +509,6 @@ async def _finish_blocked_tool_call(
 class _ToolBridgeTiming:
     started_at: float
     before_hooks_ms: float | None = None
-    approval_ms: float | None = None
     tool_body_ms: float | None = None
     result_ready_ms: float | None = None
     after_hooks_ms: float | None = None
@@ -576,7 +517,6 @@ class _ToolBridgeTiming:
         """Return phases persisted to tool_calls.jsonl; after hooks stay debug-event only."""
         return ToolCallTiming(
             before_hooks_ms=self.before_hooks_ms,
-            approval_ms=self.approval_ms,
             tool_body_ms=self.tool_body_ms,
             result_ready_ms=self.result_ready_ms,
         )
@@ -594,7 +534,6 @@ class _ToolBridgeTiming:
             agent_name=agent_name,
             outcome=outcome,
             before_hooks_ms=self.before_hooks_ms,
-            approval_ms=self.approval_ms,
             tool_body_ms=self.tool_body_ms,
             result_ready_ms=self.result_ready_ms,
             after_hooks_ms=self.after_hooks_ms,
@@ -670,7 +609,6 @@ async def _execute_bridge(
     runtime_paths: RuntimePaths | None,
     has_before_hooks: bool,
     has_after_hooks: bool,
-    workflow_origin: ToolCallWorkflowOrigin | None,
 ) -> _ToolHookResult:
     started_at = time.perf_counter()
     timing = _ToolBridgeTiming(started_at=started_at)
@@ -715,27 +653,6 @@ async def _execute_bridge(
             blocked_result=blocked_result,
             has_after_hooks=has_after_hooks,
             outcome="blocked_before_hooks",
-        )
-
-    approval_started_at = time.perf_counter()
-    blocked_result = await _maybe_block_for_tool_approval(
-        resolved_context=resolved_context,
-        args=args,
-        tool_name=tool_name,
-        workflow_origin=workflow_origin,
-    )
-    timing.approval_ms = elapsed_ms_since(approval_started_at, clock=time.perf_counter, ndigits=2)
-    if blocked_result is not None:
-        return await _finish_blocked_tool_call(
-            timing=timing,
-            hook_registry=hook_registry,
-            resolved_context=resolved_context,
-            hook_arguments=hook_arguments,
-            args=args,
-            tool_name=tool_name,
-            blocked_result=blocked_result,
-            has_after_hooks=has_after_hooks,
-            outcome="blocked_approval",
         )
 
     result: _ToolHookResult = None
@@ -878,7 +795,6 @@ def build_tool_hook_bridge(
     dispatch_context: ToolDispatchContext | None = None,
     config: Config | None = None,
     runtime_paths: RuntimePaths | None = None,
-    workflow_origin: ToolCallWorkflowOrigin | None = None,
 ) -> Callable[..., Any]:
     """Return one Agno-compatible tool hook bridge."""
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
@@ -896,7 +812,6 @@ def build_tool_hook_bridge(
             runtime_paths=runtime_paths,
             has_before_hooks=has_before_hooks,
             has_after_hooks=has_after_hooks,
-            workflow_origin=workflow_origin,
         )
 
     def sync_bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
@@ -913,7 +828,6 @@ def build_tool_hook_bridge(
                     runtime_paths=runtime_paths,
                     has_before_hooks=has_before_hooks,
                     has_after_hooks=has_after_hooks,
-                    workflow_origin=workflow_origin,
                 ),
             )
         return _run_coroutine_from_sync(
@@ -928,7 +842,6 @@ def build_tool_hook_bridge(
                 runtime_paths=runtime_paths,
                 has_before_hooks=has_before_hooks,
                 has_after_hooks=has_after_hooks,
-                workflow_origin=workflow_origin,
             ),
         )
 

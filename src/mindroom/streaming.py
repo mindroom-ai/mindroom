@@ -73,6 +73,7 @@ __all__ = [
     "ReplacementStreamingResponse",
     "StreamInputChunk",
     "StreamingDeliveryError",
+    "StreamingLifecycleSuspensionError",
     "StreamingResponse",
     "TerminalEdit",
     "TerminalSend",
@@ -88,6 +89,12 @@ __all__ = [
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
+
+
+class StreamingLifecycleSuspensionError(Exception):
+    """A response-stream exit that must reach the lifecycle owner unchanged."""
+
+
 PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
 _CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
 INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
@@ -1990,6 +1997,32 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 transport_outcome=transport_outcome,
             ) from exc
         except Exception as exc:
+            if isinstance(exc, StreamingLifecycleSuspensionError):
+                cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
+                progress_task = None
+                delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+                if not isinstance(delivery_cleanup_error, _StreamDeliveryShutdownTimeoutError):
+                    delivery_task = None
+                if cleanup_error is not None:
+                    logger.warning(
+                        "Worker progress drain raised during suspension cleanup",
+                        error=str(cleanup_error),
+                    )
+                if delivery_cleanup_error is not None:
+                    logger.warning(
+                        "Stream delivery controller raised during suspension cleanup",
+                        error=str(delivery_cleanup_error),
+                    )
+                    if isinstance(delivery_cleanup_error, _StreamDeliveryShutdownTimeoutError):
+                        streaming.restore_last_delivered_state()
+                        raise _build_streaming_delivery_error(
+                            streaming,
+                            delivery_cleanup_error,
+                            failure_reason=str(delivery_cleanup_error),
+                            terminal_status="error",
+                            tool_trace_collector=tool_trace_collector,
+                        ) from delivery_cleanup_error
+                raise
             delivery_error = exc.error if isinstance(exc, _NonTerminalDeliveryError) else exc
             logger.exception("Streaming response failed", error=str(delivery_error))
             cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import aclosing
+from contextlib import ExitStack, aclosing
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -82,15 +83,20 @@ from mindroom.response_turn import (
     AttemptResolved,
     BlockingAttemptResolution,
     BlockingTurnAdapter,
+    CompletedApprovalRun,
     CompletedAttempt,
     DynamicContinuationRunState,
     ExcludedAttempt,
     HandledAttempt,
+    PausedAttempt,
     ResponseTurnContext,
     StreamingTurnAdapter,
     TurnPartialSnapshot,
     TurnSinks,
+    apply_exact_approval_decisions,
     build_matrix_run_metadata,
+    paused_attempt_from_event,
+    paused_attempt_from_response,
     run_blocking_response_turn,
     stream_response_turn,
 )
@@ -120,7 +126,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
     from mindroom.history.turn_recorder import TurnRecorder
-    from mindroom.history.types import CompactionLifecycle, PreparedHistoryState
+    from mindroom.history.types import CompactionLifecycle, HistoryScope, PreparedHistoryState
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
@@ -1538,6 +1544,7 @@ def materialize_exact_team_members(
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     reason_prefix: str = "Team request",
     dynamic_tool_continuation: bool = False,
+    supports_native_tool_approval: bool = False,
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact team-member set without silent fallback.
 
@@ -1574,6 +1581,7 @@ def materialize_exact_team_members(
             include_openai_compat_guidance=include_openai_compat_guidance,
             refresh_scheduler=refresh_scheduler,
             dynamic_tool_continuation=dynamic_tool_continuation,
+            supports_native_tool_approval=supports_native_tool_approval,
         )
 
     team_members = materialize_exact_requested_team_members(
@@ -1630,6 +1638,7 @@ def _materialize_team_members(
         unavailable_bases=unavailable_bases,
         refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
         dynamic_tool_continuation=True,
+        supports_native_tool_approval=True,
         reason_prefix=reason_prefix,
     )
 
@@ -1818,6 +1827,128 @@ def build_materialized_team_instance(
         model_name=model_name,
         configured_team_name=configured_team_name,
     )
+
+
+async def continue_paused_team_run(
+    *,
+    member_names: tuple[str, ...],
+    mode: TeamMode,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+    session_id: str,
+    run_id: str,
+    user_id: str,
+    configured_team_name: str,
+    model_name: str,
+    decisions: dict[str, bool],
+    denial_reasons: dict[str, str | None],
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    history_scope: HistoryScope | None = None,
+    tool_trace_collector: list[ToolTraceEntry] | None = None,
+) -> CompletedApprovalRun | PausedAttempt:
+    """Rebuild a team and continue its exact persisted paused run."""
+    members = await asyncio.to_thread(
+        materialize_exact_team_members,
+        list(member_names),
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        session_id=session_id,
+        refresh_scheduler=refresh_scheduler,
+        dynamic_tool_continuation=True,
+        supports_native_tool_approval=True,
+    )
+    stack = ExitStack()
+    scope: ScopeSessionContext | None = None
+    team: Team | None = None
+    try:
+        scope = stack.enter_context(
+            open_bound_scope_session_context(
+                agents=members.agents,
+                session_id=session_id,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+                team_name=configured_team_name,
+                scope=history_scope,
+            ),
+        )
+        if scope is None:
+            msg = "Paused team history is no longer available"
+            raise RuntimeError(msg)
+        team = build_materialized_team_instance(
+            requested_agent_names=list(member_names),
+            agents=members.agents,
+            mode=mode,
+            config=config,
+            runtime_paths=runtime_paths,
+            scope_context=scope,
+            model_name=model_name,
+            configured_team_name=configured_team_name,
+            execution_identity=execution_identity,
+        )
+        session = await team.aget_session(session_id=session_id, user_id=user_id)
+        persisted = None if session is None else session.get_run(run_id)
+        if not isinstance(persisted, TeamRunOutput) or persisted.status != RunStatus.paused:
+            msg = f"Paused team run {run_id!r} is no longer available"
+            raise RuntimeError(msg)
+        requirements = apply_exact_approval_decisions(
+            persisted.requirements or (),
+            decisions=decisions,
+            denial_reasons=denial_reasons,
+        )
+        continued = await cast(
+            "Any",
+            team.acontinue_run(
+                run_response=persisted,
+                requirements=requirements,
+                session_id=session_id,
+                user_id=user_id,
+                metadata=deepcopy(persisted.metadata),
+                stream=False,
+            ),
+        )
+        if not isinstance(continued, TeamRunOutput):
+            msg = "Team continuation returned an unexpected result"
+            raise TypeError(msg)
+        paused = paused_attempt_from_response(
+            continued,
+            fallback_session_id=session_id,
+            fallback_run_id=run_id,
+        )
+        if paused is not None:
+            return paused
+        if continued.status != RunStatus.completed:
+            raise RuntimeError(str(continued.content or "Team continuation did not complete"))
+        if tool_trace_collector is not None:
+            tool_trace_collector.extend(_extract_completed_team_tool_trace(continued))
+        return CompletedApprovalRun(
+            response_text=_format_terminal_team_response(continued, team_display_names=members.display_names),
+            metadata_content=build_ai_run_metadata_content(
+                config=config,
+                model_name=model_name,
+                run_id=continued.run_id,
+                session_id=continued.session_id or session_id,
+                status=continued.status,
+                model=continued.model,
+                model_provider=continued.model_provider,
+                metrics=_aggregate_team_usage_metrics(continued.metrics, continued.member_responses),
+                tool_count=len(_collect_team_tool_executions(continued)),
+            ),
+        )
+    finally:
+        _register_team_notice_storage(
+            scope_context=scope,
+            session_id=session_id,
+            entity_name=configured_team_name,
+        )
+        close_team_runtime_state_dbs(
+            agents=members.agents,
+            team_db=cast("BaseDb | None", team.db) if team is not None else None,
+            shared_scope_storage=scope.storage if scope is not None else None,
+        )
+        stack.close()
 
 
 async def prepare_materialized_team_execution(
@@ -2176,6 +2307,13 @@ async def team_response(  # noqa: C901, PLR0915
                 team_id=run.scope_context.scope.scope_id if run.scope_context is not None else team.id or "",
             )
         ):
+            paused_attempt = paused_attempt_from_response(
+                response,
+                fallback_session_id=ctx.session_id,
+                fallback_run_id=attempt_run_id,
+            )
+            if paused_attempt is not None:
+                return replace(paused_attempt, runtime_model_name=prepared_execution.runtime_model_name)
             original_status = response.status if isinstance(response.status, RunStatus) else RunStatus.error
             partial_text = _extract_interrupted_team_partial_text(response)
             completed_tools, interrupted_tools = _extract_cancelled_team_tool_trace(response)
@@ -2981,6 +3119,16 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 if isinstance(event, TeamRunPausedEvent):
                     if event.team_id and event.team_id != bound_team_id:
                         continue
+                    paused_attempt = paused_attempt_from_event(
+                        event,
+                        fallback_session_id=ctx.session_id,
+                        fallback_run_id=attempt_run_id,
+                    )
+                    if paused_attempt is not None:
+                        yield AttemptResolved(
+                            replace(paused_attempt, runtime_model_name=prepared_execution.runtime_model_name),
+                        )
+                        return
                     yield AttemptResolved(
                         ExcludedAttempt(
                             original_status=RunStatus.paused,
@@ -3197,6 +3345,7 @@ __all__ = [
     "TeamResolution",
     "TeamResolutionMember",
     "build_materialized_team_instance",
+    "continue_paused_team_run",
     "decide_team_formation",
     "format_team_response",
     "is_cancelled_run_output",

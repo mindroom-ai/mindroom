@@ -9,6 +9,7 @@ from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
@@ -191,6 +192,7 @@ def _session_has_prompt_messages(session: Session, prompt_roles: frozenset[str])
         return False
     return any(
         isinstance(run, (RunOutput, TeamRunOutput))
+        and run.status != RunStatus.paused
         and run.messages is not None
         and any(message.role in prompt_roles for message in run.messages)
         for run in session.runs
@@ -201,7 +203,7 @@ def _strip_prompt_messages_from_session(session: Session, prompt_roles: frozense
     if not isinstance(session, (AgentSession, TeamSession)) or not session.runs:
         return
     for run in session.runs:
-        if not isinstance(run, (RunOutput, TeamRunOutput)) or not run.messages:
+        if not isinstance(run, (RunOutput, TeamRunOutput)) or run.status == RunStatus.paused or not run.messages:
             continue
         run.messages = [message for message in run.messages if message.role not in prompt_roles]
 

@@ -133,6 +133,7 @@ class _RecordingResponseRunner:
     visible_response_event_id: str | None = None
     pre_lock_error: Exception | None = None
     deferred_sync_restart_error: asyncio.CancelledError | None = None
+    suspend_source: bool = False
     requests: list[ResponseRequest] = field(default_factory=list)
     team_requests: list[ResponseRequest] = field(default_factory=list)
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
@@ -161,6 +162,7 @@ class _RecordingResponseRunner:
         name: str,
         recovery_proof_ready: Callable[[], bool],
         on_failure: Callable[[], None] | None = None,
+        source_event_ids: tuple[str, ...] = (),  # noqa: ARG002
     ) -> asyncio.Task[None]:
         self.recovery_proof_checks.append(recovery_proof_ready)
         self.failure_callbacks.append(on_failure)
@@ -192,6 +194,10 @@ class _RecordingResponseRunner:
             request.on_interrupted_response_recoverable()
             await request.on_deferred_outcome_handled(self.response_event_id)
             raise self.deferred_sync_restart_error
+        if self.suspend_source:
+            assert request.source_handoff is not None
+            request.source_handoff.set()
+            return None
         return self.response_event_id
 
     async def generate_team_response_helper(
@@ -679,6 +685,7 @@ def _obligation_runner(
             on_room_lifecycle=cast("Any", noop),
             on_redaction=cast("Any", noop),
             on_decryption_failure=cast("Any", noop),
+            on_approval_continuation=AsyncMock(return_value=None),
             source_has_live_owner=harness.gate.has_pending_source_event,
             turn_has_live_claim=harness.turn_store.has_live_turn_claim,
         ),
@@ -2778,6 +2785,40 @@ async def test_edited_question_selection_uses_its_exact_source_as_turn_identity(
     assert len(harness.gateway.sent) == 2
     assert harness.turn_store.is_handled("$original-selection:localhost") is True
     assert harness.turn_store.is_handled("$replacement-selection:localhost") is True
+
+
+@pytest.mark.asyncio
+async def test_numeric_interactive_selection_defers_to_tool_approval_continuation(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A numeric answer stays journal-owned while its response waits for approval."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.suspend_source = True
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    harness.controller.deps.interactive_questions.claim_interactive_text = AsyncMock(
+        return_value=selection,
+    )
+    event = _text_event("1", event_id="$selection:localhost", thread_id=selection.thread_id)
+
+    outcome = await harness.controller.handle_text_event(
+        _room_with_members(config, "general"),
+        event,
+    )
+
+    assert outcome is TurnDispatchOutcome.DEFERRED
+    assert len(harness.runner.requests) == 1
+    assert harness.runner.requests[0].source_handoff is not None
+    assert harness.runner.requests[0].source_handoff.is_set()
+    assert harness.turn_store.is_handled(event.event_id) is False
+    assert harness.ignored_dispatch_sources == []
 
 
 @pytest.mark.asyncio

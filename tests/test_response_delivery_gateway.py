@@ -216,13 +216,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.event_id == "$sent"
         assert list(outbox.rows) == [("$cause", "final")]
         assert outbox.rows["$cause", "final"].acknowledged_event_id == "$sent"
-        (projection,) = outbox.acknowledged_projections[0]
-        assert (projection.event_id, projection.sender, projection.origin_server_ts) == (
-            "$sent",
-            _AGENT_USER_ID,
-            1_000,
-        )
-        gateway.deps.runtime.client.room_get_event.assert_awaited_once_with(_ROOM_ID, "$sent")
+        assert outbox.acknowledged_projections == [()]
+        gateway.deps.runtime.client.room_get_event.assert_not_awaited()
 
     async def test_interactive_prompt_is_frozen_in_the_terminal_matrix_payload(self, tmp_path: Path) -> None:
         """Projection ownership requires prompt metadata to cross Matrix with the answer."""
@@ -292,13 +287,16 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         gateway.deps.runtime.client.room_get_event.return_value = nio.RoomGetEventError("not found")
         gateway.deps.runtime.client.room_get_event.side_effect = None
-        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
+        response = """```interactive
+{"question":"Pick","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
+```"""
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "Pick"})
 
         with (
             patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)),
             pytest.raises(RuntimeError, match="could not read delivered event"),
         ):
-            await gateway.deliver_final(self._final_request("answer"))
+            await gateway.deliver_final(self._final_request(response))
 
         stored = outbox.rows["$cause", "final"]
         assert stored.attempted
@@ -313,10 +311,13 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         response.event.source["unsigned"] = {"redacted_because": {}}
         gateway.deps.runtime.client.room_get_event.return_value = response
         gateway.deps.runtime.client.room_get_event.side_effect = None
-        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
+        interactive_text = """```interactive
+{"question":"Pick","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
+```"""
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "Pick"})
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
-            outcome = await gateway.deliver_final(self._final_request("answer"))
+            outcome = await gateway.deliver_final(self._final_request(interactive_text))
 
         assert outcome.event_id == "$sent"
         assert outbox.acknowledged_projections == [()]
@@ -493,6 +494,39 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         # this row byte for byte, so an outer body still reading "Thinking..."
         # would be permanent for those clients, not a one-attempt glitch.
         assert stored["body"] == "* the answer"
+
+    async def test_deferred_final_edit_freezes_semantic_interactive_outcome(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Approval recovery must restore plain text and interactive registration facts."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        edited = DeliveredMatrixEvent("$placeholder", {"msgtype": "m.text", "body": "Choose"})
+        interactive_text = (
+            'Choose one.\n```interactive\n{"question":"Pick",'
+            '"options":[{"emoji":"✅","label":"Yes","value":"yes"}]}\n```'
+        )
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=edited)):
+            outcome = await gateway.deliver_final(
+                replace(
+                    self._final_request(interactive_text),
+                    existing_event_id="$placeholder",
+                    defer_source_handoff=True,
+                ),
+            )
+
+        frozen = outbox.rows["$cause", "final"].payload
+        new_content = frozen["m.new_content"]
+        prompt = new_content["io.mindroom.interactive"]
+        assert prompt["question_text"] == "Pick"
+        assert prompt["options"] == {"1": "yes", "✅": "yes"}
+        semantic = new_content["io.mindroom.final_delivery"]
+        assert semantic["body"] == outcome.final_visible_body
+        assert semantic["interactive"]["question_text"] == "Pick"
+        assert semantic["interactive"]["option_map"] == {"1": "yes", "✅": "yes"}
 
     async def test_a_regenerated_answer_cannot_go_out_under_a_frozen_edit(
         self,
@@ -1392,6 +1426,39 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
         record = json.loads(terminal_turn.record_json)
         assert record["response_event_id"] == "$sent"
         assert record["completed"] is True
+
+    async def test_a_final_edit_acknowledgement_binds_the_edited_response(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The replacement event acknowledges delivery, while the edited event remains the response owner."""
+        outbox = FakeOutbox()
+        pending = TurnRecord.create(["$cause"], completed=False, response_owner="agent")
+        gateway = _gateway(
+            tmp_path,
+            outbox,
+            terminal_turn_for=lambda _turn_id, event_id: replace(
+                pending,
+                response_event_id=event_id,
+                completed=True,
+            ),
+        )
+        gateway.deps.response_hooks._apply_before_response = (
+            TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
+        )
+        delivered = DeliveredMatrixEvent("$replacement", {"msgtype": "m.text", "body": "answer"})
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
+            outcome = await gateway.deliver_final(
+                replace(self._final_request("answer"), existing_event_id="$waiting"),
+            )
+
+        assert outcome.event_id == "$waiting"
+        turn_id, terminal_turn = outbox.acknowledged_terminal_turns[0]
+        assert turn_id == "$cause"
+        assert terminal_turn is not None
+        record = json.loads(terminal_turn.record_json)
+        assert record["response_event_id"] == "$waiting"
 
     async def test_a_placeholder_acknowledgement_carries_no_record(
         self,

@@ -26,6 +26,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
+    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -155,7 +156,7 @@ _INTERACTIVE_SELECTION_METADATA_KIND = "interactive_selection"
 class _InteractiveSelectionDispatch:
     """Deferred selection work carried through receipt-ordered coalescing."""
 
-    response_factory: Callable[[], Awaitable[None]]
+    response_factory: Callable[[], Awaitable[bool]]
     response_target: MessageTarget
     source_event_id: str
     user_id: str
@@ -746,13 +747,13 @@ class TurnController:
                 # response may wait behind this conversation's active turn; the
                 # sender's lane slot must settle now, not at response completion.
                 await reservation_owner.release()
-                await self._handle_interactive_selection(
+                source_handed_off = await self._handle_interactive_selection(
                     room,
                     selection=selection,
                     user_id=envelope.requester_id,
                     source_event_id=prepared_event.event_id,
                 )
-                return _IngressAdmissionOutcome.CONSUMED
+                return _IngressAdmissionOutcome.DEFERRED if source_handed_off else _IngressAdmissionOutcome.CONSUMED
         if self.deps.ingress.command_control_input(prepared_event, source_kind=envelope.source_kind) is not None:
             if (turn_claim := reservation_owner.pending_turn_claim) is not None:
                 self.deps.turn_store.release_pending_turn_claim(turn_claim)
@@ -1175,7 +1176,7 @@ class TurnController:
 
     async def _start_interactive_selection(
         self,
-        response_factory: Callable[[], Awaitable[None]],
+        response_factory: Callable[[], Awaitable[bool]],
         *,
         response_target: MessageTarget,
         source_event_id: str,
@@ -1202,11 +1203,12 @@ class TurnController:
                     await reservation.wait_until_acquired()
                     response = response_factory()
                     response_claim_transferred = True
-                    await response
+                    source_handed_off = await response
                 # Terminal delivery normally settles the discovery alias in its
                 # outbox transaction. This idempotent fallback also handles an
                 # already-terminal replay that has no new delivery to enqueue.
-                await self.deps.settle_dispatch_sources((source_event_id,))
+                if not source_handed_off:
+                    await self.deps.settle_dispatch_sources((source_event_id,))
             except BaseException:
                 if not response_claim_transferred:
                     self.deps.retry_dispatch_sources((source_event_id,))
@@ -1331,11 +1333,11 @@ class TurnController:
         user_id: str,
         source_event_id: str,
         response_target: MessageTarget | None = None,
-    ) -> None:
+    ) -> bool:
         """Own claim settlement around one validated interactive selection."""
         target = response_target or self._interactive_selection_target(room.room_id, selection)
         try:
-            await self._execute_interactive_selection(
+            return await self._execute_interactive_selection(
                 room,
                 selection=selection,
                 user_id=user_id,
@@ -1353,7 +1355,7 @@ class TurnController:
             if source_is_terminal:
                 if isinstance(error, asyncio.CancelledError):
                     raise
-                return
+                return False
             raise
 
     async def _execute_interactive_selection(
@@ -1364,10 +1366,10 @@ class TurnController:
         user_id: str,
         source_event_id: str,
         response_target: MessageTarget,
-    ) -> None:
+    ) -> bool:
         """Execute one selection after its caller transfers claim ownership."""
         if await self._interactive_selection_is_durably_terminal(source_event_id):
-            return
+            return False
         reconcile_visible_response = self.deps.turn_store.has_pending_response_intent(
             (source_event_id,),
         )
@@ -1394,10 +1396,10 @@ class TurnController:
         pending_turn = await self.deps.turn_store.record_pending_turn(selection_handled_turn)
         if pending_turn is None:
             await self._require_durable_interactive_selection(source_event_id)
-            return
+            return False
         if pending_turn.completed or pending_turn.redacted_source_event_ids:
             await self._require_durable_interactive_selection(source_event_id)
-            return
+            return False
         selection_handled_turn = pending_turn
         ack_event_id = (
             await self.deps.visible_responses.recovered_response_event_id(
@@ -1461,7 +1463,7 @@ class TurnController:
                     canonicalize_turn_record(selection_handled_turn, response_event_id=response_event_id),
                 )
                 await self._require_durable_interactive_selection(source_event_id)
-                return
+                return False
             raise self._interactive_selection_retry_error(source_event_id) from error
         selection_attachment_ids = tuple(selection_payload.attachment_ids or ())
         selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(selection_handled_turn)
@@ -1479,6 +1481,7 @@ class TurnController:
             handled_turn=selection_handled_turn,
         )
 
+        source_handoff = asyncio.Event()
         response_event_id = await self.deps.response_runner.generate_response(
             ResponseRequest(
                 prompt=selection_payload.prompt,
@@ -1498,13 +1501,17 @@ class TurnController:
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 on_deferred_outcome_handled=record_deferred_outcome,
                 on_user_stop_handled=record_user_stop,
+                source_handoff=source_handoff,
             ),
         )
+        if source_handoff.is_set():
+            return True
         if response_event_id is not None:
             await self.deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(selection_handled_turn, response_event_id=response_event_id),
             )
         await self._require_durable_interactive_selection(source_event_id)
+        return False
 
     async def _interactive_selection_is_durably_terminal(
         self,
@@ -1967,6 +1974,7 @@ class TurnController:
         event_info = EventInfo.from_event(event.source)
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
         is_nonterminal_stream = isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in {
+            STREAM_STATUS_APPROVAL_PENDING,
             STREAM_STATUS_PENDING,
             STREAM_STATUS_STREAMING,
         }

@@ -38,12 +38,17 @@ from mindroom.constants import (
 )
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.logging_config import get_logger
+from mindroom.streaming import StreamingLifecycleSuspensionError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from contextlib import AbstractContextManager
 
     from agno.models.response import ToolExecution
+    from agno.run.agent import RunOutput, RunPausedEvent
+    from agno.run.requirement import RunRequirement
+    from agno.run.team import RunPausedEvent as TeamRunPausedEvent
+    from agno.run.team import TeamRunOutput
 
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.history.runtime import ScopeSessionContext
@@ -57,11 +62,14 @@ __all__ = [
     "AttemptResolved",
     "BlockingAttemptResolution",
     "BlockingTurnAdapter",
+    "CompletedApprovalRun",
     "CompletedAttempt",
     "DynamicContinuationRunState",
     "EmptyRunDiscard",
     "ExcludedAttempt",
     "HandledAttempt",
+    "PausedAttempt",
+    "ResponsePausedForApproval",
     "ResponseTurnContext",
     "StandaloneReplaySnapshot",
     "StreamAttemptResolution",
@@ -69,10 +77,61 @@ __all__ = [
     "TurnPartialSnapshot",
     "TurnRunState",
     "TurnSinks",
+    "apply_exact_approval_decisions",
     "build_matrix_run_metadata",
+    "paused_attempt_from_event",
+    "paused_attempt_from_response",
     "run_blocking_response_turn",
     "stream_response_turn",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedApprovalRun:
+    """One completed persisted run plus its normal Matrix response metadata."""
+
+    response_text: str
+    metadata_content: dict[str, Any]
+
+
+def _has_unsupported_approval_requirement(requirement: RunRequirement) -> bool:
+    """Return whether MindRoom cannot safely resolve this paused requirement."""
+    return (
+        requirement.needs_user_input
+        or requirement.needs_user_feedback
+        or requirement.needs_external_execution
+        or (not requirement.is_resolved() and not requirement.needs_confirmation)
+    )
+
+
+def apply_exact_approval_decisions(
+    requirements: Sequence[RunRequirement],
+    *,
+    decisions: Mapping[str, bool],
+    denial_reasons: Mapping[str, str | None],
+) -> list[RunRequirement]:
+    """Apply decisions only when they exactly identify one persisted call each."""
+    if any(_has_unsupported_approval_requirement(requirement) for requirement in requirements):
+        msg = "Paused run contains an unsupported non-confirmation requirement"
+        raise RuntimeError(msg)
+    pending = [requirement for requirement in requirements if requirement.needs_confirmation]
+    call_ids: list[str] = []
+    for requirement in pending:
+        tool = requirement.tool_execution
+        if tool is None or not tool.tool_call_id:
+            msg = "Paused tools no longer match the approval continuation"
+            raise RuntimeError(msg)
+        call_ids.append(tool.tool_call_id)
+    decision_ids = set(decisions)
+    if len(call_ids) != len(set(call_ids)) or set(call_ids) != decision_ids or set(denial_reasons) != decision_ids:
+        msg = "Paused tools no longer match the approval continuation"
+        raise RuntimeError(msg)
+    for requirement, tool_call_id in zip(pending, call_ids, strict=True):
+        if decisions[tool_call_id]:
+            requirement.confirm()
+        else:
+            requirement.reject(denial_reasons[tool_call_id] or "Not approved by requester")
+    return pending
 
 
 def _normalized_string_list(values: object) -> list[str]:
@@ -294,12 +353,117 @@ class ExcludedAttempt:
 
 
 @dataclass(frozen=True)
+class PausedAttempt:
+    """One Agno run durably paused before approval-gated tool execution."""
+
+    session_id: str
+    run_id: str
+    tools: tuple[ToolExecution, ...]
+    requirements: tuple[RunRequirement, ...] = ()
+    runtime_model_name: str | None = None
+
+
+class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N818
+    """Leave the live response turn while its persisted Agno run awaits approval."""
+
+    def __init__(self, paused: PausedAttempt) -> None:
+        super().__init__(f"Run {paused.run_id} is waiting for tool approval")
+        self.paused = paused
+
+
+def paused_attempt_from_response(
+    response: RunOutput | TeamRunOutput,
+    *,
+    fallback_session_id: str | None,
+    fallback_run_id: str | None,
+) -> PausedAttempt | None:
+    """Extract confirmation requirements from one persisted paused Agno run."""
+    if response.status != RunStatus.paused:
+        return None
+    return _paused_attempt(
+        tools=response.tools or (),
+        requirements=response.requirements or (),
+        session_id=response.session_id or fallback_session_id,
+        run_id=response.run_id or fallback_run_id,
+    )
+
+
+def paused_attempt_from_event(
+    event: RunPausedEvent | TeamRunPausedEvent,
+    *,
+    fallback_session_id: str | None,
+    fallback_run_id: str | None,
+) -> PausedAttempt | None:
+    """Extract confirmation requirements from one streamed Agno pause event."""
+    return _paused_attempt(
+        tools=event.tools or (),
+        requirements=event.requirements or (),
+        session_id=event.session_id or fallback_session_id,
+        run_id=event.run_id or fallback_run_id,
+    )
+
+
+def _paused_attempt(
+    *,
+    tools: Sequence[ToolExecution],
+    requirements: Sequence[RunRequirement],
+    session_id: str | None,
+    run_id: str | None,
+) -> PausedAttempt | None:
+    """Build one restartable pause from Agno's common pause fields."""
+    if any(_has_unsupported_approval_requirement(requirement) for requirement in requirements):
+        msg = "Paused run contains an unsupported non-confirmation requirement"
+        raise RuntimeError(msg)
+    pending_requirement_candidates = tuple(
+        requirement for requirement in requirements if requirement.needs_confirmation
+    )
+    if any(
+        requirement.tool_execution is None or not requirement.tool_execution.tool_call_id
+        for requirement in pending_requirement_candidates
+    ):
+        msg = "Paused approval requirement is missing its exact tool-call ID"
+        raise RuntimeError(msg)
+    requirement_call_ids = [
+        requirement.tool_execution.tool_call_id
+        for requirement in pending_requirement_candidates
+        if requirement.tool_execution is not None
+    ]
+    if len(requirement_call_ids) != len(set(requirement_call_ids)):
+        msg = "Paused approval requirements contain duplicate tool-call IDs"
+        raise RuntimeError(msg)
+    pending_tool_candidates = tuple(tool for tool in tools if tool.requires_confirmation and tool.confirmed is None)
+    if any(not tool.tool_call_id for tool in pending_tool_candidates):
+        msg = "Paused approval tool is missing its exact tool-call ID"
+        raise RuntimeError(msg)
+    tool_call_ids = [tool.tool_call_id for tool in pending_tool_candidates]
+    if len(tool_call_ids) != len(set(tool_call_ids)):
+        msg = "Paused approval tools contain duplicate tool-call IDs"
+        raise RuntimeError(msg)
+    pending_requirements = pending_requirement_candidates
+    pending_tools = list(pending_tool_candidates)
+    known_call_ids = {tool.tool_call_id for tool in pending_tools}
+    for requirement in pending_requirements:
+        tool = requirement.tool_execution
+        if tool is not None and tool.tool_call_id not in known_call_ids:
+            pending_tools.append(tool)
+            known_call_ids.add(tool.tool_call_id)
+    if not pending_tools or session_id is None or run_id is None:
+        return None
+    return PausedAttempt(
+        session_id=session_id,
+        run_id=run_id,
+        tools=tuple(pending_tools),
+        requirements=pending_requirements,
+    )
+
+
+@dataclass(frozen=True)
 class HandledAttempt:
     """One streaming error whose user-facing text was already emitted."""
 
 
-BlockingAttemptResolution = CompletedAttempt | ExcludedAttempt
-StreamAttemptResolution = CompletedAttempt | ExcludedAttempt | HandledAttempt
+BlockingAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt
+StreamAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt | HandledAttempt
 
 
 @dataclass(frozen=True)
@@ -607,6 +771,8 @@ async def run_blocking_response_turn(
             use_recorder_state=True,
         )
         raise
+    except ResponsePausedForApproval:
+        raise
     except Exception as e:
         _record_turn_excluded_fallback(
             ctx,
@@ -639,6 +805,10 @@ def _settle_blocking_attempt(
     # The blocking envelope publishes run metadata before recording, and only
     # for attempts that end the turn: a discarded empty run's or a superseded
     # continuation attempt's payload must not ride out on a later resolution.
+    if isinstance(resolution, PausedAttempt):
+        if sinks.turn_recorder is not None:
+            sinks.turn_recorder.mark_suspended()
+        raise ResponsePausedForApproval(resolution)
     if isinstance(resolution, ExcludedAttempt):
         _publish_run_metadata(sinks, resolution.metadata_content)
         run_metadata = _interrupted_run_metadata(ctx, sinks, run)
@@ -815,6 +985,10 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         yield item
                     if resolution is None:
                         _raise_missing_stream_resolution(ctx.entity_label)
+                    if isinstance(resolution, PausedAttempt):
+                        if sinks.turn_recorder is not None:
+                            sinks.turn_recorder.mark_suspended()
+                        raise ResponsePausedForApproval(resolution)
                     if isinstance(resolution, HandledAttempt):
                         _record_turn_excluded_fallback(
                             ctx,
@@ -888,6 +1062,8 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
             original_status=RunStatus.cancelled,
             use_recorder_state=False,
         )
+        raise
+    except ResponsePausedForApproval:
         raise
     except Exception as e:
         _record_turn_excluded_fallback(
