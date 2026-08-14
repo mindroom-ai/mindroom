@@ -326,6 +326,46 @@ class CallManager:
         self._observed_rooms.update((room.room_id, room) for room in rooms)
         await asyncio.gather(*(self._reconcile(room) for room in rooms))
 
+    async def reconcile_reply_authorization(self) -> None:
+        """End tracked calls whose requester no longer passes reply authorization."""
+        if self._shutting_down:
+            return
+        room_ids = set(self._logical_calls) | set(self._sessions)
+        await asyncio.gather(*(self._reconcile_room_reply_authorization(room_id) for room_id in room_ids))
+
+    async def _reconcile_room_reply_authorization(self, room_id: str) -> None:
+        """Recheck one tracked call against the current shared reply policy."""
+        lock = self._locks.setdefault(room_id, asyncio.Lock())
+        async with lock:
+            logical_call = self._logical_calls.get(room_id)
+            session = self._sessions.get(room_id)
+            requester_ids = {
+                requester_id
+                for requester_id in (
+                    logical_call.requester_id if logical_call is not None else None,
+                    session.requester_id if session is not None else None,
+                )
+                if requester_id is not None
+            }
+            if requester_ids and all(
+                self._is_authorized_call_member(requester_id, room_id) for requester_id in requester_ids
+            ):
+                return
+            self._clear_logical_call(room_id)
+            self._pending_keys.pop(room_id, None)
+            expiry = self._expiry_handles.pop(room_id, None)
+            if expiry is not None:
+                expiry.cancel()
+            session = self._sessions.pop(room_id, None)
+            if session is not None:
+                await self._stop_session(session)
+            logger.info(
+                "call_reply_authorization_revoked",
+                room_id=room_id,
+                agent=self._agent_name,
+                requester_ids=sorted(requester_ids),
+            )
+
     async def shutdown(self) -> None:
         """Leave every active call."""
         self._shutting_down = True

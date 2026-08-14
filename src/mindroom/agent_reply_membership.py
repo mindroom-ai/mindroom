@@ -153,20 +153,16 @@ class AgentReplyMembershipIndex:
         if self._desired_signature != signature:
             return
         async with self._refresh_lock:
-            while self._desired_signature == signature:
-                expected_epoch = self._epoch
-                candidate = await _build_authoritative_snapshot(
-                    config,
-                    runtime_paths,
-                    client,
-                    signature=signature,
-                )
-                if self._desired_signature != signature:
-                    return
-                if self._epoch != expected_epoch:
-                    continue
-                self._snapshot = candidate
+            expected_epoch = self._epoch
+            candidate = await _build_authoritative_snapshot(
+                config,
+                runtime_paths,
+                client,
+                signature=signature,
+            )
+            if self._desired_signature != signature or self._epoch != expected_epoch:
                 return
+            self._snapshot = candidate
 
     def apply_member_event(
         self,
@@ -175,16 +171,24 @@ class AgentReplyMembershipIndex:
         event: nio.RoomMemberEvent,
         *,
         control_user_id: str,
-    ) -> None:
+    ) -> bool:
         """Apply one live membership transition to every matching ready grant room."""
+        signature = _agent_reply_membership_policy_signature(config.authorization)
+        if self._desired_signature != signature:
+            return False
+
+        # Fence any in-flight authoritative query before inspecting the currently
+        # published room IDs. A newly configured room has no ID in the fail-closed
+        # snapshot yet, but a live transition for it must still prevent an older
+        # roster captured concurrently from being published.
+        self._epoch += 1
         snapshot = self._snapshot
-        if snapshot.policy_signature != _agent_reply_membership_policy_signature(config.authorization):
-            return
+        if snapshot.policy_signature != signature:
+            return False
 
         matching_room_keys = tuple(room.room_key for room in snapshot.rooms if room.room_id == room_id)
         if not matching_room_keys:
-            return
-        self._epoch += 1
+            return False
 
         updated_rooms_tuple = tuple(
             _apply_transition_to_room(
@@ -203,7 +207,7 @@ class AgentReplyMembershipIndex:
         ]
 
         if not changed_room_keys:
-            return
+            return False
         self._snapshot = replace(
             snapshot,
             rooms=updated_rooms_tuple,
@@ -218,6 +222,7 @@ class AgentReplyMembershipIndex:
                 transition=("grant" if event.membership == "join" else "revoke"),
                 authorization_source="joined_room",
             )
+        return True
 
 
 def _apply_transition_to_room(

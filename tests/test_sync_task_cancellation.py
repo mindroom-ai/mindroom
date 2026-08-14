@@ -32,7 +32,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
-from mindroom.constants import RuntimePaths
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.matrix.health import (
     SyncCacheWriteProgress,
     get_matrix_sync_cache_write_progress,
@@ -124,6 +124,7 @@ class _FakeBot:
         self.first_call_cancel_args: tuple[object, ...] = ()
         self.prepare_for_sync_shutdown_calls = 0
         self.prepare_for_sync_shutdown_cancel_messages: list[str | None] = []
+        self.membership_invalidations: list[str] = []
         self.runtime_paths = _fake_runtime_paths(**env_overrides)
 
     def mark_sync_loop_started(self) -> None:
@@ -131,6 +132,10 @@ class _FakeBot:
 
     def reset_watchdog_clock(self) -> None:
         self._last_sync_monotonic = None
+
+    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
+        """Record fail-closed router membership invalidations."""
+        self.membership_invalidations.append(reason)
 
     def seconds_since_last_sync_activity(self) -> float | None:
         if self._last_sync_monotonic is None:
@@ -902,6 +907,7 @@ async def test_sync_forever_with_restart_preserves_runtime_before_retry_backoff(
 ) -> None:
     """Receive-loop restart must not tear down response runtime before backoff."""
     bot = _FakeBot()
+    bot.agent_name = ROUTER_AGENT_NAME
     call_order: list[str] = []
     call_count = 0
 
@@ -925,6 +931,12 @@ async def test_sync_forever_with_restart_preserves_runtime_before_retry_backoff(
         call_order.append("retry_delay")
         return 0.0
 
+    def invalidate_agent_reply_memberships(*, reason: str) -> None:
+        bot.membership_invalidations.append(reason)
+        call_order.append("invalidate")
+
+    bot.invalidate_agent_reply_memberships = invalidate_agent_reply_memberships
+
     monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", fake_retry_delay)
     monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 5.0)
     monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_STARTUP_GRACE_SECONDS", 5.0)
@@ -932,7 +944,8 @@ async def test_sync_forever_with_restart_preserves_runtime_before_retry_backoff(
 
     await sync_forever_with_restart(bot, max_retries=2)
 
-    assert call_order == ["retry_delay", "prepare"]
+    assert call_order == ["invalidate", "retry_delay", "prepare"]
+    assert bot.membership_invalidations == ["sync_failure"]
 
 
 @pytest.mark.asyncio
@@ -2373,12 +2386,14 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
     router_bot.running = True
     router_bot.stop = AsyncMock()
+    router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
 
     general_bot = AsyncMock()
     general_bot.agent_name = "general"
     general_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
     general_bot.running = True
     general_bot.stop = AsyncMock()
+    general_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
 
     orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
 
@@ -2439,12 +2454,14 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
     router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
     router_bot.running = True
     router_bot.stop = AsyncMock()
+    router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
 
     general_bot = AsyncMock()
     general_bot.agent_name = "general"
     general_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
     general_bot.running = True
     general_bot.stop = AsyncMock()
+    general_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
 
     orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
 
@@ -2732,8 +2749,10 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
         mock_existing_bot = AsyncMock()
         mock_existing_bot.config = old_config
         mock_existing_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
+        mock_existing_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
         mock_router_bot = AsyncMock()
         mock_router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
+        mock_router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
         orchestrator.agent_bots = {"general": mock_existing_bot, "router": mock_router_bot}
 
         async def existing_sync_loop() -> None:

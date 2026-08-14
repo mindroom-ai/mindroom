@@ -1296,6 +1296,26 @@ class AgentBot:
         self._reply_membership_refresh_attempt = 0
         self._reply_membership_refresh_retry_at = 0.0
 
+    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
+        """Expose fail-closed router membership invalidation to the sync supervisor."""
+        self._invalidate_agent_reply_memberships(reason=reason)
+
+    async def reconcile_reply_authorized_calls(self) -> None:
+        """Recheck this bot's active calls against the shared reply policy."""
+        call_manager = self._call_manager
+        if call_manager is not None:
+            await call_manager.reconcile_reply_authorization()
+
+    def schedule_reply_authorized_call_reconciliation(self) -> None:
+        """Schedule this bot's active-call authorization reconciliation."""
+        if self._call_manager is None:
+            return
+        create_background_task(
+            self.reconcile_reply_authorized_calls(),
+            name=f"matrix_rtc_reply_authorization_{self.agent_name}",
+            owner=self._runtime_view,
+        )
+
     async def _refresh_agent_reply_memberships_if_needed(self) -> None:
         """Rebuild router-owned room grants after a receive-generation boundary."""
         if self.agent_name != ROUTER_AGENT_NAME:
@@ -2545,12 +2565,19 @@ class AgentBot:
         """Update reply grants from one durably admitted live Matrix transition."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
-        self._runtime_view.agent_reply_memberships.apply_member_event(
+        changed = self._runtime_view.agent_reply_memberships.apply_member_event(
             self.config,
             room_id,
             event,
             control_user_id=self.agent_user.user_id,
         )
+        if not changed:
+            return
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            await self.reconcile_reply_authorized_calls()
+        else:
+            await orchestrator.reconcile_reply_authorized_calls()
 
     async def _emit_room_member_joined_sync_state_hooks(
         self,

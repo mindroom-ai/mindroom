@@ -83,6 +83,10 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Rebuild room-backed reply grants from the router client."""
         ...
 
+    def reconcile_reply_authorized_calls(self) -> Awaitable[None]:
+        """End active calls whose requester no longer has reply access."""
+        ...
+
     def send_approval_notice(
         self,
         *,

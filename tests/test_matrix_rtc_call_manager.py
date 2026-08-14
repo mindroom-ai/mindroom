@@ -1122,6 +1122,65 @@ async def test_manager_accepts_call_member_authorized_by_grant_room(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_path: Path) -> None:
+    """A grant-room departure must end an active call without another call-room event."""
+    grant_room_id = "!grant:example.org"
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    config.agents["helper"].rooms = [ROOM_ID, "grant"]
+    config.authorization = AuthorizationConfig(
+        global_users=["@alice:example.org"],
+        agent_reply_permissions={
+            "helper": AgentReplyPermission(joined_rooms=["grant"]),
+        },
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
+    state.save(runtime_paths=runtime_paths)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@alice:example.org", None, None)],
+        room_id=grant_room_id,
+    )
+    memberships = AgentReplyMembershipIndex()
+    await memberships.refresh(config, runtime_paths, client)
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        agent_reply_memberships=memberships,
+    )
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.connected_grant is not None
+
+    memberships.apply_member_event(
+        config,
+        grant_room_id,
+        nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": "$grant-leave",
+                "sender": "@alice:example.org",
+                "state_key": "@alice:example.org",
+                "origin_server_ts": 1,
+                "content": {"membership": "leave"},
+                "unsigned": {"prev_content": {"membership": "join"}},
+            },
+        ),
+        control_user_id=BOT_USER,
+    )
+    await manager.reconcile_reply_authorization()
+
+    assert bridge.closed
+    assert not manager._sessions
+    assert not manager._logical_calls
+
+
+@pytest.mark.asyncio
 async def test_manager_uses_reloaded_reply_policy(tmp_path: Path) -> None:
     """Authorization-only reloads must replace the call manager's live config."""
     client = _client()

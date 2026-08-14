@@ -341,7 +341,7 @@ async def test_invalidation_revokes_ready_members_until_refresh(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_invalidation_during_refresh_prevents_stale_publication(tmp_path: Path) -> None:
-    """A late pre-reconnect snapshot must retry instead of restoring revoked grants."""
+    """A late pre-reconnect snapshot must not restore revoked grants."""
     room_id = "!project:example.com"
     config, runtime_paths = _runtime_config(tmp_path, joined_rooms=["project"])
     _persist_room(runtime_paths, "project", room_id)
@@ -367,7 +367,46 @@ async def test_invalidation_during_refresh_prevents_stale_publication(tmp_path: 
     release_first_query.set()
     await refresh_task
 
-    assert client.joined_members.await_count == 2
+    assert client.joined_members.await_count == 1
+    assert index.needs_refresh(config.authorization)
+    assert not index.is_allowed("@alice:example.com", ["project"], config.authorization)
+
+
+@pytest.mark.asyncio
+async def test_live_transition_fences_refresh_for_newly_resolved_room(tmp_path: Path) -> None:
+    """A transition during first resolution must fence the in-flight membership roster."""
+    room_id = "!project:example.com"
+    empty_config, runtime_paths = _runtime_config(tmp_path, joined_rooms=[])
+    config, _ = _runtime_config(tmp_path, joined_rooms=["project"])
+    _persist_room(runtime_paths, "project", room_id)
+    query_started = asyncio.Event()
+    release_query = asyncio.Event()
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        query_started.set()
+        await release_query.wait()
+        return _joined_members(room_id, "@alice:example.com")
+
+    client = AsyncMock()
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.side_effect = joined_members
+    index = AgentReplyMembershipIndex()
+    index.invalidate(empty_config, reason="startup")
+    index.invalidate(config, reason="config_reload")
+    refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
+    await query_started.wait()
+
+    index.apply_member_event(
+        config,
+        room_id,
+        _member_event("@alice:example.com", "leave"),
+        control_user_id="@mindroom_router:example.com",
+    )
+    release_query.set()
+    await refresh_task
+
+    assert client.joined_members.await_count == 1
+    assert index.needs_refresh(config.authorization)
     assert not index.is_allowed("@alice:example.com", ["project"], config.authorization)
 
 

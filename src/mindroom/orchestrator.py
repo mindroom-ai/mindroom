@@ -958,6 +958,7 @@ class _MultiAgentOrchestrator:
         current_config: Config,
         new_config: Config,
         changed_server_ids: set[str],
+        invalidate_reply_memberships: bool,
     ) -> set[str]:
         """Stage and commit plugin changes without interleaving live reloads."""
         prepared_plugin_roots, prepared_plugin_root_snapshots = self.plugin_watch.capture(new_config)
@@ -972,7 +973,8 @@ class _MultiAgentOrchestrator:
             changed_server_ids,
         )
         self.config = new_config
-        self.agent_reply_memberships.invalidate(new_config, reason="config_reload")
+        if invalidate_reply_memberships:
+            self.invalidate_agent_reply_memberships(reason="config_reload")
         new_hook_registry = apply_prepared_plugin_reload(
             prepared_plugin_reload,
             cancel_existing_tasks=True,
@@ -1267,15 +1269,22 @@ class _MultiAgentOrchestrator:
         """Synchronously revoke every room-backed reply grant."""
         if self.config is not None:
             self.agent_reply_memberships.invalidate(self.config, reason=reason)
+            for bot in self.agent_bots.values():
+                bot.schedule_reply_authorized_call_reconciliation()
+
+    async def reconcile_reply_authorized_calls(self) -> None:
+        """Recheck every active MatrixRTC call against current reply access."""
+        await asyncio.gather(*(bot.reconcile_reply_authorized_calls() for bot in self.agent_bots.values()))
 
     async def refresh_agent_reply_memberships(self) -> None:
         """Refresh room-backed reply grants through the router's Matrix client."""
         config = self._require_config()
         router_bot = self._router_bot()
         if router_bot is None or router_bot.client is None:
-            self.agent_reply_memberships.invalidate(config, reason="router_unavailable")
+            self.invalidate_agent_reply_memberships(reason="router_unavailable")
             return
         await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_bot.client)
+        await self.reconcile_reply_authorized_calls()
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
@@ -1655,6 +1664,7 @@ class _MultiAgentOrchestrator:
                     current_config=current_config,
                     new_config=new_config,
                     changed_server_ids=plan.changed_mcp_servers,
+                    invalidate_reply_memberships=not plan.only_support_service_changes,
                 )
             else:
                 pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
@@ -1664,7 +1674,8 @@ class _MultiAgentOrchestrator:
                 )
                 # Only apply the new config after validation and account checks succeed.
                 self.config = new_config
-                self.agent_reply_memberships.invalidate(new_config, reason="config_reload")
+                if not plan.only_support_service_changes:
+                    self.invalidate_agent_reply_memberships(reason="config_reload")
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
                 clear_worker_validation_snapshot_cache()

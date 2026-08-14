@@ -660,6 +660,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
         outcome = await _run_sync_iteration(bot, attempt=retry_count + 1)
         if outcome.restart_reason_category is None or not bot.running:
             break
+        bot.invalidate_agent_reply_memberships(reason=outcome.restart_reason_category)
         retry_count += 1
         will_retry = max_retries < 0 or retry_count < max_retries
         resulting_action: RuntimeLifecycleAction = "restart_receive_loop" if will_retry else "preserve_response_runtime"
