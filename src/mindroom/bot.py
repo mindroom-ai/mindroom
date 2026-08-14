@@ -88,7 +88,7 @@ from mindroom.tool_system.worker_routing import tool_execution_identity
 
 from . import constants
 from .agents import create_agent, show_tool_calls_for_agent
-from .authorization import is_authorized_sender
+from .authorization import is_sender_allowed_for_agent_reply_in_room
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import CoalescingGate
 from .coalescing_batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
@@ -146,6 +146,7 @@ from .matrix.room_member_joins import (
 from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
+from .response_admission import admitted_response_decision
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
 from .scheduling import (
@@ -883,6 +884,7 @@ class AgentBot:
                 reserve_prompt_ingress_order=self._turn_controller.reserve_prompt_ingress_order,
                 enqueue_interactive_selection=self._turn_controller.enqueue_interactive_selection,
                 emit_reaction_received_hooks=self._emit_reaction_received_hooks,
+                wait_for_admission_or_shutdown=self._response_runner.wait_for_admission_or_shutdown,
                 config_confirmation=config_confirmation.ConfigConfirmationContext(
                     runtime=self._runtime_view,
                     runtime_paths=self.runtime_paths,
@@ -1294,13 +1296,16 @@ class AgentBot:
         """Fail closed when the router's view of Matrix membership is uncertain."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
-        refresh_already_pending = self._reply_membership_refresh_pending
         orchestrator = self.orchestrator
         if orchestrator is None:
             self._runtime_view.agent_reply_memberships.invalidate(self.config, reason=reason)
         else:
             orchestrator.invalidate_agent_reply_memberships(reason=reason)
-        if refresh_already_pending:
+        self._schedule_agent_reply_membership_refresh()
+
+    def _schedule_agent_reply_membership_refresh(self) -> None:
+        """Request a fresh authoritative grant snapshot without resetting backoff."""
+        if self._reply_membership_refresh_pending:
             return
         self._reply_membership_refresh_pending = True
         self._reply_membership_refresh_attempt = 0
@@ -1316,6 +1321,12 @@ class AgentBot:
         if call_manager is not None:
             await call_manager.reconcile_reply_authorization()
 
+    async def revoke_reply_authorized_calls(self) -> None:
+        """End active calls that no longer pass current reply access."""
+        call_manager = self._call_manager
+        if call_manager is not None:
+            await call_manager.revoke_reply_authorization()
+
     def schedule_reply_authorized_call_reconciliation(self) -> None:
         """Schedule this bot's active-call authorization reconciliation."""
         if self._call_manager is None:
@@ -1325,6 +1336,10 @@ class AgentBot:
             name=f"matrix_rtc_reply_authorization_{self.agent_name}",
             owner=self._runtime_view,
         )
+
+    async def wait_for_admission_or_shutdown(self) -> bool:
+        """Wait for replacement admission unless this bot runtime is stopping."""
+        return await self._response_runner.wait_for_admission_or_shutdown()
 
     async def _refresh_agent_reply_memberships_if_needed(self) -> None:
         """Rebuild router-owned room grants after a receive-generation boundary."""
@@ -1341,6 +1356,8 @@ class AgentBot:
             if client is None:
                 return
             await index.refresh(self.config, self.runtime_paths, client)
+            await self.revoke_reply_authorized_calls()
+            self.schedule_reply_authorized_call_reconciliation()
         else:
             await orchestrator.refresh_agent_reply_memberships()
         self._reply_membership_refresh_pending = index.needs_refresh(self.config.authorization)
@@ -1921,6 +1938,8 @@ class AgentBot:
             tool_support=self._tool_runtime_support,
             get_invited_rooms_by_agent=self._invited_call_rooms_by_agent,
             agent_reply_memberships=self._runtime_view.agent_reply_memberships,
+            response_admission_gate=self._runtime_view.response_admission_gate,
+            wait_for_admission_or_shutdown=self.wait_for_admission_or_shutdown,
         )
 
         client.add_event_callback(
@@ -1969,8 +1988,21 @@ class AgentBot:
 
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
-        await self._membership_fence.fence_reported_departures(membership.departures)
         departed_room_ids = membership.departed_room_ids
+        reply_grant_departed = False
+        if self.agent_name == ROUTER_AGENT_NAME:
+            index = self._runtime_view.agent_reply_memberships
+            for room_id in membership.left_room_ids:
+                room_was_grant = index.mark_control_room_unready(
+                    self.config,
+                    self.runtime_paths,
+                    room_id,
+                    reason="control_client_departed",
+                )
+                reply_grant_departed = room_was_grant or reply_grant_departed
+            if reply_grant_departed:
+                self._schedule_agent_reply_membership_refresh()
+        await self._membership_fence.fence_reported_departures(membership.departures)
         for room_id in departed_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
         self._local_departures_awaiting_sync.difference_update(departed_room_ids)
@@ -1983,6 +2015,12 @@ class AgentBot:
                 joined_room_ids=current_joined_room_ids,
                 left_room_ids=membership.left_room_ids,
             )
+        if reply_grant_departed:
+            orchestrator = self.orchestrator
+            if orchestrator is None:
+                await self.revoke_reply_authorized_calls()
+            else:
+                await orchestrator.revoke_reply_authorized_calls()
 
     def _invited_call_rooms_by_agent(self) -> dict[str, frozenset[str]]:
         """Return live accepted-invite state for the configured call agents."""
@@ -2714,21 +2752,32 @@ class AgentBot:
         """Apply authorization before encrypted-event recovery and visibility."""
         client = self.client
         assert client is not None
-        if not is_authorized_sender(event.sender, self.config, room.room_id, self.runtime_paths):
-            self.logger.debug(
-                "ignoring_decrypt_failure_from_unauthorized_sender",
-                user_id=event.sender,
-                room_id=room.room_id,
+        async with admitted_response_decision(
+            self.admission_gate,
+            self._response_runner.wait_for_admission_or_shutdown,
+        ):
+            if not is_sender_allowed_for_agent_reply_in_room(
+                event.sender,
+                self.agent_name,
+                self.config,
+                room.room_id,
+                self.runtime_paths,
+                self._runtime_view.agent_reply_memberships,
+            ):
+                self.logger.debug(
+                    "ignoring_decrypt_failure_from_unauthorized_sender",
+                    user_id=event.sender,
+                    room_id=room.room_id,
+                )
+                return
+            await handle_decrypt_failure(
+                client,
+                room,
+                event,
+                agent_name=self.agent_name,
+                runtime_paths=self.runtime_paths,
+                suppress_notice=suppress_notice,
             )
-            return
-        await handle_decrypt_failure(
-            client,
-            room,
-            event,
-            agent_name=self.agent_name,
-            runtime_paths=self.runtime_paths,
-            suppress_notice=suppress_notice,
-        )
 
     async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""

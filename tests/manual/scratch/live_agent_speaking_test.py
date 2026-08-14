@@ -57,6 +57,7 @@ sys.path.insert(0, SRC)
 
 from livekit import rtc  # noqa: E402
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: E402
 from mindroom.config.agent import AgentConfig  # noqa: E402
 from mindroom.config.auth import AuthorizationConfig  # noqa: E402
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, RealtimeCallProfile  # noqa: E402
@@ -74,6 +75,7 @@ from mindroom.matrix_rtc.events import (  # noqa: E402
     membership_state_key,
 )
 from mindroom.matrix_rtc.focus import OpenIDToken, request_sfu_grant  # noqa: E402
+from mindroom.response_admission import ResponseAdmissionGate  # noqa: E402
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV  # noqa: E402
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context  # noqa: E402
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity  # noqa: E402
@@ -596,6 +598,12 @@ async def main() -> int:  # noqa: C901, PLR0915
                     with tool_runtime_context(tool_context):
                         return await operation()
 
+            response_admission_gate = ResponseAdmissionGate()
+
+            async def wait_for_admission_or_shutdown() -> bool:
+                await response_admission_gate.wait_until_open()
+                return True
+
             manager = cm.CallManager(
                 agent_name=AGENT,
                 config=config,
@@ -604,6 +612,9 @@ async def main() -> int:  # noqa: C901, PLR0915
                 ssl_verify=True,
                 tool_support=LiveToolSupport(),  # type: ignore[arg-type]
                 get_invited_rooms_by_agent=dict,
+                agent_reply_memberships=AgentReplyMembershipIndex(),
+                response_admission_gate=response_admission_gate,
+                wait_for_admission_or_shutdown=wait_for_admission_or_shutdown,
             )
 
             room_obj = nio.MatrixRoom(room_id=room_id, own_user_id=bot.user_id)

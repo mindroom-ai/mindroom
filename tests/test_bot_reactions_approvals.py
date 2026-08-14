@@ -27,6 +27,7 @@ from mindroom.approval_manager import (
 from mindroom.bot import AgentBot
 from mindroom.coalescing import ReadyPendingEvent
 from mindroom.coalescing_batch import PendingEvent, PreparedTurn, requester_coalescing_key
+from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
@@ -375,6 +376,66 @@ class TestAgentBot(AgentBotTestBase):
         assert seen == [("👍", "$question", "$thread-root")]
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
+    async def test_reaction_hook_waits_for_reload_and_rechecks_reply_authorization(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A generic hook must not run after a reply-policy reload revokes its sender."""
+        sender_id = "@user:localhost"
+        config = self._config_for_storage(tmp_path)
+        config.authorization = AuthorizationConfig(
+            default_room_access=True,
+            agent_reply_permissions={
+                mock_agent_user.agent_name: AgentReplyPermission(users=[sender_id]),
+            },
+        )
+        denied_config = config.model_copy(deep=True)
+        denied_config.authorization = AuthorizationConfig(
+            default_room_access=True,
+            agent_reply_permissions={
+                mock_agent_user.agent_name: AgentReplyPermission(users=[]),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        seen: list[str] = []
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def record_reaction(ctx: ReactionReceivedContext) -> None:
+            seen.append(ctx.event_id)
+
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        room = MagicMock(room_id="!test:localhost", canonical_alias=None)
+        event = self._make_handler_event("reaction", sender=sender_id, event_id="$reaction-during-reload")
+        event.reacts_to = ""
+        claim_started = asyncio.Event()
+        release_claim = asyncio.Event()
+
+        async def delayed_interactive_claim() -> None:
+            claim_started.set()
+            await release_claim.wait()
+
+        gate = bot._runtime_view.response_admission_gate
+        dispatcher = unwrap_extracted_collaborator(bot._journal_dispatcher)
+        with patch.object(dispatcher, "claim_interactive_reaction", side_effect=delayed_interactive_claim):
+            reaction_task = asyncio.create_task(_dispatch_reaction(bot, room, event))
+            await asyncio.wait_for(claim_started.wait(), timeout=1)
+            assert gate.close_if_idle()
+            bot.config = denied_config
+            release_claim.set()
+            await asyncio.sleep(0)
+            try:
+                assert not reaction_task.done()
+                assert seen == []
+            finally:
+                gate.reopen()
+                await reaction_task
+
+        assert seen == []
+
+    @pytest.mark.asyncio
     async def test_reaction_hooks_do_not_run_when_interactive_handler_claims_event(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -489,6 +550,73 @@ class TestAgentBot(AgentBotTestBase):
 
         assert seen == []
         resolve_pending.assert_awaited_once_with(bot.client, room.room_id, event, enabled=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
+    async def test_fresh_config_confirmation_waits_for_reload_and_rechecks_authorization(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An uncommitted config decision must not apply after room access is revoked."""
+        sender_id = "@user:localhost"
+        config = self._config_for_storage(tmp_path)
+        config.authorization = AuthorizationConfig(
+            default_room_access=True,
+            agent_reply_permissions={
+                ROUTER_AGENT_NAME: AgentReplyPermission(users=[sender_id]),
+            },
+        )
+        router_user = replace(
+            mock_agent_user,
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="RouterAgent",
+        )
+        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock()
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        event = _reaction_event("✅", "$fresh-config")
+        pending_change = MagicMock(decision_event_id=None)
+        resolution_started = asyncio.Event()
+        release_resolution = asyncio.Event()
+
+        async def delayed_resolution(*_args: object, **_kwargs: object) -> object:
+            resolution_started.set()
+            await release_resolution.wait()
+            return pending_change
+
+        replacement = config.model_copy(deep=True)
+        replacement.authorization = AuthorizationConfig(
+            default_room_access=False,
+            room_permissions={room.room_id: []},
+            agent_reply_permissions={
+                ROUTER_AGENT_NAME: AgentReplyPermission(users=[sender_id]),
+            },
+        )
+        handler = AsyncMock()
+        gate = bot.admission_gate
+        with (
+            patch(
+                "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+                side_effect=delayed_resolution,
+            ),
+            patch(
+                "mindroom.bot.config_confirmation.handle_confirmation_reaction",
+                new=handler,
+            ),
+        ):
+            reaction = asyncio.create_task(_dispatch_reaction(bot, room, event))
+            await asyncio.wait_for(resolution_started.wait(), timeout=1)
+            assert gate.close_if_idle()
+            bot.config = replacement
+            release_resolution.set()
+            await asyncio.sleep(0)
+            handler.assert_not_awaited()
+            gate.reopen()
+            await reaction
+
+        handler.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_failure_replays_the_same_durable_claim(
@@ -2663,6 +2791,72 @@ class TestAgentBot(AgentBotTestBase):
 
         assert emissions == [event.event_id, event.event_id]
         interactive_handler.assert_not_awaited()
+        assert await restarted._journal_dispatcher.store.pending() == ()
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
+    async def test_claimed_reaction_hook_replay_rechecks_reply_authorization(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A claimed hook must settle without running after its sender is revoked."""
+        sender_id = "@user:localhost"
+        config = self._config_for_storage(tmp_path)
+        config.authorization = AuthorizationConfig(
+            default_room_access=True,
+            agent_reply_permissions={
+                mock_agent_user.agent_name: AgentReplyPermission(users=[sender_id]),
+            },
+        )
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock()
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        event = _reaction_event("👍", "$claimed-hook-reaction")
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def crash_after_claim(_ctx: ReactionReceivedContext) -> None:
+            message = "crash after hook claim"
+            raise asyncio.CancelledError(message)
+
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [crash_after_claim])])
+        with _mock_interactive_claim(bot, None):
+            await bot._journal_dispatcher.admit_out_of_band(
+                room,
+                event,
+                EventKind.REACTION,
+                EventClass.ACTIONABLE,
+            )
+            with pytest.raises(asyncio.CancelledError):
+                await bot._journal_dispatcher.drain_once()
+        pending = await bot._journal_dispatcher.store.pending()
+        assert pending[0].semantic_consumer is SemanticConsumer.REACTION_HOOKS
+
+        denied_config = config.model_copy(deep=True)
+        denied_config.authorization = AuthorizationConfig(
+            default_room_access=True,
+            agent_reply_permissions={
+                mock_agent_user.agent_name: AgentReplyPermission(users=[]),
+            },
+        )
+        restarted = AgentBot(
+            mock_agent_user,
+            tmp_path,
+            config=denied_config,
+            runtime_paths=runtime_paths,
+        )
+        restarted.client = make_matrix_client_mock()
+        replays: list[str] = []
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def record_replay(ctx: ReactionReceivedContext) -> None:
+            replays.append(ctx.event_id)
+
+        restarted.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_replay])])
+        await restarted._journal_dispatcher.drain_once()
+
+        assert replays == []
         assert await restarted._journal_dispatcher.store.pending() == ()
 
     @pytest.mark.asyncio

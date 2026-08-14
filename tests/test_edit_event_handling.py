@@ -221,6 +221,7 @@ async def test_edit_event_reserves_prompt_order_while_regenerating(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) -> None:
     """An edit prechecked before reload must not regenerate after its requester is revoked."""
     sender_id = "@user:example.com"

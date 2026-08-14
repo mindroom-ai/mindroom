@@ -1276,6 +1276,10 @@ class _MultiAgentOrchestrator:
         """Recheck every active MatrixRTC call against current reply access."""
         await asyncio.gather(*(bot.reconcile_reply_authorized_calls() for bot in self.agent_bots.values()))
 
+    async def revoke_reply_authorized_calls(self) -> None:
+        """End active MatrixRTC calls that no longer pass current reply access."""
+        await asyncio.gather(*(bot.revoke_reply_authorized_calls() for bot in self.agent_bots.values()))
+
     async def refresh_agent_reply_memberships(self) -> None:
         """Refresh room-backed reply grants through the router's Matrix client."""
         config = self._require_config()
@@ -1284,7 +1288,9 @@ class _MultiAgentOrchestrator:
             self.invalidate_agent_reply_memberships(reason="router_unavailable")
             return
         await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_bot.client)
-        await self.reconcile_reply_authorized_calls()
+        await self.revoke_reply_authorized_calls()
+        for bot in self.agent_bots.values():
+            bot.schedule_reply_authorized_call_reconciliation()
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""

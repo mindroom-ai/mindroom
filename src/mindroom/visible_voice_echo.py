@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
-from mindroom.authorization import is_sender_allowed_for_agent_reply
+from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -287,10 +287,11 @@ class VisibleVoiceEchoLifecycle:
             self.deps.ingress.managed_entity_name_for_sender(user_id) == ROUTER_AGENT_NAME for user_id in room.users
         ):
             return False
-        return is_sender_allowed_for_agent_reply(
+        return is_sender_allowed_for_agent_reply_in_room(
             requester_user_id,
             ROUTER_AGENT_NAME,
             config,
+            room.room_id,
             self.deps.runtime.runtime_paths,
             self.deps.runtime.agent_reply_memberships,
         )
@@ -502,10 +503,11 @@ class VisibleVoiceEchoLifecycle:
 
     def _sender_is_authorized(self, request: VisibleVoiceEchoRequest) -> bool:
         """Return whether the current router policy permits this echo requester."""
-        return is_sender_allowed_for_agent_reply(
+        return is_sender_allowed_for_agent_reply_in_room(
             request.requester_user_id,
             self.deps.agent_name,
             self.deps.runtime.config,
+            request.target.room_id,
             self.deps.runtime.runtime_paths,
             self.deps.runtime.agent_reply_memberships,
         )

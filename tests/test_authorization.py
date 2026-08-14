@@ -99,6 +99,25 @@ def is_sender_allowed_for_agent_reply(
     )
 
 
+def is_sender_allowed_for_agent_reply_in_room(
+    sender_id: str,
+    agent_name: str,
+    config: Config,
+    room_id: str,
+    membership_index: AgentReplyMembershipIndex | None = None,
+) -> bool:
+    """Run the combined room and entity reply check for one room."""
+    effective_membership_index = membership_index or AgentReplyMembershipIndex()
+    return mindroom.authorization.is_sender_allowed_for_agent_reply_in_room(
+        sender_id,
+        agent_name,
+        config,
+        room_id,
+        _runtime_paths_for(config),
+        membership_index=effective_membership_index,
+    )
+
+
 def is_sender_allowed_for_agent_credential_management(sender_id: str, agent_name: str, config: Config) -> bool:
     """Run credential-management permission checks with the test config's bound runtime context."""
     return mindroom.authorization.is_sender_allowed_for_agent_credential_management(
@@ -991,6 +1010,35 @@ def test_agent_reply_permissions_with_aliases() -> None:
     assert is_sender_allowed_for_agent_reply("@telegram_111:example.com", "assistant", config)
     assert not is_sender_allowed_for_agent_reply("@bob:example.com", "assistant", config)
     assert is_sender_allowed_for_agent_reply("@bob:example.com", "analyst", config)
+
+
+def test_combined_agent_reply_authorization_requires_room_and_entity_access() -> None:
+    """A reply is allowed only when both independent authorization layers pass."""
+    sender_id = "@alice:example.com"
+    room_id = "!room:example.com"
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": False,
+            "room_permissions": {room_id: [sender_id]},
+            "agent_reply_permissions": {"assistant": [sender_id]},
+        },
+    )
+
+    assert is_sender_allowed_for_agent_reply_in_room(sender_id, "assistant", config, room_id)
+
+    config.authorization.room_permissions[room_id] = []
+    assert not is_sender_allowed_for_agent_reply_in_room(sender_id, "assistant", config, room_id)
+
+    config.authorization.room_permissions[room_id] = [sender_id]
+    config.authorization.agent_reply_permissions["assistant"].users = []
+    assert not is_sender_allowed_for_agent_reply_in_room(sender_id, "assistant", config, room_id)
 
 
 def test_agent_reply_permissions_do_not_bypass_bot_accounts() -> None:

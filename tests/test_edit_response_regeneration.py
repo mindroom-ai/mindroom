@@ -3899,7 +3899,6 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
             "claim_interactive_reaction",
             new=claim_interactive,
         ),
-        patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock) as mock_send_text,
         patch.object(bot._response_runner, "generate_response", new_callable=AsyncMock) as mock_generate_response,
         patch.object(bot._conversation_resolver, "fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
@@ -4005,7 +4004,6 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
             "claim_interactive_reaction",
             new=claim_interactive,
         ),
-        patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock) as mock_send_text,
         patch.object(bot._response_runner, "generate_response", new_callable=AsyncMock) as mock_generate_response,
         patch.object(bot._conversation_resolver, "fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
@@ -4149,6 +4147,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> None:
     """Disallowed reactions must not consume interactive questions."""
     agent_user = AgentMatrixUser(
@@ -4243,7 +4242,6 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
     allowed_reaction.key = "1️⃣"
 
     with (
-        patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch.object(
             unwrap_extracted_collaborator(bot._journal_dispatcher),
             "claim_interactive_reaction",
@@ -4269,6 +4267,7 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) -> None:
     """Disallowed senders must not trigger config confirmation reactions."""
     agent_user = AgentMatrixUser(
@@ -4338,7 +4337,6 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
     )
 
     with (
-        patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch("mindroom.bot.config_confirmation.handle_confirmation_reaction", new_callable=AsyncMock) as mock_confirm,
     ):
         await dispatch_reaction_durably(bot, room, reaction_event)

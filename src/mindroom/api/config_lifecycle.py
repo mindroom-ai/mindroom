@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
+    from mindroom.response_admission import ResponseAdmissionGate
 
 logger = get_logger(__name__)
 _UNSET = object()
@@ -99,6 +100,8 @@ class ExternalTriggerRuntime:
     config_generation: int
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
     agent_reply_memberships: AgentReplyMembershipIndex
+    response_admission_gate: ResponseAdmissionGate
+    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
 
 
 @dataclass
@@ -427,6 +430,13 @@ def bind_current_request_snapshot(request: Request) -> ApiSnapshot:
     existing = request_snapshot(request)
     if existing is not None:
         return existing
+    app_state = require_api_state(request.app)
+    with app_state.config_lock:
+        return store_request_snapshot(request, app_state.snapshot)
+
+
+def rebind_current_request_snapshot(request: Request) -> ApiSnapshot:
+    """Replace a request's pinned snapshot with the app's current publication."""
     app_state = require_api_state(request.app)
     with app_state.config_lock:
         return store_request_snapshot(request, app_state.snapshot)

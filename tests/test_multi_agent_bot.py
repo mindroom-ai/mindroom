@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,7 +14,7 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import (
@@ -237,32 +238,74 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """The decrypt-failure path must gate senders like every other ingress path."""
+        """The decrypt-failure notice requires both room and entity reply access."""
         mock_load_config.return_value = self.create_mock_config(tmp_path)
         config = mock_load_config.return_value
+        sender_id = "@stranger:localhost"
+        config.authorization = AuthorizationConfig(
+            default_room_access=True,
+            agent_reply_permissions={
+                mock_agent_user.agent_name: AgentReplyPermission(users=[]),
+            },
+        )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         event = MagicMock(spec=nio.MegolmEvent)
-        event.sender = "@stranger:localhost"
+        event.sender = sender_id
 
-        with (
-            patch("mindroom.bot.is_authorized_sender", return_value=False) as gate,
-            patch("mindroom.bot.handle_decrypt_failure", new=AsyncMock()) as handler,
-        ):
+        with patch("mindroom.bot.handle_decrypt_failure", new=AsyncMock()) as handler:
             await bot._on_decryption_failure(room, event)
 
         handler.assert_not_awaited()
-        gate.assert_called_once_with(event.sender, config, room.room_id, bot.runtime_paths)
 
-        with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.bot.handle_decrypt_failure", new=AsyncMock()) as handler,
-        ):
+        config.authorization.agent_reply_permissions[mock_agent_user.agent_name].users = [sender_id]
+        with patch("mindroom.bot.handle_decrypt_failure", new=AsyncMock()) as handler:
             await bot._on_decryption_failure(room, event)
 
         handler.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("mindroom.config.main.load_config")
+    async def test_decrypt_failure_notice_holds_response_admission(
+        self,
+        mock_load_config: MagicMock,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A config replacement cannot commit while a decrypt notice is being delivered."""
+        mock_load_config.return_value = self.create_mock_config(tmp_path)
+        config = mock_load_config.return_value
+        sender_id = "@user:localhost"
+        config.authorization = AuthorizationConfig(
+            default_room_access=True,
+            agent_reply_permissions={
+                mock_agent_user.agent_name: AgentReplyPermission(users=[sender_id]),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock(spec=nio.MegolmEvent)
+        event.sender = sender_id
+        notice_started = asyncio.Event()
+        release_notice = asyncio.Event()
+
+        async def delayed_notice(*_args: object, **_kwargs: object) -> None:
+            notice_started.set()
+            await release_notice.wait()
+
+        with patch("mindroom.bot.handle_decrypt_failure", side_effect=delayed_notice):
+            task = asyncio.create_task(bot._on_decryption_failure(room, event))
+            await asyncio.wait_for(notice_started.wait(), timeout=1)
+            assert not bot.admission_gate.close_if_idle()
+            release_notice.set()
+            await task
+
+        assert bot.admission_gate.close_if_idle()
+        bot.admission_gate.reopen()
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
@@ -933,7 +976,6 @@ class TestAgentBot(AgentBotTestBase):
         event = self._make_handler_event(handler_name, sender="@user:localhost", event_id=f"${handler_name}_unauth")
 
         with (
-            patch("mindroom.bot.is_authorized_sender", return_value=False),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=False),
             patch("mindroom.reaction_dispatch.is_authorized_sender", return_value=False),
         ):
@@ -999,9 +1041,13 @@ class TestAgentBot(AgentBotTestBase):
 
         wrap_extracted_collaborators(bot, "_turn_policy")
         with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch.object(bot._turn_policy, "can_reply_to_sender", return_value=False),
+            patch.object(
+                bot._turn_controller.deps.turn_policy,
+                "can_reply_to_sender_in_room",
+                return_value=False,
+            ),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
         ):
             await self._invoke_handler(bot, handler_name, room, event)

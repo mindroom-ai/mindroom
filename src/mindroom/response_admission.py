@@ -17,12 +17,10 @@ holds it while running the plan. Applying stops bots, and stopping a bot drains
 its detached responses, which would otherwise wait on the very gate the
 applier holds.
 
-Scope: the gate covers Matrix-driven response lifecycles, which is where a
-replacement can stop an entity mid-turn. Direct agent-run entry points that
-bypass the response lifecycle (the OpenAI-compatible API in
-``mindroom.api.openai_compat`` and cascaded voice in
-``mindroom.matrix_rtc.call_tools``) are not admitted through it, so a
-replacement can still land underneath one of those runs.
+Scope: the gate covers Matrix-driven response lifecycles plus requester-driven
+voice operations and external-trigger delivery. Direct agent-run entry points
+that bypass Matrix response policy, such as the OpenAI-compatible API in
+``mindroom.api.openai_compat``, remain outside it.
 
 Every state transition is deliberately synchronous. No critical section here
 contains an ``await``, so the single-threaded event loop cannot interleave one

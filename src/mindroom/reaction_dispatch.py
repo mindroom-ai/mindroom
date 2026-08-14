@@ -13,6 +13,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import SemanticConsumer
+from mindroom.response_admission import admitted_response_decision
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -49,6 +50,7 @@ class ReactionDispatcherDeps:
     reserve_prompt_ingress_order: Callable[..., PromptIngressReservationOwner]
     enqueue_interactive_selection: Callable[..., Awaitable[None]]
     emit_reaction_received_hooks: Callable[..., Awaitable[None]]
+    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
     config_confirmation: ConfigConfirmationContext
 
 
@@ -183,7 +185,10 @@ class ReactionDispatcher:
         """Route one authorized reaction among the non-config consumers."""
         if await self._maybe_handle_approval_reaction(room, event, consumer):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        if consumer is None and not self.deps.turn_policy.can_reply_to_sender(event.sender):
+        if consumer is None and not self.deps.turn_policy.can_reply_to_sender_in_room(
+            requester_user_id,
+            room.room_id,
+        ):
             self.deps.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         if await self._maybe_handle_stop_reaction(event, consumer):
@@ -248,18 +253,25 @@ class ReactionDispatcher:
         )
         try:
             if pending_change is not None:
-                if semantic_consumer is None and not self.deps.turn_policy.can_reply_to_sender(event.sender):
-                    self.deps.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
-                    return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-                if semantic_consumer is None:
-                    await self.deps.journal_dispatcher.claim_semantic_consumer(
-                        SemanticConsumer.CONFIG_CONFIRMATION,
+                async with admitted_response_decision(
+                    self.deps.runtime.response_admission_gate,
+                    self.deps.wait_for_admission_or_shutdown,
+                ):
+                    if not self.deps.turn_policy.can_reply_to_sender_in_room(
+                        requester_user_id,
+                        room.room_id,
+                    ):
+                        self.deps.logger.debug("Ignoring reaction due to current authorization", sender=event.sender)
+                        return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+                    if semantic_consumer is None:
+                        await self.deps.journal_dispatcher.claim_semantic_consumer(
+                            SemanticConsumer.CONFIG_CONFIRMATION,
+                        )
+                    await config_confirmation.handle_confirmation_reaction(
+                        self.deps.config_confirmation,
+                        room,
+                        event,
                     )
-                await config_confirmation.handle_confirmation_reaction(
-                    self.deps.config_confirmation,
-                    room,
-                    event,
-                )
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
             if (
@@ -278,21 +290,40 @@ class ReactionDispatcher:
         await self.deps.journal_dispatcher.claim_semantic_consumer(
             SemanticConsumer.REACTION_HOOKS,
         )
-        await self.deps.emit_reaction_received_hooks(
-            room_id=room.room_id,
-            event=event,
-            correlation_id=event.event_id,
-        )
+        await self._emit_authorized_reaction_hooks(room, event, requester_user_id)
         return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
-    async def dispatch(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> TurnDispatchOutcome:
-        """Route one reaction to its sole durable semantic consumer."""
-        semantic_consumer = self.deps.journal_dispatcher.semantic_consumer()
-        if semantic_consumer is SemanticConsumer.REACTION_HOOKS:
+    async def _emit_authorized_reaction_hooks(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.ReactionEvent,
+        requester_user_id: str,
+    ) -> None:
+        """Emit generic hooks only while their current reply authority is admitted."""
+        async with admitted_response_decision(
+            self.deps.runtime.response_admission_gate,
+            self.deps.wait_for_admission_or_shutdown,
+        ):
+            if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+                self.deps.logger.debug(
+                    "Ignoring reaction hook due to current authorization",
+                    sender=event.sender,
+                )
+                return
             await self.deps.emit_reaction_received_hooks(
                 room_id=room.room_id,
                 event=event,
                 correlation_id=event.event_id,
             )
+
+    async def dispatch(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> TurnDispatchOutcome:
+        """Route one reaction to its sole durable semantic consumer."""
+        semantic_consumer = self.deps.journal_dispatcher.semantic_consumer()
+        if semantic_consumer is SemanticConsumer.REACTION_HOOKS:
+            requester_user_id = self.deps.ingress.requester_user_id(
+                sender=event.sender,
+                source=event.source,
+            )
+            await self._emit_authorized_reaction_hooks(room, event, requester_user_id)
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         return await self._route_reaction(room, event, semantic_consumer)

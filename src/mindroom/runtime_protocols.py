@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.tool_system.plugins import PluginReloadResult
 
 __all__ = [
@@ -87,6 +88,10 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """End active calls whose requester no longer has reply access."""
         ...
 
+    def revoke_reply_authorized_calls(self) -> Awaitable[None]:
+        """End active calls without running positive room reconciliation."""
+        ...
+
     def send_approval_notice(
         self,
         *,
@@ -139,6 +144,9 @@ class SupportsClientConfigOrchestrator(SupportsClientConfig, SupportsAgentReplyM
 
     @property
     def orchestrator(self) -> OrchestratorRuntime | None: ...  # noqa: D102
+
+    @property
+    def response_admission_gate(self) -> ResponseAdmissionGate: ...  # noqa: D102
 
     @property
     def runtime_started_at(self) -> float: ...  # noqa: D102

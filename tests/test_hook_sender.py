@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -13,6 +14,7 @@ import pytest
 from mindroom.authorization import is_authorized_sender as real_is_authorized_sender
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
@@ -204,6 +206,7 @@ def _hook_bot(tmp_path: Path) -> AgentBot:
 
 def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     config = _config(tmp_path)
+    config.authorization = AuthorizationConfig(default_room_access=True)
     bot = AgentBot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,
@@ -1165,6 +1168,77 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     assert hook_calls == ["called"]
     bot._command_turn_executor.execute_if_owned.assert_not_awaited()
     turn_store.record_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_message_received_hook_waits_for_reload_and_rechecks_reply_authorization(tmp_path: Path) -> None:
+    """An ingress hook must not run after a reply-policy reload revokes its sender."""
+    sender_id = "@user:localhost"
+    bot = _agent_bot(tmp_path)
+    bot.config.authorization = AuthorizationConfig(
+        default_room_access=True,
+        agent_reply_permissions={
+            bot.agent_name: AgentReplyPermission(users=[sender_id]),
+        },
+    )
+    denied_config = bot.config.model_copy(deep=True)
+    denied_config.authorization = AuthorizationConfig(
+        default_room_access=False,
+        room_permissions={"!room:localhost": []},
+        agent_reply_permissions={
+            bot.agent_name: AgentReplyPermission(users=[sender_id]),
+        },
+    )
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id=bot.matrix_id.full_id)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$hook-during-reload",
+            "sender": sender_id,
+            "origin_server_ts": 1234567890,
+            "content": {"msgtype": "m.text", "body": "hello"},
+        },
+    )
+    hook_calls: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def received(_ctx: MessageReceivedContext) -> None:
+        hook_calls.append("called")
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+
+    async def delayed_context(*_args: object, **_kwargs: object) -> object:
+        lookup_started.set()
+        await release_lookup.wait()
+        return dispatch_context_result(_dispatch_context(bot))
+
+    bot._conversation_resolver.extract_dispatch_context = AsyncMock(side_effect=delayed_context)
+    gate = bot._runtime_view.response_admission_gate
+    prepare_task = asyncio.create_task(
+        bot._turn_controller._prepare_dispatch(
+            room,
+            event,
+            sender_id,
+            event_label="message",
+            handled_turn=TurnRecord.create([event.event_id]),
+        ),
+    )
+    await asyncio.wait_for(lookup_started.wait(), timeout=1)
+    assert gate.close_if_idle()
+    bot.config = denied_config
+    release_lookup.set()
+    await asyncio.sleep(0)
+    try:
+        assert not prepare_task.done()
+        assert hook_calls == []
+    finally:
+        gate.reopen()
+        prepared = await prepare_task
+
+    assert prepared is None
+    assert hook_calls == []
 
 
 @pytest.mark.asyncio

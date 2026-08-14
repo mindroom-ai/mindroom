@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
@@ -20,8 +21,7 @@ import aiohttp
 import httpx
 import nio
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_agent_reply
+from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.config.voice import normalize_speech_base_url
 from mindroom.credentials_sync import get_api_key_for_service
 from mindroom.entity_resolution import configured_call_agent_name_for_room
@@ -51,12 +51,18 @@ from mindroom.matrix_rtc.voice_agent import (
     matrix_calls_dependencies_available,
 )
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
+from mindroom.response_admission import (
+    ResponseAdmissionGate,
+    ResponseAdmissionRefusedError,
+    admitted_response_decision,
+)
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from collections.abc import Set as AbstractSet
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.calls import CallProfile, CascadedCallProfile, RealtimeCallProfile
     from mindroom.config.main import Config
     from mindroom.config.voice import SpeechServiceConfig
@@ -128,7 +134,9 @@ def maybe_build_call_manager(
     ssl_verify: bool,
     tool_support: ToolRuntimeSupport,
     get_invited_rooms_by_agent: Callable[[], Mapping[str, AbstractSet[str]]],
-    agent_reply_memberships: AgentReplyMembershipIndex | None = None,
+    agent_reply_memberships: AgentReplyMembershipIndex,
+    response_admission_gate: ResponseAdmissionGate,
+    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]],
 ) -> CallManager | None:
     """Build a call manager when this agent is configured for voice calls."""
     if not config.calls.enabled or agent_name not in config.calls.agents:
@@ -151,6 +159,8 @@ def maybe_build_call_manager(
         tool_support=tool_support,
         get_invited_rooms_by_agent=get_invited_rooms_by_agent,
         agent_reply_memberships=agent_reply_memberships,
+        response_admission_gate=response_admission_gate,
+        wait_for_admission_or_shutdown=wait_for_admission_or_shutdown,
     )
 
 
@@ -168,8 +178,10 @@ class CallManager:
         bridge_factory: Callable[[str, bool], VoiceBridgeLike] | None = None,
         tool_support: ToolRuntimeSupport,
         get_invited_rooms_by_agent: Callable[[], Mapping[str, AbstractSet[str]]],
+        agent_reply_memberships: AgentReplyMembershipIndex,
+        response_admission_gate: ResponseAdmissionGate,
+        wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]],
         clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
-        agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     ) -> None:
         self._agent_name = agent_name
         self._config = config
@@ -183,7 +195,9 @@ class CallManager:
         self._tool_support = tool_support
         self._get_invited_rooms_by_agent = get_invited_rooms_by_agent
         self._clock_ms = clock_ms
-        self._agent_reply_memberships = agent_reply_memberships or AgentReplyMembershipIndex()
+        self._agent_reply_memberships = agent_reply_memberships
+        self._response_admission_gate = response_admission_gate
+        self._wait_for_admission_or_shutdown = wait_for_admission_or_shutdown
         self._key_transport = ToDeviceFrameKeyTransport(client)
         self._sessions: dict[str, CallSession] = {}
         self._pending_keys: dict[str, dict[tuple[str, str, int], ReceivedFrameKey]] = {}
@@ -201,7 +215,7 @@ class CallManager:
         """Replace the live config used by authorization-only hot reloads."""
         self._config = config
         self._call_config = config.calls.resolve_agent_config(self._agent_name)
-        if self._shutting_down or not (self._logical_calls or self._sessions):
+        if self._shutting_down:
             return
         task = asyncio.create_task(self.reconcile_reply_authorization())
         self._track_background_task(
@@ -335,7 +349,12 @@ class CallManager:
         await asyncio.gather(*(self._reconcile(room) for room in rooms))
 
     async def reconcile_reply_authorization(self) -> None:
-        """End tracked calls whose requester no longer passes reply authorization."""
+        """Revoke denied calls, then start joined calls that became authorized."""
+        await self.revoke_reply_authorization()
+        await self.reconcile_joined_rooms()
+
+    async def revoke_reply_authorization(self) -> None:
+        """End tracked calls whose requester no longer passes current reply access."""
         if self._shutting_down:
             return
         room_ids = set(self._logical_calls) | set(self._sessions)
@@ -403,18 +422,33 @@ class CallManager:
             return
         self._observed_rooms[room.room_id] = room
         room_id = room.room_id
-        lock = self._locks.setdefault(room_id, asyncio.Lock())
-        async with lock:
-            if self._shutting_down or room_id in self._departed_rooms:
-                return
-            members = await self._fetch_remote_members(room_id)
-            if members is None:
-                # Transient state-fetch failure: keep any active session alive
-                # and retry even if no further call event arrives.
-                self._schedule_reconcile_retry(room)
-                return
-            self._schedule_expiry_reconcile(room, members)
-            await self._apply_reconciled_members(room, members, retrying=retrying)
+        try:
+            async with admitted_response_decision(
+                self._response_admission_gate,
+                self._wait_for_admission_or_shutdown,
+            ):
+                lock = self._locks.setdefault(room_id, asyncio.Lock())
+                async with lock:
+                    if (
+                        self._shutting_down
+                        or room_id in self._departed_rooms
+                        or not self._is_configured_call_room(room)
+                    ):
+                        return
+                    members = await self._fetch_remote_members(room_id)
+                    if members is None:
+                        # Transient state-fetch failure: keep any active session alive
+                        # and retry even if no further call event arrives.
+                        self._schedule_reconcile_retry(room)
+                        return
+                    self._schedule_expiry_reconcile(room, members)
+                    await self._apply_reconciled_members(room, members, retrying=retrying)
+        except ResponseAdmissionRefusedError:
+            logger.info(
+                "call_reconcile_refused_after_runtime_replacement",
+                room_id=room_id,
+                agent=self._agent_name,
+            )
 
     async def _apply_reconciled_members(
         self,
@@ -569,15 +603,11 @@ class CallManager:
 
     def _is_authorized_call_member(self, user_id: str, room_id: str) -> bool:
         """Return whether a participant may hear and invoke this voice agent."""
-        return is_authorized_sender(
-            user_id,
-            self._config,
-            room_id,
-            self._runtime_paths,
-        ) and is_sender_allowed_for_agent_reply(
+        return is_sender_allowed_for_agent_reply_in_room(
             user_id,
             self._agent_name,
             self._config,
+            room_id,
             self._runtime_paths,
             self._agent_reply_memberships,
         )
@@ -698,6 +728,7 @@ class CallManager:
             room=room,
             bridge=bridge,
             backend=backend,
+            requester_id=members[0].user_id,
         )
         try:
             session = CallSession(
@@ -715,7 +746,11 @@ class CallManager:
                         config=self._config,
                         runtime_paths=self._runtime_paths,
                     ),
-                    on_failure=lambda message: self._send_call_failure_notice(room_id, message),
+                    on_failure=lambda message: self._send_call_failure_notice(
+                        room_id,
+                        members[0].user_id,
+                        message,
+                    ),
                 ),
             )
             await session.start(members)
@@ -810,29 +845,38 @@ class CallManager:
         task = asyncio.create_task(self._handle_session_termination(room, bridge, retryable=retryable))
         self._track_background_task(task, event="call_session_termination_failed", room_id=room.room_id)
 
-    def _schedule_call_failure_notice(self, room_id: str, message: str) -> None:
+    def _schedule_call_failure_notice(self, room_id: str, requester_id: str, message: str) -> None:
         """Publish an asynchronous diagnostic without blocking SDK callbacks."""
         if self._shutting_down:
             return
-        task = asyncio.create_task(self._send_call_failure_notice(room_id, message))
+        task = asyncio.create_task(self._send_call_failure_notice(room_id, requester_id, message))
         self._track_background_task(task, event="call_failure_notice_failed", room_id=room_id)
 
-    async def _send_call_failure_notice(self, room_id: str, message: str) -> None:
+    async def _send_call_failure_notice(self, room_id: str, requester_id: str, message: str) -> None:
         """Post a cross-client Matrix notice explaining a silent call failure."""
         try:
-            response = await send_room_event_result(
-                self._client,
-                room_id,
-                "m.room.message",
-                {
-                    "msgtype": "m.notice",
-                    "body": message,
-                    "chat.mindroom.call_failure": {"version": 1},
-                },
-                operation="send_call_failure_notice",
-            )
-        except _MATRIX_NETWORK_ERRORS as error:
-            logger.warning("call_failure_notice_send_failed", room_id=room_id, error=str(error))
+            async with admitted_response_decision(
+                self._response_admission_gate,
+                self._wait_for_admission_or_shutdown,
+            ):
+                if not self._is_authorized_call_member(requester_id, room_id):
+                    return
+                try:
+                    response = await send_room_event_result(
+                        self._client,
+                        room_id,
+                        "m.room.message",
+                        {
+                            "msgtype": "m.notice",
+                            "body": message,
+                            "chat.mindroom.call_failure": {"version": 1},
+                        },
+                        operation="send_call_failure_notice",
+                    )
+                except _MATRIX_NETWORK_ERRORS as error:
+                    logger.warning("call_failure_notice_send_failed", room_id=room_id, error=str(error))
+                    return
+        except ResponseAdmissionRefusedError:
             return
         if not isinstance(response, nio.RoomSendResponse):
             error = response.message if isinstance(response, nio.RoomSendError) else "no Matrix response"
@@ -892,11 +936,36 @@ class CallManager:
             tool_support=self._tool_support,
             room_id=room_id,
             requester_id=requester_id,
+            authorize_operation=lambda: self._admitted_call_requester_operation(
+                room_id,
+                requester_id,
+            ),
             session_id=session_id,
             enable_responder=cascaded,
             voice_instructions=_VOICE_STYLE_ADDENDUM if cascaded else None,
             active_model_name=self._call_config.model if cascaded else None,
         )
+
+    @asynccontextmanager
+    async def _admitted_call_requester_operation(
+        self,
+        room_id: str,
+        requester_id: str,
+    ) -> AsyncIterator[bool]:
+        """Reserve replacement admission and publish current call authorization."""
+        admission = admitted_response_decision(
+            self._response_admission_gate,
+            self._wait_for_admission_or_shutdown,
+        )
+        try:
+            await admission.__aenter__()
+        except ResponseAdmissionRefusedError:
+            yield False
+            return
+        try:
+            yield self._is_authorized_call_member(requester_id, room_id)
+        finally:
+            await admission.__aexit__(None, None, None)
 
     def _start_logical_call(self, room_id: str, requester_id: str) -> _LogicalCallState:
         """Create the state shared by every media attempt for one caller presence."""
@@ -966,6 +1035,7 @@ class CallManager:
         room: nio.MatrixRoom,
         bridge: VoiceBridgeLike,
         backend: _ResolvedVoiceBackend,
+        requester_id: str,
     ) -> CallVoiceAgentOptions:
         """Build selected-backend options with shared transcript hooks."""
 
@@ -973,7 +1043,7 @@ class CallManager:
             self._schedule_session_termination(room, bridge, retryable=retryable)
 
         def on_session_error(message: str) -> None:
-            self._schedule_call_failure_notice(room.room_id, message)
+            self._schedule_call_failure_notice(room.room_id, requester_id, message)
 
         if self._call_config.backend == "realtime":
             realtime_config = cast("RealtimeCallProfile", self._call_config)

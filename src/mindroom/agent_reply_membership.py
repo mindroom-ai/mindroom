@@ -139,6 +139,58 @@ class AgentReplyMembershipIndex:
             grant_room_count=len(room_keys),
         )
 
+    def mark_control_room_unready(
+        self,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        room_id: str,
+        *,
+        reason: str,
+    ) -> bool:
+        """Fail one grant room closed after the control client departs it."""
+        signature = _agent_reply_membership_policy_signature(config.authorization)
+        if self._desired_signature != signature or self._snapshot.policy_signature != signature:
+            return False
+        state = matrix_state_for_runtime(runtime_paths)
+        matching_room_keys = {
+            room_key
+            for room_key in _referenced_room_keys(config.authorization)
+            if (managed_room := state.rooms.get(room_key)) is not None and managed_room.room_id == room_id
+        }
+        matching_room_keys.update(room.room_key for room in self._snapshot.rooms if room.room_id == room_id)
+        if not matching_room_keys:
+            return False
+
+        # A departure observed while an authoritative query is in flight must
+        # fence that query even when the room ID was not yet published.
+        self._epoch += 1
+        updated_rooms = tuple(
+            replace(
+                room,
+                room_id=room_id,
+                ready=False,
+                raw_joined_user_ids=frozenset(),
+                joined_user_ids=frozenset(),
+            )
+            if room.room_key in matching_room_keys
+            else room
+            for room in self._snapshot.rooms
+        )
+        self._snapshot = replace(
+            self._snapshot,
+            rooms=updated_rooms,
+            refresh_required=True,
+        )
+        for room_key in sorted(matching_room_keys):
+            logger.warning(
+                "agent_reply_grant_room_unready",
+                room_key=room_key,
+                room_id=room_id,
+                readiness="unready",
+                reason=reason,
+            )
+        return True
+
     async def refresh(
         self,
         config: Config,

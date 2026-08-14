@@ -236,7 +236,7 @@ async def test_warm_join_decrypt_notice_waits_for_trusted_sync_containing_room(
 ) -> None:
     """Fenced Megolm events request recovery but stay visibly silent until trusted sync."""
     room_id = "!room:localhost"
-    bot = _agent_bot(tmp_path)
+    bot = _agent_bot(tmp_path, authorize_senders=True)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.outgoing_key_requests = {}
     bot._first_sync_done = True
@@ -289,7 +289,6 @@ async def test_warm_join_decrypt_notice_waits_for_trusted_sync_containing_room(
         capture_logs(),
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
         patch("mindroom.bot_room_lifecycle.join_room", new=join_while_sync_is_live),
-        patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch("mindroom.matrix.decrypt_failure._send_decrypt_failure_notice", new=notice),
     ):
         await bot.join_configured_rooms()

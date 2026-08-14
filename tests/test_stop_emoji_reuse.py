@@ -746,8 +746,7 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
     send_response = AsyncMock()
     install_send_response_mock(bot, send_response)
 
-    with patch("mindroom.bot.is_authorized_sender", return_value=True):
-        await dispatch_reaction_durably(bot, room, reaction_event)
+    await dispatch_reaction_durably(bot, room, reaction_event)
 
     # Task should NOT have been cancelled — sender is disallowed
     task.cancel.assert_not_called()

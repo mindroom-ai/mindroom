@@ -255,6 +255,9 @@ class _SpyTurnPolicy:
     def can_reply_to_sender(self, sender_id: str) -> bool:
         return self.inner.can_reply_to_sender(sender_id)
 
+    def can_reply_to_sender_in_room(self, sender_id: str, room_id: str) -> bool:
+        return self.inner.can_reply_to_sender_in_room(sender_id, room_id)
+
     def responder_availability(self) -> ResponderAvailability:
         return self.inner.responder_availability()
 
@@ -1538,6 +1541,7 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_policy_planning_waits_for_config_replacement_before_authorizing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1547,14 +1551,20 @@ async def test_policy_planning_waits_for_config_replacement_before_authorizing(
     old_config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General")},
-            authorization=AuthorizationConfig(agent_reply_permissions={"general": [_SENDER]}),
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={"general": [_SENDER]},
+            ),
         ),
         runtime_paths,
     )
     new_config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General")},
-            authorization=AuthorizationConfig(agent_reply_permissions={"general": []}),
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={"general": []},
+            ),
         ),
         runtime_paths,
     )
@@ -1593,6 +1603,7 @@ async def test_policy_planning_waits_for_config_replacement_before_authorizing(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_command_waits_for_config_replacement_and_rechecks_authorization(
     tmp_path: Path,
 ) -> None:
@@ -1601,14 +1612,20 @@ async def test_command_waits_for_config_replacement_and_rechecks_authorization(
     old_config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General")},
-            authorization=AuthorizationConfig(agent_reply_permissions={ROUTER_AGENT_NAME: [_SENDER]}),
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={ROUTER_AGENT_NAME: [_SENDER]},
+            ),
         ),
         runtime_paths,
     )
     new_config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General")},
-            authorization=AuthorizationConfig(agent_reply_permissions={ROUTER_AGENT_NAME: []}),
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={ROUTER_AGENT_NAME: []},
+            ),
         ),
         runtime_paths,
     )
@@ -2893,6 +2910,7 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_interactive_selection_waits_for_reload_and_rechecks_authorization(
     tmp_path: Path,
 ) -> None:
@@ -2901,14 +2919,20 @@ async def test_interactive_selection_waits_for_reload_and_rechecks_authorization
     old_config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General")},
-            authorization=AuthorizationConfig(agent_reply_permissions={"general": [_SENDER]}),
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={"general": [_SENDER]},
+            ),
         ),
         runtime_paths,
     )
     new_config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General")},
-            authorization=AuthorizationConfig(agent_reply_permissions={"general": []}),
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={"general": []},
+            ),
         ),
         runtime_paths,
     )

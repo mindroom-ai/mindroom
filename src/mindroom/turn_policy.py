@@ -7,7 +7,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.authorization import is_sender_allowed_for_agent_reply, responder_candidate_entities_for_room
+from mindroom.authorization import (
+    is_sender_allowed_for_agent_reply,
+    is_sender_allowed_for_agent_reply_in_room,
+    responder_candidate_entities_for_room,
+)
 from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
@@ -297,6 +301,17 @@ class TurnPolicy:
             sender_id,
             self.deps.agent_name,
             self.deps.runtime.config,
+            self.deps.runtime_paths,
+            self.deps.agent_reply_memberships,
+        )
+
+    def can_reply_to_sender_in_room(self, sender_id: str, room_id: str) -> bool:
+        """Return whether this entity may reply to a sender in one room."""
+        return is_sender_allowed_for_agent_reply_in_room(
+            sender_id,
+            self.deps.agent_name,
+            self.deps.runtime.config,
+            room_id,
             self.deps.runtime_paths,
             self.deps.agent_reply_memberships,
         )

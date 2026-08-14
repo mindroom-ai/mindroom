@@ -2423,7 +2423,6 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.inbound_turn_normalizer.download_image", new_callable=AsyncMock, return_value=None),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -28,8 +29,11 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.matrix import journal_ingress
+from mindroom.matrix.state import MatrixState
+from mindroom.matrix.sync_loop import OwnRoomMembership
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.membership_models import ReportedDeparture
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
@@ -174,6 +178,26 @@ def _sync_response_with_room_membership_section(
         },
     )
     assert isinstance(response, nio.SyncResponse)
+    return response
+
+
+def _sliding_response_with_room_membership(
+    room_id: str,
+    *,
+    membership: str,
+) -> nio.SlidingSyncResponse:
+    response = nio.SlidingSyncResponse.from_dict(
+        {
+            "pos": f"s-after-{membership}",
+            "rooms": {
+                room_id: {
+                    "membership": membership,
+                    "timeline": [],
+                },
+            },
+        },
+    )
+    assert isinstance(response, nio.SlidingSyncResponse)
     return response
 
 
@@ -362,6 +386,115 @@ def test_repeated_membership_invalidation_preserves_refresh_backoff(tmp_path: Pa
 
     assert bot._reply_membership_refresh_attempt == 3
     assert bot._reply_membership_refresh_retry_at == 123.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["classic", "sliding"])
+async def test_router_authoritative_departure_revokes_grant_before_membership_fence(
+    tmp_path: Path,
+    transport: str,
+) -> None:
+    """Classic and sliding leave sections must synchronously fail the grant room closed."""
+    room_id = "!grant:localhost"
+    sender_id = "@alice:localhost"
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    orchestrator.revoke_reply_authorized_calls = AsyncMock()
+    bot.config.authorization.agent_reply_permissions = {
+        "router": AgentReplyPermission(joined_rooms=["grant"]),
+    }
+    state = MatrixState.load(runtime_paths=bot.runtime_paths)
+    state.add_room("grant", room_id, "#grant:localhost", "Grant")
+    state.save(runtime_paths=bot.runtime_paths)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[
+            nio.RoomMember(bot.agent_user.user_id, None, None),
+            nio.RoomMember(sender_id, None, None),
+        ],
+        room_id=room_id,
+    )
+    bot.client = client
+    index = bot._runtime_view.agent_reply_memberships
+    await index.refresh(bot.config, bot.runtime_paths, client)
+    assert index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+    fence_started = asyncio.Event()
+    release_fence = asyncio.Event()
+
+    async def delayed_fence(*_args: object) -> None:
+        fence_started.set()
+        await release_fence.wait()
+
+    response = (
+        _sync_response_with_room_membership_section(room_id, membership="leave")
+        if transport == "classic"
+        else _sliding_response_with_room_membership(room_id, membership="leave")
+    )
+    apply_membership = (
+        bot._apply_own_room_membership_from_sync
+        if isinstance(response, nio.SyncResponse)
+        else bot._apply_own_room_membership_from_sliding_sync
+    )
+    with patch.object(
+        type(bot._membership_fence),
+        "fence_reported_departures",
+        side_effect=delayed_fence,
+    ):
+        apply_task = asyncio.create_task(apply_membership(response))
+        await asyncio.wait_for(fence_started.wait(), timeout=1)
+        try:
+            assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+            assert bot._reply_membership_refresh_pending
+        finally:
+            release_fence.set()
+            await apply_task
+
+    orchestrator.revoke_reply_authorized_calls.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_router_leave_then_rejoin_in_one_sync_keeps_grant_ready(tmp_path: Path) -> None:
+    """A historical departure must not revoke a room whose final membership is joined."""
+    room_id = "!grant:localhost"
+    sender_id = "@alice:localhost"
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    orchestrator.revoke_reply_authorized_calls = AsyncMock()
+    bot.config.authorization.agent_reply_permissions = {
+        "router": AgentReplyPermission(joined_rooms=["grant"]),
+    }
+    state = MatrixState.load(runtime_paths=bot.runtime_paths)
+    state.add_room("grant", room_id, "#grant:localhost", "Grant")
+    state.save(runtime_paths=bot.runtime_paths)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[
+            nio.RoomMember(bot.agent_user.user_id, None, None),
+            nio.RoomMember(sender_id, None, None),
+        ],
+        room_id=room_id,
+    )
+    bot.client = client
+    index = bot._runtime_view.agent_reply_memberships
+    await index.refresh(bot.config, bot.runtime_paths, client)
+
+    await bot._apply_own_room_membership(
+        OwnRoomMembership(
+            joined_room_ids=frozenset({room_id}),
+            left_room_ids=frozenset(),
+            departures=(
+                ReportedDeparture(
+                    room_id=room_id,
+                    observation_id="$leave",
+                    rejoined_after=True,
+                ),
+            ),
+        ),
+    )
+
+    assert index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+    assert not bot._reply_membership_refresh_pending
+    orchestrator.revoke_reply_authorized_calls.assert_not_awaited()
 
 
 def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Path) -> None:

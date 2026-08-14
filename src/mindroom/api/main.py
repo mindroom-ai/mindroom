@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
+    from mindroom.response_admission import ResponseAdmissionGate
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
@@ -543,6 +544,8 @@ def bind_external_trigger_runtime(
     *,
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
     agent_reply_memberships: AgentReplyMembershipIndex,
+    response_admission_gate: ResponseAdmissionGate,
+    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]],
 ) -> None:
     """Attach router Matrix delivery runtime to one API app."""
     api_state = config_lifecycle.require_api_state(api_app)
@@ -552,6 +555,8 @@ def bind_external_trigger_runtime(
         config_generation=api_state.snapshot.generation,
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
         agent_reply_memberships=agent_reply_memberships,
+        response_admission_gate=response_admission_gate,
+        wait_for_admission_or_shutdown=wait_for_admission_or_shutdown,
     )
 
 

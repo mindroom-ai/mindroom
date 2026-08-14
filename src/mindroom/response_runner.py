@@ -22,6 +22,7 @@ from mindroom.approval_response import (
     continuation_target,
     identify_approval_tools,
 )
+from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -1890,12 +1891,40 @@ class ResponseRunner:
         recovered, event_id = await self._recover_nonready_approval(owned, target=target)
         if recovered:
             return event_id
+        if not is_sender_allowed_for_agent_reply_in_room(
+            owned.requester_id,
+            owned.entity_name,
+            self.deps.runtime.config,
+            owned.room_id,
+            self.deps.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
+        ):
+            return await self._settle_unauthorized_approval_continuation(owned)
         claimed = await self.deps.approval_store.claim_approval_continuation(
             owned.approval_id,
             runtime_generation=self.deps.approval_runtime_generation,
         )
         if claimed is None:
             return None
+        return await self._run_owned_approval_continuation(claimed, target=target)
+
+    async def _settle_unauthorized_approval_continuation(
+        self,
+        continuation: ApprovalContinuation,
+    ) -> str | None:
+        reason = "Current authorization no longer permits this tool approval continuation."
+        failing = await self._approval_responses.request_failure(continuation, reason)
+        if failing is None:
+            return None
+        settled = await self._approval_responses.settle_failure(failing, reason)
+        return continuation.response_event_id if settled else None
+
+    async def _run_owned_approval_continuation(
+        self,
+        claimed: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> str | None:
         try:
             outcome = await self._run_claimed_approval_lifecycle(claimed, target=target)
         except asyncio.CancelledError:

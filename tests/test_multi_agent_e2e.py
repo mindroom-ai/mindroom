@@ -639,8 +639,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         mock_event = MagicMock(spec=nio.InviteEvent)
         mock_event.sender = "@inviter:localhost"
 
-        with patch("mindroom.bot.is_authorized_sender", return_value=True):
-            await bot._on_invite(mock_room, mock_event)
+        await bot._on_invite(mock_room, mock_event)
 
         # Verify new room was joined (not the initial room)
         bot.client.join.assert_called_with(invite_room)

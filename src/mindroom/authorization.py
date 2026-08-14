@@ -144,6 +144,24 @@ def is_sender_allowed_for_agent_reply(
     return sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
 
 
+def is_sender_allowed_for_agent_reply_in_room(
+    sender_id: str,
+    agent_name: str,
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+) -> bool:
+    """Require both current-room access and entity reply access."""
+    return is_authorized_sender(sender_id, config, room_id, runtime_paths) and is_sender_allowed_for_agent_reply(
+        sender_id,
+        agent_name,
+        config,
+        runtime_paths,
+        membership_index,
+    )
+
+
 def _current_internal_sender_ids_for_auth(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return internal sender IDs when prepared, or an empty set before provisioning."""
     try:

@@ -86,6 +86,40 @@ from tests.conftest import (
     runtime_paths_for,
 )
 
+
+@pytest.mark.asyncio
+async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_reconciliation(
+    tmp_path: Path,
+) -> None:
+    """A refresh must finish its revoke pass without awaiting positive call starts."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+    router_bot = MagicMock()
+    router_bot.client = AsyncMock(spec=nio.AsyncClient)
+    router_bot.revoke_reply_authorized_calls = AsyncMock()
+    router_bot.reconcile_reply_authorized_calls = AsyncMock(side_effect=AssertionError("must be scheduled"))
+    worker_bot = MagicMock()
+    worker_bot.client = AsyncMock(spec=nio.AsyncClient)
+    worker_bot.revoke_reply_authorized_calls = AsyncMock()
+    worker_bot.reconcile_reply_authorized_calls = AsyncMock(side_effect=AssertionError("must be scheduled"))
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: router_bot,
+        "worker": worker_bot,
+    }
+
+    with patch.object(orchestrator.agent_reply_memberships, "refresh", new=AsyncMock()) as refresh:
+        await orchestrator.refresh_agent_reply_memberships()
+
+    refresh.assert_awaited_once_with(config, orchestrator.runtime_paths, router_bot.client)
+    router_bot.revoke_reply_authorized_calls.assert_awaited_once_with()
+    worker_bot.revoke_reply_authorized_calls.assert_awaited_once_with()
+    router_bot.schedule_reply_authorized_call_reconciliation.assert_called_once_with()
+    worker_bot.schedule_reply_authorized_call_reconciliation.assert_called_once_with()
+    router_bot.reconcile_reply_authorized_calls.assert_not_awaited()
+    worker_bot.reconcile_reply_authorized_calls.assert_not_awaited()
+
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path

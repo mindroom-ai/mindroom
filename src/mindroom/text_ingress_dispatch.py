@@ -107,7 +107,10 @@ async def dispatch_text_message(
             controller.deps.runtime.response_admission_gate,
             controller.deps.response_runner.wait_for_admission_or_shutdown,
         ):
-            if not controller.deps.turn_policy.can_reply_to_sender(turn.requester_user_id):
+            if not controller.deps.turn_policy.can_reply_to_sender_in_room(
+                turn.requester_user_id,
+                turn.room.room_id,
+            ):
                 await controller.deps.visible_responses.settle_source_events_ignored(prepared.handled_turn)
                 return
             if await _blocked_before_plan(

@@ -416,6 +416,7 @@ __all__ = [
     "delivered_matrix_side_effect",
     "dispatch_context_result",
     "drain_coalescing",
+    "enforce_turn_authorization",
     "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
@@ -2714,9 +2715,19 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
     if "test_authorization" in request.node.parent.name:
         yield
     else:
-        with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
-            patch("mindroom.reaction_dispatch.is_authorized_sender", return_value=True),
-        ):
+        with ExitStack() as stack:
+            stack.enter_context(patch("mindroom.ingress_validation.is_authorized_sender", return_value=True))
+            stack.enter_context(patch("mindroom.reaction_dispatch.is_authorized_sender", return_value=True))
+            if "enforce_turn_authorization" not in request.fixturenames:
+                stack.enter_context(
+                    patch(
+                        "mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room",
+                        return_value=True,
+                    ),
+                )
             yield
+
+
+@pytest.fixture
+def enforce_turn_authorization() -> None:
+    """Keep final TurnPolicy authorization active for tests that exercise it."""

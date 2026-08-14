@@ -51,6 +51,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from contextlib import AbstractAsyncContextManager
 
     from agno.agent import Agent as AgnoAgent
     from agno.knowledge.protocol import KnowledgeProtocol
@@ -62,6 +63,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+type _CallAuthorizationGuard = Callable[[], AbstractAsyncContextManager[bool]]
 
 logger = get_logger(__name__)
 
@@ -312,6 +316,7 @@ async def build_call_tools(
     tool_support: ToolRuntimeSupport,
     room_id: str,
     requester_id: str,
+    authorize_operation: _CallAuthorizationGuard,
     session_id: str | None = None,
     enable_responder: bool = False,
     voice_instructions: str | None = None,
@@ -394,6 +399,7 @@ async def build_call_tools(
             response_tracker=response_tracker,
             agent_cache=agent_cache,
             active_model_name=active_model_name,
+            authorize_operation=authorize_operation,
         )
         return CallAgentTooling(
             tools=(),
@@ -475,6 +481,7 @@ async def build_call_tools(
                 context=context,
                 agent_name=agent_name,
                 config=config,
+                authorize_operation=authorize_operation,
             ),
         )
     instructions = await _render_system_prompt(agent, session, run_context, visible_functions)
@@ -503,11 +510,53 @@ async def _run_call_agent(
     response_tracker: _CallResponseTracker,
     agent_cache: _CallAgentCache,
     active_model_name: str | None,
+    authorize_operation: _CallAuthorizationGuard,
 ) -> CallAgentResponse:
-    """Run one finalized call transcript through the normal MindRoom agent."""
+    """Run one finalized transcript only while its current caller remains authorized."""
+    await response_tracker.wait_for_settlements()
+    async with authorize_operation() as authorized:
+        if not authorized:
+            return CallAgentResponse(text="")
+        return await _run_authorized_call_agent(
+            transcript,
+            on_tools_executed,
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            tool_support=tool_support,
+            context=context,
+            execution_identity=execution_identity,
+            room_id=room_id,
+            requester_id=requester_id,
+            session_id=session_id,
+            voice_enrichment_items=voice_enrichment_items,
+            response_tracker=response_tracker,
+            agent_cache=agent_cache,
+            active_model_name=active_model_name,
+        )
+
+
+async def _run_authorized_call_agent(
+    transcript: str,
+    on_tools_executed: Callable[[list[str]], None] | None = None,
+    *,
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    tool_support: ToolRuntimeSupport,
+    context: ToolRuntimeContext,
+    execution_identity: ToolExecutionIdentity,
+    room_id: str,
+    requester_id: str,
+    session_id: str,
+    voice_enrichment_items: tuple[EnrichmentItem, ...],
+    response_tracker: _CallResponseTracker,
+    agent_cache: _CallAgentCache,
+    active_model_name: str | None,
+) -> CallAgentResponse:
+    """Run one admitted call transcript through the normal MindRoom agent."""
     from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
 
-    await response_tracker.wait_for_settlements()
     refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
     knowledge_resolution = resolve_agent_knowledge_access(
         agent_name,
@@ -693,6 +742,7 @@ def _wrap_agno_function(
     context: ToolRuntimeContext,
     agent_name: str,
     config: Config,
+    authorize_operation: _CallAuthorizationGuard,
 ) -> RawFunctionTool:
     """Wrap one agno function as a livekit raw function tool."""
     from livekit.agents import llm  # noqa: PLC0415
@@ -713,22 +763,25 @@ def _wrap_agno_function(
         if _function_requires_text_chat(function, config):
             logger.info("call_tool_blocked_needs_text_chat", tool=function.name, agent=agent_name)
             return _TEXT_CHAT_REQUIRED_MESSAGE
-        logger.info("call_tool_executing", tool=function.name, agent=agent_name, room_id=context.room_id)
-        try:
-            with tool_runtime_context(context):
-                # create_agent installs MindRoom's canonical hook bridge on
-                # every function. It owns approval evaluation, including the
-                # defensive argument copy, so do not preflight policy here.
-                execution = FunctionCall(function=function, arguments=raw_arguments)
-                if _function_requires_async_execution(function):
-                    result = await execution.aexecute()
-                else:
-                    # asyncio.to_thread copies the current contextvars context,
-                    # so hooks and the tool see the call's runtime context.
-                    result = await asyncio.to_thread(execution.execute)
-        except Exception as error:
-            logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=str(error))
-            return f"Tool {function.name} failed: {error}"
+        async with authorize_operation() as authorized:
+            if not authorized:
+                return "Call access was revoked before this tool could run."
+            logger.info("call_tool_executing", tool=function.name, agent=agent_name, room_id=context.room_id)
+            try:
+                with tool_runtime_context(context):
+                    # create_agent installs MindRoom's canonical hook bridge on
+                    # every function. It owns approval evaluation, including the
+                    # defensive argument copy, so do not preflight policy here.
+                    execution = FunctionCall(function=function, arguments=raw_arguments)
+                    if _function_requires_async_execution(function):
+                        result = await execution.aexecute()
+                    else:
+                        # asyncio.to_thread copies the current contextvars context,
+                        # so hooks and the tool see the call's runtime context.
+                        result = await asyncio.to_thread(execution.execute)
+            except Exception as error:
+                logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=str(error))
+                return f"Tool {function.name} failed: {error}"
         if result.status != "success":
             error = result.error or "unknown error"
             logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=error)

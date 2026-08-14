@@ -286,6 +286,41 @@ async def test_control_client_departure_marks_grant_room_unready(tmp_path: Path)
     assert not index.is_allowed("@alice:example.com", ["project"], config.authorization)
 
 
+@pytest.mark.asyncio
+async def test_authoritative_control_departure_fences_inflight_initial_snapshot(tmp_path: Path) -> None:
+    """A leave-section departure must prevent an older first snapshot from publishing."""
+    room_id = "!project:example.com"
+    config, runtime_paths = _runtime_config(tmp_path, joined_rooms=["project"])
+    _persist_room(runtime_paths, "project", room_id)
+    query_started = asyncio.Event()
+    release_query = asyncio.Event()
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        query_started.set()
+        await release_query.wait()
+        return _joined_members(room_id, "@alice:example.com")
+
+    client = AsyncMock()
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.side_effect = joined_members
+    index = AgentReplyMembershipIndex()
+    index.invalidate(config, reason="startup")
+    refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
+    await query_started.wait()
+
+    assert index.mark_control_room_unready(
+        config,
+        runtime_paths,
+        room_id,
+        reason="control_client_departed",
+    )
+    release_query.set()
+    await refresh_task
+
+    assert index.needs_refresh(config.authorization)
+    assert not index.is_allowed("@alice:example.com", ["project"], config.authorization)
+
+
 def test_transition_cannot_make_unready_room_authoritative(tmp_path: Path) -> None:
     """A single live join must not replace the missing full membership baseline."""
     config, _runtime_paths = _runtime_config(tmp_path, joined_rooms=["project"])

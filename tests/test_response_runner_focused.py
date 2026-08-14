@@ -31,6 +31,7 @@ from mindroom import response_runner
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import (
@@ -1302,6 +1303,81 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
 
     assert event_id is None
     locked_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoked_layer", ["room", "entity"])
+async def test_ready_approval_replay_rechecks_current_authorization(
+    tmp_path: Path,
+    revoked_layer: str,
+) -> None:
+    """A ready continuation must fail safely instead of executing after revocation."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    await _admit_approval_source(runner.deps.approval_store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-revoked",
+        run_id="run-paused",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id=request.room_id,
+        thread_id=request.thread_id,
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    if revoked_layer == "room":
+        runner.deps.runtime.config.authorization = AuthorizationConfig(
+            default_room_access=False,
+            room_permissions={request.room_id: []},
+            agent_reply_permissions={
+                "general": AgentReplyPermission(users=[continuation.requester_id]),
+            },
+        )
+    else:
+        runner.deps.runtime.config.authorization = AuthorizationConfig(
+            default_room_access=True,
+            agent_reply_permissions={
+                "general": AgentReplyPermission(users=[]),
+            },
+        )
+    failing = replace(
+        continuation,
+        state="failing",
+        failure_reason="Current authorization no longer permits this tool approval continuation.",
+    )
+
+    with (
+        patch.object(
+            runner._approval_responses,
+            "request_failure",
+            new=AsyncMock(return_value=failing),
+        ) as request_failure,
+        patch.object(runner._approval_responses, "settle_failure", new=AsyncMock(return_value=True)) as settle_failure,
+        patch.object(
+            runner,
+            "_run_claimed_approval_lifecycle",
+            new=AsyncMock(side_effect=AssertionError("revoked continuation executed")),
+        ) as execute,
+    ):
+        event_id = await runner._run_owned_or_locked_response(
+            request,
+            target=request.response_envelope.target,
+            early_placeholder=response_runner._EarlyPlaceholderState(),
+            locked_operation=AsyncMock(return_value="$duplicate"),
+        )
+
+    assert event_id == "$waiting"
+    request_failure.assert_awaited_once()
+    settle_failure.assert_awaited_once_with(
+        failing,
+        "Current authorization no longer permits this tool approval continuation.",
+    )
+    execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio

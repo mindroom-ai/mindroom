@@ -14,6 +14,7 @@ from mindroom import inbound_turn_normalizer, interactive, voice_handler
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import ActiveFollowUpCoalescingOwner, CoalescingKey, RequesterCoalescingOwner
+from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
@@ -449,6 +450,66 @@ async def test_router_command_targeting_unresolved_conversation_fails_visibly(tm
     assert "command" in request.response_text.lower()
     dispatch_mock.assert_not_awaited()
     assert bot._turn_store.is_handled("$cmd")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_unresolved_router_command_waits_for_reload_and_rechecks_authorization(tmp_path: Path) -> None:
+    """The exceptional command notice must not publish after its requester is revoked."""
+    sender_id = "@user:localhost"
+    bot = _make_bot(tmp_path, agent_name="router")
+    bot.config.authorization = AuthorizationConfig(
+        default_room_access=True,
+        agent_reply_permissions={"router": AgentReplyPermission(users=[sender_id])},
+    )
+    replacement_config = bot.config.model_copy(deep=True)
+    replacement_config.authorization = AuthorizationConfig(
+        default_room_access=True,
+        agent_reply_permissions={"router": AgentReplyPermission(users=[])},
+    )
+    room = _make_room()
+    command_event = _text_event(
+        event_id="$cmd-during-reload",
+        body="!help",
+        sender=sender_id,
+        server_timestamp=1000,
+        thread_id="$pending_root",
+    )
+    lookup_started = asyncio.Event()
+    fail_lookup = asyncio.Event()
+    gate_wait_started = asyncio.Event()
+    admission_gate = bot._runtime_view.response_admission_gate
+
+    async def unresolved_thread(*_args: object) -> None:
+        lookup_started.set()
+        await fail_lookup.wait()
+        message = "unproven root"
+        raise ThreadMembershipLookupError(message)
+
+    async def wait_for_replacement() -> bool:
+        gate_wait_started.set()
+        await admission_gate.wait_until_open()
+        return True
+
+    with (
+        patch.object(bot._conversation_resolver, "coalescing_thread_id", side_effect=unresolved_thread),
+        patch.object(bot._response_runner, "wait_for_admission_or_shutdown", side_effect=wait_for_replacement),
+        patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock, return_value="$notice") as send_text,
+        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as dispatch,
+    ):
+        command_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, command_event))
+        await asyncio.wait_for(lookup_started.wait(), timeout=1)
+        assert admission_gate.close_if_idle()
+        bot.config = replacement_config
+        fail_lookup.set()
+        await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
+
+        send_text.assert_not_awaited()
+        admission_gate.reopen()
+        await command_task
+
+    send_text.assert_not_awaited()
+    dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
