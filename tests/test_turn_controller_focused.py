@@ -1604,6 +1604,61 @@ async def test_policy_planning_waits_for_config_replacement_before_authorizing(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_ingress_denial_waits_for_config_replacement_before_settling(
+    tmp_path: Path,
+) -> None:
+    """A transient pre-publication denial must not terminally discard the turn."""
+    runtime_paths = test_runtime_paths(tmp_path / "runtime")
+    old_config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={"general": []},
+            ),
+        ),
+        runtime_paths,
+    )
+    new_config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={"general": [_SENDER]},
+            ),
+        ),
+        runtime_paths,
+    )
+    harness = _build_harness(old_config, tmp_path)
+    room = _room_with_members(old_config, "general")
+    event = _text_event("authorize me after the reload")
+    admission_gate = harness.controller.deps.runtime.response_admission_gate
+    assert admission_gate.close_if_idle()
+
+    gate_wait_started = asyncio.Event()
+
+    async def wait_for_replacement() -> bool:
+        gate_wait_started.set()
+        await admission_gate.wait_until_open()
+        return True
+
+    harness.runner.admission_waiter = wait_for_replacement
+    delivery_task = asyncio.create_task(harness.deliver(room, event))
+    try:
+        await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
+        assert not delivery_task.done()
+        runtime = cast("BotRuntimeState", harness.controller.deps.runtime)
+        runtime.config = new_config
+    finally:
+        admission_gate.reopen()
+        await delivery_task
+
+    assert len(harness.runner.requests) == 1
+    assert harness.ignored_dispatch_sources == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_command_waits_for_config_replacement_and_rechecks_authorization(
     tmp_path: Path,
 ) -> None:
@@ -1653,7 +1708,8 @@ async def test_command_waits_for_config_replacement_and_rechecks_authorization(
     await delivery_task
 
     assert harness.gateway.sent == []
-    assert harness.ignored_dispatch_sources == [(event.event_id,)]
+    assert harness.ignored_dispatch_sources == []
+    assert harness.turn_store.is_handled(event.event_id)
 
 
 @pytest.mark.asyncio

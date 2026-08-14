@@ -513,6 +513,10 @@ class AgentBot:
                 get_logger=lambda: self.logger,
                 get_configured_rooms=lambda: self.rooms,
                 send_response=send_room_lifecycle_response,
+                admit_response=lambda: admitted_response_decision(
+                    self.admission_gate,
+                    self.wait_for_admission_or_shutdown,
+                ),
                 on_room_joined=self._on_room_joined,
                 on_configured_room_joined=self._post_join_room_setup,
                 on_room_left=self._fence_left_room,

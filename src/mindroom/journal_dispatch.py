@@ -496,6 +496,14 @@ class JournalDispatcher:
         self._release_sources(event_ids)
         await self.store.settle_many(event_ids)
 
+    async def settle_running_event_intentionally_ignored(self) -> None:
+        """Settle the current callback's event before releasing an authorization fence."""
+        event = _RUNNING_EVENT.get()
+        if event is None:
+            msg = "A running event can only be settled inside its journal callback"
+            raise RuntimeError(msg)
+        await self.settle_intentionally_ignored_turn_sources((event.event_id,))
+
     def retry_turn_source(self, event_id: str) -> None:
         """Return one undelivered turn source to the worker."""
         self.retry_turn_sources((event_id,))

@@ -947,6 +947,7 @@ class TestAgentBot(AgentBotTestBase):
             ("reaction", False),
         ],
     )
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_sender_unauthorized_parity_across_handlers(
         self,
         handler_name: str,
@@ -975,10 +976,7 @@ class TestAgentBot(AgentBotTestBase):
 
         event = self._make_handler_event(handler_name, sender="@user:localhost", event_id=f"${handler_name}_unauth")
 
-        with (
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=False),
-            patch("mindroom.reaction_dispatch.is_authorized_sender", return_value=False),
-        ):
+        with patch("mindroom.ingress_validation.is_authorized_sender", return_value=False):
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:

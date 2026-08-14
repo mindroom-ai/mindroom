@@ -410,22 +410,23 @@ class TestAgentBot(AgentBotTestBase):
         room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender=sender_id, event_id="$reaction-during-reload")
         event.reacts_to = ""
-        claim_started = asyncio.Event()
-        release_claim = asyncio.Event()
-
-        async def delayed_interactive_claim() -> None:
-            claim_started.set()
-            await release_claim.wait()
-
         gate = bot._runtime_view.response_admission_gate
-        dispatcher = unwrap_extracted_collaborator(bot._journal_dispatcher)
-        with patch.object(dispatcher, "claim_interactive_reaction", side_effect=delayed_interactive_claim):
+        assert gate.close_if_idle()
+        gate_wait_started = asyncio.Event()
+
+        async def wait_for_replacement() -> bool:
+            gate_wait_started.set()
+            await gate.wait_until_open()
+            return True
+
+        replace_reaction_dispatcher_deps(
+            bot,
+            wait_for_admission_or_shutdown=wait_for_replacement,
+        )
+        with _mock_interactive_claim(bot, None):
             reaction_task = asyncio.create_task(_dispatch_reaction(bot, room, event))
-            await asyncio.wait_for(claim_started.wait(), timeout=1)
-            assert gate.close_if_idle()
+            await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
             bot.config = denied_config
-            release_claim.set()
-            await asyncio.sleep(0)
             try:
                 assert not reaction_task.done()
                 assert seen == []
@@ -434,6 +435,104 @@ class TestAgentBot(AgentBotTestBase):
                 await reaction_task
 
         assert seen == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
+    async def test_fresh_reaction_hook_holds_admission_through_effect(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A reload cannot overtake a claimed fresh reaction hook."""
+        sender_id = "@user:localhost"
+        config = self._config_for_storage(tmp_path)
+        config.authorization = AuthorizationConfig(
+            default_room_access=True,
+            agent_reply_permissions={
+                mock_agent_user.agent_name: AgentReplyPermission(users=[sender_id]),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        hook_started = asyncio.Event()
+        release_hook = asyncio.Event()
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def hold_reaction(_ctx: ReactionReceivedContext) -> None:
+            hook_started.set()
+            await release_hook.wait()
+
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [hold_reaction])])
+        room = MagicMock(room_id="!test:localhost", canonical_alias=None)
+        event = self._make_handler_event("reaction", sender=sender_id, event_id="$admitted-reaction-hook")
+        event.reacts_to = ""
+        gate = bot._runtime_view.response_admission_gate
+
+        with _mock_interactive_claim(bot, None):
+            reaction_task = asyncio.create_task(_dispatch_reaction(bot, room, event))
+            await asyncio.wait_for(hook_started.wait(), timeout=1)
+            try:
+                assert not gate.close_if_idle()
+            finally:
+                release_hook.set()
+                await reaction_task
+
+        assert gate.in_flight_response_count == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
+    async def test_fresh_reaction_denial_waits_for_replacement_policy(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A transient old-policy denial must not terminally discard a fresh reaction."""
+        sender_id = "@user:localhost"
+        config = self._config_for_storage(tmp_path)
+        config.authorization = AuthorizationConfig(
+            default_room_access=True,
+            agent_reply_permissions={
+                mock_agent_user.agent_name: AgentReplyPermission(users=[]),
+            },
+        )
+        allowed_config = config.model_copy(deep=True)
+        allowed_config.authorization = AuthorizationConfig(
+            default_room_access=True,
+            agent_reply_permissions={
+                mock_agent_user.agent_name: AgentReplyPermission(users=[sender_id]),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        seen = _install_reaction_recorder(bot)
+        room = MagicMock(room_id="!test:localhost", canonical_alias=None)
+        event = self._make_handler_event("reaction", sender=sender_id, event_id="$reaction-before-reload")
+        event.reacts_to = ""
+        gate = bot._runtime_view.response_admission_gate
+        assert gate.close_if_idle()
+        gate_wait_started = asyncio.Event()
+
+        async def wait_for_replacement() -> bool:
+            gate_wait_started.set()
+            await gate.wait_until_open()
+            return True
+
+        replace_reaction_dispatcher_deps(
+            bot,
+            wait_for_admission_or_shutdown=wait_for_replacement,
+        )
+
+        with _mock_interactive_claim(bot, None):
+            reaction_task = asyncio.create_task(_dispatch_reaction(bot, room, event))
+            try:
+                await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
+                assert not reaction_task.done()
+                bot.config = allowed_config
+            finally:
+                gate.reopen()
+                await reaction_task
+
+        assert seen == [event.event_id]
 
     @pytest.mark.asyncio
     async def test_reaction_hooks_do_not_run_when_interactive_handler_claims_event(

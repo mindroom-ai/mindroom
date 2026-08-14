@@ -2717,7 +2717,6 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
     else:
         with ExitStack() as stack:
             stack.enter_context(patch("mindroom.ingress_validation.is_authorized_sender", return_value=True))
-            stack.enter_context(patch("mindroom.reaction_dispatch.is_authorized_sender", return_value=True))
             if "enforce_turn_authorization" not in request.fixturenames:
                 stack.enter_context(
                     patch(

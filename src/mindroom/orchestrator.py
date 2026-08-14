@@ -1272,6 +1272,26 @@ class _MultiAgentOrchestrator:
             for bot in self.agent_bots.values():
                 bot.schedule_reply_authorized_call_reconciliation()
 
+    def _invalidate_reply_memberships_before_control_stop(self, entity_names: set[str]) -> None:
+        """Fence room-backed grants before stopping their sole control client."""
+        if ROUTER_AGENT_NAME in entity_names:
+            self.invalidate_agent_reply_memberships(reason="router_replacement")
+
+    async def _stop_runtime_entities(
+        self,
+        entity_names: set[str],
+        *,
+        restart_entities: set[str],
+    ) -> None:
+        """Stop entities after fencing control-plane state they exclusively own."""
+        self._invalidate_reply_memberships_before_control_stop(entity_names)
+        await stop_entities(
+            entity_names,
+            self.agent_bots,
+            self._sync_tasks,
+            restart_entities=restart_entities,
+        )
+
     async def reconcile_reply_authorized_calls(self) -> None:
         """Recheck every active MatrixRTC call against current reply access."""
         await asyncio.gather(*(bot.reconcile_reply_authorized_calls() for bot in self.agent_bots.values()))
@@ -1473,10 +1493,8 @@ class _MultiAgentOrchestrator:
         replaced_bots = self._replacement_bots(affected_entities)
         for entity_name in affected_entities:
             await self._cancel_bot_start_task(entity_name)
-        await stop_entities(
+        await self._stop_runtime_entities(
             affected_entities,
-            self.agent_bots,
-            self._sync_tasks,
             restart_entities=affected_entities & set(configured_entity_names(new_config)),
         )
         self._capture_replacement_recovery_rooms(replaced_bots)
@@ -1498,10 +1516,8 @@ class _MultiAgentOrchestrator:
             self._external_trigger_runtime.unbind_for_entity_changes(entities_to_stop)
             for entity_name in entities_to_stop:
                 await self._cancel_bot_start_task(entity_name)
-            await stop_entities(
+            await self._stop_runtime_entities(
                 entities_to_stop,
-                self.agent_bots,
-                self._sync_tasks,
                 restart_entities=entities_to_stop & plan.configured_entities,
             )
 
@@ -1569,10 +1585,8 @@ class _MultiAgentOrchestrator:
             replaced_bots = self._replacement_bots(changed_entities)
             for entity_name in changed_entities:
                 await self._cancel_bot_start_task(entity_name)
-            await stop_entities(
+            await self._stop_runtime_entities(
                 changed_entities,
-                self.agent_bots,
-                self._sync_tasks,
                 restart_entities=changed_entities,
             )
             self._capture_replacement_recovery_rooms(replaced_bots)

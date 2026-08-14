@@ -388,7 +388,11 @@ class TurnController:
         is_edit: bool = False,
     ) -> _PrecheckedEvent[T] | None:
         """Return a typed prechecked event for turn dispatch."""
-        requester_user_id = await self.deps.ingress.precheck_event(room, event, is_edit=is_edit)
+        async with admitted_response_decision(
+            self.deps.runtime.response_admission_gate,
+            self.deps.response_runner.wait_for_admission_or_shutdown,
+        ):
+            requester_user_id = await self.deps.ingress.precheck_event(room, event, is_edit=is_edit)
         if requester_user_id is None:
             return None
         return _PrecheckedEvent(event=event, requester_user_id=requester_user_id)

@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.approval_inbound import handle_tool_approval_action
-from mindroom.authorization import is_authorized_sender
 from mindroom.commands import config_confirmation
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
@@ -174,7 +173,7 @@ class ReactionDispatcher:
         )
         return TurnDispatchOutcome.DEFERRED
 
-    async def _maybe_handle_nonconfig_reaction(
+    async def _maybe_handle_nonconfig_reaction(  # noqa: PLR0911 - one outcome per durable reaction consumer
         self,
         room: nio.MatrixRoom,
         event: nio.ReactionEvent,
@@ -185,12 +184,38 @@ class ReactionDispatcher:
         """Route one authorized reaction among the non-config consumers."""
         if await self._maybe_handle_approval_reaction(room, event, consumer):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        if consumer is None and not self.deps.turn_policy.can_reply_to_sender_in_room(
-            requester_user_id,
-            room.room_id,
-        ):
-            self.deps.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
-            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+        if consumer is None:
+            async with admitted_response_decision(
+                self.deps.runtime.response_admission_gate,
+                self.deps.wait_for_admission_or_shutdown,
+            ):
+                if not self.deps.turn_policy.can_reply_to_sender_in_room(
+                    requester_user_id,
+                    room.room_id,
+                ):
+                    self.deps.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
+                    await self.deps.journal_dispatcher.settle_running_event_intentionally_ignored()
+                    return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+                if await self._maybe_handle_stop_reaction(event, consumer):
+                    return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+                outcome = await self._maybe_handle_interactive_reaction(
+                    room,
+                    event,
+                    consumer,
+                    reservation_owner,
+                    requester_user_id,
+                )
+                if outcome is not None:
+                    return outcome
+                await self.deps.journal_dispatcher.claim_semantic_consumer(
+                    SemanticConsumer.REACTION_HOOKS,
+                )
+                await self.deps.emit_reaction_received_hooks(
+                    room_id=room.room_id,
+                    event=event,
+                    correlation_id=event.event_id,
+                )
+                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         if await self._maybe_handle_stop_reaction(event, consumer):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         return await self._maybe_handle_interactive_reaction(
@@ -201,7 +226,7 @@ class ReactionDispatcher:
             requester_user_id,
         )
 
-    async def _route_reaction(  # noqa: PLR0911 - explicit terminal outcome for each consumer branch
+    async def _route_reaction(
         self,
         room: nio.MatrixRoom,
         event: nio.ReactionEvent,
@@ -233,15 +258,6 @@ class ReactionDispatcher:
             )
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
-        if semantic_consumer is None and not is_authorized_sender(
-            event.sender,
-            self.deps.runtime.config,
-            room.room_id,
-            self.deps.runtime_paths,
-        ):
-            self.deps.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
-            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-
         requester_user_id = self.deps.ingress.requester_user_id(
             sender=event.sender,
             source=event.source,
@@ -262,6 +278,7 @@ class ReactionDispatcher:
                         room.room_id,
                     ):
                         self.deps.logger.debug("Ignoring reaction due to current authorization", sender=event.sender)
+                        await self.deps.journal_dispatcher.settle_running_event_intentionally_ignored()
                         return TurnDispatchOutcome.INTENTIONALLY_IGNORED
                     if semantic_consumer is None:
                         await self.deps.journal_dispatcher.claim_semantic_consumer(
@@ -286,11 +303,11 @@ class ReactionDispatcher:
                 return outcome
         finally:
             await reservation_owner.release()
-
-        await self.deps.journal_dispatcher.claim_semantic_consumer(
-            SemanticConsumer.REACTION_HOOKS,
+        self.deps.logger.warning(
+            "reaction_consumer_did_not_match_event",
+            event_id=event.event_id,
+            semantic_consumer=semantic_consumer,
         )
-        await self._emit_authorized_reaction_hooks(room, event, requester_user_id)
         return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
     async def _emit_authorized_reaction_hooks(
@@ -309,6 +326,7 @@ class ReactionDispatcher:
                     "Ignoring reaction hook due to current authorization",
                     sender=event.sender,
                 )
+                await self.deps.journal_dispatcher.settle_running_event_intentionally_ignored()
                 return
             await self.deps.emit_reaction_received_hooks(
                 room_id=room.room_id,

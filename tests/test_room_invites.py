@@ -685,7 +685,10 @@ async def test_router_deduplicates_concurrent_invite_callbacks(
 ) -> None:
     """Duplicate invite callbacks for one room should join and welcome only once."""
     config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
+        Config(
+            router=RouterConfig(model="default", accept_invites=True),
+            authorization=AuthorizationConfig(default_room_access=True),
+        ),
         test_runtime_paths(tmp_path),
     )
     bot = AgentBot(
@@ -744,7 +747,10 @@ async def test_router_departure_allows_fresh_reinvite(
 ) -> None:
     """A room departure must not let old invite and welcome markers suppress rejoining."""
     config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
+        Config(
+            router=RouterConfig(model="default", accept_invites=True),
+            authorization=AuthorizationConfig(default_room_access=True),
+        ),
         test_runtime_paths(tmp_path),
     )
     bot = AgentBot(
@@ -912,7 +918,10 @@ async def test_router_duplicate_invite_retries_failed_welcome_delivery(
 ) -> None:
     """Duplicate invite callbacks should retry welcome delivery after a failed first send."""
     config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
+        Config(
+            router=RouterConfig(model="default", accept_invites=True),
+            authorization=AuthorizationConfig(default_room_access=True),
+        ),
         test_runtime_paths(tmp_path),
     )
     bot = AgentBot(
@@ -960,7 +969,10 @@ async def test_redelivered_invite_retries_a_failed_welcome(
 ) -> None:
     """A redelivered invite must retry a welcome whose delivery failed."""
     config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
+        Config(
+            router=RouterConfig(model="default", accept_invites=True),
+            authorization=AuthorizationConfig(default_room_access=True),
+        ),
         test_runtime_paths(tmp_path),
     )
     bot = AgentBot(
@@ -1119,6 +1131,7 @@ async def test_router_auto_welcome_lists_ad_hoc_present_responder(tmp_path: Path
                 ),
             },
             router=RouterConfig(model="default", accept_invites=True),
+            authorization=AuthorizationConfig(default_room_access=True),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -1271,6 +1284,111 @@ async def test_router_invite_welcome_filters_ad_hoc_responders_for_inviter(
     response_text = send_response.await_args.kwargs["response_text"]
     assert "\u2022 **@code**: Writes code" in response_text
     assert "@mindroom_research" not in response_text
+
+
+@pytest.mark.asyncio
+async def test_router_invite_welcome_requires_current_reply_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Joining an invite must not let the router welcome a reply-denied inviter."""
+    sender_id = "@alice:localhost"
+    config = bind_runtime_paths(
+        Config(
+            router=RouterConfig(model="default", accept_invites=True),
+            authorization=AuthorizationConfig(
+                global_users=[sender_id],
+                agent_reply_permissions={ROUTER_AGENT_NAME: []},
+            ),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    install_runtime_journal_support(bot)
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!adhoc:localhost",
+            chunk=[],
+            start="",
+            end=None,
+        ),
+    )
+    send_response = AsyncMock(return_value="$welcome")
+    install_send_response_mock(bot, send_response)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.JOINED),
+    )
+    room = MagicMock(room_id="!adhoc:localhost", canonical_alias=None)
+    event = MagicMock(sender=sender_id)
+
+    await bot._on_invite(room, event)
+    await bot._send_welcome_message_if_empty(room.room_id)
+
+    send_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_invite_welcome_waits_for_replacement_authorization(
+    tmp_path: Path,
+) -> None:
+    """Welcome delivery must use the policy published after a closed reload gate."""
+    sender_id = "@alice:localhost"
+    config = bind_runtime_paths(
+        Config(
+            router=RouterConfig(model="default", accept_invites=True),
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={ROUTER_AGENT_NAME: [sender_id]},
+            ),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    denied_config = config.model_copy(deep=True)
+    denied_config.authorization = AuthorizationConfig(
+        default_room_access=True,
+        agent_reply_permissions={ROUTER_AGENT_NAME: []},
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!adhoc:localhost",
+            chunk=[],
+            start="",
+            end=None,
+        ),
+    )
+    send_response = AsyncMock(return_value="$welcome")
+    install_send_response_mock(bot, send_response)
+    gate = bot.admission_gate
+    assert gate.close_if_idle()
+
+    welcome_task = asyncio.create_task(
+        bot._room_lifecycle.send_welcome_message_if_empty("!adhoc:localhost", sender_id),
+    )
+    try:
+        await asyncio.sleep(0)
+        assert not welcome_task.done()
+        bot.config = denied_config
+    finally:
+        gate.reopen()
+        await welcome_task
+
+    send_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio
