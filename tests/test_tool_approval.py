@@ -1465,28 +1465,30 @@ async def test_a_restart_adopts_a_card_whose_send_never_came_back(tmp_path: Path
     # The homeserver already has this card; the repeat resolves to that event.
     sender = AsyncMock(return_value=SentApprovalEvent("$stranded"))
     editor, edited = _signalling_editor()
-    restarted = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-    )
+    try:
+        restarted = initialize_approval_store(
+            test_runtime_paths(tmp_path),
+            sender=sender,
+            editor=editor,
+            cards=cards,
+            approval_room_ids=lambda: {"!room:localhost"},
+            transport_sender=lambda: "@mindroom_router:localhost",
+            sending_device=lambda: CLAIMING_DEVICE_ID,
+        )
 
-    assert (await restarted.recover_cards_on_startup()).discarded == 0
-    async with asyncio.timeout(1):
-        await edited.wait()
-    # The repeat carries the stored transaction, which is the only reason it
-    # can converge on the card already in the room instead of adding a second.
-    assert sender.await_args.args == ("!room:localhost", "$thread", ANY, "txn-stranded")
-    assert editor.await_args.args[:2] == ("!room:localhost", "$stranded")
-    assert editor.await_args.args[2]["status"] == "expired"
-    assert cards.acknowledged == [("txn-stranded", "$stranded")]
-    # Retired for good: the row is gone, so the next startup has nothing to do.
-    assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
-    await restarted.shutdown(reason="test complete")
+        assert (await restarted.recover_cards_on_startup()).discarded == 0
+        async with asyncio.timeout(1):
+            await edited.wait()
+        # The repeat carries the stored transaction, which is the only reason it
+        # can converge on the card already in the room instead of adding a second.
+        assert sender.await_args.args == ("!room:localhost", "$thread", ANY, "txn-stranded")
+        assert editor.await_args.args[:2] == ("!room:localhost", "$stranded")
+        assert editor.await_args.args[2]["status"] == "expired"
+        assert cards.acknowledged == [("txn-stranded", "$stranded")]
+        # Retired for good: the row is gone, so the next startup has nothing to do.
+        assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
+    finally:
+        await shutdown_approval_runtime(reason="test complete")
 
 
 @pytest.mark.asyncio
@@ -1505,20 +1507,22 @@ async def test_a_restart_does_not_resend_a_card_it_already_has_an_event_for(tmp_
     )
     sender = AsyncMock()
     editor, edited = _signalling_editor()
-    restarted = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
+    try:
+        restarted = initialize_approval_store(
+            test_runtime_paths(tmp_path),
+            sender=sender,
+            editor=editor,
+            cards=cards,
+            approval_room_ids=lambda: {"!room:localhost"},
+            transport_sender=lambda: "@mindroom_router:localhost",
+        )
 
-    assert (await restarted.recover_cards_on_startup()).discarded == 0
-    async with asyncio.timeout(1):
-        await edited.wait()
-    sender.assert_not_awaited()
-    await restarted.shutdown(reason="test complete")
+        assert (await restarted.recover_cards_on_startup()).discarded == 0
+        async with asyncio.timeout(1):
+            await edited.wait()
+        sender.assert_not_awaited()
+    finally:
+        await shutdown_approval_runtime(reason="test complete")
 
 
 @pytest.mark.asyncio
@@ -1625,30 +1629,36 @@ async def test_a_restart_adopts_and_expires_the_card_a_previous_device_left(tmp_
     sender = AsyncMock(return_value=SentApprovalEvent("$second-card"))
     editor, edited = _signalling_editor()
     locate_card = AsyncMock(return_value="$stranded")
-    restarted = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: CLAIMING_DEVICE_ID,
-        locate_card=locate_card,
-    )
+    try:
+        restarted = initialize_approval_store(
+            test_runtime_paths(tmp_path),
+            sender=sender,
+            editor=editor,
+            cards=cards,
+            approval_room_ids=lambda: {"!room:localhost"},
+            transport_sender=lambda: "@mindroom_router:localhost",
+            sending_device=lambda: CLAIMING_DEVICE_ID,
+            locate_card=locate_card,
+        )
 
-    assert (await restarted.recover_cards_on_startup()).discarded == 0
-    async with asyncio.timeout(1):
-        await edited.wait()
-    # Located by the approval id, which is device-independent, and never by the
-    # transaction, which is not.
-    assert locate_card.await_args.args == ("!room:localhost", "@mindroom_router:localhost", "stranded-approval")
-    sender.assert_not_awaited()
-    assert editor.await_args.args[:2] == ("!room:localhost", "$stranded")
-    assert editor.await_args.args[2]["status"] == "expired"
-    assert cards.acknowledged == [("txn-stranded", "$stranded")]
-    # And only now is the row safe to drop: nothing clickable is left behind it.
-    assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
-    await restarted.shutdown(reason="test complete")
+        assert (await restarted.recover_cards_on_startup()).discarded == 0
+        async with asyncio.timeout(1):
+            await edited.wait()
+        # Located by the approval id, which is device-independent, and never by the
+        # transaction, which is not.
+        assert locate_card.await_args.args == (
+            "!room:localhost",
+            "@mindroom_router:localhost",
+            "stranded-approval",
+        )
+        sender.assert_not_awaited()
+        assert editor.await_args.args[:2] == ("!room:localhost", "$stranded")
+        assert editor.await_args.args[2]["status"] == "expired"
+        assert cards.acknowledged == [("txn-stranded", "$stranded")]
+        # And only now is the row safe to drop: nothing clickable is left behind it.
+        assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
+    finally:
+        await shutdown_approval_runtime(reason="test complete")
 
 
 def test_adopted_native_card_keeps_exact_continuation_identity() -> None:
@@ -1772,23 +1782,25 @@ async def test_a_restart_still_expires_an_acknowledged_card_from_another_device(
     )
     sender = AsyncMock()
     editor, edited = _signalling_editor()
-    restarted = initialize_approval_store(
-        test_runtime_paths(tmp_path),
-        sender=sender,
-        editor=editor,
-        cards=cards,
-        approval_room_ids=lambda: {"!room:localhost"},
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: "ADIFFERENTDEVICE",
-    )
+    try:
+        restarted = initialize_approval_store(
+            test_runtime_paths(tmp_path),
+            sender=sender,
+            editor=editor,
+            cards=cards,
+            approval_room_ids=lambda: {"!room:localhost"},
+            transport_sender=lambda: "@mindroom_router:localhost",
+            sending_device=lambda: "ADIFFERENTDEVICE",
+        )
 
-    assert (await restarted.recover_cards_on_startup()).discarded == 0
-    async with asyncio.timeout(1):
-        await edited.wait()
-    sender.assert_not_awaited()
-    assert editor.await_args.args[:2] == ("!room:localhost", "$recorded")
-    await restarted.shutdown(reason="test complete")
-    assert editor.await_args.args[2]["status"] == "expired"
+        assert (await restarted.recover_cards_on_startup()).discarded == 0
+        async with asyncio.timeout(1):
+            await edited.wait()
+        sender.assert_not_awaited()
+        assert editor.await_args.args[:2] == ("!room:localhost", "$recorded")
+        assert editor.await_args.args[2]["status"] == "expired"
+    finally:
+        await shutdown_approval_runtime(reason="test complete")
 
 
 @pytest.mark.asyncio
