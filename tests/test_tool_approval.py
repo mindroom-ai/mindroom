@@ -1626,7 +1626,7 @@ async def test_a_restart_adopts_and_expires_the_card_a_previous_device_left(tmp_
 
 
 def test_adopted_native_card_keeps_exact_continuation_identity() -> None:
-    """Device-change recovery must not reinterpret a native card as legacy."""
+    """Device-change recovery must preserve the exact paused call identity."""
     stored = StoredApprovalCard(
         card=_approval_card(),
         resolution=None,
@@ -2062,7 +2062,7 @@ async def test_detached_card_response_ignores_untrusted_terminal_edit(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_card_response_ignores_cross_router_matrix_only_card(tmp_path: Path) -> None:
+async def test_card_response_ignores_card_owned_by_another_router(tmp_path: Path) -> None:
     cards = FakeApprovalCards()
     await cards.store_card("$approval", "!room:localhost", _approval_card(sender="@router_a:localhost"))
     editor = AsyncMock(return_value=True)

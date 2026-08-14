@@ -3582,8 +3582,8 @@ class TestApprovalCards:
         assert stored.resolution is None
         assert stored.card_event_id == "$card"
 
-    async def test_malformed_legacy_card_does_not_block_later_rows(self, alice: PrincipalStore) -> None:
-        """One unreadable old row must fail closed without poisoning the startup page."""
+    async def test_malformed_card_does_not_block_later_rows(self, alice: PrincipalStore) -> None:
+        """One unreadable row must fail closed without poisoning the startup page."""
         await self.remember(alice, "$malformed")
         await self.remember(alice, "$valid")
         await alice._backend.write(
@@ -3597,7 +3597,7 @@ class TestApprovalCards:
         scanned = await alice.pending_approval_cards(room_id=ROOM)
         assert [stored.card_event_id for stored in scanned] == ["$valid"]
 
-    async def test_full_page_of_malformed_legacy_cards_does_not_starve_valid_rows(
+    async def test_full_page_of_malformed_cards_does_not_starve_valid_rows(
         self,
         alice: PrincipalStore,
     ) -> None:
@@ -3619,11 +3619,11 @@ class TestApprovalCards:
 
         assert [stored.card_event_id for stored in scanned] == ["$valid"]
 
-    async def test_wrong_shaped_legacy_resolution_does_not_crash_startup_reader(
+    async def test_wrong_shaped_resolution_does_not_crash_startup_reader(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """Old or damaged resolution JSON is never reinterpreted as executable permission."""
+        """Damaged resolution JSON is never reinterpreted as executable permission."""
         await self.remember(alice, "$malformed")
         await self.remember(alice, "$valid")
         await alice._backend.write(

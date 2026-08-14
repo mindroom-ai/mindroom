@@ -510,7 +510,7 @@ class _ApprovalManager:
 
     @staticmethod
     def _pending_expiry(pending: PendingApproval) -> datetime:
-        """Return a safe expiry for a persisted card with tolerant legacy timestamps."""
+        """Return a safe expiry for a persisted card with malformed timestamps."""
         try:
             parsed = parse_approval_datetime(pending.expires_at)
         except (TypeError, ValueError):
@@ -1785,18 +1785,11 @@ class _ApprovalManager:
         requested_at: datetime,
         expires_at: datetime,
         status: PendingApprovalStatus,
-        workflow_id: str | None = None,
-        participant_id: str | None = None,
         full_arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
-            "body": _ApprovalManager._event_body(
-                tool_name,
-                status,
-                workflow_id=workflow_id,
-                participant_id=participant_id,
-            ),
+            "body": _ApprovalManager._event_body(tool_name, status),
             "tool_name": tool_name,
             "tool_call_id": approval_id,
             "arguments": arguments,
@@ -1809,10 +1802,6 @@ class _ApprovalManager:
         }
         if agent_name is not None:
             content["agent_name"] = agent_name
-        if workflow_id is not None:
-            content["workflow_id"] = workflow_id
-        if participant_id is not None:
-            content["participant_id"] = participant_id
         if arguments_truncated:
             content["arguments_truncated"] = True
             if full_arguments is not None:
@@ -1841,12 +1830,7 @@ class _ApprovalManager:
         )
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
-            "body": _ApprovalManager._event_body(
-                pending.tool_name,
-                status,
-                workflow_id=pending.workflow_id,
-                participant_id=pending.participant_id,
-            ),
+            "body": _ApprovalManager._event_body(pending.tool_name, status),
             "tool_name": pending.tool_name,
             "tool_call_id": pending.approval_id,
             "arguments": pending.arguments_preview,
@@ -1861,10 +1845,6 @@ class _ApprovalManager:
         }
         if pending.agent_name is not None:
             content["agent_name"] = pending.agent_name
-        if pending.workflow_id is not None:
-            content["workflow_id"] = pending.workflow_id
-        if pending.participant_id is not None:
-            content["participant_id"] = pending.participant_id
         if pending.arguments_preview_truncated:
             content["arguments_truncated"] = True
         if pending.requester_id:
@@ -1874,23 +1854,14 @@ class _ApprovalManager:
         return content
 
     @staticmethod
-    def _event_body(
-        tool_name: str,
-        status: PendingApprovalStatus,
-        *,
-        workflow_id: str | None = None,
-        participant_id: str | None = None,
-    ) -> str:
-        subject = tool_name
-        if workflow_id is not None and participant_id is not None:
-            subject = f"{tool_name} — Dynamic Workflow '{workflow_id}' participant '{participant_id}'"
+    def _event_body(tool_name: str, status: PendingApprovalStatus) -> str:
         if status == "approved":
-            return f"Approved: {subject}"
+            return f"Approved: {tool_name}"
         if status == "denied":
-            return f"Denied: {subject}"
+            return f"Denied: {tool_name}"
         if status == "expired":
-            return f"Expired: {subject}"
-        return f"🔒 Approval required: {subject}"
+            return f"Expired: {tool_name}"
+        return f"🔒 Approval required: {tool_name}"
 
     @staticmethod
     def _normalized_resolution_request(

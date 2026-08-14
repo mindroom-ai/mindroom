@@ -105,6 +105,9 @@ def _detached_approval_card() -> dict[str, Any]:
         "content": {
             "approval_id": "approval-1",
             "tool_name": "read_file",
+            "tool_call_id": "call-1",
+            "continuation_id": "continuation-1",
+            "continuation_generation": 0,
             "arguments": {"path": "notes.txt"},
             "status": "pending",
             "requester_id": "@user:localhost",
@@ -1803,13 +1806,13 @@ class TestAgentBot(AgentBotTestBase):
             await shutdown_approval_runtime()
 
     @pytest.mark.asyncio
-    async def test_reply_to_detached_pending_approval_is_consumed_and_expires_card(
+    async def test_reply_to_detached_pending_approval_is_consumed_and_denies_card(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Detached approval replies should expire their card instead of entering conversation input."""
+        """Detached approval replies should deny their card instead of entering conversation input."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
@@ -1842,8 +1845,8 @@ class TestAgentBot(AgentBotTestBase):
             handle_text_event.assert_not_awaited()
             assert editor.await_args.args[:2] == ("!test:localhost", "$approval")
             replacement = editor.await_args.args[2]
-            assert replacement["status"] == "expired"
-            assert replacement["resolution_reason"] == "Original tool request is no longer active."
+            assert replacement["status"] == "denied"
+            assert replacement["resolution_reason"] == "Deny."
         finally:
             await shutdown_approval_runtime()
 
