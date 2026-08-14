@@ -84,9 +84,9 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    The dependent-entity check runs again under the config update lock immediately before replacement.
 3. `ConfigReloadLifecycle.apply_with_response_admission()` serializes config reloads and MCP catalog replacements behind one global admission owner.
 4. Sampling the in-flight count and closing the shared `ResponseAdmissionGate` happen atomically, so a new response cannot race the decision to apply.
-   The gate covers Matrix-driven response lifecycles only.
-   Text and router planning, commands, edit regeneration, interactive selections, and visible router voice echoes perform their final reply-policy check after admission and retain the slot through their direct side effect or response-runner handoff.
-   Direct agent-run entry points that bypass the response lifecycle (`mindroom.api.openai_compat` and cascaded voice in `mindroom.matrix_rtc.call_tools`) are not admitted through it, so a replacement can still land underneath one of those runs.
+   The gate covers Matrix-driven response lifecycles, external-trigger delivery, call admission, and requester-driven call operations.
+   Text and router planning, commands, edit regeneration, interactive selections, visible router voice echoes, calls, and external triggers perform their final reply-policy check after admission and retain the slot through their direct side effect or response-runner handoff.
+   The OpenAI-compatible API in `mindroom.api.openai_compat` remains outside this gate because it does not use Matrix reply authorization.
    The gate stays closed, but is not held, across config loading and plan application.
    Holding it would stall the apply against itself: applying the plan stops bots, and stopping a bot drains its detached responses.
 5. While the gate is closed, a response waits before taking a lifecycle lock, incrementing the in-flight count, or publishing a placeholder.
