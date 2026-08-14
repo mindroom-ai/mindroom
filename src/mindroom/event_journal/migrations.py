@@ -47,7 +47,9 @@ def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: boo
     migrate_responses = _table_exists(transaction, "response_outbox", postgres=postgres)
     if migrate_responses:
         transaction.execute("DROP INDEX IF EXISTS response_outbox_unacknowledged_scan")
-        transaction.execute(f"ALTER TABLE response_outbox RENAME TO {_LEGACY_RESPONSE_OUTBOX}")
+        transaction.execute(
+            "ALTER TABLE response_outbox RENAME TO response_outbox_legacy_delivery",
+        )
     migrate_approvals = _column_exists(transaction, "approval_cards", "transaction_id", postgres=postgres)
     if migrate_approvals:
         transaction.execute("ALTER TABLE approval_cards RENAME TO approval_cards_legacy_delivery")
@@ -159,7 +161,7 @@ def _migrate_response_outbox(transaction: Transaction) -> None:
                 int(row["created_at_ns"]),
             ),
         )
-    transaction.execute(f"DROP TABLE {_LEGACY_RESPONSE_OUTBOX}")
+    transaction.execute("DROP TABLE response_outbox_legacy_delivery")
 
 
 def _object_json(value: object) -> dict[str, Any] | None:
