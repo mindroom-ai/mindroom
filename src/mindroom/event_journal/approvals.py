@@ -1063,6 +1063,10 @@ def retire(
         "DELETE FROM approval_cards WHERE principal_id = ? AND delivery_id = ?",
         (principal_id, delivery_id),
     )
+    transaction.execute(
+        "DELETE FROM matrix_delivery_outbox WHERE principal_id = ? AND delivery_id = ?",
+        (principal_id, delivery_id),
+    )
     return True
 
 

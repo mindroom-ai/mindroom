@@ -5473,11 +5473,11 @@ class TestApprovalContinuations:
         assert terminal.payload == {"status": "approved", "resolution_reason": "Looks safe."}
         assert terminal.attempted is False
 
-    async def test_terminal_edit_acknowledgement_retires_only_the_card_domain_row(
+    async def test_terminal_edit_acknowledgement_retires_card_and_completed_delivery(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """The generic outbox proves delivery before the approval lookup becomes a tombstone."""
+        """The tombstone replaces completed approval-domain and transport ownership."""
         await self.admit_sources(alice)
         await alice.create_approval_continuation(
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
@@ -5520,12 +5520,16 @@ class TestApprovalContinuations:
         )
         assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$approval") is None
         assert await alice.is_terminal_approval_card(room_id=ROOM, card_event_id="$approval") is True
-        delivered = await alice.load_matrix_delivery(
+        initial = await alice.load_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+        )
+        terminal = await alice.load_matrix_delivery(
             delivery_id="approval-card-1",
             stage=DeliveryStage.FINAL,
         )
-        assert delivered is not None
-        assert delivered.acknowledged_event_id == "$terminal-edit"
+        assert initial is None
+        assert terminal is None
 
     async def test_late_approval_atomically_expires_the_call_and_card(self, alice: PrincipalStore) -> None:
         """A click at or after the exact deadline cannot authorize execution."""
