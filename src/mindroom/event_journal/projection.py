@@ -173,7 +173,12 @@ def project(
     receipt_order: int,
     membership_epoch: int,
 ) -> str | None:
-    """Fold one event and return the event ID whose tombstone became authoritative."""
+    """Fold one event and report tombstone authority to admission.
+
+    A redaction returns its target ID.
+    A newly admitted event with a preexisting tombstone returns its own ID.
+    Every other projection returns ``None``.
+    """
     if event.redacts_event_id is not None:
         _project_redaction(
             transaction,
