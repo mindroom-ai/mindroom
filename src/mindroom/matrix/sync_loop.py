@@ -75,12 +75,18 @@ class OwnRoomMembership:
 
     joined_room_ids: frozenset[str]
     left_room_ids: frozenset[str]
+    invited_room_ids: frozenset[str]
     departures: tuple[ReportedDeparture, ...]
 
     @property
     def departed_room_ids(self) -> frozenset[str]:
         """Return the rooms this response reported at least one departure from."""
         return frozenset(departure.room_id for departure in self.departures)
+
+    @property
+    def continuity_lost_room_ids(self) -> frozenset[str]:
+        """Return rooms whose prior joined-members view is no longer authoritative."""
+        return self.departed_room_ids | self.invited_room_ids
 
 
 def own_membership_from_sync(response: nio.SyncResponse, *, self_user_id: str) -> OwnRoomMembership:
@@ -113,6 +119,7 @@ def own_membership_from_sync(response: nio.SyncResponse, *, self_user_id: str) -
     return OwnRoomMembership(
         joined_room_ids=frozenset(response.rooms.join),
         left_room_ids=left_room_ids,
+        invited_room_ids=frozenset(response.rooms.invite),
         departures=tuple(departures),
     )
 
@@ -129,6 +136,7 @@ def own_membership_from_sliding_sync(
     """
     joined_room_ids: set[str] = set()
     left_room_ids: set[str] = set()
+    invited_room_ids: set[str] = set()
     departures: list[ReportedDeparture] = []
     for room_id, room in response.rooms.items():
         is_invite = room.membership == "invite" or (room.membership is None and bool(room.stripped_state))
@@ -150,14 +158,47 @@ def own_membership_from_sliding_sync(
                 )
             departures.extend(observed)
             continue
-        if not is_invite:
+        if is_invite:
+            invited_room_ids.add(room_id)
+        else:
             joined_room_ids.add(room_id)
         departures.extend(observed)
     return OwnRoomMembership(
         joined_room_ids=frozenset(joined_room_ids),
         left_room_ids=frozenset(left_room_ids),
+        invited_room_ids=frozenset(invited_room_ids),
         departures=tuple(departures),
     )
+
+
+def negative_member_events_from_sync(
+    response: nio.SyncResponse | nio.SlidingSyncResponse,
+) -> tuple[tuple[str, nio.RoomMemberEvent], ...]:
+    """Return deduplicated non-join member events before cross-room fan-out."""
+    room_events: Iterable[tuple[str, Iterable[object]]]
+    if isinstance(response, nio.SyncResponse):
+        room_events = (
+            (room_id, (*room.state, *room.timeline.events))
+            for room_id, room in response.rooms.join.items()
+        )
+    else:
+        room_events = (
+            (room_id, (*room.required_state, *room.timeline))
+            for room_id, room in response.rooms.items()
+        )
+
+    seen: set[tuple[str, str]] = set()
+    transitions: list[tuple[str, nio.RoomMemberEvent]] = []
+    for room_id, events in room_events:
+        for event in events:
+            if not isinstance(event, nio.RoomMemberEvent) or event.membership == "join":
+                continue
+            identity = (room_id, event.event_id)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            transitions.append((room_id, event))
+    return tuple(transitions)
 
 
 def _sync_departure_observation_id(sync_kind: str, token: str, room_id: str) -> str:

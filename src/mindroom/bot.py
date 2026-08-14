@@ -63,6 +63,7 @@ from mindroom.matrix.sync_checkpoint_trust import SyncCheckpointTrust
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
 from mindroom.matrix.sync_loop import (
     OwnRoomMembership,
+    negative_member_events_from_sync,
     own_membership_from_sliding_sync,
     own_membership_from_sync,
     run_matrix_sync_forever,
@@ -1337,6 +1338,22 @@ class AgentBot:
             owner=self._runtime_view,
         )
 
+    def _schedule_reply_authorized_call_revocation(self) -> None:
+        """Revoke calls after a synchronous pre-admission policy change."""
+        create_background_task(
+            self._revoke_reply_authorized_calls_runtimewide(),
+            name="matrix_rtc_reply_authorization_revoke",
+            owner=self._runtime_view,
+        )
+
+    async def _revoke_reply_authorized_calls_runtimewide(self) -> None:
+        """End denied calls through the owner of the shared reply policy."""
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            await self.revoke_reply_authorized_calls()
+        else:
+            await orchestrator.revoke_reply_authorized_calls()
+
     async def wait_for_admission_or_shutdown(self) -> bool:
         """Wait for replacement admission unless this bot runtime is stopping."""
         return await self._response_runner.wait_for_admission_or_shutdown()
@@ -1836,17 +1853,31 @@ class AgentBot:
             if isinstance(response, nio.SyncResponse)
             else own_membership_from_sliding_sync(response, self_user_id=self.agent_user.user_id)
         )
-        grant_room_departed = False
-        for room_id in membership.left_room_ids:
+        index = self._runtime_view.agent_reply_memberships
+        grant_authorization_changed = False
+        grant_room_continuity_lost = False
+        for room_id in membership.continuity_lost_room_ids:
             room_was_grant = self._runtime_view.agent_reply_memberships.mark_control_room_unready(
                 self.config,
                 self.runtime_paths,
                 room_id,
                 reason="control_client_departed",
             )
-            grant_room_departed = room_was_grant or grant_room_departed
-        if grant_room_departed:
+            grant_room_continuity_lost = room_was_grant or grant_room_continuity_lost
+        if grant_room_continuity_lost:
             self._schedule_agent_reply_membership_refresh()
+            grant_authorization_changed = True
+
+        for room_id, event in negative_member_events_from_sync(response):
+            changed = index.apply_member_event(
+                self.config,
+                room_id,
+                event,
+                control_user_id=self.agent_user.user_id,
+            )
+            grant_authorization_changed = changed or grant_authorization_changed
+        if grant_authorization_changed:
+            self._schedule_reply_authorized_call_revocation()
 
     async def _apply_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Apply one certified sync response through its transport owners."""
@@ -2008,18 +2039,18 @@ class AgentBot:
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
         departed_room_ids = membership.departed_room_ids
-        reply_grant_departed = False
+        reply_grant_continuity_lost = False
         if self.agent_name == ROUTER_AGENT_NAME:
             index = self._runtime_view.agent_reply_memberships
-            for room_id in membership.left_room_ids:
+            for room_id in membership.continuity_lost_room_ids:
                 room_was_grant = index.mark_control_room_unready(
                     self.config,
                     self.runtime_paths,
                     room_id,
                     reason="control_client_departed",
                 )
-                reply_grant_departed = room_was_grant or reply_grant_departed
-            if reply_grant_departed:
+                reply_grant_continuity_lost = room_was_grant or reply_grant_continuity_lost
+            if reply_grant_continuity_lost:
                 self._schedule_agent_reply_membership_refresh()
         await self._membership_fence.fence_reported_departures(membership.departures)
         for room_id in departed_room_ids:
@@ -2034,12 +2065,8 @@ class AgentBot:
                 joined_room_ids=current_joined_room_ids,
                 left_room_ids=membership.left_room_ids,
             )
-        if reply_grant_departed:
-            orchestrator = self.orchestrator
-            if orchestrator is None:
-                await self.revoke_reply_authorized_calls()
-            else:
-                await orchestrator.revoke_reply_authorized_calls()
+        if reply_grant_continuity_lost:
+            await self._revoke_reply_authorized_calls_runtimewide()
 
     def _invited_call_rooms_by_agent(self) -> dict[str, frozenset[str]]:
         """Return live accepted-invite state for the configured call agents."""
