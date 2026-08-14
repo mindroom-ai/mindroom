@@ -217,6 +217,24 @@ def _install_legacy_delivery_state(connection: object, *, postgres: bool) -> Non
             20,
         ),
     )
+    insert(
+        "INSERT INTO approval_cards VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "router@shared",
+            ROOM,
+            "malformed-approval-txn",
+            "$malformed-approval",
+            1,
+            DEVICE,
+            "not-json",
+            None,
+            "approval-1",
+            0,
+            "call-malformed",
+            0,
+            23,
+        ),
+    )
     unattempted_card_content = {
         **card_content,
         "approval_id": "approval-card-2",
@@ -233,12 +251,35 @@ def _install_legacy_delivery_state(connection: object, *, postgres: bool) -> Non
             0,
             None,
             json.dumps({"type": "io.mindroom.tool_approval", "content": unattempted_card_content}),
-            json.dumps({**unattempted_card_content, "status": "expired", "body": "Expired: shell"}),
+            None,
             "approval-1",
             0,
             "call-2",
             0,
             21,
+        ),
+    )
+    pending_card_content = {
+        **card_content,
+        "approval_id": "approval-card-4",
+        "tool_call_id": "call-4",
+    }
+    insert(
+        "INSERT INTO approval_cards VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "router@shared",
+            ROOM,
+            "approval-pending-txn",
+            "$pending-approval",
+            1,
+            DEVICE,
+            json.dumps({"type": "io.mindroom.tool_approval", "content": pending_card_content}),
+            None,
+            "approval-1",
+            0,
+            "call-4",
+            0,
+            22,
         ),
     )
     context = {
@@ -252,7 +293,7 @@ def _install_legacy_delivery_state(connection: object, *, postgres: bool) -> Non
     }
     insert(
         "INSERT INTO approval_continuations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("agent@alice", "approval-1", "agent", "ready", 0, None, None, json.dumps(context), 15),
+        ("agent@alice", "approval-1", "agent", "waiting", 0, "publisher", None, json.dumps(context), 15),
     )
     insert(
         "INSERT INTO approval_continuations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -278,12 +319,20 @@ def _install_legacy_delivery_state(connection: object, *, postgres: bool) -> Non
     )
     insert(
         "INSERT INTO approval_continuation_calls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("agent@alice", "approval-1", 0, "call-2", 1, "shell", "agent", 999_999, "expired", "departed"),
+        ("agent@alice", "approval-1", 0, "call-2", 1, "shell", "agent", 999_999, None, None),
+    )
+    insert(
+        "INSERT INTO approval_continuation_calls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("agent@alice", "approval-1", 0, "call-3", 2, "python", "agent", 999_999, None, None),
+    )
+    insert(
+        "INSERT INTO approval_continuation_calls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("agent@alice", "approval-1", 0, "call-4", 3, "shell", "agent", 999_999, None, None),
     )
 
 
 async def _assert_legacy_delivery_state_migrated(store: EventJournalStore) -> None:
-    """Assert all transport and exact-call facts survived one schema open."""
+    """Assert response debt survives while legacy approval debt expires closed."""
     from mindroom.event_journal import ApprovalDecision  # noqa: PLC0415
 
     response = await store.principal("agent@alice").load_matrix_delivery(
@@ -309,106 +358,52 @@ async def _assert_legacy_delivery_state_migrated(store: EventJournalStore) -> No
         delivery_id="approval-txn",
         stage=DeliveryStage.FINAL,
     )
-    assert initial is not None
-    assert initial.event_type == "io.mindroom.tool_approval"
-    assert initial.transaction_id == "approval-txn"
-    assert initial.acknowledged_event_id == "$approval"
-    assert initial.attempted is True
-    assert initial.sending_device_id == DEVICE
+    assert initial is None
     assert terminal is not None
     assert terminal.event_type == "io.mindroom.tool_approval"
     assert terminal.edits_event_id == "$approval"
     assert terminal.payload["status"] == "approved"
     assert terminal.attempted is False
 
-    stored_card = await router.pending_approval_card(room_id=ROOM, card_event_id="$approval")
-    assert stored_card is not None
-    assert stored_card.delivery_id == "approval-txn"
-    assert stored_card.resolution is not None
-    assert stored_card.resolution["status"] == "approved"
+    assert await router.pending_approval_card(room_id=ROOM, card_event_id="$approval") is None
+    assert await router.is_terminal_approval_card(room_id=ROOM, card_event_id="$approval")
 
-    await _assert_legacy_unacknowledged_card_promotes_after_wire_preparation(router)
+    expired_terminal = await router.load_matrix_delivery(
+        delivery_id="approval-pending-txn",
+        stage=DeliveryStage.FINAL,
+    )
+    assert expired_terminal is not None
+    assert expired_terminal.edits_event_id == "$pending-approval"
+    assert expired_terminal.payload["status"] == "expired"
+    assert expired_terminal.payload["approvable"] is False
+    assert await router.is_terminal_approval_card(room_id=ROOM, card_event_id="$pending-approval")
+
+    for stage in DeliveryStage:
+        assert (
+            await router.load_matrix_delivery(
+                delivery_id="approval-unattempted-txn",
+                stage=stage,
+            )
+            is None
+        )
+        assert (
+            await router.load_matrix_delivery(
+                delivery_id="malformed-approval-txn",
+                stage=stage,
+            )
+            is None
+        )
 
     continuation = await store.principal("agent@alice").approval_continuation("approval-1")
     assert continuation is not None
-    assert [call.decision for call in continuation.calls] == [ApprovalDecision.APPROVED, ApprovalDecision.EXPIRED]
-
-
-async def _assert_legacy_unacknowledged_card_promotes_after_wire_preparation(router: PrincipalStore) -> None:
-    """Pre-wire legacy content stays staged until relation and sidecar content is frozen."""
-    unattempted = await router.load_matrix_delivery(
-        delivery_id="approval-unattempted-txn",
-        stage=DeliveryStage.INITIAL,
-    )
-    assert unattempted is None
-    claim = await router.claim_legacy_approval_delivery(
-        owner="migration-test",
-        now_ns=1,
-        lease_until_ns=9_000_000_000_000_000_000,
-    )
-    assert claim is not None
-    legacy = claim
-    assert legacy.delivery_id == "approval-unattempted-txn"
-    assert legacy.attempted is False
-    assert "m.relates_to" not in legacy.payload
-    assert legacy.payload["full_arguments"] == {"command": "x" * 60_000}
-    assert await router.legacy_approval_delivery_pending("approval-1")
-    assert not await router.legacy_approval_delivery_pending("unrelated-approval")
-
-    promoted_payload = {
-        **legacy.payload,
-        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
-        "full_arguments_url": "mxc://example.org/arguments",
-    }
-    promoted_payload.pop("full_arguments")
-    assert await router.promote_legacy_approval_delivery(
-        delivery_id="approval-unattempted-txn",
-        payload=promoted_payload,
-        acknowledged_event_id=None,
-        claim=claim,
-    )
-    assert not await router.legacy_approval_delivery_pending()
-    migrated_initial = await router.load_matrix_delivery(
-        delivery_id="approval-unattempted-txn",
-        stage=DeliveryStage.INITIAL,
-    )
-    unattempted_terminal = await router.load_matrix_delivery(
-        delivery_id="approval-unattempted-txn",
-        stage=DeliveryStage.FINAL,
-    )
-    assert migrated_initial is not None
-    assert migrated_initial.attempted is False
-    assert migrated_initial.acknowledged_event_id is None
-    assert migrated_initial.payload == promoted_payload
-    assert unattempted_terminal is not None
-    assert unattempted_terminal.payload["status"] == "expired"
-    assert "full_arguments" not in unattempted_terminal.payload
-
-    assert (
-        await router.claim_matrix_delivery(
-            delivery_id="approval-unattempted-txn",
-            stage=DeliveryStage.INITIAL,
-        )
-        is not None
-    )
-    await router.acknowledge_matrix_delivery(
-        delivery_id="approval-unattempted-txn",
-        stage=DeliveryStage.INITIAL,
-        event_id="$migrated-pending",
-        delivered_projections=(),
-    )
-    migrated_terminal = await router.load_matrix_delivery(
-        delivery_id="approval-unattempted-txn",
-        stage=DeliveryStage.FINAL,
-    )
-    assert migrated_terminal is not None
-    assert migrated_terminal.edits_event_id == "$migrated-pending"
-    claimed_terminal = await router.claim_matrix_delivery(
-        delivery_id="approval-unattempted-txn",
-        stage=DeliveryStage.FINAL,
-    )
-    assert claimed_terminal is not None
-    assert claimed_terminal.edits_event_id == "$migrated-pending"
+    assert [call.decision for call in continuation.calls] == [
+        ApprovalDecision.APPROVED,
+        ApprovalDecision.EXPIRED,
+        ApprovalDecision.EXPIRED,
+        ApprovalDecision.EXPIRED,
+    ]
+    assert continuation.state == "ready"
+    assert continuation.runtime_generation is None
 
 
 async def _assert_legacy_unavailable_notices_migrated(store: EventJournalStore) -> None:
@@ -4907,44 +4902,6 @@ class TestApprovalContinuations:
             delivered_projections=(),
         )
 
-    @staticmethod
-    async def remember_legacy_card(
-        journal_store: EventJournalStore,
-        *,
-        attempted: bool,
-    ) -> None:
-        """Persist one unacknowledged #1834 card whose wire payload is not normalized yet."""
-        content = {
-            "approval_id": "approval-card-1",
-            "continuation_id": "approval-1",
-            "continuation_generation": 0,
-            "tool_call_id": "call-1",
-            "tool_name": "shell",
-            "thread_id": "$thread",
-            "status": "pending",
-        }
-        await journal_store.backend.write(
-            lambda transaction: transaction.execute(
-                """
-                INSERT INTO approval_cards_legacy_delivery (
-                    principal_id, room_id, transaction_id, card_event_id, attempted,
-                    sending_device_id, card_json, resolution_json, continuation_id,
-                    continuation_generation, tool_call_id, membership_epoch, created_at_ns
-                ) VALUES (?, ?, ?, NULL, ?, ?, ?, NULL, ?, 0, ?, 0, 1)
-                """,
-                (
-                    "router@shared",
-                    ROOM,
-                    "approval-card-1",
-                    int(attempted),
-                    DEVICE if attempted else None,
-                    json.dumps({"type": "io.mindroom.tool_approval", "content": content}),
-                    "approval-1",
-                    "call-1",
-                ),
-            ),
-        )
-
     async def test_continuation_is_reachable_from_every_owned_source(self, alice: PrincipalStore) -> None:
         """A coalesced source cannot replay outside its one paused-run owner."""
         await self.admit_sources(alice)
@@ -5100,13 +5057,25 @@ class TestApprovalContinuations:
                     delivery_id="approval-card-1",
                     tool_call_id="call-1",
                     event_type="io.mindroom.tool_approval",
-                    payload={"approval_id": "approval-card-1", "status": "pending"},
+                    payload={
+                        "approval_id": "approval-card-1",
+                        "continuation_id": publishing.approval_id,
+                        "continuation_generation": publishing.generation,
+                        "tool_call_id": "call-1",
+                        "status": "pending",
+                    },
                 ),
                 ApprovalCardReservation(
                     delivery_id="approval-card-2",
                     tool_call_id="call-2",
                     event_type="io.mindroom.tool_approval",
-                    payload={"approval_id": "approval-card-2", "status": "pending"},
+                    payload={
+                        "approval_id": "approval-card-2",
+                        "continuation_id": publishing.approval_id,
+                        "continuation_generation": publishing.generation,
+                        "tool_call_id": "call-2",
+                        "status": "pending",
+                    },
                 ),
             ),
         )
@@ -5184,6 +5153,51 @@ class TestApprovalContinuations:
             is None
         )
 
+    async def test_card_reservation_rejects_payload_identity_that_disagrees_with_its_owner(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A clickable payload cannot name a different exact call than its domain row."""
+        from mindroom.event_journal import ApprovalCardReservation  # noqa: PLC0415
+
+        responder = journal_store.principal("agent@alice")
+        router = journal_store.principal("router@shared")
+        await self.admit_sources(responder)
+        publishing = replace(self.continuation(state="waiting"), runtime_generation="runtime-a")
+        await responder.create_approval_continuation(publishing)
+
+        with pytest.raises(ValueError, match="changed exact-call identity"):
+            await router.reserve_approval_card_deliveries(
+                continuation_principal_id=responder.principal_id,
+                continuation_id=publishing.approval_id,
+                expected_generation=publishing.generation,
+                cards=(
+                    ApprovalCardReservation(
+                        delivery_id="approval-card-1",
+                        tool_call_id="call-1",
+                        event_type="io.mindroom.tool_approval",
+                        payload={
+                            "approval_id": "approval-card-1",
+                            "continuation_id": publishing.approval_id,
+                            "continuation_generation": publishing.generation,
+                            "tool_call_id": "different-call",
+                            "status": "pending",
+                        },
+                    ),
+                ),
+            )
+
+        retained = await responder.approval_continuation(publishing.approval_id)
+        assert retained is not None
+        assert retained.runtime_generation == "runtime-a"
+        assert (
+            await router.load_matrix_delivery(
+                delivery_id="approval-card-1",
+                stage=DeliveryStage.INITIAL,
+            )
+            is None
+        )
+
     async def test_card_reservation_after_transport_departure_keeps_the_pause_recoverable(
         self,
         journal_store: EventJournalStore,
@@ -5208,7 +5222,12 @@ class TestApprovalContinuations:
                     delivery_id="approval-card-1",
                     tool_call_id="call-1",
                     event_type="io.mindroom.tool_approval",
-                    payload={"status": "pending"},
+                    payload={
+                        "continuation_id": "approval-1",
+                        "continuation_generation": 0,
+                        "tool_call_id": "call-1",
+                        "status": "pending",
+                    },
                 ),
             ),
         )
@@ -5921,128 +5940,6 @@ class TestApprovalContinuations:
         assert stored.resolution["status"] == "expired"
         assert stored.resolution["resolution_reason"] == "Requesting agent left the room."
 
-    async def test_responder_departure_terminalizes_an_attempted_legacy_card_before_deleting_its_owner(
-        self,
-        journal_store: EventJournalStore,
-        alice: PrincipalStore,
-    ) -> None:
-        """A pre-upgrade card retains terminal cleanup debt when its responder leaves first."""
-        router = journal_store.principal("router@shared")
-        await self.admit_sources(alice)
-        await alice.create_approval_continuation(
-            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
-        )
-        await self.remember_legacy_card(journal_store, attempted=True)
-
-        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
-
-        assert await alice.approval_continuation("approval-1") is None
-        claim = await router.claim_legacy_approval_delivery(
-            owner="departure-migration",
-            now_ns=1,
-            lease_until_ns=9_000_000_000_000_000_000,
-        )
-        assert claim is not None
-        legacy = claim
-        assert await router.promote_legacy_approval_delivery(
-            delivery_id="approval-card-1",
-            payload={
-                **legacy.payload,
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
-            },
-            acknowledged_event_id="$approval",
-            claim=claim,
-        )
-        terminal = await router.load_matrix_delivery(
-            delivery_id="approval-card-1",
-            stage=DeliveryStage.FINAL,
-        )
-        assert terminal is not None
-        assert terminal.payload["status"] == "expired"
-        assert terminal.payload["resolution_reason"] == "Requesting agent left the room."
-        assert terminal.edits_event_id == "$approval"
-
-    async def test_responder_departure_discards_an_unattempted_legacy_card_with_its_owner(
-        self,
-        journal_store: EventJournalStore,
-        alice: PrincipalStore,
-    ) -> None:
-        """No invisible legacy delivery survives after its responder source is fenced."""
-        router = journal_store.principal("router@shared")
-        await self.admit_sources(alice)
-        await alice.create_approval_continuation(
-            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
-        )
-        await self.remember_legacy_card(journal_store, attempted=False)
-
-        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
-
-        assert await alice.approval_continuation("approval-1") is None
-        assert not await router.legacy_approval_delivery_pending()
-
-    async def test_card_owner_departure_fences_an_attempted_legacy_card_and_its_responder(
-        self,
-        journal_store: EventJournalStore,
-        alice: PrincipalStore,
-    ) -> None:
-        """Legacy staging participates in the same cross-principal departure transaction."""
-        router = journal_store.principal("router@shared")
-        await self.admit_sources(alice)
-        await alice.create_approval_continuation(
-            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
-        )
-        await self.remember_legacy_card(journal_store, attempted=True)
-
-        await router.fence_departure(ROOM, source=DepartureSource.REPORTED)
-
-        continuation = await alice.approval_continuation("approval-1")
-        assert continuation is not None
-        assert continuation.state == "failing"
-        assert continuation.calls[0].decision is ApprovalDecision.DENIED
-        claim = await router.claim_legacy_approval_delivery(
-            owner="departure-inspection",
-            now_ns=1,
-            lease_until_ns=9_000_000_000_000_000_000,
-        )
-        assert claim is not None
-        assert await router.promote_legacy_approval_delivery(
-            delivery_id="approval-card-1",
-            payload={
-                **claim.payload,
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
-            },
-            acknowledged_event_id="$approval",
-            claim=claim,
-        )
-        terminal = await router.load_matrix_delivery(
-            delivery_id="approval-card-1",
-            stage=DeliveryStage.FINAL,
-        )
-        assert terminal is not None
-        assert terminal.payload["status"] == "denied"
-        assert terminal.payload["resolution_reason"] == "Approval transport left the room."
-
-    async def test_card_owner_departure_discards_unattempted_legacy_card_after_fencing_responder(
-        self,
-        journal_store: EventJournalStore,
-        alice: PrincipalStore,
-    ) -> None:
-        """Invisible legacy debt is removed only after its exact continuation fails closed."""
-        router = journal_store.principal("router@shared")
-        await self.admit_sources(alice)
-        await alice.create_approval_continuation(
-            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
-        )
-        await self.remember_legacy_card(journal_store, attempted=False)
-
-        await router.fence_departure(ROOM, source=DepartureSource.REPORTED)
-
-        continuation = await alice.approval_continuation("approval-1")
-        assert continuation is not None
-        assert continuation.state == "failing"
-        assert continuation.calls[0].decision is ApprovalDecision.DENIED
-        assert not await router.legacy_approval_delivery_pending()
-
     async def test_room_departure_retires_router_card_after_terminal_ack_crash(
         self,
         journal_store: EventJournalStore,
@@ -6751,10 +6648,10 @@ class TestTheJournalIsAtLeastAsDurableAsWhatCertifiesIt:
 
 
 class TestMatrixDeliveryMigration:
-    """Opening current code preserves every live #1834 delivery fact."""
+    """Opening current code preserves responses and expires old approval debt."""
 
-    async def test_sqlite_preserves_response_card_resolution_and_exact_call_debt(self, tmp_path: Path) -> None:
-        """SQLite migrates both delivery protocols in one schema transaction."""
+    async def test_sqlite_preserves_responses_and_expires_legacy_approvals(self, tmp_path: Path) -> None:
+        """SQLite replaces legacy approval transport with fail-closed decisions."""
         database_path = tmp_path / "legacy-delivery.db"
         connection = sqlite3.connect(database_path)
         _install_legacy_delivery_state(connection, postgres=False)
@@ -6778,16 +6675,14 @@ class TestMatrixDeliveryMigration:
         finally:
             inspected.close()
         assert "response_outbox" not in tables
-        assert "approval_cards_legacy_delivery" in tables
-        with sqlite3.connect(database_path) as connection:
-            assert connection.execute("SELECT COUNT(*) FROM approval_cards_legacy_delivery").fetchone() == (0,)
+        assert "approval_cards_legacy_delivery" not in tables
         assert "response_outbox_unacknowledged_scan" not in indexes
 
-    async def test_postgres_preserves_response_card_resolution_and_exact_call_debt(
+    async def test_postgres_preserves_responses_and_expires_legacy_approvals(
         self,
         postgres_journal_url: str,
     ) -> None:
-        """Postgres applies the same migration under its schema advisory lock."""
+        """Postgres applies the same fail-closed migration under its schema lock."""
         import psycopg  # noqa: PLC0415 - optional backend exercised explicitly
 
         database_url = postgres_journal_schema_url(postgres_journal_url)
@@ -6807,90 +6702,13 @@ class TestMatrixDeliveryMigration:
 
         with psycopg.connect(database_url) as connection:
             legacy_response = connection.execute("SELECT to_regclass('response_outbox')").fetchone()
-            legacy_cards = connection.execute("SELECT COUNT(*) FROM approval_cards_legacy_delivery").fetchone()
+            legacy_cards = connection.execute("SELECT to_regclass('approval_cards_legacy_delivery')").fetchone()
             legacy_index = connection.execute(
                 "SELECT to_regclass('response_outbox_unacknowledged_scan')",
             ).fetchone()
         assert legacy_response == (None,)
-        assert legacy_cards == (0,)
+        assert legacy_cards == (None,)
         assert legacy_index == (None,)
-
-    async def test_stale_legacy_migration_claim_cannot_create_a_second_delivery_owner(
-        self,
-        journal_store: EventJournalStore,
-    ) -> None:
-        """Lease generation is the cross-process CAS around network-bearing promotion."""
-        card = {
-            "type": "io.mindroom.tool_approval",
-            "content": {
-                "approval_id": "legacy-card",
-                "continuation_id": "legacy-continuation",
-                "continuation_generation": 0,
-                "tool_call_id": "legacy-call",
-                "status": "pending",
-            },
-        }
-        await journal_store.backend.write(
-            lambda transaction: transaction.execute(
-                """
-                INSERT INTO approval_cards_legacy_delivery (
-                    principal_id, room_id, transaction_id, card_event_id, attempted,
-                    sending_device_id, card_json, resolution_json, continuation_id,
-                    continuation_generation, tool_call_id, membership_epoch, created_at_ns
-                ) VALUES (?, ?, ?, NULL, 0, NULL, ?, NULL, ?, 0, ?, 0, 1)
-                """,
-                (
-                    "router@shared",
-                    ROOM,
-                    "legacy-transaction",
-                    json.dumps(card),
-                    "legacy-continuation",
-                    "legacy-call",
-                ),
-            ),
-        )
-        router = journal_store.principal("router@shared")
-        first = await router.claim_legacy_approval_delivery(
-            owner="first",
-            now_ns=1,
-            lease_until_ns=10,
-        )
-        assert first is not None
-        assert (
-            await router.claim_legacy_approval_delivery(
-                owner="blocked",
-                now_ns=2,
-                lease_until_ns=20,
-            )
-            is None
-        )
-        second = await router.claim_legacy_approval_delivery(
-            owner="second",
-            now_ns=11,
-            lease_until_ns=20,
-        )
-        assert second is not None
-        await router.release_legacy_approval_delivery(first)
-
-        assert not await router.promote_legacy_approval_delivery(
-            delivery_id="legacy-transaction",
-            payload=card["content"],
-            acknowledged_event_id=None,
-            claim=first,
-        )
-        assert await router.promote_legacy_approval_delivery(
-            delivery_id="legacy-transaction",
-            payload=card["content"],
-            acknowledged_event_id=None,
-            claim=second,
-        )
-        assert not await router.legacy_approval_delivery_pending()
-        initial = await router.load_matrix_delivery(
-            delivery_id="legacy-transaction",
-            stage=DeliveryStage.INITIAL,
-        )
-        assert initial is not None
-        assert initial.transaction_id == "legacy-transaction"
 
 
 class TestConnectionSecretsStayOutOfLogs:
@@ -7104,22 +6922,14 @@ class TestSchemaUpgrades:
             await reopened.close()
 
     @staticmethod
-    async def _assert_old_row_is_inert_and_new_card_works(backend: Backend) -> None:
+    async def _assert_old_row_is_discarded_and_new_card_works(backend: Backend) -> None:
         old = await backend.read(
             lambda transaction: transaction.fetchone(
-                """
-                SELECT card_event_id, continuation_id, continuation_generation, tool_call_id
-                FROM approval_cards_legacy_delivery WHERE principal_id = ? AND transaction_id = ?
-                """,
-                ("agent@alice", "legacy"),
+                "SELECT 1 AS present FROM approval_cards WHERE principal_id = ?",
+                ("agent@alice",),
             ),
         )
-        assert old is not None
-        assert old["card_event_id"] == "$legacy"
-        assert old["continuation_id"] is None
-        assert old["continuation_generation"] is None
-        assert old["tool_call_id"] is None
-
+        assert old is None
         await backend.write(
             lambda transaction: transaction.execute(
                 """
@@ -7146,8 +6956,8 @@ class TestSchemaUpgrades:
         assert stored["continuation_generation"] == 0
         assert stored["tool_call_id"] == "native"
 
-    async def test_sqlite_open_adds_native_identity_to_the_previous_card_schema(self, tmp_path: Path) -> None:
-        """SQLite upgrades the previous table without activating its old row."""
+    async def test_sqlite_open_discards_the_previous_card_schema(self, tmp_path: Path) -> None:
+        """SQLite drops an obsolete card while leaving the current table writable."""
         database_path = tmp_path / "previous-schema.db"
         with sqlite3.connect(database_path) as database:
             database.execute(
@@ -7179,15 +6989,15 @@ class TestSchemaUpgrades:
 
         backend = SqliteBackend.open(database_path)
         try:
-            await self._assert_old_row_is_inert_and_new_card_works(backend)
+            await self._assert_old_row_is_discarded_and_new_card_works(backend)
         finally:
             await backend.close()
 
-    async def test_postgres_open_adds_native_identity_to_the_previous_card_schema(
+    async def test_postgres_open_discards_the_previous_card_schema(
         self,
         postgres_journal_url: str,
     ) -> None:
-        """PostgreSQL upgrades the previous table without activating its old row."""
+        """PostgreSQL drops an obsolete card while leaving the current table writable."""
         import psycopg  # noqa: PLC0415 - optional backend exercised only by this test
 
         from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415
@@ -7223,7 +7033,7 @@ class TestSchemaUpgrades:
 
         backend = PostgresBackend.open(database_url)
         try:
-            await self._assert_old_row_is_inert_and_new_card_works(backend)
+            await self._assert_old_row_is_discarded_and_new_card_works(backend)
         finally:
             await backend.close()
 

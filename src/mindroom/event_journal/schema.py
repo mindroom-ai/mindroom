@@ -259,28 +259,6 @@ _TABLES = (
     )
     """,
     """
-    -- One-way staging for #1834 rows whose payloads predate wire preparation.
-    CREATE TABLE IF NOT EXISTS approval_cards_legacy_delivery (
-        principal_id TEXT NOT NULL,
-        room_id TEXT NOT NULL,
-        transaction_id TEXT NOT NULL,
-        card_event_id TEXT,
-        attempted INTEGER NOT NULL,
-        sending_device_id TEXT,
-        card_json TEXT NOT NULL,
-        resolution_json TEXT,
-        continuation_id TEXT,
-        continuation_generation BIGINT,
-        tool_call_id TEXT,
-        membership_epoch BIGINT NOT NULL,
-        created_at_ns BIGINT NOT NULL,
-        migration_owner TEXT,
-        migration_generation BIGINT NOT NULL DEFAULT 0,
-        migration_lease_until_ns BIGINT,
-        PRIMARY KEY (principal_id, transaction_id)
-    )
-    """,
-    """
     CREATE TABLE IF NOT EXISTS approval_action_tombstones (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,

@@ -52,7 +52,8 @@ The projection keeps no edit history, so an edit overwrites the body and the pre
 
 The decision remains in the exact-call continuation ledger, the terminal edit is another frozen outbox stage, and `approval_action_tombstones` retains the acknowledged card event ID after retirement so duplicate clicks remain consumed.
 
-`approval_cards_legacy_delivery` is one-way migration staging for unacknowledged cards created by the previous schema and is drained into the generic outbox before their approval state may change.
+During the delivery-outbox schema upgrade, already-decided legacy calls keep their first decision and undecided calls expire atomically.
+Known card event IDs receive durable terminal edits; an unacknowledged legacy send is abandoned because its Matrix outcome cannot be reconciled safely without retaining the removed delivery protocol.
 
 ## Sidecar previews are never stored as bodies
 

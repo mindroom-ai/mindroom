@@ -29,7 +29,6 @@ if TYPE_CHECKING:
 
     from .approvals import (
         ApprovalCardReservation,
-        LegacyApprovalDelivery,
         RecordedApprovalDecision,
         StoredApprovalCard,
     )
@@ -398,28 +397,6 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         limit: int = ...,
         after: tuple[int, str] | None = None,
     ) -> tuple[StoredApprovalCard, ...]: ...
-
-    async def legacy_approval_delivery_pending(self, continuation_id: str | None = None) -> bool: ...  # noqa: D102
-
-    async def claim_legacy_approval_delivery(  # noqa: D102
-        self,
-        *,
-        owner: str,
-        now_ns: int,
-        lease_until_ns: int,
-    ) -> LegacyApprovalDelivery | None: ...
-
-    async def release_legacy_approval_delivery(self, claim: LegacyApprovalDelivery) -> None: ...  # noqa: D102
-
-    async def promote_legacy_approval_delivery(  # noqa: D102
-        self,
-        *,
-        delivery_id: str,
-        payload: Mapping[str, object],
-        acknowledged_event_id: str | None,
-        claim: LegacyApprovalDelivery,
-    ) -> bool: ...
-
 
 __all__ = [
     "AdmissionView",

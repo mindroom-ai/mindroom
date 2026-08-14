@@ -41,7 +41,6 @@ from mindroom.event_journal import (
     MatrixDelivery,
     delivery_transaction_id,
 )
-from mindroom.event_journal.approvals import LegacyApprovalDelivery
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.tool_approval import (
     MatrixApprovalAction,
@@ -81,223 +80,12 @@ def _config(tmp_path: Path) -> Config:
     return config
 
 
-def _legacy_delivery_claim(*, attempted: bool, sending_device_id: str | None) -> LegacyApprovalDelivery:
-    content = {
-        "approval_id": "approval-card-1",
-        "continuation_id": "approval-1",
-        "continuation_generation": 0,
-        "tool_call_id": "call-1",
-        "thread_id": "$thread",
-        "status": "pending",
-        "full_arguments": {"command": "x" * 60_000},
-    }
-    return LegacyApprovalDelivery(
-        delivery_id="legacy-transaction",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        payload=content,
-        attempted=attempted,
-        sending_device_id=sending_device_id,
-        migration_owner="migration-owner",
-        migration_generation=1,
-    )
-
-
-def _legacy_transport(tmp_path: Path, cards: MagicMock) -> approval_transport.ApprovalMatrixTransport:
-    client = MagicMock(user_id="@router:localhost", device_id="CURRENT")
-    router = MagicMock(
-        agent_name="router",
-        running=True,
-        client=client,
-        approval_room_ids=frozenset({"!room:localhost"}),
-        approval_store=cards,
-    )
-    return approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
-        bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: cards,
-    )
-
-
 @pytest.mark.asyncio
-async def test_legacy_unattempted_card_is_wire_prepared_before_generic_promotion(tmp_path: Path) -> None:
-    """Raw oversized #1834 content cannot enter the generic outbox before sidecar preparation."""
-    claim = _legacy_delivery_claim(attempted=False, sending_device_id=None)
-    cards = MagicMock()
-    cards.claim_legacy_approval_delivery = AsyncMock(side_effect=(claim, None))
-    cards.legacy_approval_delivery_pending = AsyncMock(return_value=False)
-    cards.promote_legacy_approval_delivery = AsyncMock(return_value=True)
-    prepared = {key: value for key, value in claim.payload.items() if key != "full_arguments"}
-    prepared["full_arguments_url"] = "mxc://localhost/arguments"
-    prepared["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$thread"}
-    transport = _legacy_transport(tmp_path, cards)
-
-    with patch.object(transport, "prepare_approval_event", new=AsyncMock(return_value=prepared)) as prepare:
-        assert await transport._upgrade_legacy_approval_deliveries()
-
-    prepare.assert_awaited_once_with("!room:localhost", "$thread", claim.payload)
-    cards.promote_legacy_approval_delivery.assert_awaited_once_with(
-        delivery_id="legacy-transaction",
-        payload=prepared,
-        acknowledged_event_id=None,
-        claim=claim,
-    )
-
-
-@pytest.mark.asyncio
-async def test_legacy_attempted_card_on_changed_device_keeps_staging_after_history_miss(tmp_path: Path) -> None:
-    """A changed device never converts a scan miss into permission to send."""
-    claim = _legacy_delivery_claim(attempted=True, sending_device_id="OLD")
-    cards = MagicMock()
-    cards.claim_legacy_approval_delivery = AsyncMock(side_effect=(claim, None))
-    cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
-    cards.release_legacy_approval_delivery = AsyncMock()
-    cards.promote_legacy_approval_delivery = AsyncMock()
-    transport = _legacy_transport(tmp_path, cards)
-
-    with (
-        patch(
-            "mindroom.approval_transport.find_approval_card_via_room_messages",
-            new=AsyncMock(return_value=None),
-        ),
-        patch("mindroom.approval_transport.send_room_event_result", new=AsyncMock()) as send,
-    ):
-        assert not await transport._upgrade_legacy_approval_deliveries()
-
-    send.assert_not_awaited()
-    cards.promote_legacy_approval_delivery.assert_not_awaited()
-    cards.release_legacy_approval_delivery.assert_awaited_once_with(claim)
-
-
-@pytest.mark.asyncio
-async def test_legacy_attempted_card_adopts_actual_matrix_content_before_promotion(tmp_path: Path) -> None:
-    """Accepted-before-ack legacy cards promote the wire payload, not the pre-wire claim."""
-    claim = _legacy_delivery_claim(attempted=True, sending_device_id="OLD")
-    actual = MagicMock(
-        event_id="$approval",
-        content={
-            **{key: value for key, value in claim.payload.items() if key != "full_arguments"},
-            "full_arguments_url": "mxc://localhost/original",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
-        },
-    )
-    cards = MagicMock()
-    cards.claim_legacy_approval_delivery = AsyncMock(side_effect=(claim, None))
-    cards.legacy_approval_delivery_pending = AsyncMock(return_value=False)
-    cards.promote_legacy_approval_delivery = AsyncMock(return_value=True)
-    transport = _legacy_transport(tmp_path, cards)
-
-    with (
-        patch(
-            "mindroom.approval_transport.find_approval_card_via_room_messages",
-            new=AsyncMock(return_value=actual),
-        ),
-        patch("mindroom.approval_transport.send_room_event_result", new=AsyncMock()) as send,
-    ):
-        assert await transport._upgrade_legacy_approval_deliveries()
-
-    send.assert_not_awaited()
-    cards.promote_legacy_approval_delivery.assert_awaited_once_with(
-        delivery_id="legacy-transaction",
-        payload=actual.content,
-        acknowledged_event_id="$approval",
-        claim=claim,
-    )
-
-
-@pytest.mark.asyncio
-async def test_legacy_same_device_retry_fetches_the_transaction_winner_before_promotion(tmp_path: Path) -> None:
-    """A deduplicated resend records the old event's content rather than its newly uploaded sidecar."""
-    claim = _legacy_delivery_claim(attempted=True, sending_device_id="CURRENT")
-    prepared = {key: value for key, value in claim.payload.items() if key != "full_arguments"}
-    prepared["full_arguments_url"] = "mxc://localhost/new-orphan"
-    actual = MagicMock(
-        event_id="$approval",
-        content={**prepared, "full_arguments_url": "mxc://localhost/original"},
-    )
-    cards = MagicMock()
-    cards.claim_legacy_approval_delivery = AsyncMock(side_effect=(claim, None))
-    cards.legacy_approval_delivery_pending = AsyncMock(return_value=False)
-    cards.promote_legacy_approval_delivery = AsyncMock(return_value=True)
-    transport = _legacy_transport(tmp_path, cards)
-    bot = transport.transport_bot(claim.room_id)
-    assert bot is not None
-    assert bot.client is not None
-    event = MagicMock(
-        event_id=actual.event_id,
-        sender="@router:localhost",
-        source={"type": "io.mindroom.tool_approval", "content": actual.content},
-    )
-    fetched = nio.RoomGetEventResponse()
-    fetched.event = event
-    bot.client.room_get_event = AsyncMock(return_value=fetched)
-
-    with (
-        patch(
-            "mindroom.approval_transport.find_approval_card_via_room_messages",
-            new=AsyncMock(return_value=None),
-        ),
-        patch.object(transport, "prepare_approval_event", new=AsyncMock(return_value=prepared)),
-        patch(
-            "mindroom.approval_transport.send_room_event_result",
-            new=AsyncMock(return_value=nio.RoomSendResponse(event_id="$approval", room_id=claim.room_id)),
-        ) as send,
-    ):
-        assert await transport._upgrade_legacy_approval_deliveries()
-
-    send.assert_awaited_once_with(
-        bot.client,
-        claim.room_id,
-        "io.mindroom.tool_approval",
-        prepared,
-        transaction_id=claim.delivery_id,
-        operation="migrate_legacy_approval_delivery",
-    )
-    bot.client.room_get_event.assert_awaited_once_with(claim.room_id, "$approval")
-    cards.promote_legacy_approval_delivery.assert_awaited_once_with(
-        delivery_id="legacy-transaction",
-        payload=actual.content,
-        acknowledged_event_id="$approval",
-        claim=claim,
-    )
-
-
-@pytest.mark.asyncio
-async def test_approval_action_waits_while_legacy_delivery_ownership_is_being_migrated(tmp_path: Path) -> None:
-    """A click admitted during startup remains journal work until its exact card owner is promoted."""
-    cards = MagicMock()
-    cards.pending_approval_card = AsyncMock(return_value=None)
-    cards.is_terminal_approval_card = AsyncMock(return_value=False)
-    cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
-    manager = initialize_approval_store(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
-    recovery = AsyncMock()
-    worker = MagicMock(recover=recovery)
-
-    with (
-        patch.object(manager, "_worker", return_value=worker),
-        pytest.raises(RuntimeError, match="migration has not established"),
-    ):
-        await handle_matrix_approval_action(
-            MatrixApprovalAction(
-                room_id="!room:localhost",
-                sender_id="@approver:localhost",
-                card_event_id="$approval",
-                status="approved",
-                reason=None,
-            ),
-        )
-
-    assert cards.pending_approval_card.await_count == 2
-    recovery.assert_awaited_once_with()
-
-
-@pytest.mark.asyncio
-async def test_terminal_approval_action_is_not_blocked_by_unrelated_legacy_delivery(tmp_path: Path) -> None:
-    """A current tombstone remains authoritative while an unrelated old card awaits migration."""
+async def test_terminal_approval_action_is_consumed_without_delivery_recovery(tmp_path: Path) -> None:
+    """A terminal tombstone remains authoritative without consulting transport."""
     cards = MagicMock()
     cards.pending_approval_card = AsyncMock(return_value=None)
     cards.is_terminal_approval_card = AsyncMock(return_value=True)
-    cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
     initialize_approval_store(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
     before_consume = AsyncMock()
 
@@ -314,7 +102,6 @@ async def test_terminal_approval_action_is_not_blocked_by_unrelated_legacy_deliv
 
     assert result.consumed is True
     before_consume.assert_awaited_once_with()
-    cards.legacy_approval_delivery_pending.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -323,7 +110,6 @@ async def test_action_consumes_tombstone_created_during_delivery_recovery(tmp_pa
     cards = MagicMock()
     cards.pending_approval_card = AsyncMock(side_effect=(None, None))
     cards.is_terminal_approval_card = AsyncMock(side_effect=(False, True))
-    cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
     manager = initialize_approval_store(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
     worker = MagicMock(recover=AsyncMock())
     before_consume = AsyncMock()
@@ -344,7 +130,6 @@ async def test_action_consumes_tombstone_created_during_delivery_recovery(tmp_pa
     assert result.resolved is False
     assert cards.is_terminal_approval_card.await_count == 2
     before_consume.assert_awaited_once_with()
-    cards.legacy_approval_delivery_pending.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -353,7 +138,6 @@ async def test_decided_card_action_is_consumed_before_transport_or_approver_vali
     cards = MagicMock()
     cards.pending_approval_card = AsyncMock(return_value=MagicMock(resolution={"status": "approved"}))
     cards.is_terminal_approval_card = AsyncMock()
-    cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
     manager = initialize_approval_store(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
     before_consume = AsyncMock()
 
@@ -375,7 +159,6 @@ async def test_decided_card_action_is_consumed_before_transport_or_approver_vali
     assert result.resolved is False
     before_consume.assert_awaited_once_with()
     cards.is_terminal_approval_card.assert_not_awaited()
-    cards.legacy_approval_delivery_pending.assert_not_awaited()
 
 
 def test_tool_approval_config_coerces_numeric_timeout_strings() -> None:
@@ -391,6 +174,122 @@ def test_tool_approval_config_coerces_numeric_timeout_strings() -> None:
 
     assert config.tool_approval.timeout_days == 7.0
     assert config.tool_approval.rules[0].timeout_days == 3.0
+
+
+@pytest.mark.asyncio
+async def test_action_binds_its_exact_visible_card_after_changed_device_recovery_misses(tmp_path: Path) -> None:
+    """An exact action target closes accepted-before-ack debt without a blind resend."""
+    delivery = MatrixDelivery(
+        delivery_id="approval-card-1",
+        stage=DeliveryStage.INITIAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        transaction_id="approval-transaction",
+        payload={"approval_id": "approval-card-1"},
+        edits_event_id=None,
+        acknowledged_event_id=None,
+        created_at_ns=1,
+        event_type="io.mindroom.tool_approval",
+        attempted=True,
+        sending_device_id="OLD-DEVICE",
+    )
+    settled = MagicMock(resolution={"status": "expired"})
+    cards = MagicMock()
+    cards.pending_approval_card = AsyncMock(side_effect=(None, settled))
+    cards.is_terminal_approval_card = AsyncMock(return_value=False)
+    cards.load_matrix_delivery = AsyncMock(return_value=delivery)
+    cards.acknowledge_matrix_delivery = AsyncMock(
+        return_value=DeliveryAcknowledgement(settled_event_id="$approval", bound=True),
+    )
+    resolve_action = AsyncMock(return_value="approval-card-1")
+    manager = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        send_delivery=AsyncMock(),
+        resolve_delivery=AsyncMock(return_value=None),
+        resolve_action_delivery=resolve_action,
+        cards=cards,
+        sending_device=lambda: "NEW-DEVICE",
+    )
+    before_consume = AsyncMock()
+
+    try:
+        result = await manager.handle_card_response(
+            room_id="!room:localhost",
+            sender_id="@approver:localhost",
+            card_event_id="$approval",
+            status="approved",
+            reason=None,
+            before_consume=before_consume,
+        )
+    finally:
+        await manager.shutdown(reason="test complete")
+
+    assert result.consumed is True
+    assert result.resolved is False
+    resolve_action.assert_awaited_once_with("!room:localhost", "$approval")
+    cards.acknowledge_matrix_delivery.assert_awaited_once_with(
+        delivery_id="approval-card-1",
+        stage=DeliveryStage.INITIAL,
+        event_id="$approval",
+        delivered_projections=(),
+    )
+    before_consume.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_action_delivery_resolver_reads_the_exact_router_card(tmp_path: Path) -> None:
+    event = MagicMock(
+        event_id="$approval",
+        sender="@mindroom_router:localhost",
+        source={
+            "event_id": "$approval",
+            "room_id": "!room:localhost",
+            "type": "io.mindroom.tool_approval",
+            "content": {"approval_id": "approval-card-1"},
+        },
+    )
+    response = nio.RoomGetEventResponse()
+    response.event = event
+    client = MagicMock(
+        user_id="@mindroom_router:localhost",
+        room_get_event=AsyncMock(return_value=response),
+    )
+    router = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: router if name == "router" else None,
+        cards_provider=lambda: None,
+    )
+
+    assert await transport.resolve_approval_action_delivery("!room:localhost", "$approval") == "approval-card-1"
+    client.room_get_event.assert_awaited_once_with("!room:localhost", "$approval")
+
+
+@pytest.mark.asyncio
+async def test_action_delivery_resolver_retries_an_unreadable_exact_card(tmp_path: Path) -> None:
+    client = MagicMock(
+        user_id="@mindroom_router:localhost",
+        room_get_event=AsyncMock(return_value=nio.RoomGetEventError("not found")),
+    )
+    router = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: router if name == "router" else None,
+        cards_provider=lambda: None,
+    )
+
+    with pytest.raises(approval_transport.ToolApprovalTransportError, match="could not verify"):
+        await transport.resolve_approval_action_delivery("!room:localhost", "$approval")
 
 
 @pytest.mark.asyncio
@@ -486,10 +385,8 @@ async def test_click_recovers_a_card_accepted_before_its_acknowledgement(tmp_pat
         sent.append(delivery.stage)
         return card_event_id if delivery.stage is DeliveryStage.INITIAL else "$terminal-edit"
 
-    legacy_pending = AsyncMock(return_value=True)
     cards = MagicMock(wraps=router)
     cards.principal_id = router.principal_id
-    cards.legacy_approval_delivery_pending = legacy_pending
     manager = _ApprovalManager(
         test_runtime_paths(tmp_path),
         send_delivery=send,
@@ -508,7 +405,6 @@ async def test_click_recovers_a_card_accepted_before_its_acknowledgement(tmp_pat
 
         assert result.consumed is True
         assert result.resolved is True
-        legacy_pending.assert_not_awaited()
         assert sent == [DeliveryStage.INITIAL, DeliveryStage.FINAL]
         decided = await responder.approval_continuation(approval_id)
         assert decided is not None
@@ -693,8 +589,8 @@ async def test_startup_unavailable_owner_cleanup_walks_cursor_pages(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_startup_unavailable_cleanup_scans_owners_while_legacy_upgrade_remains_retryable(tmp_path: Path) -> None:
-    """One stuck legacy card does not prevent cleanup from settling unrelated continuations."""
+async def test_startup_unavailable_cleanup_scans_owners_while_card_recovery_remains_retryable(tmp_path: Path) -> None:
+    """One stuck card does not prevent cleanup from settling unrelated continuations."""
     transport = approval_transport.ApprovalMatrixTransport(
         runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda _name: None,
@@ -722,33 +618,6 @@ async def test_startup_unavailable_cleanup_scans_owners_while_legacy_upgrade_rem
     reconcile.assert_awaited_once_with(None)
     schedule_retry.assert_called_once_with()
     assert transport._startup_cleanup_done is False
-
-
-@pytest.mark.asyncio
-async def test_unavailable_cleanup_waits_for_the_exact_continuations_legacy_card(tmp_path: Path) -> None:
-    """A failed entity cannot lose the continuation still owned by staged delivery debt."""
-    cards = MagicMock()
-    cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
-    continuation = MagicMock(approval_id="approval-staged")
-    principal = MagicMock(
-        approval_continuation=AsyncMock(return_value=continuation),
-        load_matrix_delivery=AsyncMock(),
-        request_approval_failure=AsyncMock(),
-    )
-    journal = MagicMock()
-    journal.principal.return_value = principal
-    transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
-        bot_provider=lambda _name: None,
-        cards_provider=lambda: cards,
-        journal_provider=lambda: journal,
-    )
-
-    assert not await transport._discard_unavailable("agent@removed", continuation, "unavailable")
-
-    cards.legacy_approval_delivery_pending.assert_awaited_once_with("approval-staged")
-    principal.load_matrix_delivery.assert_not_awaited()
-    principal.request_approval_failure.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -830,14 +699,10 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
         approval_room_ids=frozenset({"!room:localhost"}),
         approval_store=notice_store,
     )
-    cards = MagicMock()
-    cards.legacy_approval_delivery_pending = AsyncMock(
-        side_effect=lambda continuation_id=None: continuation_id != "approval-removed",
-    )
     transport = approval_transport.ApprovalMatrixTransport(
         runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: cards,
+        cards_provider=lambda: notice_store,
         journal_provider=lambda: journal,
         entity_configured=lambda name: name != "removed",
     )
@@ -851,7 +716,6 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
     content = client.room_send.await_args.kwargs["content"]
     assert content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$waiting"}
     assert "no longer available" in content["body"]
-    cards.legacy_approval_delivery_pending.assert_awaited_once_with("approval-removed")
     assert client.room_send.await_args.kwargs["tx_id"] == transaction_id
     principal.discard_unavailable_approval_continuation.assert_awaited_once_with(
         "approval-removed",

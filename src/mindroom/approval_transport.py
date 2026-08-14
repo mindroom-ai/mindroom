@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
@@ -23,9 +21,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_upload_is_usable, upload_json_sidecar
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
 from mindroom.matrix.room_history_reads import (
-    LocatedApprovalCard,
     find_approval_card_event_id_via_room_messages,
-    find_approval_card_via_room_messages,
     find_response_event_ids_via_room_messages,
 )
 from mindroom.matrix_delivery import MatrixDeliveryWorker
@@ -41,8 +37,6 @@ if TYPE_CHECKING:
         EventJournalStore,
         MatrixDelivery,
     )
-    from mindroom.event_journal.approvals import LegacyApprovalDelivery
-
 logger = get_logger(__name__)
 
 _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS = 1.0
@@ -50,8 +44,6 @@ _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
 _STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION = 10
 _UNAVAILABLE_OWNER_SCAN_LIMIT = 100
 _UNAVAILABLE_NOTICE_APPROVAL_ID_KEY = "io.mindroom.approval_unavailable_id"
-_LEGACY_MIGRATION_LEASE_NS = 30_000_000_000
-_LEGACY_MIGRATION_PASS_LIMIT = 256
 
 
 class _ApprovalTransportBot(Protocol):
@@ -139,7 +131,6 @@ class ApprovalMatrixTransport:
         repr=False,
     )
     _startup_cleanup_attempts: int = field(default=0, init=False, repr=False)
-    _legacy_migration_owner: str = field(default_factory=lambda: str(uuid.uuid4()), init=False, repr=False)
 
     def bind_approval_runtime(self) -> None:
         """Bind approval manager hooks to the current Matrix transport."""
@@ -148,6 +139,7 @@ class ApprovalMatrixTransport:
             prepare_event=self.prepare_approval_event,
             send_delivery=self.send_approval_delivery,
             resolve_delivery=self.resolve_approval_delivery,
+            resolve_action_delivery=self.resolve_approval_action_delivery,
             cards=self.cards_provider(),
             transport_sender=self.transport_sender_id,
             sending_device=self.transport_device_id,
@@ -312,8 +304,7 @@ class ApprovalMatrixTransport:
         assert self.journal_provider is not None
         store = self.journal_provider().principal(principal_id)
         current = await store.approval_continuation(continuation.approval_id)
-        cards = self.cards_provider()
-        if current is None or (cards is not None and await cards.legacy_approval_delivery_pending(current.approval_id)):
+        if current is None:
             return current is None
         final_delivery = await store.load_matrix_delivery(
             delivery_id=current.source_event_ids[0],
@@ -418,6 +409,37 @@ class ApprovalMatrixTransport:
         if not isinstance(approval_id, str) or sender is None:
             return None
         return await self.locate_approval_card(claimed.room_id, sender, approval_id)
+
+    async def resolve_approval_action_delivery(self, room_id: str, card_event_id: str) -> str | None:
+        """Return the generic delivery ID carried by one exact visible card."""
+        bot = self.transport_bot(room_id)
+        if bot is None or bot.client is None:
+            msg = f"Router approval transport cannot read {room_id} to verify a card action"
+            raise ToolApprovalTransportError(msg)
+        response = await bot.client.room_get_event(room_id, card_event_id)
+        if not isinstance(response, nio.RoomGetEventResponse):
+            msg = f"Matrix could not verify approval card {card_event_id!r}: {response}"
+            raise ToolApprovalTransportError(msg)
+        event = response.event
+        if isinstance(event, nio.MegolmEvent):
+            msg = f"Matrix could not decrypt approval card {card_event_id!r}"
+            raise ToolApprovalTransportError(msg)
+        sender = self.transport_sender_id()
+        source = event.source if isinstance(event.source, dict) else None
+        if (
+            sender is None
+            or event.event_id != card_event_id
+            or event.sender != sender
+            or source is None
+            or source.get("room_id") not in {None, room_id}
+            or source.get("type") != "io.mindroom.tool_approval"
+        ):
+            return None
+        content = source.get("content")
+        if not isinstance(content, dict):
+            return None
+        approval_id = content.get("approval_id")
+        return approval_id if isinstance(approval_id, str) and approval_id else None
 
     async def locate_approval_card(
         self,
@@ -562,10 +584,9 @@ class ApprovalMatrixTransport:
     async def _recover_approval_cards_on_startup(self) -> bool:
         """Recover current approval-card transport obligations."""
         try:
-            legacy_recovered = await self._upgrade_legacy_approval_deliveries()
             manager = approval_manager.get_approval_store()
             if manager is None:
-                return legacy_recovered
+                return True
             sweep = await manager.recover_cards_on_startup()
         except Exception as exc:
             logger.warning(
@@ -593,138 +614,7 @@ class ApprovalMatrixTransport:
                 owed_count=sweep.failed,
                 attempt=self._startup_cleanup_attempts,
             )
-        return legacy_recovered and sweep.complete
-
-    async def _upgrade_legacy_approval_deliveries(self) -> bool:
-        """Normalize one pass of pre-wire #1834 rows into the generic outbox."""
-        cards = self.cards_provider()
-        if cards is None:
-            return True
-        failed: list[LegacyApprovalDelivery] = []
-        for _index in range(_LEGACY_MIGRATION_PASS_LIMIT):
-            now_ns = time.time_ns()
-            claim = await cards.claim_legacy_approval_delivery(
-                owner=self._legacy_migration_owner,
-                now_ns=now_ns,
-                lease_until_ns=now_ns + _LEGACY_MIGRATION_LEASE_NS,
-            )
-            if claim is None:
-                break
-            try:
-                if claim.attempted:
-                    upgraded = await self._upgrade_attempted_legacy(cards, claim)
-                else:
-                    prepared = await self.prepare_approval_event(claim.room_id, claim.thread_id, claim.payload)
-                    upgraded = prepared is not None and await cards.promote_legacy_approval_delivery(
-                        delivery_id=claim.delivery_id,
-                        payload=prepared,
-                        acknowledged_event_id=None,
-                        claim=claim,
-                    )
-                if not upgraded:
-                    failed.append(claim)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning(
-                    "legacy_approval_delivery_upgrade_failed",
-                    delivery_id=claim.delivery_id,
-                    room_id=claim.room_id,
-                    exc_info=True,
-                )
-                failed.append(claim)
-        for claim in failed:
-            await cards.release_legacy_approval_delivery(claim)
-        return not await cards.legacy_approval_delivery_pending()
-
-    async def _upgrade_attempted_legacy(  # noqa: PLR0911 - every unproven recovery fact retains the staging owner
-        self,
-        cards: ApprovalDeliveryView,
-        claim: LegacyApprovalDelivery,
-    ) -> bool:
-        """Adopt or safely complete one old transaction before generic promotion."""
-        legacy = claim
-        approval_id = legacy.payload.get("approval_id")
-        bot = self.transport_bot(legacy.room_id)
-        sender = None if bot is None or bot.client is None else bot.client.user_id
-        if (
-            not isinstance(approval_id, str)
-            or not approval_id
-            or not isinstance(sender, str)
-            or not sender
-            or bot is None
-            or bot.client is None
-        ):
-            return False
-        try:
-            located = await find_approval_card_via_room_messages(
-                bot.client,
-                legacy.room_id,
-                card_sender=sender,
-                approval_id=approval_id,
-            )
-        except Exception:
-            located = None
-            logger.warning(
-                "legacy_approval_card_lookup_failed",
-                delivery_id=legacy.delivery_id,
-                room_id=legacy.room_id,
-                exc_info=True,
-            )
-        if located is not None:
-            return await self._promote_located_legacy(cards, claim, located)
-        current_device = bot.client.device_id
-        if (
-            legacy.sending_device_id is None
-            or not isinstance(current_device, str)
-            or not current_device
-            or legacy.sending_device_id != current_device
-        ):
-            return False
-        prepared = await self.prepare_approval_event(legacy.room_id, legacy.thread_id, legacy.payload)
-        if prepared is None:
-            return False
-        response = await send_room_event_result(
-            bot.client,
-            legacy.room_id,
-            "io.mindroom.tool_approval",
-            prepared,
-            transaction_id=legacy.delivery_id,
-            operation="migrate_legacy_approval_delivery",
-        )
-        if not isinstance(response, nio.RoomSendResponse):
-            msg = f"Matrix refused legacy approval delivery {legacy.delivery_id!r}: {response}"
-            raise ToolApprovalTransportError(msg)
-        event_id = str(response.event_id)
-        fetched = await bot.client.room_get_event(legacy.room_id, event_id)
-        if not isinstance(fetched, nio.RoomGetEventResponse) or isinstance(fetched.event, nio.MegolmEvent):
-            return False
-        event = fetched.event
-        source = event.source if isinstance(event.source, dict) else {}
-        content = source.get("content")
-        if (
-            event.event_id != event_id
-            or event.sender != sender
-            or source.get("type") != "io.mindroom.tool_approval"
-            or not isinstance(content, dict)
-            or content.get("approval_id") != approval_id
-        ):
-            return False
-        located = LocatedApprovalCard(event_id=event_id, content=dict(content))
-        return await self._promote_located_legacy(cards, claim, located)
-
-    @staticmethod
-    async def _promote_located_legacy(
-        cards: ApprovalDeliveryView,
-        claim: LegacyApprovalDelivery,
-        located: LocatedApprovalCard,
-    ) -> bool:
-        return await cards.promote_legacy_approval_delivery(
-            delivery_id=claim.delivery_id,
-            payload=located.content,
-            acknowledged_event_id=located.event_id,
-            claim=claim,
-        )
+        return sweep.complete
 
     def _schedule_startup_cleanup_retry(self) -> None:
         """Arrange a later cleanup pass after a transient failure."""

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from . import approvals
+from . import outbox
+from .models import DeliveryStage
 
 if TYPE_CHECKING:
     from .backend import Transaction
 
 _LEGACY_UNAVAILABLE_NOTICE_PREFIX = "approval-unavailable:"
+_LEGACY_APPROVAL_EXPIRY_REASON = "Tool approval request expired during delivery upgrade."
+_APPROVAL_EVENT_TYPE = "io.mindroom.tool_approval"
 
 
 def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: bool) -> bool:
@@ -45,23 +48,6 @@ def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: boo
     legacy_approvals = _column_exists(transaction, "approval_cards", "transaction_id", postgres=postgres)
     if legacy_approvals:
         transaction.execute("ALTER TABLE approval_cards RENAME TO approval_cards_legacy_delivery")
-        for column, definition in (
-            ("continuation_id", "TEXT"),
-            ("continuation_generation", "BIGINT"),
-            ("tool_call_id", "TEXT"),
-            ("migration_owner", "TEXT"),
-            ("migration_generation", "BIGINT NOT NULL DEFAULT 0"),
-            ("migration_lease_until_ns", "BIGINT"),
-        ):
-            if not _column_exists(
-                transaction,
-                "approval_cards_legacy_delivery",
-                column,
-                postgres=postgres,
-            ):
-                transaction.execute(
-                    f"ALTER TABLE approval_cards_legacy_delivery ADD COLUMN {column} {definition}",
-                )
     return legacy_approvals
 
 
@@ -84,14 +70,31 @@ def _migrate_unavailable_notice_delivery_ids(transaction: Transaction) -> None:
         )
         if continuation is None:
             continue
-        context = json.loads(str(continuation["context_json"]))
+        try:
+            context = json.loads(str(continuation["context_json"]))
+        except json.JSONDecodeError:
+            continue
         if not isinstance(context, dict):
-            msg = "Stored approval continuation context is not an object"
-            raise TypeError(msg)
+            continue
         response_event_id = context.get("response_event_id")
         if not isinstance(response_event_id, str) or not response_event_id:
-            msg = f"Legacy approval continuation {approval_id!r} has no response event ID"
-            raise ValueError(msg)
+            continue
+        target = transaction.fetchone(
+            """
+            SELECT 1 AS present FROM matrix_delivery_outbox
+            WHERE principal_id = ? AND delivery_id = ? AND stage = 'final'
+            """,
+            (str(row["principal_id"]), response_event_id),
+        )
+        if target is not None:
+            transaction.execute(
+                """
+                DELETE FROM matrix_delivery_outbox
+                WHERE principal_id = ? AND delivery_id = ? AND stage = 'final'
+                """,
+                (str(row["principal_id"]), old_delivery_id),
+            )
+            continue
         transaction.execute(
             """
             UPDATE matrix_delivery_outbox SET delivery_id = ?
@@ -102,30 +105,97 @@ def _migrate_unavailable_notice_delivery_ids(transaction: Transaction) -> None:
 
 
 def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approvals: bool) -> None:
-    """Promote legacy rows whose stored payload is already the acknowledged wire content."""
+    """Expire pre-unification approvals without retaining a second delivery protocol."""
     if not migrate_approvals:
         return
+    transaction.execute(
+        """
+        UPDATE approval_continuation_calls
+        SET decision = 'expired', reason = ?
+        WHERE decision IS NULL
+        """,
+        (_LEGACY_APPROVAL_EXPIRY_REASON,),
+    )
+    transaction.execute(
+        """
+        UPDATE approval_continuations
+        SET state = 'ready', runtime_generation = NULL
+        WHERE state = 'waiting'
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_continuation_calls AS calls
+              WHERE calls.principal_id = approval_continuations.principal_id
+                AND calls.approval_id = approval_continuations.approval_id
+                AND calls.generation = approval_continuations.generation
+                AND calls.decision IS NULL
+          )
+        """,
+    )
     rows = transaction.fetchall(
         """
-        SELECT principal_id, room_id, transaction_id, card_event_id, attempted,
-               sending_device_id, card_json, resolution_json, continuation_id,
-               continuation_generation, tool_call_id, membership_epoch, created_at_ns
+        SELECT principal_id, room_id, transaction_id, card_event_id,
+               card_json, resolution_json
         FROM approval_cards_legacy_delivery
-        WHERE continuation_id IS NOT NULL
-          AND continuation_generation IS NOT NULL
-          AND tool_call_id IS NOT NULL
+        WHERE card_event_id IS NOT NULL
         """,
     )
     for row in rows:
-        if row["card_event_id"] is None:
+        card = _object_json(row["card_json"])
+        if card is None:
             continue
-        approvals.promote_legacy_delivery(
+        content = card.get("content")
+        if not isinstance(content, dict):
+            continue
+        if row["resolution_json"] is None:
+            resolution = _expired_content(content)
+        else:
+            resolution = _object_json(row["resolution_json"])
+            if resolution is None:
+                continue
+        event_type = card.get("type")
+        thread_id = content.get("thread_id")
+        principal_id = str(row["principal_id"])
+        card_event_id = str(row["card_event_id"])
+        outbox.enqueue(
             transaction,
-            str(row["principal_id"]),
+            principal_id,
             delivery_id=str(row["transaction_id"]),
-            payload=None,
-            acknowledged_event_id=str(row["card_event_id"]),
+            stage=DeliveryStage.FINAL,
+            event_type=event_type if isinstance(event_type, str) and event_type else _APPROVAL_EVENT_TYPE,
+            room_id=str(row["room_id"]),
+            thread_id=thread_id if isinstance(thread_id, str) and thread_id else None,
+            payload=resolution,
+            edits_event_id=card_event_id,
         )
+        transaction.execute(
+            """
+            INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT (principal_id, card_event_id) DO NOTHING
+            """,
+            (principal_id, str(row["room_id"]), card_event_id),
+        )
+    transaction.execute("DROP TABLE approval_cards_legacy_delivery")
+
+
+def _object_json(value: object) -> dict[str, Any] | None:
+    try:
+        decoded = json.loads(str(value))
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _expired_content(content: dict[str, Any]) -> dict[str, Any]:
+    expired = {
+        **content,
+        "status": "expired",
+        "approvable": False,
+        "resolution_reason": _LEGACY_APPROVAL_EXPIRY_REASON,
+        "resolved_by": None,
+    }
+    tool_name = content.get("tool_name")
+    expired["body"] = f"Expired: {tool_name}" if isinstance(tool_name, str) else "Approval expired"
+    return expired
 
 
 def _table_exists(transaction: Transaction, table: str, *, postgres: bool) -> bool:

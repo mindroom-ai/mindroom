@@ -30,6 +30,7 @@ _ResolutionStatus = Literal["approved", "denied"]
 _MatrixEventPreparer = Callable[[str, str | None, dict[str, Any]], Awaitable[dict[str, Any] | None]]
 _MatrixDeliverySender = Callable[[MatrixDelivery], Awaitable[str]]
 _MatrixDeliveryResolver = Callable[[MatrixDelivery], Awaitable[str | None]]
+_ApprovalActionDeliveryResolver = Callable[[str, str], Awaitable[str | None]]
 _TransportSenderProvider = Callable[[], str | None]
 _SendingDeviceProvider = Callable[[], str | None]
 _ContinuationReadyHandler = Callable[[str, tuple[str, ...]], Awaitable[None] | None]
@@ -44,7 +45,6 @@ DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
 )
 DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
-DELIVERY_MIGRATION_PENDING_REASON = "Approval delivery migration has not established the generic card owner yet"
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the tool arguments are too large to show in full, so a human cannot review "
     "exactly what would run. Retry with a smaller payload — for example save large content to a "
@@ -187,6 +187,7 @@ class _ApprovalManager:
     prepare_event: _MatrixEventPreparer | None = None
     send_delivery: _MatrixDeliverySender | None = None
     resolve_delivery: _MatrixDeliveryResolver | None = None
+    resolve_action_delivery: _ApprovalActionDeliveryResolver | None = None
     cards: ApprovalDeliveryView | None = None
     transport_sender: _TransportSenderProvider | None = None
     sending_device: _SendingDeviceProvider | None = None
@@ -202,6 +203,7 @@ class _ApprovalManager:
         prepare_event: _MatrixEventPreparer | None = None,
         send_delivery: _MatrixDeliverySender | None = None,
         resolve_delivery: _MatrixDeliveryResolver | None = None,
+        resolve_action_delivery: _ApprovalActionDeliveryResolver | None = None,
         cards: ApprovalDeliveryView | None = None,
         transport_sender: _TransportSenderProvider | None = None,
         sending_device: _SendingDeviceProvider | None = None,
@@ -214,6 +216,8 @@ class _ApprovalManager:
             self.send_delivery = send_delivery
         if resolve_delivery is not None:
             self.resolve_delivery = resolve_delivery
+        if resolve_action_delivery is not None:
+            self.resolve_action_delivery = resolve_action_delivery
         if cards is not None:
             self.cards = cards
         if transport_sender is not None:
@@ -351,7 +355,17 @@ class _ApprovalManager:
                 room_id=room_id,
                 card_event_id=card_event_id,
             )
-            if not terminal and cards is not None and self.send_delivery is not None:
+            if not terminal and cards is not None and self.resolve_action_delivery is not None:
+                stored = await self._bind_action_delivery(
+                    cards,
+                    room_id=room_id,
+                    card_event_id=card_event_id,
+                )
+                terminal = stored is None and await cards.is_terminal_approval_card(
+                    room_id=room_id,
+                    card_event_id=card_event_id,
+                )
+            if stored is None and not terminal and cards is not None and self.send_delivery is not None:
                 # Matrix can expose a card whose send response died with its
                 # process. Let the shared delivery owner recover that event ID
                 # before deciding this reaction targets nothing durable.
@@ -364,8 +378,6 @@ class _ApprovalManager:
                     room_id=room_id,
                     card_event_id=card_event_id,
                 )
-                if stored is None and not terminal and await cards.legacy_approval_delivery_pending():
-                    raise RuntimeError(DELIVERY_MIGRATION_PENDING_REASON)
             if stored is None:
                 if terminal and before_consume is not None:
                     await before_consume()
@@ -408,6 +420,44 @@ class _ApprovalManager:
             resolved=delivered,
             error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON if resolution_was_truncated else None,
             thread_id=pending.thread_id,
+            card_event_id=card_event_id,
+        )
+
+    async def _bind_action_delivery(
+        self,
+        cards: ApprovalDeliveryView,
+        *,
+        room_id: str,
+        card_event_id: str,
+    ) -> StoredApprovalCard | None:
+        """Bind the exact visible action target to generic delivery debt."""
+        if self.resolve_action_delivery is None:
+            return None
+        delivery_id = await self.resolve_action_delivery(room_id, card_event_id)
+        if delivery_id is None:
+            return None
+        delivery = await cards.load_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=DeliveryStage.INITIAL,
+        )
+        if (
+            delivery is None
+            or delivery.room_id != room_id
+            or delivery.event_type != _EVENT_TYPE
+            or delivery.payload.get("approval_id") != delivery_id
+            or delivery.acknowledged_event_id not in {None, card_event_id}
+        ):
+            return None
+        acknowledgement = await cards.acknowledge_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=DeliveryStage.INITIAL,
+            event_id=card_event_id,
+            delivered_projections=(),
+        )
+        if acknowledgement.settled_event_id != card_event_id:
+            return None
+        return await cards.pending_approval_card(
+            room_id=room_id,
             card_event_id=card_event_id,
         )
 
@@ -739,6 +789,7 @@ def initialize_approval_store(
     prepare_event: _MatrixEventPreparer | None = None,
     send_delivery: _MatrixDeliverySender | None = None,
     resolve_delivery: _MatrixDeliveryResolver | None = None,
+    resolve_action_delivery: _ApprovalActionDeliveryResolver | None = None,
     cards: ApprovalDeliveryView | None = None,
     transport_sender: _TransportSenderProvider | None = None,
     sending_device: _SendingDeviceProvider | None = None,
@@ -751,6 +802,7 @@ def initialize_approval_store(
             prepare_event=prepare_event,
             send_delivery=send_delivery,
             resolve_delivery=resolve_delivery,
+            resolve_action_delivery=resolve_action_delivery,
             cards=cards,
             transport_sender=transport_sender,
             sending_device=sending_device,
@@ -765,6 +817,7 @@ def initialize_approval_store(
         prepare_event=prepare_event,
         send_delivery=send_delivery,
         resolve_delivery=resolve_delivery,
+        resolve_action_delivery=resolve_action_delivery,
         cards=cards,
         transport_sender=transport_sender,
         sending_device=sending_device,

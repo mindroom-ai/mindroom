@@ -291,7 +291,6 @@ class ApprovalResponseCoordinator:
         reason: str,
     ) -> ApprovalContinuation | None:
         """Fence exactly the state a failed lifecycle observed and wake settlement."""
-        await self._require_delivery_migrated(continuation.approval_id)
         failing = await self.store.request_approval_failure(
             continuation.approval_id,
             reason,
@@ -315,9 +314,7 @@ class ApprovalResponseCoordinator:
             return True
         if await self.successful_final_delivery(current) is not None:
             return False
-        if current.state == "failing":
-            await self._require_delivery_migrated(current.approval_id)
-        else:
+        if current.state != "failing":
             current = await self.request_failure(current, reason)
             if current is None:
                 return False
@@ -337,14 +334,6 @@ class ApprovalResponseCoordinator:
             ),
         )
         return delivered and await self.store.finish_approval_continuation(current.approval_id)
-
-    @staticmethod
-    async def _require_delivery_migrated(continuation_id: str) -> None:
-        """Keep a continuation unchanged until generic delivery owns all its cards."""
-        manager = approval_manager.get_approval_store()
-        cards = None if manager is None else manager.cards
-        if cards is not None and await cards.legacy_approval_delivery_pending(continuation_id):
-            raise RuntimeError(approval_manager.DELIVERY_MIGRATION_PENDING_REASON)
 
     async def successful_final_delivery(
         self,
