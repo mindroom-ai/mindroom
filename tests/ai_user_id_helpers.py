@@ -13,6 +13,7 @@ import nio
 from agno.db.base import SessionType
 from agno.models.message import Message
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import (
     _PreparedAgentRun,
 )
@@ -391,9 +392,12 @@ def _build_response_runner(
         side_effect=lambda scope: SessionType.TEAM if scope.kind == "team" else SessionType.AGENT,
     )
     bot._edit_message = AsyncMock(return_value=True)
+    agent_reply_memberships = AgentReplyMembershipIndex()
+    bot.agent_reply_memberships = agent_reply_memberships
     runtime = SimpleNamespace(
         client=bot.client,
         config=config,
+        agent_reply_memberships=agent_reply_memberships,
         enable_streaming=bot.enable_streaming,
         orchestrator=bot.orchestrator,
         response_admission_gate=bot.admission_gate,

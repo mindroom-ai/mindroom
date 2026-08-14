@@ -115,6 +115,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         room=context.room,
         conversation_reader=context.conversation_reader,
         matrix_admin=matrix_admin,
+        agent_reply_memberships=context.agent_reply_memberships,
     )
     assert first_call == {
         "runtime": expected_runtime,
@@ -196,6 +197,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         runtime_paths=context.runtime_paths,
         room=context.room,
         conversation_reader=context.conversation_reader,
+        agent_reply_memberships=context.agent_reply_memberships,
     )
     assert mock_edit.await_count == 2
     assert mock_edit.await_args_list[0].kwargs == {

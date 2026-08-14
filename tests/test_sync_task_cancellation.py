@@ -28,6 +28,7 @@ from mindroom.cancellation import (
     cancel_message_for_source,
 )
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
@@ -1287,7 +1288,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot.orchestrator = None
     bot._runtime_view = BotRuntimeState(
         client=bot.client,
-        config=MagicMock(spec=Config),
+        config=bot.config,
         runtime_paths=MagicMock(),
         agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=True,
@@ -2309,6 +2310,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
 
         # Create config with one agent
         config = MagicMock(spec=Config)
+        config.authorization = AuthorizationConfig()
         config.agents = {"test_agent": MagicMock()}
         config.teams = {}
         config.mcp_servers = {}
@@ -2359,6 +2361,7 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     config = MagicMock(spec=Config)
+    config.authorization = AuthorizationConfig()
     config.agents = {"general": MagicMock()}
     config.teams = {}
     config.mcp_servers = {}
@@ -2424,6 +2427,7 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     config = MagicMock(spec=Config)
+    config.authorization = AuthorizationConfig()
     config.agents = {"general": MagicMock()}
     config.teams = {}
     config.mcp_servers = {}
@@ -2625,6 +2629,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
 
         # Setup existing config and bot
         old_config = MagicMock(spec=Config)
+        old_config.authorization = AuthorizationConfig()
         old_config.agents = {"agent1": MagicMock()}
         old_config.teams = {}
         old_config.mcp_servers = {}
@@ -2643,6 +2648,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
 
         # Setup new config (agent1 needs restart)
         new_config = MagicMock(spec=Config)
+        new_config.authorization = AuthorizationConfig()
         new_config.agents = {"agent1": MagicMock()}
         new_config.teams = {}
         new_config.mcp_servers = {}

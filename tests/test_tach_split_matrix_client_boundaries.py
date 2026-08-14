@@ -27,7 +27,9 @@ RUNTIME_VIEW_STRUCTURAL_MEMBER = "orchestrator"
 RUNTIME_PROTOCOL_PRIVATE_SYMBOL = "_check_narrow_protocols_are_subsets_of_bot_runtime_view"
 RUNTIME_PROTOCOL_PUBLIC_SYMBOLS = [
     "OrchestratorRuntime",
+    "SupportsAgentReplyMemberships",
     "SupportsClientConfig",
+    "SupportsClientConfigMemberships",
     "SupportsClientConfigOrchestrator",
     "SupportsConfig",
     "SupportsConfigOrchestrator",

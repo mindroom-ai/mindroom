@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.attachment_ids import unique_attachment_ids
 from mindroom.hooks import (
     CustomEventContext,
@@ -35,6 +34,7 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
     from structlog.stdlib import BoundLogger
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -53,6 +53,13 @@ if TYPE_CHECKING:
 
 _ToolContextReturn = TypeVar("_ToolContextReturn")
 _StreamChunk = TypeVar("_StreamChunk")
+
+
+def _new_agent_reply_memberships() -> AgentReplyMembershipIndex:
+    """Create an inert standalone index without loading Matrix nio at tool-catalog import time."""
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: PLC0415
+
+    return AgentReplyMembershipIndex()
 
 
 @contextmanager
@@ -92,7 +99,7 @@ class ToolRuntimeContext:
     tool_function_filter: Callable[[Function], bool] | None = None
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
-    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
+    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=_new_agent_reply_memberships)
 
     @property
     def room_id(self) -> str:

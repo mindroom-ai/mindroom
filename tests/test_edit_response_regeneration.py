@@ -4527,6 +4527,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
             voice_event,
             config,
             runtime_paths_for(config),
+            bot._runtime_view.agent_reply_memberships,
         )
         mock_generate_response.assert_called_once()
 
@@ -4637,6 +4638,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
             voice_event,
             config,
             runtime_paths_for(config),
+            bot._runtime_view.agent_reply_memberships,
         )
         mock_generate_response.assert_called_once()
 
