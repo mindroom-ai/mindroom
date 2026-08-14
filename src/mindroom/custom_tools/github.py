@@ -134,6 +134,8 @@ class GithubTools(AgnoGithubTools):
 
     def authenticate(self) -> Github:
         """Build the PyGithub client without logging credential values."""
+        if not self.access_token:
+            raise self._connection_required()
         auth = Auth.Token(self.access_token)
         if self.base_url:
             return Github(base_url=self.base_url, auth=auth)
