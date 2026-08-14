@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import threading
-from copy import deepcopy
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -16,14 +15,7 @@ from mindroom.approval_manager import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     DEFAULT_SHUTDOWN_REASON,
     ApprovalActionResult,
-    ApprovalStartupSweep,
-    ContinuationReadyHandler,
-    MatrixDeliveryResolver,
-    MatrixDeliverySender,
-    MatrixEventPreparer,
-    SendingDeviceProvider,
     ToolApprovalTransportError,
-    TransportSenderProvider,
 )
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.entity_resolution import is_human_requester_id
@@ -37,26 +29,17 @@ if TYPE_CHECKING:
 
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
-    from mindroom.event_journal import ApprovalCardReservation, ApprovalDeliveryView
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
-    "ApprovalStartupSweep",
     "MatrixApprovalAction",
-    "ToolApprovalCall",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "evaluate_tool_approval",
-    "expire_continuation_approval_cards",
     "handle_matrix_approval_action",
-    "initialize_approval_runtime",
     "is_process_active_approval_card",
-    "prepare_suspended_tool_approval",
-    "publish_suspended_tool_approvals",
-    "recover_approval_cards_on_startup",
-    "require_approval_delivery_migrated",
     "resolve_tool_approval_approver",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
@@ -71,20 +54,6 @@ logger = get_logger(__name__)
 
 class ToolApprovalScriptError(RuntimeError):
     """One approval-script load or execution failure."""
-
-
-@dataclass(frozen=True, slots=True)
-class ToolApprovalCall:
-    """One tool call that may require a Matrix approval card."""
-
-    config: Config
-    runtime_paths: RuntimePaths
-    tool_name: str
-    arguments: dict[str, Any]
-    agent_name: str
-    room_id: str | None
-    thread_id: str | None
-    requester_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,55 +191,6 @@ async def evaluate_tool_approval(
     return result, timeout_seconds
 
 
-async def prepare_suspended_tool_approval(
-    call: ToolApprovalCall,
-    *,
-    approval_id: str,
-    continuation_id: str,
-    continuation_generation: int,
-    tool_call_id: str,
-    expires_at_ns: int,
-) -> ApprovalCardReservation | None:
-    """Prepare one frozen card for an atomic continuation reservation."""
-    manager = approval_manager.get_approval_store()
-    approver = resolve_tool_approval_approver(call.config, call.runtime_paths, call.requester_id)
-    if manager is None or call.room_id is None or call.requester_id is None or approver is None:
-        return None
-    return await manager.prepare_detached_approval(
-        approval_id=approval_id,
-        continuation_id=continuation_id,
-        continuation_generation=continuation_generation,
-        tool_call_id=tool_call_id,
-        tool_name=call.tool_name,
-        arguments=deepcopy(call.arguments),
-        room_id=call.room_id,
-        requester_id=call.requester_id,
-        approver_user_id=approver,
-        expires_at_ns=expires_at_ns,
-        agent_name=call.agent_name,
-        thread_id=call.thread_id,
-    )
-
-
-async def publish_suspended_tool_approvals(
-    *,
-    continuation_principal_id: str,
-    continuation_id: str,
-    continuation_generation: int,
-    cards: tuple[ApprovalCardReservation, ...],
-) -> bool:
-    """Atomically own one complete card generation, then flush its delivery debt."""
-    manager = approval_manager.get_approval_store()
-    if manager is None:
-        return False
-    return await manager.reserve_and_publish(
-        continuation_principal_id=continuation_principal_id,
-        continuation_id=continuation_id,
-        continuation_generation=continuation_generation,
-        cards=cards,
-    )
-
-
 async def handle_matrix_approval_action(
     action: MatrixApprovalAction,
     *,
@@ -293,56 +213,10 @@ async def handle_matrix_approval_action(
     )
 
 
-async def require_approval_delivery_migrated(continuation_id: str) -> None:
-    """Keep one continuation unchanged until generic delivery owns all of its cards."""
-    manager = approval_manager.get_approval_store()
-    cards = None if manager is None else manager.cards
-    if cards is not None and await cards.legacy_approval_delivery_pending(continuation_id):
-        raise RuntimeError(approval_manager.DELIVERY_MIGRATION_PENDING_REASON)
-
-
 def is_process_active_approval_card(card_event_id: str) -> bool:
     """Return whether one approval card is being settled in this process."""
     manager = approval_manager.get_approval_store()
     return manager is not None and manager.has_active_in_memory_approval_card(card_event_id)
-
-
-def initialize_approval_runtime(
-    runtime_paths: RuntimePaths,
-    *,
-    prepare_event: MatrixEventPreparer,
-    send_delivery: MatrixDeliverySender,
-    resolve_delivery: MatrixDeliveryResolver,
-    cards: ApprovalDeliveryView | None,
-    transport_sender: TransportSenderProvider,
-    sending_device: SendingDeviceProvider,
-    continuation_ready: ContinuationReadyHandler | None = None,
-) -> None:
-    """Initialize the approval runtime behind the public approval seam."""
-    approval_manager.initialize_approval_store(
-        runtime_paths,
-        prepare_event=prepare_event,
-        send_delivery=send_delivery,
-        resolve_delivery=resolve_delivery,
-        cards=cards,
-        transport_sender=transport_sender,
-        sending_device=sending_device,
-        continuation_ready=continuation_ready,
-    )
-
-
-async def expire_continuation_approval_cards(continuation_id: str) -> bool:
-    """Expire every unresolved Matrix card for one continuation."""
-    manager = approval_manager.get_approval_store()
-    return False if manager is None else await manager.expire_continuation_cards(continuation_id)
-
-
-async def recover_approval_cards_on_startup() -> ApprovalStartupSweep:
-    """Recover native approval-card publication, decisions, and deadlines."""
-    manager = approval_manager.get_approval_store()
-    if manager is None:
-        return ApprovalStartupSweep(discarded=0, failed=0)
-    return await manager.recover_cards_on_startup()
 
 
 async def shutdown_approval_runtime(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:

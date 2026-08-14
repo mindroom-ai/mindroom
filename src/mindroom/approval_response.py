@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from mindroom import approval_manager
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
@@ -19,12 +21,7 @@ from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
-    ToolApprovalCall,
     evaluate_tool_approval,
-    expire_continuation_approval_cards,
-    prepare_suspended_tool_approval,
-    publish_suspended_tool_approvals,
-    require_approval_delivery_migrated,
     resolve_tool_approval_approver,
 )
 
@@ -175,32 +172,34 @@ class ApprovalResponseCoordinator:
     ) -> None:
         """Publish every human-gated card already linked by durable identity."""
         config = self.config()
+        manager = approval_manager.get_approval_store()
+        approver = resolve_tool_approval_approver(config, self.runtime_paths, continuation.requester_id)
         cards = []
         for index, (tool, call) in enumerate(zip(plan.tools, plan.calls, strict=True)):
             if call.decision is not None:
                 continue
-            card = await prepare_suspended_tool_approval(
-                ToolApprovalCall(
-                    config=config,
-                    runtime_paths=self.runtime_paths,
-                    tool_name=call.tool_name,
-                    arguments=dict(tool.tool_args or {}),
-                    agent_name=call.invoking_agent,
-                    room_id=target.room_id,
-                    thread_id=target.resolved_thread_id,
-                    requester_id=continuation.requester_id,
-                ),
+            if manager is None or approver is None:
+                raise RuntimeError(failure_reason)
+            card = await manager.prepare_detached_approval(
                 approval_id=f"{continuation.approval_id}-{continuation.generation}-{index}",
                 continuation_id=continuation.approval_id,
                 continuation_generation=continuation.generation,
                 tool_call_id=call.tool_call_id,
+                tool_name=call.tool_name,
+                arguments=deepcopy(dict(tool.tool_args or {})),
+                room_id=target.room_id,
+                requester_id=continuation.requester_id,
+                approver_user_id=approver,
                 expires_at_ns=call.expires_at_ns,
+                agent_name=call.invoking_agent,
+                thread_id=target.resolved_thread_id,
             )
             if card is None:
                 raise RuntimeError(failure_reason)
             cards.append(card)
         if cards:
-            if not await publish_suspended_tool_approvals(
+            assert manager is not None
+            if not await manager.reserve_and_publish(
                 continuation_principal_id=self.store.principal_id,
                 continuation_id=continuation.approval_id,
                 continuation_generation=continuation.generation,
@@ -292,7 +291,7 @@ class ApprovalResponseCoordinator:
         reason: str,
     ) -> ApprovalContinuation | None:
         """Fence exactly the state a failed lifecycle observed and wake settlement."""
-        await require_approval_delivery_migrated(continuation.approval_id)
+        await self._require_delivery_migrated(continuation.approval_id)
         failing = await self.store.request_approval_failure(
             continuation.approval_id,
             reason,
@@ -317,12 +316,13 @@ class ApprovalResponseCoordinator:
         if await self.successful_final_delivery(current) is not None:
             return False
         if current.state == "failing":
-            await require_approval_delivery_migrated(current.approval_id)
+            await self._require_delivery_migrated(current.approval_id)
         else:
             current = await self.request_failure(current, reason)
             if current is None:
                 return False
-        if not await expire_continuation_approval_cards(current.approval_id):
+        manager = approval_manager.get_approval_store()
+        if manager is None or not await manager.expire_continuation_cards(current.approval_id):
             return False
         visible_reason = _USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else reason
         target = continuation_target(current)
@@ -337,6 +337,14 @@ class ApprovalResponseCoordinator:
             ),
         )
         return delivered and await self.store.finish_approval_continuation(current.approval_id)
+
+    @staticmethod
+    async def _require_delivery_migrated(continuation_id: str) -> None:
+        """Keep a continuation unchanged until generic delivery owns all its cards."""
+        manager = approval_manager.get_approval_store()
+        cards = None if manager is None else manager.cards
+        if cards is not None and await cards.legacy_approval_delivery_pending(continuation_id):
+            raise RuntimeError(approval_manager.DELIVERY_MIGRATION_PENDING_REASON)
 
     async def successful_final_delivery(
         self,

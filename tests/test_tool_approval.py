@@ -642,7 +642,10 @@ async def test_transient_removed_owner_cleanup_rearms_startup_retry(tmp_path: Pa
     transport._startup_cleanup_done = True
 
     with (
-        patch("mindroom.approval_transport.expire_continuation_approval_cards", new=AsyncMock(return_value=False)),
+        patch(
+            "mindroom.approval_transport.approval_manager.get_approval_store",
+            return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=False)),
+        ),
         patch.object(transport, "_schedule_startup_cleanup_retry") as schedule_retry,
     ):
         await transport.reconcile_unavailable_entities({"removed"})
@@ -840,8 +843,8 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
     )
 
     with patch(
-        "mindroom.approval_transport.expire_continuation_approval_cards",
-        new=AsyncMock(return_value=True),
+        "mindroom.approval_transport.approval_manager.get_approval_store",
+        return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
     ):
         await transport.reconcile_unavailable_entities({"removed"})
 
@@ -926,10 +929,11 @@ async def test_removed_owner_cleanup_recovers_frozen_success_through_original_ow
     )
 
     try:
+        expire_cards = AsyncMock()
         with patch(
-            "mindroom.approval_transport.expire_continuation_approval_cards",
-            new=AsyncMock(),
-        ) as expire_cards:
+            "mindroom.approval_transport.approval_manager.get_approval_store",
+            return_value=MagicMock(expire_continuation_cards=expire_cards),
+        ):
             assert await transport._discard_unavailable(
                 "agent@removed",
                 continuation,
@@ -1051,8 +1055,8 @@ async def test_removed_owner_cleanup_adopts_notice_after_matrix_device_change(tm
 
     try:
         with patch(
-            "mindroom.approval_transport.expire_continuation_approval_cards",
-            new=AsyncMock(return_value=True),
+            "mindroom.approval_transport.approval_manager.get_approval_store",
+            return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
         ):
             assert await transport._discard_unavailable("agent@removed", continuation, reason)
 
@@ -1135,8 +1139,8 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
     try:
         with (
             patch(
-                "mindroom.approval_transport.expire_continuation_approval_cards",
-                new=AsyncMock(return_value=True),
+                "mindroom.approval_transport.approval_manager.get_approval_store",
+                return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
             ),
             patch.object(transport, "_schedule_startup_cleanup_retry") as schedule_retry,
         ):

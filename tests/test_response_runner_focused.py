@@ -679,7 +679,7 @@ async def test_user_stop_fences_waiting_approval_before_terminal_turn_record(tmp
     blocked_finalize = AsyncMock()
     with (
         patch(
-            "mindroom.approval_response.require_approval_delivery_migrated",
+            "mindroom.approval_response.ApprovalResponseCoordinator._require_delivery_migrated",
             new=AsyncMock(
                 side_effect=RuntimeError(
                     "Approval delivery migration has not established the generic card owner yet",
@@ -711,7 +711,7 @@ async def test_user_stop_fences_waiting_approval_before_terminal_turn_record(tmp
     blocked_failing_finalize = AsyncMock()
     with (
         patch(
-            "mindroom.approval_response.require_approval_delivery_migrated",
+            "mindroom.approval_response.ApprovalResponseCoordinator._require_delivery_migrated",
             new=AsyncMock(
                 side_effect=RuntimeError(
                     "Approval delivery migration has not established the generic card owner yet",
@@ -732,7 +732,10 @@ async def test_user_stop_fences_waiting_approval_before_terminal_turn_record(tmp
     blocked_failing_finalize.assert_not_awaited()
 
     with (
-        patch("mindroom.approval_response.expire_continuation_approval_cards", new=AsyncMock(return_value=True)),
+        patch(
+                "mindroom.approval_response.approval_manager.get_approval_store",
+                return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
+        ),
         patch.object(DeliveryGateway, "edit_text", new=AsyncMock(side_effect=acknowledge_stop_edit)),
     ):
         stopped = await runner.finalize_user_stop(
@@ -802,7 +805,10 @@ async def test_user_stop_preserves_a_claimed_frozen_final_until_success_recovery
     with (
         patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock(side_effect=recover_final)),
         patch.object(runner, "_build_lifecycle", return_value=lifecycle),
-        patch("mindroom.approval_response.expire_continuation_approval_cards", new=expire_cards),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(cards=None, expire_continuation_cards=expire_cards),
+        ),
     ):
         assert not await runner.finalize_user_stop(
             "$waiting",

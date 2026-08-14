@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import nio
 
+from mindroom import approval_manager
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import DeliveryStage
 from mindroom.logging_config import get_logger
@@ -28,13 +29,7 @@ from mindroom.matrix.room_history_reads import (
     find_response_event_ids_via_room_messages,
 )
 from mindroom.matrix_delivery import MatrixDeliveryWorker
-from mindroom.tool_approval import (
-    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
-    ToolApprovalTransportError,
-    expire_continuation_approval_cards,
-    initialize_approval_runtime,
-    recover_approval_cards_on_startup,
-)
+from mindroom.tool_approval import DEFAULT_ROUTER_MANAGED_ROOM_REASON, ToolApprovalTransportError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -148,7 +143,7 @@ class ApprovalMatrixTransport:
 
     def bind_approval_runtime(self) -> None:
         """Bind approval manager hooks to the current Matrix transport."""
-        initialize_approval_runtime(
+        approval_manager.initialize_approval_store(
             self.runtime_paths,
             prepare_event=self.prepare_approval_event,
             send_delivery=self.send_approval_delivery,
@@ -339,7 +334,8 @@ class ApprovalMatrixTransport:
             )
             if current is None:
                 return False
-        if not await expire_continuation_approval_cards(current.approval_id):
+        manager = approval_manager.get_approval_store()
+        if manager is None or not await manager.expire_continuation_cards(current.approval_id):
             return False
         notice_store = await self._deliver_unavailable_notice(current, reason)
         if notice_store is None:
@@ -567,7 +563,10 @@ class ApprovalMatrixTransport:
         """Recover current approval-card transport obligations."""
         try:
             legacy_recovered = await self._upgrade_legacy_approval_deliveries()
-            sweep = await recover_approval_cards_on_startup()
+            manager = approval_manager.get_approval_store()
+            if manager is None:
+                return legacy_recovered
+            sweep = await manager.recover_cards_on_startup()
         except Exception as exc:
             logger.warning(
                 "tool_approval_startup_recovery_failed",
