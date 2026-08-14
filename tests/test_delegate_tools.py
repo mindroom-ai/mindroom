@@ -218,6 +218,54 @@ class TestDelegateTools:
         mock_ai_response.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_delegation_uses_live_runtime_authorization_after_config_reload(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """A long-lived delegate toolkit must enforce the current runtime policy."""
+        runtime_paths = resolve_runtime_paths(
+            config_path=storage_path / "config.yaml",
+            storage_path=storage_path,
+        )
+        tools = DelegateTools(
+            agent_name="leader",
+            delegate_to=["code"],
+            runtime_paths=runtime_paths,
+            config=config,
+            delegation_depth=0,
+        )
+        replacement_config = config.model_copy(deep=True)
+        replacement_config.authorization = AuthorizationConfig(
+            agent_reply_permissions={"code": AgentReplyPermission(users=[])},
+        )
+        runtime_context = ToolRuntimeContext(
+            agent_name="leader",
+            target=MessageTarget(
+                room_id="!room:example.org",
+                source_thread_id=None,
+                resolved_thread_id=None,
+                reply_to_event_id=None,
+                session_id="!room:example.org",
+            ),
+            requester_id="@alice:example.org",
+            client=MagicMock(),
+            config=replacement_config,
+            runtime_paths=runtime_paths,
+            relations=make_relation_lookup(),
+            conversation_reader=make_conversation_reader_mock(),
+        )
+
+        with (
+            tool_runtime_context(runtime_context),
+            patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as mock_ai_response,
+        ):
+            result = await tools.delegate_task("code", "Write a hello world program")
+
+        assert "not allowed to reply" in result
+        mock_ai_response.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_successful_delegation(self, tools: DelegateTools) -> None:
         """Test that a successful delegation returns the agent's response content."""
         with patch(

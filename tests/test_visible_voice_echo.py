@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_handoff import PreparedIngress
@@ -110,6 +111,7 @@ class _EchoHarness:
     """Router and responder lifecycles sharing one process-global barrier registry."""
 
     config: Config
+    runtime: BotRuntimeState
     router: VisibleVoiceEchoLifecycle
     responder: VisibleVoiceEchoLifecycle
     room: nio.MatrixRoom
@@ -144,6 +146,10 @@ def _echo_harness(
     gateway = _RecordingEchoGateway()
     turn_store = _EchoTurnStore()
 
+    async def wait_for_admission_or_shutdown() -> bool:
+        await runtime.response_admission_gate.wait_until_open()
+        return True
+
     def lifecycle(agent_name: str) -> VisibleVoiceEchoLifecycle:
         return VisibleVoiceEchoLifecycle(
             VisibleVoiceEchoDeps(
@@ -153,6 +159,7 @@ def _echo_harness(
                 delivery_gateway=cast("DeliveryGateway", gateway),
                 turn_store=cast("TurnStore", turn_store),
                 ingress=cast("IngressValidator", ingress),
+                wait_for_admission_or_shutdown=wait_for_admission_or_shutdown,
             ),
         )
 
@@ -161,6 +168,7 @@ def _echo_harness(
     room.add_member(_REQUESTER_ID, _REQUESTER_ID, None)
     return _EchoHarness(
         config=config,
+        runtime=runtime,
         router=lifecycle(ROUTER_AGENT_NAME),
         responder=lifecycle("home"),
         room=room,
@@ -216,6 +224,31 @@ async def test_responder_waits_for_claimed_echo_publication(tmp_path: Path) -> N
     harness.gateway.release_send.set()
     await finish
     assert await asyncio.wait_for(responder_wait, timeout=1) is True
+
+
+@pytest.mark.asyncio
+async def test_visible_echo_waits_for_reload_and_rechecks_authorization(tmp_path: Path) -> None:
+    """A voice echo started before reload must not publish after the requester is revoked."""
+    harness = _echo_harness(tmp_path, voice_enabled=True)
+    source_event_id = "$voice-during-reload"
+    admission_gate = harness.runtime.response_admission_gate
+    assert admission_gate.close_if_idle()
+
+    handle = harness.router.start(_request(source_event_id))
+    assert handle is not None
+    await asyncio.sleep(0)
+    assert not harness.gateway.send_started.is_set()
+
+    replacement_config = harness.config.model_copy(deep=True)
+    replacement_config.authorization = AuthorizationConfig(
+        default_room_access=True,
+        agent_reply_permissions={ROUTER_AGENT_NAME: AgentReplyPermission(users=[])},
+    )
+    harness.runtime.config = replacement_config
+    admission_gate.reopen()
+    await harness.router.finish(handle, _normalized_event(source_event_id))
+
+    assert not harness.gateway.send_started.is_set()
 
 
 @pytest.mark.asyncio

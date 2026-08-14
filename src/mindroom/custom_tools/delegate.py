@@ -107,13 +107,14 @@ class DelegateTools(Toolkit):
             return "Cannot delegate an empty task. Please provide a task description."
 
         runtime_context = get_tool_runtime_context()
-        policy = self._config.authorization.agent_reply_policy(agent_name)
+        active_config = runtime_context.config if runtime_context is not None else self._config
+        policy = active_config.authorization.agent_reply_policy(agent_name)
         if runtime_context is None and policy is not None and "*" not in policy.users:
             return f"Cannot delegate to '{agent_name}': requester authorization is unavailable."
         if runtime_context is not None and not is_sender_allowed_for_agent_reply(
             runtime_context.requester_id,
             agent_name,
-            self._config,
+            active_config,
             self._runtime_paths,
             runtime_context.agent_reply_memberships,
         ):
@@ -129,7 +130,7 @@ class DelegateTools(Toolkit):
 
             knowledge_resolution = resolve_agent_knowledge_access(
                 agent_name,
-                self._config,
+                active_config,
                 self._runtime_paths,
                 refresh_scheduler=self._refresh_scheduler,
                 execution_identity=execution_identity,
@@ -154,6 +155,7 @@ class DelegateTools(Toolkit):
                 session_id=session_id,
                 room_id=room_id,
                 runtime_context=runtime_context,
+                config=active_config,
             )
             delegated_correlation_id = (
                 delegated_runtime_context.correlation_id if delegated_runtime_context is not None else None
@@ -175,7 +177,7 @@ class DelegateTools(Toolkit):
                     turn_ctx,
                     prompt=task,
                     runtime_paths=self._runtime_paths,
-                    config=self._config,
+                    config=active_config,
                     knowledge=knowledge_resolution.knowledge,
                     include_interactive_questions=False,
                     tool_function_filter=(
@@ -203,11 +205,12 @@ class DelegateTools(Toolkit):
         session_id: str,
         room_id: str | None,
         runtime_context: ToolRuntimeContext | None,
+        config: Config,
     ) -> ToolRuntimeContext | None:
         """Return the child tool runtime context for one delegated run."""
         if runtime_context is None:
             return None
-        runtime_model = self._config.resolve_runtime_model(
+        runtime_model = config.resolve_runtime_model(
             entity_name=agent_name,
             room_id=room_id,
             thread_id=runtime_context.resolved_thread_id,

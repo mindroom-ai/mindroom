@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -20,7 +19,7 @@ from mindroom.constants import (
 from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.response_admission import ResponseAdmissionRefusedError
+from mindroom.response_admission import admitted_response_decision
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
     DispatchPipelineTiming,
@@ -34,7 +33,7 @@ from mindroom.timing import (
 from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     import nio
 
@@ -104,14 +103,19 @@ async def dispatch_text_message(
         if prepared is None:
             return
         timing_scope_token = timing_scope_context.set(event_timing_scope(prepared.event.event_id))
-        if await _blocked_before_plan(
-            controller,
-            turn.room,
-            prepared,
+        async with admitted_response_decision(
+            controller.deps.runtime.response_admission_gate,
+            controller.deps.response_runner.wait_for_admission_or_shutdown,
         ):
-            return
-
-        async with _admitted_response_decision(controller):
+            if not controller.deps.turn_policy.can_reply_to_sender(turn.requester_user_id):
+                await controller.deps.visible_responses.settle_source_events_ignored(prepared.handled_turn)
+                return
+            if await _blocked_before_plan(
+                controller,
+                turn.room,
+                prepared,
+            ):
+                return
             message_attachment_ids, trusted_attachment_ids, router_extra_content = _attachment_parts(
                 prepared,
                 media_events=list(turn.media_events) or None,
@@ -457,25 +461,15 @@ async def _run_claimed_response(
         controller.deps.turn_store.release_pending_turn_claim(turn_claim)
 
 
-@asynccontextmanager
-async def _admitted_response_decision(controller: TurnController) -> AsyncIterator[None]:
-    """Keep config application outside authorization-sensitive planning and handoff."""
-    admission_gate = controller.deps.runtime.response_admission_gate
-    while not admission_gate.admit():
-        if not await controller.deps.response_runner.wait_for_admission_or_shutdown():
-            raise ResponseAdmissionRefusedError
-    try:
-        yield
-    finally:
-        admission_gate.release()
-
-
 async def _run_admitted_router_relay(
     controller: TurnController,
     relay: Callable[[], Awaitable[None]],
 ) -> None:
     """Keep config application outside one router selection and relay delivery."""
-    async with _admitted_response_decision(controller):
+    async with admitted_response_decision(
+        controller.deps.runtime.response_admission_gate,
+        controller.deps.response_runner.wait_for_admission_or_shutdown,
+    ):
         await relay()
 
 

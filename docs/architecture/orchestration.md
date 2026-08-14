@@ -89,6 +89,7 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
 3. `ConfigReloadLifecycle.apply_with_response_admission()` serializes config reloads and MCP catalog replacements behind one global admission owner.
 4. Sampling the in-flight count and closing the shared `ResponseAdmissionGate` happen atomically, so a new response cannot race the decision to apply.
    The gate covers Matrix-driven response lifecycles only.
+   Text and router planning, commands, edit regeneration, interactive selections, and visible router voice echoes perform their final reply-policy check after admission and retain the slot through their direct side effect or response-runner handoff.
    Direct agent-run entry points that bypass the response lifecycle (`mindroom.api.openai_compat` and cascaded voice in `mindroom.matrix_rtc.call_tools`) are not admitted through it, so a replacement can still land underneath one of those runs.
    The gate stays closed, but is not held, across config loading and plan application.
    Holding it would stall the apply against itself: applying the plan stops bots, and stopping a bot drains its detached responses.

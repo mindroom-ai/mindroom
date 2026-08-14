@@ -91,6 +91,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
+from mindroom.response_admission import admitted_response_decision
 from mindroom.response_lifecycle import response_lifecycle_reservation_context
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -783,12 +784,18 @@ class TurnController:
         event_info: EventInfo,
     ) -> None:
         """Hand one edited user turn to the edit regenerator."""
-        await self.deps.edit_regenerator.handle_message_edit(
-            room,
-            prechecked_event.event,
-            event_info,
-            prechecked_event.requester_user_id,
-        )
+        async with admitted_response_decision(
+            self.deps.runtime.response_admission_gate,
+            self.deps.response_runner.wait_for_admission_or_shutdown,
+        ):
+            if not self.deps.turn_policy.can_reply_to_sender(prechecked_event.requester_user_id):
+                return
+            await self.deps.edit_regenerator.handle_message_edit(
+                room,
+                prechecked_event.event,
+                event_info,
+                prechecked_event.requester_user_id,
+            )
 
     async def _notify_command_target_not_ready(
         self,
@@ -1368,7 +1375,32 @@ class TurnController:
         source_event_id: str,
         response_target: MessageTarget,
     ) -> bool:
-        """Execute one selection after its caller transfers claim ownership."""
+        """Authorize and execute one selection after its caller transfers claim ownership."""
+        async with admitted_response_decision(
+            self.deps.runtime.response_admission_gate,
+            self.deps.response_runner.wait_for_admission_or_shutdown,
+        ):
+            if not self.deps.turn_policy.can_reply_to_sender(user_id):
+                await self.deps.settle_dispatch_sources((source_event_id,))
+                return False
+            return await self._execute_admitted_interactive_selection(
+                room,
+                selection=selection,
+                user_id=user_id,
+                source_event_id=source_event_id,
+                response_target=response_target,
+            )
+
+    async def _execute_admitted_interactive_selection(
+        self,
+        room: nio.MatrixRoom,
+        *,
+        selection: interactive.InteractiveSelection,
+        user_id: str,
+        source_event_id: str,
+        response_target: MessageTarget,
+    ) -> bool:
+        """Execute one authorized selection while replacement admission remains reserved."""
         if await self._interactive_selection_is_durably_terminal(source_event_id):
             return False
         reconcile_visible_response = self.deps.turn_store.has_pending_response_intent(

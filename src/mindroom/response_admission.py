@@ -7,9 +7,10 @@ active responses to drain, and then force-applies if the runtime never becomes
 idle. MCP notifications schedule their replacement asynchronously so the
 triggering admitted tool call can release its own slot first.
 
-Inbound turns reserve admission before authorization-sensitive planning and
-keep it through the response-runner handoff. This prevents a policy reload from
-committing between a reply authorization decision and the response it permits.
+Matrix reply surfaces reserve admission before their final authorization check
+and keep it through direct side effects or the response-runner handoff. This
+prevents a policy reload from committing between a reply authorization decision
+and the response it permits.
 
 The gate closes admission for exactly the apply window, but the applier never
 holds it while running the plan. Applying stops bots, and stopping a bot drains
@@ -34,7 +35,12 @@ interrupted and permanently leak a slot, wedging replacement admission.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
 
 class ResponseAdmissionRefusedError(Exception):
@@ -104,3 +110,18 @@ class ResponseAdmissionGate:
     async def wait_until_open(self) -> None:
         """Wait until runtime replacement reopens response admission."""
         await self._open_event.wait()
+
+
+@asynccontextmanager
+async def admitted_response_decision(
+    gate: ResponseAdmissionGate,
+    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]],
+) -> AsyncIterator[None]:
+    """Reserve replacement admission around one final authorization decision and its effects."""
+    while not gate.admit():
+        if not await wait_for_admission_or_shutdown():
+            raise ResponseAdmissionRefusedError
+    try:
+        yield
+    finally:
+        gate.release()

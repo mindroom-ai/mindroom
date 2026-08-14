@@ -1640,6 +1640,7 @@ visibility = [
     "mindroom.sync_restart_retry",
     "mindroom.text_ingress_dispatch",
     "mindroom.turn_controller",
+    "mindroom.visible_voice_echo",
 ]
 
 [[modules]]
@@ -3505,6 +3506,7 @@ depends_on = [
     "mindroom.dispatch_handoff",
     "mindroom.dispatch_recovery_context",
     "mindroom.dispatch_source",
+    "mindroom.response_admission",
     "mindroom.turn_origin",
 ]
 visibility = [
