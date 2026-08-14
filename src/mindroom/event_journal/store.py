@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
+    from mindroom.interactive_models import InteractivePrompt
+
     from .backend import Backend, Transaction
     from .interactive_questions import InteractiveSelection
     from .models import (
@@ -204,19 +206,21 @@ class PrincipalStore:
             lambda transaction: journal.current_membership_epoch(transaction, self._principal_id, room_id),
         )
 
-    async def interactive_prompt_membership_is_current(
+    async def interactive_prompt_is_current(
         self,
         *,
         room_id: str,
-        source_event_id: str,
+        question_event_id: str,
+        expected: InteractivePrompt,
     ) -> bool:
-        """Return whether one prompt proof still names the active room membership."""
+        """Return whether projection still exposes one prompt in its active membership."""
         return await self._backend.write(
-            lambda transaction: interactive_questions.prompt_membership_is_current(
+            lambda transaction: interactive_questions.prompt_is_current(
                 transaction,
                 self._principal_id,
                 room_id=room_id,
-                source_event_id=source_event_id,
+                question_event_id=question_event_id,
+                expected=expected,
             ),
         )
 

@@ -836,6 +836,8 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
     assert stream_outcome.last_physical_stream_event_id == "$displayed-root"
     assert stream_outcome.rendered_body == formatted_interactive.formatted_text
     assert stream_outcome.canonical_final_body_candidate == raw_interactive
+    assert len(captured_stream_edits) >= 2
+    assert all("io.mindroom.interactive" not in content for content in captured_stream_edits[:-1])
     assert captured_stream_edits[-1]["body"] == formatted_interactive.formatted_text
     assert captured_stream_edits[-1]["io.mindroom.interactive"]["source_event_id"] == "$source"
 
@@ -909,6 +911,7 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
         runtime_paths=runtime_paths_for(config),
         conversation_reader=make_conversation_reader_mock(),
         membership=make_membership_stub(),
+        agent_name="agent",
     )
     await apply_post_response_effects(
         final_outcome,

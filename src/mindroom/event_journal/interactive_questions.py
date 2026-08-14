@@ -103,26 +103,41 @@ def _prompt_membership_epoch(
     return int(source["membership_epoch"])
 
 
-def prompt_membership_is_current(
+def prompt_is_current(
     transaction: Transaction,
     principal_id: str,
     *,
     room_id: str,
-    source_event_id: str,
+    question_event_id: str,
+    expected: InteractivePrompt,
 ) -> bool:
-    """Claim the active membership named by one projected prompt proof."""
+    """Claim membership and match the prompt currently exposed by projection."""
     membership_epoch = _prompt_membership_epoch(
         transaction,
         principal_id,
         room_id=room_id,
-        source_event_id=source_event_id,
+        source_event_id=expected.source_event_id,
     )
-    return membership_epoch is not None and claim_membership_epoch(
+    if membership_epoch is None or not claim_membership_epoch(
         transaction,
         principal_id,
         room_id=room_id,
         expected_membership_epoch=membership_epoch,
+    ):
+        return False
+    row = transaction.fetchone(
+        """
+        UPDATE visible_messages
+        SET revision_event_id = revision_event_id
+        WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
+        RETURNING content_json
+        """,
+        (principal_id, room_id, question_event_id),
     )
+    if row is None or row["content_json"] is None:
+        return False
+    content = json.loads(str(row["content_json"]))
+    return isinstance(content, dict) and interactive_prompt_from_content(content) == expected
 
 
 def record_projected_prompt(

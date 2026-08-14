@@ -60,6 +60,7 @@ from mindroom.event_journal.schema import (
     schema_statements,
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
+from mindroom.interactive_models import InteractivePrompt
 from tests.conftest import postgres_journal_schema_url
 
 if TYPE_CHECKING:
@@ -539,6 +540,7 @@ async def _activate_interactive_question(
     options: Mapping[str, str] | None = None,
     option_labels: Mapping[str, str] | None = None,
     source_event_id: str = "$turn",
+    ts: int | None = None,
 ) -> None:
     """Admit one self-authored Matrix revision carrying an active prompt."""
     metadata = {
@@ -562,7 +564,7 @@ async def _activate_interactive_question(
             room_id=room_id,
             sender="alice",
             thread_id=thread_id,
-            ts=3_000 if revision_event_id is not None else 2_000,
+            ts=ts if ts is not None else (3_000 if revision_event_id is not None else 2_000),
             content=content,
         )
         is AdmissionResult.ADMITTED
@@ -2093,36 +2095,71 @@ class TestProjectedInteractivePrompts:
 
         assert await _interactive_question_rows(journal_store) == []
 
-    async def test_button_membership_check_rejects_a_fenced_prompt(
+    async def test_button_check_requires_the_same_visible_prompt(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Post-effects cannot put regenerated buttons on a different visible event."""
+        await admit(alice, "$turn", sender=BOB)
+        expected = InteractivePrompt(
+            creator_agent="agent",
+            question_text="Choose?",
+            options={"1": "yes"},
+            option_labels={"1": "Yes"},
+            source_event_id="$turn",
+        )
+        await admit(
+            alice,
+            "$question",
+            sender="alice",
+            ts=1_000,
+            content=interactive_prompt("Choose?", "yes", source_event_id="$turn"),
+        )
+        assert await alice.interactive_prompt_is_current(
+            room_id=ROOM,
+            question_event_id="$question",
+            expected=expected,
+        )
+
+        await admit(
+            alice,
+            "$plain-edit",
+            sender="alice",
+            ts=2_000,
+            content=edit("$question", "Plain replacement"),
+        )
+
+        assert not await alice.interactive_prompt_is_current(
+            room_id=ROOM,
+            question_event_id="$question",
+            expected=expected,
+        )
+
+    async def test_button_check_rejects_a_fenced_prompt(
         self,
         alice: PrincipalStore,
     ) -> None:
         """Post-transport button delivery must obey the same fence as projection."""
         await admit(alice, "$turn", sender=BOB)
-        assert await alice.interactive_prompt_membership_is_current(
-            room_id=ROOM,
+        expected = InteractivePrompt(
+            creator_agent="agent",
+            question_text="Choose?",
+            options={"1": "yes"},
+            option_labels={"1": "Yes"},
             source_event_id="$turn",
         )
-
-        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
-
-        assert not await alice.interactive_prompt_membership_is_current(
-            room_id=ROOM,
-            source_event_id="$turn",
+        await admit(
+            alice,
+            "$question",
+            sender="alice",
+            content=interactive_prompt("Choose?", "yes", source_event_id="$turn"),
         )
-
-    async def test_button_membership_check_rejects_a_stale_source_proof(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A stale admitted source cannot borrow a newer fallback membership."""
-        await admit(alice, "$old-turn", sender=BOB)
         await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
-        await alice.note_membership_restarted(ROOM)
 
-        assert not await alice.interactive_prompt_membership_is_current(
+        assert not await alice.interactive_prompt_is_current(
             room_id=ROOM,
-            source_event_id="$old-turn",
+            question_event_id="$question",
+            expected=expected,
         )
 
     @pytest.mark.parametrize("installer", ["hydration", "recovery"])
@@ -2531,11 +2568,11 @@ class TestInteractiveQuestionClaims:
     ) -> None:
         """Database order replaces process-dictionary insertion order deterministically."""
         await admit(alice, "$turn")
-        for event_id in ("$first", "$second"):
-            await _activate_interactive_question(alice, event_id)
+        await _activate_interactive_question(alice, "$z-first", ts=1_000)
+        await _activate_interactive_question(alice, "$a-second", ts=2_000)
         await admit(alice, "$answer", thread_id="$thread", content=text("1"), ts=2_500)
         expected = InteractiveSelection(
-            question_event_id="$first",
+            question_event_id="$z-first",
             question_text="Choose",
             selection_key="1",
             selected_label="One",
@@ -2557,7 +2594,7 @@ class TestInteractiveQuestionClaims:
         )
 
         rows = await _interactive_question_rows(journal_store)
-        assert [row["question_event_id"] for row in rows] == ["$second"]
+        assert [row["question_event_id"] for row in rows] == ["$a-second"]
         selection_rows = await _interactive_selection_rows(journal_store)
         assert [row["source_event_id"] for row in selection_rows] == ["$answer"]
 

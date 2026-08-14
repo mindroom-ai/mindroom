@@ -456,6 +456,7 @@ def _build_response_runner(
         runtime_paths=runtime_paths,
         conversation_reader=make_conversation_reader_mock(),
         membership=membership,
+        agent_name=bot.agent_name,
     )
     bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
     approval_store = MagicMock(spec=PrincipalStore)
@@ -550,5 +551,6 @@ def _install_inert_post_response_effects(coordinator: ResponseRunner) -> None:
             runtime_paths=support.runtime_paths,
             conversation_reader=support.conversation_reader,
             membership=support.membership,
+            agent_name=support.agent_name,
         ),
     )

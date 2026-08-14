@@ -111,7 +111,7 @@ def _make_context(
     if membership is None:
         membership = MagicMock()
         membership.membership_epoch = AsyncMock(return_value=0)
-        membership.interactive_prompt_membership_is_current = AsyncMock(return_value=True)
+        membership.interactive_prompt_is_current = AsyncMock(return_value=True)
     return ToolRuntimeContext(
         agent_name="general",
         target=MessageTarget(

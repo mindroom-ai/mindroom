@@ -4,12 +4,10 @@ Every rule here runs inside the admission transaction, so the projection can
 never disagree with the journal about what was admitted.
 
 The projection deliberately keeps no edit-body history. An edit overwrites the
-visible row and the previous body is gone. Logical messages that expose an
-interactive prompt get a content-free revision-order ledger so a delayed
-answer can identify which immutable prompt revision was on screen when Matrix
-accepted it. Ordinary streaming edits create no history. Redacting the current
-revision still has to ask the homeserver for its new body rather than popping a
-local content stack.
+visible row and the previous body is gone. Answer admission atomically snapshots
+the interactive prompt revision currently exposed by this projection, so later
+edits cannot reinterpret that source. Redacting the current revision still has
+to ask the homeserver for its new body rather than popping a local content stack.
 """
 
 from __future__ import annotations

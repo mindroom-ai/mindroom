@@ -64,6 +64,17 @@ class TestInteractiveFunctions:
     ]
 }
 ```""",
+            """Please choose.
+
+```
+interactive
+{
+    "question": "Which option?",
+    "options": [
+        {"emoji": "✅", "label": "Approve", "value": "approve"}
+    ]
+}
+```""",
         ],
     )
     def test_parse_and_format_interactive_matches_common_variants(self, response_text: str) -> None:

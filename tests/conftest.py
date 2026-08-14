@@ -385,6 +385,7 @@ async def activate_interactive_prompt(
 
 async def membership_epoch_is_active(store: PrincipalStore, room_id: str, epoch: int) -> bool:
     """Probe the journal's row-locked active-membership predicate."""
+    # This is deliberately white-box: production callers use higher-level store guards.
     return await store._backend.write(
         lambda transaction: journal_reads.claim_membership_epoch(
             transaction,
@@ -1730,7 +1731,7 @@ def make_membership_stub() -> PrincipalStore:
         "PrincipalStore",
         SimpleNamespace(
             membership_epoch=AsyncMock(return_value=0),
-            interactive_prompt_membership_is_current=AsyncMock(return_value=True),
+            interactive_prompt_is_current=AsyncMock(return_value=True),
         ),
     )
 

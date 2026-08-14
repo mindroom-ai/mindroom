@@ -61,6 +61,7 @@ from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
+from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
@@ -843,13 +844,14 @@ async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(t
         orchestrator=None,
     )
     membership = make_membership_stub()
-    membership.interactive_prompt_membership_is_current.return_value = False
+    membership.interactive_prompt_is_current.return_value = False
     support = PostResponseEffectsSupport(
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
         conversation_reader=make_conversation_reader_mock(),
         membership=membership,
+        agent_name="agent",
     )
     interactive_metadata = InteractiveMetadata._from_parts(
         {"1": "yes"},
@@ -873,9 +875,16 @@ async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(t
         ),
     )
 
-    membership.interactive_prompt_membership_is_current.assert_awaited_once_with(
+    membership.interactive_prompt_is_current.assert_awaited_once_with(
         room_id="!room:localhost",
-        source_event_id="$turn",
+        question_event_id="$response",
+        expected=InteractivePrompt(
+            creator_agent="agent",
+            question_text="",
+            options={"1": "yes"},
+            option_labels={},
+            source_event_id="$turn",
+        ),
     )
     client.room_send.assert_not_awaited()
 
@@ -900,6 +909,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         runtime_paths=runtime_paths,
         conversation_reader=conversation_reader,
         membership=make_membership_stub(),
+        agent_name="agent",
     )
     deps = support.build_deps(
         room_id="!room:localhost",
@@ -1004,6 +1014,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         runtime_paths=runtime_paths,
         conversation_reader=conversation_reader,
         membership=make_membership_stub(),
+        agent_name="agent",
     )
     deps = support.build_deps(
         room_id="!adhoc:localhost",

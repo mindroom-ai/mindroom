@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom import interactive
 from mindroom.background_tasks import create_background_task
+from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_summary import maybe_generate_thread_summary
@@ -68,6 +69,7 @@ class PostResponseEffectsSupport:
     runtime_paths: RuntimePaths
     conversation_reader: ConversationReader
     membership: PrincipalStore
+    agent_name: str
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client for interactive follow-up effects."""
@@ -141,9 +143,17 @@ class PostResponseEffectsSupport:
             event_id: str,
             interactive_metadata: interactive.InteractiveMetadata,
         ) -> None:
-            if not await self.membership.interactive_prompt_membership_is_current(
-                room_id=room_id,
+            expected = InteractivePrompt(
+                creator_agent=self.agent_name,
+                question_text=interactive_metadata.question_text,
+                options=interactive_metadata.option_map,
+                option_labels=interactive_metadata.option_labels,
                 source_event_id=membership_turn_id,
+            )
+            if not await self.membership.interactive_prompt_is_current(
+                room_id=room_id,
+                question_event_id=event_id,
+                expected=expected,
             ):
                 return
             await interactive.add_reaction_buttons(
