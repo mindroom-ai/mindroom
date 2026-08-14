@@ -88,9 +88,8 @@ _TABLES = (
         sequence BIGINT NOT NULL CHECK (sequence >= 0 AND sequence <= 9223372036854775806),
         schema_version BIGINT NOT NULL CHECK (schema_version = 1),
         batch_sha256 TEXT NOT NULL CHECK (length(batch_sha256) = 64),
-        event_id TEXT NOT NULL CHECK (length(event_id) > 0),
-        PRIMARY KEY (principal_id, consumer_generation, stream_id, sequence),
-        FOREIGN KEY (principal_id, event_id) REFERENCES journal_events (principal_id, event_id)
+        record_id TEXT NOT NULL CHECK (length(record_id) > 0),
+        PRIMARY KEY (principal_id, consumer_generation, stream_id, sequence)
     )
     """,
     """

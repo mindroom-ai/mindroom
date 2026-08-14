@@ -10,13 +10,17 @@ import nio.ingest as ingest  # noqa: PLR0402 - carriers are owned by nio.ingest
 from nio import IngestionSession
 
 import mindroom.event_journal as ej
-from mindroom.event_journal.journal import _validate_ingestion_batch_admission
 from mindroom.event_journal.views import IngestionBatchAdmissionView
 from mindroom.matrix.journal_ingress import ingestion_event_views as event_views
 
+__all__ = ["consume_one_ingestion_batch", "validate_ingestion_batch"]
+
 
 def validate_ingestion_batch(  # noqa: PLR0915
-    batch: ingest.SyncBatch, *, account_id: str, device_id: str  # noqa: COM812
+    batch: ingest.SyncBatch,
+    *,
+    account_id: str,
+    device_id: str,
 ) -> ej.IngestionBatchAdmission:
     """Authenticate and convert one exact Task 5 batch without writing."""
 
@@ -80,12 +84,29 @@ def validate_ingestion_batch(  # noqa: PLR0915
         require(type(source) is dict and encoded == record.source_json)
         require(source.get("type") != "m.room.encrypted")
         event, projected = event_views(
-            room_id=room_id, source=source, self_sender=account_id  # noqa: COM812
+            room_id=room_id,
+            source=source,
+            self_sender=account_id,
         )
         require(event.event_id and (event_id is None or event_id == event.event_id))
-        identity = (1, generation, stream_id, sequence, digest, membership_epoch)
-        admission = ej.IngestionBatchAdmission(*identity, event, projected)
-        _validate_ingestion_batch_admission(admission)
+        admission = ej.IngestionBatchAdmission(
+            schema_version=1,
+            consumer_generation=generation,
+            stream_id=stream_id,
+            sequence=sequence,
+            sha256=digest,
+            record_id=record.record_id,
+            disposition=ej.IngestionRecordDisposition.SEMANTIC_EVENT,
+            source=None,
+            room_id=None,
+            previous_membership=None,
+            membership=None,
+            previous_membership_epoch=None,
+            membership_epoch=None,
+            event=event,
+            projected=projected,
+        )
+        ej.validate_ingestion_batch_admission(admission)
     except (ej.IngestionBatchIntegrityError, ej.IngestionBatchValidationError):
         raise
     except Exception as error:
@@ -93,13 +114,18 @@ def validate_ingestion_batch(  # noqa: PLR0915
     return admission
 
 
-async def consume_one_ingestion_batch(session: IngestionSession, admission: IngestionBatchAdmissionView, *, account_id: str, device_id: str) -> ej.AdmissionResult | None:  # fmt: skip
+async def consume_one_ingestion_batch(session: IngestionSession, admission: IngestionBatchAdmissionView, *, account_id: str, device_id: str) -> ej.AdmissionFacts | None:  # fmt: skip
     """Admit and then acknowledge at most one authenticated batch."""
     batch = session.next_batch(max_records=1)
     if batch is None:
         return None
     result = await admission.admit_ingestion_batch(validate_ingestion_batch(batch, account_id=account_id, device_id=device_id))  # fmt: skip
-    if result is not ej.AdmissionResult.ADMITTED and result is not ej.AdmissionResult.DUPLICATE:  # fmt: skip
+    if (
+        type(result) is not ej.AdmissionFacts
+        or type(result.receipt_new) is not bool
+        or type(result.semantic_event_new) is not bool
+        or (result.semantic_event_new and not result.receipt_new)
+    ):
         raise ej.IngestionBatchIntegrityError
     session.acknowledge_batch(batch.ref)
     return result

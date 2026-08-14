@@ -91,6 +91,32 @@ class AdmissionResult(StrEnum):
     DUPLICATE = "duplicate"
 
 
+class IngestionRecordDisposition(StrEnum):
+    """The one durable application owned by an ingestion record."""
+
+    SEMANTIC_EVENT = "semantic_event"
+    ROOM_LIFECYCLE = "room_lifecycle"
+    HISTORY_LOSS = "history_loss"
+    COMPATIBILITY_ONLY = "compatibility_only"
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionFacts:
+    """Receipt novelty and fresh semantic-dispatch eligibility."""
+
+    receipt_new: bool
+    semantic_event_new: bool
+
+    def __post_init__(self) -> None:
+        """Reject malformed or impossible protocol facts."""
+        if type(self.receipt_new) is not bool or type(self.semantic_event_new) is not bool:
+            msg = "Admission facts must be exact booleans"
+            raise TypeError(msg)
+        if self.semantic_event_new and not self.receipt_new:
+            msg = "A new semantic effect requires a new receipt"
+            raise ValueError(msg)
+
+
 class DeliveryStage(StrEnum):
     """The delivery points that must survive a crash."""
 
@@ -159,8 +185,15 @@ class IngestionBatchAdmission:  # noqa: D101
     stream_id: UUID
     sequence: int
     sha256: bytes
-    membership_epoch: int
-    event: InboundEvent
+    record_id: str
+    disposition: IngestionRecordDisposition
+    source: DepartureSource | None
+    room_id: str | None
+    previous_membership: str | None
+    membership: str | None
+    previous_membership_epoch: int | None
+    membership_epoch: int | None
+    event: InboundEvent | None
     projected: ProjectedEvent | None
 
 

@@ -1,5 +1,8 @@
 """Strict validation for one durable nio ingestion batch."""
 
+# Ruff: descriptive test names and immutable protocol case tables are intentional.
+# ruff: noqa: D103, PT007
+
 from __future__ import annotations
 
 import asyncio
@@ -26,6 +29,7 @@ from nio.ingest import (
 from nio.ingest.serialization import batch_from_records
 
 from mindroom.event_journal import (
+    AdmissionFacts,
     AdmissionResult,
     DepartureSource,
     EventClass,
@@ -37,7 +41,9 @@ from mindroom.event_journal import (
     IngestionBatchSequenceError,
     IngestionBatchValidationError,
     IngestionConsumerBindingError,
+    IngestionRecordDisposition,
     ProjectedEvent,
+    validate_ingestion_batch_admission,
 )
 from mindroom.matrix.durable_ingestion import (
     consume_one_ingestion_batch,
@@ -62,6 +68,10 @@ SENDER = "@alice:example.org"
 ROOM_ID = "!room:example.org"
 EVENT_ID = "$event"
 RECORD_ID = "00000000-0000-4000-8000-000000000001"
+SECOND_RECORD_ID = "00000000-0000-4000-8000-000000000002"
+FRESH_FACTS = AdmissionFacts(receipt_new=True, semantic_event_new=True)
+RECEIPT_ONLY_FACTS = AdmissionFacts(receipt_new=True, semantic_event_new=False)
+REPLAY_FACTS = AdmissionFacts(receipt_new=False, semantic_event_new=False)
 CONSUMER_GENERATION = UUID("22222222-2222-4222-8222-222222222222")
 STREAM_ID = UUID("44444444-4444-4444-8444-444444444444")
 SOURCE_JSON = (
@@ -84,6 +94,35 @@ GOLDEN_BATCH = (
 )
 GOLDEN_SHA256 = "4e1eb87df166562e921aad9ccda0ad2023cb206ee3a3fe802d8711925a3940cf"
 GOLDEN_BATCH_ID = UUID("02b67409-f182-58f3-9d27-f9b4c857969c")
+
+
+def test_ingestion_dispositions_are_literal_immutable_protocol_values() -> None:
+    assert {value.name: value.value for value in IngestionRecordDisposition} == {
+        "SEMANTIC_EVENT": "semantic_event",
+        "ROOM_LIFECYCLE": "room_lifecycle",
+        "HISTORY_LOSS": "history_loss",
+        "COMPATIBILITY_ONLY": "compatibility_only",
+    }
+
+
+@pytest.mark.parametrize(
+    ("receipt_new", "semantic_event_new", "error"),
+    (
+        pytest.param(1, False, TypeError, id="integer-receipt"),
+        pytest.param(False, 0, TypeError, id="integer-semantic"),
+        pytest.param(False, True, ValueError, id="semantic-without-receipt"),
+    ),
+)
+def test_admission_facts_reject_impossible_protocol_values(
+    receipt_new: object,
+    semantic_event_new: object,
+    error: type[Exception],
+) -> None:
+    with pytest.raises(error):
+        AdmissionFacts(  # type: ignore[arg-type]
+            receipt_new=receipt_new,
+            semantic_event_new=semantic_event_new,
+        )
 
 
 def _record() -> EventRecord:
@@ -163,14 +202,21 @@ def _expected_admission() -> IngestionBatchAdmission:
         None,
     )
     return IngestionBatchAdmission(
-        1,
-        CONSUMER_GENERATION,
-        STREAM_ID,
-        0,
-        bytes.fromhex(GOLDEN_SHA256),
-        0,
-        event,
-        projected,
+        schema_version=1,
+        consumer_generation=CONSUMER_GENERATION,
+        stream_id=STREAM_ID,
+        sequence=0,
+        sha256=bytes.fromhex(GOLDEN_SHA256),
+        record_id=RECORD_ID,
+        disposition=IngestionRecordDisposition.SEMANTIC_EVENT,
+        source=None,
+        room_id=None,
+        previous_membership=None,
+        membership=None,
+        previous_membership_epoch=None,
+        membership_epoch=None,
+        event=event,
+        projected=projected,
     )
 
 
@@ -178,23 +224,229 @@ def _admission(
     *,
     sequence: int = 0,
     event_id: str = EVENT_ID,
+    record_id: str = RECORD_ID,
     sha256: bytes = bytes.fromhex(GOLDEN_SHA256),
 ) -> IngestionBatchAdmission:
     admission = _expected_admission()
+    assert admission.event is not None
     source = dict(admission.event.source)
     source["event_id"] = event_id
     assert admission.projected is not None
     return replace(
         admission,
         sequence=sequence,
+        record_id=record_id,
         sha256=sha256,
         event=replace(admission.event, event_id=event_id, source=source),
         projected=replace(admission.projected, event_id=event_id),
     )
 
 
+def _lifecycle_admission(
+    *,
+    source: DepartureSource = DepartureSource.REPORTED,
+    previous_membership: str = "join",
+    membership: str = "leave",
+    previous_membership_epoch: int = 0,
+    membership_epoch: int = 1,
+) -> IngestionBatchAdmission:
+    return replace(
+        _expected_admission(),
+        disposition=IngestionRecordDisposition.ROOM_LIFECYCLE,
+        source=source,
+        room_id=ROOM_ID,
+        previous_membership=previous_membership,
+        membership=membership,
+        previous_membership_epoch=previous_membership_epoch,
+        membership_epoch=membership_epoch,
+        event=None,
+        projected=None,
+    )
+
+
+def _history_loss_admission() -> IngestionBatchAdmission:
+    return replace(
+        _expected_admission(),
+        disposition=IngestionRecordDisposition.HISTORY_LOSS,
+        room_id=ROOM_ID,
+        event=None,
+        projected=None,
+    )
+
+
+def _compatibility_admission() -> IngestionBatchAdmission:
+    return replace(
+        _expected_admission(),
+        disposition=IngestionRecordDisposition.COMPATIBILITY_ONLY,
+        membership_epoch=None,
+        event=None,
+        projected=None,
+    )
+
+
+def _semantic_room_membership_admission() -> IngestionBatchAdmission:
+    admission = _expected_admission()
+    assert admission.event is not None
+    source = {
+        "event_id": EVENT_ID,
+        "sender": SENDER,
+        "origin_server_ts": 1000,
+        "type": "m.room.member",
+        "state_key": "@human:example.org",
+        "content": {"membership": "join"},
+    }
+    return replace(
+        admission,
+        event=replace(
+            admission.event,
+            kind=EventKind.ROOM_LIFECYCLE,
+            source=source,
+        ),
+        projected=None,
+    )
+
+
+def _receipt_variant(
+    admission: IngestionBatchAdmission,
+    *,
+    sequence: int,
+    record_id: str,
+    sha256: bytes,
+) -> IngestionBatchAdmission:
+    return replace(
+        admission,
+        sequence=sequence,
+        record_id=record_id,
+        sha256=sha256,
+    )
+
+
+@pytest.mark.parametrize(
+    "admission",
+    (
+        pytest.param(_expected_admission(), id="semantic-event"),
+        pytest.param(_lifecycle_admission(), id="room-lifecycle"),
+        pytest.param(_history_loss_admission(), id="history-loss"),
+        pytest.param(_compatibility_admission(), id="compatibility-only"),
+    ),
+)
+def test_local_admission_grammar_accepts_each_exact_disposition(
+    admission: IngestionBatchAdmission,
+) -> None:
+    validate_ingestion_batch_admission(admission)
+
+
+@pytest.mark.parametrize(
+    "admission",
+    (
+        pytest.param(
+            replace(_expected_admission(), room_id=ROOM_ID),
+            id="semantic-with-lifecycle-room",
+        ),
+        pytest.param(
+            replace(_expected_admission(), membership_epoch=0),
+            id="semantic-with-lifecycle-epoch",
+        ),
+        pytest.param(
+            replace(_expected_admission(), source=DepartureSource.REPORTED),
+            id="semantic-with-lifecycle-source",
+        ),
+        pytest.param(
+            replace(_lifecycle_admission(), event=_expected_admission().event),
+            id="lifecycle-with-event",
+        ),
+        pytest.param(
+            replace(_history_loss_admission(), membership="leave"),
+            id="loss-with-membership",
+        ),
+        pytest.param(
+            replace(_history_loss_admission(), membership_epoch=0),
+            id="loss-with-lifecycle-epoch",
+        ),
+        pytest.param(
+            replace(_history_loss_admission(), source=DepartureSource.REPORTED),
+            id="loss-with-lifecycle-source",
+        ),
+        pytest.param(
+            replace(_compatibility_admission(), membership_epoch=0),
+            id="compatibility-with-epoch",
+        ),
+        pytest.param(
+            replace(_compatibility_admission(), source=DepartureSource.REPORTED),
+            id="compatibility-with-source",
+        ),
+    ),
+)
+def test_local_admission_grammar_rejects_mixed_disposition_fields(
+    admission: IngestionBatchAdmission,
+) -> None:
+    with pytest.raises(IngestionBatchValidationError):
+        validate_ingestion_batch_admission(admission)
+
+
+@pytest.mark.parametrize(
+    "admission",
+    (
+        pytest.param(replace(_lifecycle_admission(), source=None), id="missing-source"),
+        pytest.param(
+            replace(_lifecycle_admission(), source="reported"),  # type: ignore[arg-type]
+            id="string-source",
+        ),
+        pytest.param(
+            replace(_lifecycle_admission(), previous_membership="unknown"),
+            id="unknown-membership",
+        ),
+        pytest.param(
+            replace(_lifecycle_admission(), membership="join"),
+            id="same-membership",
+        ),
+        pytest.param(
+            replace(_lifecycle_admission(), previous_membership_epoch=True),
+            id="boolean-epoch",
+        ),
+        pytest.param(
+            replace(_lifecycle_admission(), membership_epoch=0),
+            id="missing-departure-increment",
+        ),
+        pytest.param(
+            _lifecycle_admission(
+                previous_membership="invite",
+                membership="join",
+                membership_epoch=1,
+            ),
+            id="spurious-restart-increment",
+        ),
+    ),
+)
+def test_lifecycle_admission_grammar_rejects_invalid_transition_proofs(
+    admission: IngestionBatchAdmission,
+) -> None:
+    with pytest.raises(IngestionBatchValidationError):
+        validate_ingestion_batch_admission(admission)
+
+
+def test_semantic_disposition_accepts_cleanup_and_room_membership_events() -> None:
+    admission = _expected_admission()
+    assert admission.event is not None
+
+    for candidate in (
+        replace(
+            admission,
+            event=replace(admission.event, kind=EventKind.DECRYPTION_FAILURE),
+            projected=None,
+        ),
+        _semantic_room_membership_admission(),
+    ):
+        validate_ingestion_batch_admission(candidate)
+
+
 def test_validation_freezes_task5_golden_and_exact_conversion() -> None:
     batch = _batch()
+    admission = validate_ingestion_batch(
+        batch,
+        account_id=ACCOUNT_ID,
+        device_id=DEVICE_ID,
+    )
 
     assert canonical_batch_payload(batch) == GOLDEN_BATCH
     assert batch.ref == BatchRef(
@@ -203,14 +455,8 @@ def test_validation_freezes_task5_golden_and_exact_conversion() -> None:
         GOLDEN_BATCH_ID,
         bytes.fromhex(GOLDEN_SHA256),
     )
-    assert (
-        validate_ingestion_batch(
-            batch,
-            account_id=ACCOUNT_ID,
-            device_id=DEVICE_ID,
-        )
-        == _expected_admission()
-    )
+    assert admission == _expected_admission()
+    assert admission.record_id == RECORD_ID
 
 
 @pytest.mark.parametrize(
@@ -290,9 +536,7 @@ def test_validation_rejects_mutated_carrier_fields(
         ("origin", "request_id"),
         ("origin", "frame_index"),
     } and not (
-        type(value) is bool
-        and (target, field)
-        in {("record", "membership_epoch"), ("record", "room_sequence")}
+        type(value) is bool and (target, field) in {("record", "membership_epoch"), ("record", "room_sequence")}
     ):
         _resign(batch)
 
@@ -337,7 +581,7 @@ def test_validation_accepts_the_largest_sqlite_sequence() -> None:
 
 def test_validation_rejects_a_string_subclass_identity() -> None:
     class Text(str):
-        pass
+        __slots__ = ()
 
     batch = _batch()
     object.__setattr__(batch, "account_id", Text(ACCOUNT_ID))
@@ -351,9 +595,7 @@ def test_validation_accepts_an_absent_record_event_id() -> None:
     object.__setattr__(batch.records[0], "event_id", None)
     _resign(batch)
 
-    admission = validate_ingestion_batch(
-        batch, account_id=ACCOUNT_ID, device_id=DEVICE_ID
-    )
+    admission = validate_ingestion_batch(batch, account_id=ACCOUNT_ID, device_id=DEVICE_ID)
 
     assert admission.event.event_id == EVENT_ID
 
@@ -395,12 +637,8 @@ _DEEP_JSON = (
         b'"type":"m.room.message"}',
         SOURCE_JSON.replace(b'"origin_server_ts":1000', b'"origin_server_ts":1.0'),
         SOURCE_JSON.replace(b'"origin_server_ts":1000', b'"origin_server_ts":NaN'),
-        SOURCE_JSON.replace(
-            b'"origin_server_ts":1000', b'"origin_server_ts":9007199254740992'
-        ),
-        SOURCE_JSON.replace(
-            b'"origin_server_ts":1000', b'"origin_server_ts":-9007199254740992'
-        ),
+        SOURCE_JSON.replace(b'"origin_server_ts":1000', b'"origin_server_ts":9007199254740992'),
+        SOURCE_JSON.replace(b'"origin_server_ts":1000', b'"origin_server_ts":-9007199254740992'),
         SOURCE_JSON.replace(b'"body":"hello"', rb'"body":"caf\u00e9"'),
         b'{"event_id":"$event","content":{"body":"hello","msgtype":"m.text"},'
         b'"origin_server_ts":1000,"sender":"@alice:example.org",'
@@ -441,9 +679,7 @@ def test_validation_authenticates_bytes_before_record_grammar() -> None:
 
 def test_validation_rejects_a_canonical_payload_over_16_mib() -> None:
     batch = _batch()
-    source_json = SOURCE_JSON.replace(
-        b'"body":"hello"', b'"body":"' + b"x" * (16 * 1024 * 1024) + b'"'
-    )
+    source_json = SOURCE_JSON.replace(b'"body":"hello"', b'"body":"' + b"x" * (16 * 1024 * 1024) + b'"')
     object.__setattr__(batch.records[0], "source_json", source_json)
     _resign(batch)
 
@@ -518,14 +754,13 @@ def test_conversion_uses_the_existing_media_parser() -> None:
 
     assert event.kind is EventKind.MEDIA
     assert event.event_class is EventClass.ACTIONABLE
-    assert projected is not None and projected.content == source["content"]
+    assert projected is not None
+    assert projected.content == source["content"]
 
 
 async def _bound_principal(store: EventJournalStore) -> PrincipalStore:
     principal = store.principal(ACCOUNT_ID)
-    await principal.load_or_create_ingestion_consumer(
-        new_generation=CONSUMER_GENERATION
-    )
+    await principal.load_or_create_ingestion_consumer(new_generation=CONSUMER_GENERATION)
     await principal.bind_ingestion_stream(
         generation=CONSUMER_GENERATION,
         stream_id=STREAM_ID,
@@ -538,9 +773,7 @@ def _graph_values(
     sql: str,
     columns: tuple[str, ...],
 ) -> tuple[tuple[object, ...], ...]:
-    return tuple(
-        tuple(row[column] for column in columns) for row in transaction.fetchall(sql)
-    )
+    return tuple(tuple(row[column] for column in columns) for row in transaction.fetchall(sql))
 
 
 def _ingestion_graph(
@@ -597,7 +830,7 @@ def _ingestion_graph(
         "receipts": _graph_values(
             transaction,
             "SELECT principal_id, consumer_generation, stream_id, sequence, "
-            "schema_version, batch_sha256, event_id "
+            "schema_version, batch_sha256, record_id "
             "FROM matrix_ingestion_receipts "
             "ORDER BY principal_id, consumer_generation, stream_id, sequence",
             (
@@ -607,7 +840,7 @@ def _ingestion_graph(
                 "sequence",
                 "schema_version",
                 "batch_sha256",
-                "event_id",
+                "record_id",
             ),
         ),
         "membership": _graph_values(
@@ -672,7 +905,7 @@ def _fresh_graph() -> dict[str, tuple[tuple[object, ...], ...]]:
                 0,
                 1,
                 GOLDEN_SHA256,
-                EVENT_ID,
+                RECORD_ID,
             ),
         ),
         "membership": ((ACCOUNT_ID, ROOM_ID, 0, 0, 0),),
@@ -725,17 +958,11 @@ def _fenced_fresh_graph() -> dict[str, tuple[tuple[object, ...], ...]]:
                 0,
                 1,
                 GOLDEN_SHA256,
-                EVENT_ID,
+                RECORD_ID,
             ),
         ),
         "membership": ((ACCOUNT_ID, ROOM_ID, 1, 1, 0),),
     }
-
-
-def _fence_only_graph() -> dict[str, tuple[tuple[object, ...], ...]]:
-    graph = _old_graph()
-    graph["membership"] = ((ACCOUNT_ID, ROOM_ID, 1, 1, 0),)
-    return graph
 
 
 class _ExplodingTransaction:
@@ -744,22 +971,23 @@ class _ExplodingTransaction:
 
     def _explode(self) -> None:
         self.statements += 1
-        raise AssertionError("local admission reached SQL before validation")
+        message = "local admission reached SQL before validation"
+        raise AssertionError(message)
 
-    def execute(self, sql: str, params: Sequence[object] = ()) -> None:
+    def execute(self, _sql: str, _params: Sequence[object] = ()) -> None:
         self._explode()
 
     def fetchone(
         self,
-        sql: str,
-        params: Sequence[object] = (),
+        _sql: str,
+        _params: Sequence[object] = (),
     ) -> Mapping[str, object] | None:
         self._explode()
 
     def fetchall(
         self,
-        sql: str,
-        params: Sequence[object] = (),
+        _sql: str,
+        _params: Sequence[object] = (),
     ) -> tuple[Mapping[str, object], ...]:
         self._explode()
 
@@ -796,11 +1024,7 @@ class _ObservedTransaction:
     def _after(self, sql: str) -> None:
         if self._trace is not None:
             self._trace.append(" ".join(sql.split()))
-        if (
-            not self._matched
-            and self._statement_matches is not None
-            and self._statement_matches(sql)
-        ):
+        if not self._matched and self._statement_matches is not None and self._statement_matches(sql):
             self._matched = True
             assert self._after_statement is not None
             self._after_statement()
@@ -895,9 +1119,7 @@ class _ObservedBackend:
     wrap: Callable[[Transaction], Transaction]
 
     async def write[T](self, operation: Operation[T]) -> T:
-        return await self.inner.write(
-            lambda transaction: operation(self.wrap(transaction))
-        )
+        return await self.inner.write(lambda transaction: operation(self.wrap(transaction)))
 
     async def read[T](self, operation: Operation[T]) -> T:
         return await self.inner.read(operation)
@@ -931,7 +1153,7 @@ def _raise_injected_boundary() -> None:
 
 
 class _Text(str):
-    pass
+    __slots__ = ()
 
 
 def _mutated_admission(target: str, field_name: str, value: object) -> object:
@@ -955,7 +1177,7 @@ def _mutated_admission(target: str, field_name: str, value: object) -> object:
 _CLASSIFIER_SQL = (
     "SELECT c.consumer_generation AS c_generation, c.stream_id AS c_stream, "
     "c.next_sequence AS c_next, r.schema_version AS r_schema, "
-    "r.batch_sha256 AS r_sha256, r.event_id AS r_event_id "
+    "r.batch_sha256 AS r_sha256, r.record_id AS r_record_id "
     "FROM matrix_sync_consumers AS c LEFT JOIN matrix_ingestion_receipts AS r "
     "ON r.principal_id = c.principal_id "
     "AND r.consumer_generation = c.consumer_generation "
@@ -978,8 +1200,272 @@ async def test_admit_ingestion_batch_persists_fresh_unit_on_both_backends(
 
     result = await principal.admit_ingestion_batch(_expected_admission())
 
-    assert result is AdmissionResult.ADMITTED
+    assert result.receipt_new is True
+    assert result.semantic_event_new is True
     assert await _graph(store) == _fresh_graph()
+
+
+@pytest.mark.asyncio
+async def test_context_only_semantic_event_persists_without_dispatch(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    store = journal_database()
+    principal = await _bound_principal(store)
+    admission = _expected_admission()
+    assert admission.event is not None
+    context = replace(
+        admission,
+        event=replace(admission.event, event_class=EventClass.CONTEXT_ONLY),
+    )
+
+    assert await principal.admit_ingestion_batch(context) == RECEIPT_ONLY_FACTS
+    assert await principal.admit_ingestion_batch(context) == REPLAY_FACTS
+    later = _receipt_variant(
+        context,
+        sequence=1,
+        record_id=SECOND_RECORD_ID,
+        sha256=b"1" * 32,
+    )
+    assert await principal.admit_ingestion_batch(later) == RECEIPT_ONLY_FACTS
+    graph = await _graph(store)
+    assert (graph["events"][0][8], graph["events"][0][11]) == ("", "settled")
+    assert len(graph["projection"]) == 1
+    assert len(graph["receipts"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_disposition_matrix_and_rearmed_work(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    store = journal_database()
+    principal = await _bound_principal(store)
+
+    def lifecycle(
+        sequence: int,
+        source: DepartureSource,
+        previous: str,
+        current: str,
+        previous_epoch: int,
+    ) -> IngestionBatchAdmission:
+        return _receipt_variant(
+            _lifecycle_admission(
+                source=source,
+                previous_membership=previous,
+                membership=current,
+                previous_membership_epoch=previous_epoch,
+                membership_epoch=previous_epoch + int(previous == "join" and current != "join"),
+            ),
+            sequence=sequence,
+            record_id=f"lifecycle-{sequence}",
+            sha256=bytes([sequence + 1]) * 32,
+        )
+
+    steps = (
+        (lifecycle(0, DepartureSource.REPORTED, "leave", "join", 0), FRESH_FACTS, ()),
+        (lifecycle(1, DepartureSource.REPORTED, "invite", "knock", 0), FRESH_FACTS, ()),
+        (lifecycle(2, DepartureSource.LOCAL, "leave", "join", 0), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 0, 0, 0),)),
+        (lifecycle(3, DepartureSource.REPORTED, "join", "leave", 0), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 1, 1, 0),)),
+        (
+            lifecycle(4, DepartureSource.REPORTED, "join", "leave", 0),
+            RECEIPT_ONLY_FACTS,
+            ((ACCOUNT_ID, ROOM_ID, 1, 1, 0),),
+        ),
+        (lifecycle(5, DepartureSource.REPORTED, "leave", "join", 1), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 1, 1, 0),)),
+        (lifecycle(6, DepartureSource.LOCAL, "leave", "join", 1), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 1, 0, 0),)),
+        (lifecycle(7, DepartureSource.LOCAL, "join", "leave", 1), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 2, 1, 1),)),
+        (lifecycle(8, DepartureSource.REPORTED, "leave", "join", 1), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 2, 1, 1),)),
+        (lifecycle(9, DepartureSource.LOCAL, "leave", "join", 1), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 2, 0, 1),)),
+    )
+    for admission, facts, membership in steps:
+        assert await principal.admit_ingestion_batch(admission) == facts
+        assert (await _graph(store))["membership"] == membership
+
+    message = _receipt_variant(
+        _expected_admission(),
+        sequence=10,
+        record_id="new-membership-message",
+        sha256=b"m" * 32,
+    )
+    loss = _receipt_variant(
+        _history_loss_admission(),
+        sequence=11,
+        record_id="new-membership-loss",
+        sha256=b"l" * 32,
+    )
+
+    assert await principal.admit_ingestion_batch(message) == FRESH_FACTS
+    assert await principal.admit_ingestion_batch(loss) == RECEIPT_ONLY_FACTS
+    reported_echo = lifecycle(12, DepartureSource.REPORTED, "join", "leave", 1)
+    assert await principal.admit_ingestion_batch(reported_echo) == RECEIPT_ONLY_FACTS
+    assert await principal.admit_ingestion_batch(reported_echo) == REPLAY_FACTS
+
+    graph = await _graph(store)
+    recovery = await store.backend.read(
+        lambda transaction: transaction.fetchone(
+            "SELECT state FROM room_history_recovery WHERE principal_id = ? AND room_id = ?",
+            (ACCOUNT_ID, ROOM_ID),
+        ),
+    )
+    assert graph["events"][0][10] == 2
+    assert graph["projection"][0][10] == 2
+    assert graph["membership"] == ((ACCOUNT_ID, ROOM_ID, 2, 0, 0),)
+    assert recovery is not None
+    assert recovery["state"] == "repairable"
+
+
+@pytest.mark.asyncio
+async def test_receipt_only_dispositions_settle_without_a_journal_event(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    store = journal_database()
+    principal = await _bound_principal(store)
+    compatibility = _compatibility_admission()
+    loss = _receipt_variant(
+        _history_loss_admission(),
+        sequence=1,
+        record_id="history-loss",
+        sha256=b"1" * 32,
+    )
+
+    assert await principal.admit_ingestion_batch(compatibility) == RECEIPT_ONLY_FACTS
+    assert await principal.admit_ingestion_batch(loss) == RECEIPT_ONLY_FACTS
+    assert await principal.admit_ingestion_batch(loss) == REPLAY_FACTS
+
+    graph = await _graph(store)
+    recovery = await store.backend.read(
+        lambda transaction: transaction.fetchone(
+            "SELECT state, revision FROM room_history_recovery WHERE principal_id = ? AND room_id = ?",
+            (ACCOUNT_ID, ROOM_ID),
+        ),
+    )
+    assert graph["consumers"] == ((ACCOUNT_ID, str(CONSUMER_GENERATION), str(STREAM_ID), 2),)
+    assert graph["events"] == graph["projection"] == ()
+    assert graph["membership"] == ((ACCOUNT_ID, ROOM_ID, 0, 0, 0),)
+    assert tuple(row[-1] for row in graph["receipts"]) == (RECORD_ID, "history-loss")
+    assert recovery is not None
+    assert (recovery["state"], recovery["revision"]) == ("repairable", 0)
+
+
+@pytest.mark.asyncio
+async def test_departure_suppresses_only_turn_backed_semantic_work_and_loss(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    store = journal_database()
+    principal = await _bound_principal(store)
+    await principal.fence_departure(ROOM_ID, source=DepartureSource.LOCAL)
+    old_message = _expected_admission()
+    redaction = _admission(
+        sequence=1,
+        event_id="$redaction",
+        record_id="redaction",
+        sha256=b"1" * 32,
+    )
+    assert redaction.event is not None
+    assert redaction.projected is not None
+    redaction = replace(
+        redaction,
+        event=replace(redaction.event, kind=EventKind.REDACTION),
+        projected=replace(
+            redaction.projected,
+            content={},
+            redacts_event_id="$redacted",
+        ),
+    )
+    loss = _receipt_variant(
+        _history_loss_admission(),
+        sequence=2,
+        record_id="old-history-loss",
+        sha256=b"2" * 32,
+    )
+
+    assert await principal.admit_ingestion_batch(old_message) == RECEIPT_ONLY_FACTS
+    assert await principal.admit_ingestion_batch(redaction) == FRESH_FACTS
+    assert await principal.admit_ingestion_batch(loss) == RECEIPT_ONLY_FACTS
+
+    graph = await _graph(store)
+    recovery = await store.backend.read(
+        lambda transaction: transaction.fetchone(
+            "SELECT state FROM room_history_recovery WHERE principal_id = ? AND room_id = ?",
+            (ACCOUNT_ID, ROOM_ID),
+        ),
+    )
+    redaction_tombstone = await store.backend.read(
+        lambda transaction: transaction.fetchone(
+            "SELECT redacted_event_id FROM redaction_tombstones WHERE principal_id = ? AND room_id = ?",
+            (ACCOUNT_ID, ROOM_ID),
+        ),
+    )
+    assert tuple(row[2] for row in graph["events"]) == (EVENT_ID, "$redaction")
+    tombstone = graph["events"][0]
+    assert (tombstone[5], tombstone[8], tombstone[10], tombstone[11]) == (
+        EventKind.MESSAGE.value,
+        "",
+        1,
+        "settled",
+    )
+    assert graph["events"][1][5] == EventKind.REDACTION.value
+    assert graph["projection"] == ()
+    assert graph["membership"] == ((ACCOUNT_ID, ROOM_ID, 1, 1, 1),)
+    assert recovery is None
+    assert redaction_tombstone is not None
+    assert redaction_tombstone["redacted_event_id"] == "$redacted"
+    await principal.note_membership_restarted(ROOM_ID)
+    later = _receipt_variant(
+        old_message,
+        sequence=3,
+        record_id=SECOND_RECORD_ID,
+        sha256=b"3" * 32,
+    )
+    assert await principal.admit_ingestion_batch(later) == RECEIPT_ONLY_FACTS
+    before = await _graph(store)
+    assert later.event is not None
+    assert later.projected is not None
+    conflicting = replace(
+        later,
+        sequence=4,
+        record_id="conflicting-record",
+        sha256=b"4" * 32,
+        event=replace(later.event, sender="@mallory:example.org"),
+        projected=replace(later.projected, sender="@mallory:example.org"),
+    )
+    with pytest.raises(IngestionBatchIntegrityError):
+        await principal.admit_ingestion_batch(conflicting)
+    assert await _graph(store) == before
+
+
+@pytest.mark.asyncio
+async def test_semantic_room_membership_event_deduplicates_while_fenced(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    store = journal_database()
+    principal = await _bound_principal(store)
+    await principal.fence_departure(ROOM_ID, source=DepartureSource.REPORTED)
+    first = _semantic_room_membership_admission()
+
+    assert await principal.admit_ingestion_batch(first) == FRESH_FACTS
+    later = _receipt_variant(
+        first,
+        sequence=1,
+        record_id=SECOND_RECORD_ID,
+        sha256=b"1" * 32,
+    )
+    assert await principal.admit_ingestion_batch(later) == RECEIPT_ONLY_FACTS
+    before = await _graph(store)
+    assert before["events"][0][5] == EventKind.ROOM_LIFECYCLE.value
+    assert before["events"][0][8] != ""
+    assert before["events"][0][11] == "pending"
+
+    assert later.event is not None
+    conflicting = replace(
+        later,
+        sequence=2,
+        record_id="conflicting-record",
+        sha256=b"2" * 32,
+        event=replace(later.event, sender="@mallory:example.org"),
+    )
+    with pytest.raises(IngestionBatchIntegrityError):
+        await principal.admit_ingestion_batch(conflicting)
+    assert await _graph(store) == before
 
 
 @pytest.mark.asyncio
@@ -996,6 +1482,8 @@ async def test_admit_ingestion_batch_persists_fresh_unit_on_both_backends(
         ("admission", "sequence", 2**63 - 1),
         ("admission", "sha256", bytearray(32)),
         ("admission", "sha256", b"short"),
+        ("admission", "record_id", 1),
+        ("admission", "record_id", ""),
         ("admission", "membership_epoch", True),
         ("admission", "membership_epoch", -1),
         ("admission", "event", object()),
@@ -1008,8 +1496,6 @@ async def test_admit_ingestion_batch_persists_fresh_unit_on_both_backends(
         ("event", "sender", ""),
         ("event", "thread_id", 1),
         ("event", "thread_id", ""),
-        ("event", "kind", EventKind.ROOM_LIFECYCLE),
-        ("event", "kind", EventKind.DECRYPTION_FAILURE),
         ("event", "kind", EventKind.MESSAGE.value),
         ("event", "event_class", EventClass.ACTIONABLE.value),
         ("event", "origin_server_ts", True),
@@ -1038,25 +1524,33 @@ async def test_local_admission_grammar_rejects_invalid_direct_values_before_sql(
 
     with pytest.raises(IngestionBatchValidationError):
         await principal.admit_ingestion_batch(  # type: ignore[arg-type]
-            _mutated_admission(target, field_name, value)
+            _mutated_admission(target, field_name, value),
         )
 
     assert backend.transaction.statements == 0
 
 
 @pytest.mark.asyncio
-async def test_admit_ingestion_batch_membership_epoch_mismatch_rolls_back(
+async def test_semantic_admission_stamps_the_locked_mindroom_epoch(
     journal_database: Callable[[], EventJournalStore],
 ) -> None:
     store = journal_database()
     principal = await _bound_principal(store)
-    await principal.fence_departure(ROOM_ID, source=DepartureSource.REPORTED)
-    before = await _graph(store)
+    for _ in range(3):
+        await principal.fence_departure(ROOM_ID, source=DepartureSource.REPORTED)
+        await principal.note_membership_restarted(ROOM_ID)
+    admission = validate_ingestion_batch(
+        _batch(),
+        account_id=ACCOUNT_ID,
+        device_id=DEVICE_ID,
+    )
 
-    with pytest.raises(IngestionBatchValidationError):
-        await principal.admit_ingestion_batch(_expected_admission())
-
-    assert await _graph(store) == before
+    assert admission.membership_epoch is None
+    assert await principal.admit_ingestion_batch(admission) == FRESH_FACTS
+    graph = await _graph(store)
+    assert graph["events"][0][10] == 3
+    assert graph["projection"][0][10] == 3
+    assert graph["membership"] == ((ACCOUNT_ID, ROOM_ID, 3, 0, 0),)
 
 
 @pytest.mark.asyncio
@@ -1120,8 +1614,8 @@ async def test_admit_ingestion_batch_membership_epoch_mismatch_rolls_back(
         (
             "INSERT INTO room_membership",
             "membership_epoch",
-            1,
-            IngestionBatchValidationError,
+            -1,
+            IngestionBatchIntegrityError,
         ),
     ),
 )
@@ -1153,7 +1647,7 @@ async def test_admit_ingestion_batch_fresh_unit_rejects_invalid_returned_row_and
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("different_content", (False, True), ids=("same", "different"))
-async def test_admit_ingestion_batch_same_id_collision_rolls_back(
+async def test_ingestion_receipts_an_existing_matching_generic_event(
     journal_database: Callable[[], EventJournalStore],
     different_content: bool,
 ) -> None:
@@ -1171,26 +1665,33 @@ async def test_admit_ingestion_batch_same_id_collision_rolls_back(
     assert await principal.admit(event, projected) is AdmissionResult.ADMITTED
     before = await _graph(store)
 
-    with pytest.raises(IngestionBatchIntegrityError):
-        await principal.admit_ingestion_batch(admission)
+    result = await principal.admit_ingestion_batch(admission)
 
-    assert await _graph(store) == before
+    expected = dict(before)
+    expected["consumers"] = ((ACCOUNT_ID, str(CONSUMER_GENERATION), str(STREAM_ID), 1),)
+    expected["receipts"] = _fresh_graph()["receipts"]
+    expected["membership"] = ((ACCOUNT_ID, ROOM_ID, 0, 0, 0),)
+    assert result == AdmissionFacts(receipt_new=True, semantic_event_new=False)
+    assert await _graph(store) == expected
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("boundary", "fragment"),
+    ("boundary", "fragment", "admission"),
     (
-        ("cas", "UPDATE matrix_sync_consumers"),
-        ("event", "INSERT INTO journal_events"),
-        ("projection", "DELETE FROM unresolved_edits"),
-        ("receipt", "INSERT INTO matrix_ingestion_receipts"),
+        ("cas", "UPDATE matrix_sync_consumers", _expected_admission()),
+        ("event", "INSERT INTO journal_events", _expected_admission()),
+        ("projection", "DELETE FROM unresolved_edits", _expected_admission()),
+        ("receipt", "INSERT INTO matrix_ingestion_receipts", _compatibility_admission()),
+        ("lifecycle", "DELETE FROM visible_messages", _lifecycle_admission()),
+        ("history-loss", "INSERT INTO room_history_recovery", _history_loss_admission()),
     ),
 )
 async def test_admit_ingestion_batch_rolls_back_each_injected_boundary(
     journal_database: Callable[[], EventJournalStore],
     boundary: str,
     fragment: str,
+    admission: IngestionBatchAdmission,
 ) -> None:
     store = journal_database()
     await _bound_principal(store)
@@ -1205,9 +1706,16 @@ async def test_admit_ingestion_batch_rolls_back_each_injected_boundary(
     principal = EventJournalStore(backend=backend).principal(ACCOUNT_ID)
 
     with pytest.raises(_InjectedBoundaryError):
-        await principal.admit_ingestion_batch(_expected_admission())
+        await principal.admit_ingestion_batch(admission)
 
     assert await _graph(store) == _old_graph(), boundary
+    recovery = await store.backend.read(
+        lambda transaction: transaction.fetchone(
+            "SELECT state FROM room_history_recovery WHERE principal_id = ?",
+            (ACCOUNT_ID,),
+        ),
+    )
+    assert recovery is None, boundary
 
 
 @pytest.mark.asyncio
@@ -1228,7 +1736,7 @@ async def test_admit_ingestion_batch_injected_boundary_after_commit_leaves_new_g
 
 
 @pytest.mark.asyncio
-async def test_admit_ingestion_batch_hides_enum_until_commit(
+async def test_admit_ingestion_batch_hides_facts_until_commit(
     journal_database: Callable[[], EventJournalStore],
 ) -> None:
     store = journal_database()
@@ -1238,34 +1746,29 @@ async def test_admit_ingestion_batch_hides_enum_until_commit(
 
     def hold_before_commit() -> None:
         inside_transaction.set()
-        assert release_transaction.wait(
-            20
-        ), "the receipt transaction was never released"
+        assert release_transaction.wait(20), "the receipt transaction was never released"
 
     backend = _ObservedBackend(
         store.backend,
         lambda transaction: _ObservedTransaction(
             transaction,
-            statement_matches=lambda sql: "INSERT INTO matrix_ingestion_receipts"
-            in sql,
+            statement_matches=lambda sql: "INSERT INTO matrix_ingestion_receipts" in sql,
             after_statement=hold_before_commit,
         ),
     )
     principal = EventJournalStore(backend=backend).principal(ACCOUNT_ID)
-    admitting = asyncio.create_task(
-        principal.admit_ingestion_batch(_expected_admission())
-    )
+    admitting = asyncio.create_task(principal.admit_ingestion_batch(_expected_admission()))
     try:
-        assert await asyncio.to_thread(
-            inside_transaction.wait, 20
-        ), "admission never reached the pre-commit receipt boundary"
+        assert await asyncio.to_thread(inside_transaction.wait, 20), (
+            "admission never reached the pre-commit receipt boundary"
+        )
         assert not admitting.done()
         assert await _graph(store) == _old_graph()
     finally:
         release_transaction.set()
         with suppress(Exception):
             await admitting
-    assert admitting.result() is AdmissionResult.ADMITTED
+    assert admitting.result() == FRESH_FACTS
     assert await _graph(store) == _fresh_graph()
 
 
@@ -1281,13 +1784,9 @@ async def test_fresh_sql_starts_with_cas_without_consumer_preread(
         lambda transaction: _ObservedTransaction(transaction, trace=trace),
     )
 
-    result = (
-        await EventJournalStore(backend=backend)
-        .principal(ACCOUNT_ID)
-        .admit_ingestion_batch(_expected_admission())
-    )
+    result = await EventJournalStore(backend=backend).principal(ACCOUNT_ID).admit_ingestion_batch(_expected_admission())
 
-    assert result is AdmissionResult.ADMITTED
+    assert result == FRESH_FACTS
     assert trace[0].startswith("UPDATE matrix_sync_consumers SET next_sequence")
 
 
@@ -1340,7 +1839,8 @@ def _wait_for_postgres_lock(database_url: str, application_name: str) -> None:
             if row is not None and int(row[0]) > 0:
                 return
             if time.monotonic() >= deadline:
-                raise AssertionError("the competing PostgreSQL writer never waited")
+                message = "the competing PostgreSQL writer never waited"
+                raise AssertionError(message)
             time.sleep(0.01)
 
 
@@ -1376,43 +1876,103 @@ async def test_postgres_membership_race_fences_or_cleans_up(
     other = stores.second.principal(ACCOUNT_ID)
 
     if order == "ingestion_first":
-        admission = asyncio.create_task(
-            held.admit_ingestion_batch(_expected_admission())
-        )
-        assert await asyncio.to_thread(
-            lock_held.wait, _POSTGRES_WAIT_SECONDS
-        ), "ingestion never locked membership"
-        fence = asyncio.create_task(
-            other.fence_departure(ROOM_ID, source=DepartureSource.REPORTED)
-        )
+        admission = asyncio.create_task(held.admit_ingestion_batch(_expected_admission()))
+        assert await asyncio.to_thread(lock_held.wait, _POSTGRES_WAIT_SECONDS), "ingestion never locked membership"
+        fence = asyncio.create_task(other.fence_departure(ROOM_ID, source=DepartureSource.REPORTED))
         result, outcome = await asyncio.gather(admission, fence)
-        assert result is AdmissionResult.ADMITTED
+        assert result == FRESH_FACTS
         assert outcome.membership_epoch == 1
         graph = await _graph(stores.first)
         assert graph == _fenced_fresh_graph()
     else:
-        fence = asyncio.create_task(
-            held.fence_departure(ROOM_ID, source=DepartureSource.REPORTED)
-        )
-        assert await asyncio.to_thread(
-            lock_held.wait, _POSTGRES_WAIT_SECONDS
-        ), "fence never locked membership"
+        fence = asyncio.create_task(held.fence_departure(ROOM_ID, source=DepartureSource.REPORTED))
+        assert await asyncio.to_thread(lock_held.wait, _POSTGRES_WAIT_SECONDS), "fence never locked membership"
         try:
-            admission = asyncio.create_task(
-                other.admit_ingestion_batch(_expected_admission())
-            )
+            admission = asyncio.create_task(other.admit_ingestion_batch(_expected_admission()))
         except BaseException:
             with suppress(Exception):
                 await fence
             raise
-        with pytest.raises(IngestionBatchValidationError):
-            await admission
+        assert await admission == RECEIPT_ONLY_FACTS
         outcome = await fence
         assert outcome.membership_epoch == 1
         graph = await _graph(stores.first)
-        assert graph == _fence_only_graph()
+        expected = _fenced_fresh_graph()
+        expected_event = list(expected["events"][0])
+        expected_event[10] = 1
+        expected["events"] = (tuple(expected_event),)
+        assert graph == expected
 
     assert wait_observed.is_set(), "the competing PostgreSQL writer did not wait"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "order",
+    ("history_first", "fence_first"),
+    ids=("history-first", "fence-first"),
+)
+async def test_postgres_history_loss_and_fence_serialize(
+    postgres_ingestion_stores: _PostgresIngestionStores,
+    order: str,
+) -> None:
+    stores = postgres_ingestion_stores
+    await _bound_principal(stores.first)
+    lock_held = threading.Event()
+    wait_observed = threading.Event()
+
+    def hold_membership_lock() -> None:
+        lock_held.set()
+        _wait_for_postgres_lock(stores.database_url, stores.application_name)
+        wait_observed.set()
+
+    held_backend = _ObservedBackend(
+        stores.first.backend,
+        lambda transaction: _ObservedTransaction(
+            transaction,
+            statement_matches=lambda sql: "INSERT INTO room_membership" in sql,
+            after_statement=hold_membership_lock,
+        ),
+    )
+    held = EventJournalStore(backend=held_backend).principal(ACCOUNT_ID)
+    other = stores.second.principal(ACCOUNT_ID)
+    first: asyncio.Task[object] | None = None
+    second: asyncio.Task[object] | None = None
+    try:
+        if order == "history_first":
+            first = asyncio.create_task(held.admit_ingestion_batch(_history_loss_admission()))
+        else:
+            first = asyncio.create_task(held.fence_departure(ROOM_ID, source=DepartureSource.REPORTED))
+        assert await asyncio.to_thread(lock_held.wait, _POSTGRES_WAIT_SECONDS), (
+            "the first writer did not claim the membership row"
+        )
+        if order == "history_first":
+            second = asyncio.create_task(other.fence_departure(ROOM_ID, source=DepartureSource.REPORTED))
+            facts, outcome = await asyncio.gather(first, second)
+        else:
+            second = asyncio.create_task(other.admit_ingestion_batch(_history_loss_admission()))
+            outcome, facts = await asyncio.gather(first, second)
+    finally:
+        for task in (first, second):
+            if task is not None:
+                with suppress(BaseException):
+                    await task
+
+    assert facts == RECEIPT_ONLY_FACTS
+    assert outcome.membership_epoch == 1
+    assert wait_observed.is_set(), "the competing PostgreSQL writer did not wait"
+    persisted = await stores.first.backend.read(
+        lambda transaction: transaction.fetchone(
+            "SELECT state FROM room_history_recovery WHERE principal_id = ? AND room_id = ?",
+            (ACCOUNT_ID, ROOM_ID),
+        ),
+    )
+    assert persisted is None
+    graph = await _graph(stores.first)
+    assert graph["consumers"] == ((ACCOUNT_ID, str(CONSUMER_GENERATION), str(STREAM_ID), 1),)
+    assert graph["events"] == graph["projection"] == ()
+    assert graph["receipts"] == _fresh_graph()["receipts"]
+    assert graph["membership"] == ((ACCOUNT_ID, ROOM_ID, 1, 1, 0),)
 
 
 @pytest.mark.asyncio
@@ -1422,39 +1982,117 @@ async def test_immediate_exact_receipt_replay_is_duplicate(
     store = journal_database()
     principal = await _bound_principal(store)
     admission = _expected_admission()
-    assert await principal.admit_ingestion_batch(admission) is AdmissionResult.ADMITTED
+    fresh = await principal.admit_ingestion_batch(admission)
+    assert fresh.receipt_new is True
+    assert fresh.semantic_event_new is True
     trace: list[str] = []
     replay = EventJournalStore(
         backend=_ObservedBackend(
             store.backend,
             lambda transaction: _ObservedTransaction(transaction, trace=trace),
-        )
+        ),
     ).principal(ACCOUNT_ID)
 
-    assert await replay.admit_ingestion_batch(admission) is AdmissionResult.DUPLICATE
+    result = await replay.admit_ingestion_batch(admission)
+
+    assert result.receipt_new is False
+    assert result.semantic_event_new is False
 
     _assert_classifier_trace(trace)
     assert await _graph(store) == _fresh_graph()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("disagreement", ("digest", "event", "missing"))
+async def test_later_receipt_for_matching_semantic_event_does_not_duplicate_event(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    store = journal_database()
+    principal = await _bound_principal(store)
+    first = await principal.admit_ingestion_batch(_expected_admission())
+
+    second = await principal.admit_ingestion_batch(
+        _admission(
+            sequence=1,
+            record_id=SECOND_RECORD_ID,
+            sha256=b"2" * 32,
+        ),
+    )
+
+    assert first.receipt_new is True
+    assert first.semantic_event_new is True
+    assert second.receipt_new is True
+    assert second.semantic_event_new is False
+    expected = _fresh_graph()
+    expected["consumers"] = ((ACCOUNT_ID, str(CONSUMER_GENERATION), str(STREAM_ID), 2),)
+    expected["receipts"] = (
+        *expected["receipts"],
+        (
+            ACCOUNT_ID,
+            str(CONSUMER_GENERATION),
+            str(STREAM_ID),
+            1,
+            1,
+            (b"2" * 32).hex(),
+            SECOND_RECORD_ID,
+        ),
+    )
+    assert await _graph(store) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("room_id", "!other:example.org"),
+        ("thread_id", "$thread"),
+        ("kind", EventKind.MEDIA),
+        ("sender", "@mallory:example.org"),
+        ("origin_server_ts", 1001),
+    ),
+)
+async def test_later_receipt_semantic_header_conflict_rolls_back(
+    journal_database: Callable[[], EventJournalStore],
+    field_name: str,
+    value: object,
+) -> None:
+    store = journal_database()
+    principal = await _bound_principal(store)
+    await principal.admit_ingestion_batch(_expected_admission())
+    admission = _admission(
+        sequence=1,
+        record_id=SECOND_RECORD_ID,
+        sha256=b"2" * 32,
+    )
+    event = replace(admission.event, **{field_name: value})
+    projected = admission.projected
+    assert projected is not None
+    if field_name in {"room_id", "thread_id", "sender", "origin_server_ts"}:
+        projected = replace(projected, **{field_name: value})
+    conflicting = replace(admission, event=event, projected=projected)
+
+    with pytest.raises(IngestionBatchIntegrityError):
+        await principal.admit_ingestion_batch(conflicting)
+
+    assert await _graph(store) == _fresh_graph()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disagreement", ("digest", "record", "missing"))
 async def test_immediate_receipt_disagreement_is_integrity_error(
     journal_database: Callable[[], EventJournalStore],
     disagreement: str,
 ) -> None:
     store = journal_database()
     principal = await _bound_principal(store)
-    assert (
-        await principal.admit_ingestion_batch(_expected_admission())
-        is AdmissionResult.ADMITTED
-    )
+    fresh = await principal.admit_ingestion_batch(_expected_admission())
+    assert fresh.receipt_new is True
+    assert fresh.semantic_event_new is True
     trace: list[str] = []
 
     def wrap(transaction: Transaction) -> Transaction:
         inner = transaction
         if disagreement == "missing":
-            for field_name in ("r_schema", "r_sha256", "r_event_id"):
+            for field_name in ("r_schema", "r_sha256", "r_record_id"):
                 inner = _MutatingReturnTransaction(
                     inner,
                     statement_fragment="LEFT JOIN matrix_ingestion_receipts",
@@ -1463,14 +2101,12 @@ async def test_immediate_receipt_disagreement_is_integrity_error(
                 )
         return _ObservedTransaction(inner, trace=trace)
 
-    replay = EventJournalStore(backend=_ObservedBackend(store.backend, wrap)).principal(
-        ACCOUNT_ID
-    )
+    replay = EventJournalStore(backend=_ObservedBackend(store.backend, wrap)).principal(ACCOUNT_ID)
     admission = _expected_admission()
     if disagreement == "digest":
         admission = replace(admission, sha256=b"x" * 32)
-    elif disagreement == "event":
-        admission = _admission(event_id="$other")
+    elif disagreement == "record":
+        admission = replace(admission, record_id=SECOND_RECORD_ID)
 
     with pytest.raises(IngestionBatchIntegrityError):
         await replay.admit_ingestion_batch(admission)
@@ -1497,7 +2133,7 @@ async def test_immediate_receipt_disagreement_is_integrity_error(
         ("r_schema", 2, IngestionBatchIntegrityError),
         ("r_sha256", _Text(GOLDEN_SHA256), IngestionBatchIntegrityError),
         ("r_sha256", GOLDEN_SHA256.upper(), IngestionBatchIntegrityError),
-        ("r_event_id", _Text(EVENT_ID), IngestionBatchIntegrityError),
+        ("r_record_id", _Text(RECORD_ID), IngestionBatchIntegrityError),
     ),
 )
 async def test_immediate_receipt_disagreement_rejects_invalid_classifier_alias_type(
@@ -1509,7 +2145,9 @@ async def test_immediate_receipt_disagreement_rejects_invalid_classifier_alias_t
     store = journal_database()
     principal = await _bound_principal(store)
     admission = _expected_admission()
-    assert await principal.admit_ingestion_batch(admission) is AdmissionResult.ADMITTED
+    fresh = await principal.admit_ingestion_batch(admission)
+    assert fresh.receipt_new is True
+    assert fresh.semantic_event_new is True
     trace: list[str] = []
     classified = EventJournalStore(
         backend=_ObservedBackend(
@@ -1523,7 +2161,7 @@ async def test_immediate_receipt_disagreement_rejects_invalid_classifier_alias_t
                 ),
                 trace=trace,
             ),
-        )
+        ),
     ).principal(ACCOUNT_ID)
 
     with pytest.raises(error):
@@ -1555,9 +2193,7 @@ async def test_fifo_and_binding_taxonomy(
     principal = store.principal(ACCOUNT_ID)
     admission = _expected_admission()
     if case == "inactive":
-        await principal.load_or_create_ingestion_consumer(
-            new_generation=CONSUMER_GENERATION
-        )
+        await principal.load_or_create_ingestion_consumer(new_generation=CONSUMER_GENERATION)
     elif case != "missing":
         principal = await _bound_principal(store)
     if case == "generation":
@@ -1565,14 +2201,17 @@ async def test_fifo_and_binding_taxonomy(
     elif case == "stream":
         admission = replace(admission, stream_id=UUID(int=9))
     elif case == "older":
-        assert (
-            await principal.admit_ingestion_batch(admission) is AdmissionResult.ADMITTED
-        )
+        assert await principal.admit_ingestion_batch(admission) == FRESH_FACTS
         assert (
             await principal.admit_ingestion_batch(
-                _admission(sequence=1, event_id="$second", sha256=b"2" * 32)
+                _admission(
+                    sequence=1,
+                    event_id="$second",
+                    record_id=SECOND_RECORD_ID,
+                    sha256=b"2" * 32,
+                ),
             )
-            is AdmissionResult.ADMITTED
+            == FRESH_FACTS
         )
     elif case == "future":
         admission = _admission(sequence=1, event_id="$future", sha256=b"3" * 32)
@@ -1581,16 +2220,10 @@ async def test_fifo_and_binding_taxonomy(
     trace: list[str] = []
 
     def wrap(transaction: Transaction) -> Transaction:
-        inner = (
-            _NoClaimTransaction(transaction)
-            if case == "current-no-row"
-            else transaction
-        )
+        inner = _NoClaimTransaction(transaction) if case == "current-no-row" else transaction
         return _ObservedTransaction(inner, trace=trace)
 
-    classified = EventJournalStore(
-        backend=_ObservedBackend(store.backend, wrap)
-    ).principal(ACCOUNT_ID)
+    classified = EventJournalStore(backend=_ObservedBackend(store.backend, wrap)).principal(ACCOUNT_ID)
     with pytest.raises(error):
         await classified.admit_ingestion_batch(admission)
 
@@ -1615,17 +2248,13 @@ async def test_independent_stores_same_and_conflicting_races(
                     transaction,
                     trace=trace,
                 ),
-            )
+            ),
         ).principal(ACCOUNT_ID)
         for store, trace in zip(stores, traces, strict=True)
     )
     admissions = (
         _expected_admission(),
-        (
-            replace(_expected_admission(), sha256=b"x" * 32)
-            if conflicting
-            else _expected_admission()
-        ),
+        (replace(_expected_admission(), sha256=b"x" * 32) if conflicting else _expected_admission()),
     )
 
     results = await asyncio.gather(
@@ -1636,18 +2265,14 @@ async def test_independent_stores_same_and_conflicting_races(
         return_exceptions=True,
     )
 
-    winners = [
-        index
-        for index, result in enumerate(results)
-        if result is AdmissionResult.ADMITTED
-    ]
+    winners = [index for index, result in enumerate(results) if result == FRESH_FACTS]
     assert len(winners) == 1
     winner = winners[0]
     loser = 1 - winner
     if conflicting:
         assert type(results[loser]) is IngestionBatchIntegrityError
     else:
-        assert results[loser] is AdmissionResult.DUPLICATE
+        assert results[loser] == REPLAY_FACTS
     _assert_classifier_trace(traces[loser])
     expected = _fresh_graph()
     expected["receipts"] = (
@@ -1658,14 +2283,14 @@ async def test_independent_stores_same_and_conflicting_races(
             0,
             1,
             admissions[winner].sha256.hex(),
-            EVENT_ID,
+            RECORD_ID,
         ),
     )
     assert await _graph(stores[0]) == expected
 
 
 @pytest.mark.asyncio
-async def test_concurrent_generic_same_id_rolls_back_ingestion(
+async def test_concurrent_generic_same_event_is_receipted_without_duplication(
     journal_database: Callable[[], EventJournalStore],
 ) -> None:
     stores = (journal_database(), journal_database())
@@ -1685,27 +2310,27 @@ async def test_concurrent_generic_same_id_rolls_back_ingestion(
                 statement_matches=lambda sql: "DELETE FROM unresolved_edits" in sql,
                 after_statement=hold_generic,
             ),
-        )
+        ),
     ).principal(ACCOUNT_ID)
     ingestion_entered = asyncio.Event()
-    contender = EventJournalStore(
-        backend=_WriteEntryBackend(stores[1].backend, ingestion_entered)
-    ).principal(ACCOUNT_ID)
+    contender = EventJournalStore(backend=_WriteEntryBackend(stores[1].backend, ingestion_entered)).principal(
+        ACCOUNT_ID,
+    )
     generic: asyncio.Task[AdmissionResult] | None = None
-    ingestion: asyncio.Task[AdmissionResult] | None = None
+    ingestion: asyncio.Task[AdmissionFacts] | None = None
     try:
         admission = _expected_admission()
         generic = asyncio.create_task(held.admit(admission.event, admission.projected))
-        assert await asyncio.to_thread(
-            projection_written.wait, 20
-        ), "generic admission never completed its projection"
+        assert await asyncio.to_thread(projection_written.wait, 20), "generic admission never completed its projection"
         ingestion = asyncio.create_task(contender.admit_ingestion_batch(admission))
         await asyncio.wait_for(ingestion_entered.wait(), 20)
         assert not ingestion.done()
         release_generic.set()
         assert await generic is AdmissionResult.ADMITTED
-        with pytest.raises(IngestionBatchIntegrityError):
-            await ingestion
+        assert await ingestion == AdmissionFacts(
+            receipt_new=True,
+            semantic_event_new=False,
+        )
     finally:
         release_generic.set()
         for task in (generic, ingestion):
@@ -1713,7 +2338,11 @@ async def test_concurrent_generic_same_id_rolls_back_ingestion(
                 with suppress(BaseException):
                     await task
 
-    assert await _graph(stores[0]) == _generic_graph()
+    expected = _generic_graph()
+    expected["consumers"] = ((ACCOUNT_ID, str(CONSUMER_GENERATION), str(STREAM_ID), 1),)
+    expected["receipts"] = _fresh_graph()["receipts"]
+    expected["membership"] = ((ACCOUNT_ID, ROOM_ID, 0, 0, 0),)
+    assert await _graph(stores[0]) == expected
 
 
 @pytest.mark.asyncio
@@ -1728,35 +2357,30 @@ async def test_postgres_loser_waits_then_classifies(
 
     def hold_receipt() -> None:
         receipt_written.set()
-        assert release_winner.wait(
-            20
-        ), "the winning receipt transaction was never released"
+        assert release_winner.wait(20), "the winning receipt transaction was never released"
 
     winner = EventJournalStore(
         backend=_ObservedBackend(
             stores.first.backend,
             lambda transaction: _ObservedTransaction(
                 transaction,
-                statement_matches=lambda sql: "INSERT INTO matrix_ingestion_receipts"
-                in sql,
+                statement_matches=lambda sql: "INSERT INTO matrix_ingestion_receipts" in sql,
                 after_statement=hold_receipt,
             ),
-        )
+        ),
     ).principal(ACCOUNT_ID)
     loser = EventJournalStore(
         backend=_ObservedBackend(
             stores.second.backend,
             lambda transaction: _ObservedTransaction(transaction, trace=loser_trace),
-        )
+        ),
     ).principal(ACCOUNT_ID)
-    winning: asyncio.Task[AdmissionResult] | None = None
-    losing: asyncio.Task[AdmissionResult] | None = None
+    winning: asyncio.Task[AdmissionFacts] | None = None
+    losing: asyncio.Task[AdmissionFacts] | None = None
     try:
         admission = _expected_admission()
         winning = asyncio.create_task(winner.admit_ingestion_batch(admission))
-        assert await asyncio.to_thread(
-            receipt_written.wait, _POSTGRES_WAIT_SECONDS
-        ), "winner never reached its receipt"
+        assert await asyncio.to_thread(receipt_written.wait, _POSTGRES_WAIT_SECONDS), "winner never reached its receipt"
         losing = asyncio.create_task(loser.admit_ingestion_batch(admission))
         await asyncio.to_thread(
             _wait_for_postgres_lock,
@@ -1765,8 +2389,8 @@ async def test_postgres_loser_waits_then_classifies(
         )
         assert not losing.done()
         release_winner.set()
-        assert await winning is AdmissionResult.ADMITTED
-        assert await losing is AdmissionResult.DUPLICATE
+        assert await winning == FRESH_FACTS
+        assert await losing == REPLAY_FACTS
     finally:
         release_winner.set()
         for task in (winning, losing):
@@ -1799,21 +2423,15 @@ class _AdapterSession:
 
 @dataclass
 class _AdapterAdmission:
-    result: object = AdmissionResult.ADMITTED
+    result: object = FRESH_FACTS
     error: BaseException | None = None
-    entered: asyncio.Event | None = None
-    release: asyncio.Event | None = None
     calls: list[IngestionBatchAdmission] = field(default_factory=list)
 
     async def admit_ingestion_batch(
         self,
         admission: IngestionBatchAdmission,
-    ) -> AdmissionResult:
+    ) -> AdmissionFacts:
         self.calls.append(admission)
-        if self.entered is not None:
-            self.entered.set()
-        if self.release is not None:
-            await self.release.wait()
         if self.error is not None:
             raise self.error
         return self.result  # type: ignore[return-value]
@@ -1874,8 +2492,10 @@ async def test_adapter_invalid_matrix_never_admits_or_acks(
 
 
 @pytest.mark.asyncio
-async def test_adapter_waits_for_committed_terminal_result(
+@pytest.mark.parametrize("cancel", (False, True), ids=("normal", "cancelled"))
+async def test_adapter_waits_for_terminal_commit_before_ack_or_cancellation(
     journal_database: Callable[[], EventJournalStore],
+    cancel: bool,
 ) -> None:
     store = journal_database()
     await _bound_principal(store)
@@ -1891,11 +2511,10 @@ async def test_adapter_waits_for_committed_terminal_result(
             store.backend,
             lambda transaction: _ObservedTransaction(
                 transaction,
-                statement_matches=lambda sql: "INSERT INTO matrix_ingestion_receipts"
-                in sql,
+                statement_matches=lambda sql: "INSERT INTO matrix_ingestion_receipts" in sql,
                 after_statement=hold_receipt,
             ),
-        )
+        ),
     ).principal(ACCOUNT_ID)
     batch = _batch()
     session = _AdapterSession(batch)
@@ -1905,28 +2524,49 @@ async def test_adapter_waits_for_committed_terminal_result(
             principal,
             account_id=ACCOUNT_ID,
             device_id=DEVICE_ID,
-        )
+        ),
     )
     try:
-        assert await asyncio.to_thread(
-            inside_transaction.wait, 20
-        ), "adapter admission never reached its receipt"
+        assert await asyncio.to_thread(inside_transaction.wait, 20), "adapter admission never reached its receipt"
         assert not consuming.done()
         assert session.ack_attempts == []
         assert await _graph(store) == _old_graph()
+        if cancel:
+            consuming.cancel()
+            await asyncio.sleep(0)
+            assert not consuming.done()
     finally:
         release_transaction.set()
         with suppress(BaseException):
             await consuming
 
-    assert consuming.result() is AdmissionResult.ADMITTED
-    assert session.ack_attempts == [batch.ref]
     assert await _graph(store) == _fresh_graph()
+    if not cancel:
+        assert consuming.result() == FRESH_FACTS
+        assert session.ack_attempts == [batch.ref]
+        return
+
+    assert consuming.cancelled()
+    assert session.ack_attempts == []
+    assert (
+        await consume_one_ingestion_batch(
+            session,  # type: ignore[arg-type]
+            store.principal(ACCOUNT_ID),
+            account_id=ACCOUNT_ID,
+            device_id=DEVICE_ID,
+        )
+        == REPLAY_FACTS
+    )
+    assert session.ack_attempts == [batch.ref]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "result", ("admitted", object()), ids=("equal-string", "unknown")
+    "result",
+    (
+        pytest.param("admitted", id="equal-string"),
+        pytest.param(object(), id="unknown"),
+    ),
 )
 async def test_adapter_rejects_nonterminal_results_without_ack(result: object) -> None:
     session = _AdapterSession(_batch())
@@ -1945,11 +2585,9 @@ async def test_adapter_rejects_nonterminal_results_without_ack(result: object) -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "result", (AdmissionResult.ADMITTED, AdmissionResult.DUPLICATE)
-)
-async def test_adapter_acks_each_exact_terminal_enum_once(
-    result: AdmissionResult,
+@pytest.mark.parametrize("result", (FRESH_FACTS, RECEIPT_ONLY_FACTS, REPLAY_FACTS))
+async def test_adapter_acks_each_exact_terminal_facts_once(
+    result: AdmissionFacts,
 ) -> None:
     batch = _batch()
     session = _AdapterSession(batch)
@@ -1962,7 +2600,7 @@ async def test_adapter_acks_each_exact_terminal_enum_once(
         device_id=DEVICE_ID,
     )
 
-    assert returned is result
+    assert returned == result
     assert admission.calls == [_expected_admission()]
     assert session.ack_attempts == [batch.ref]
     assert session.ack_attempts[0] is batch.ref
@@ -1983,27 +2621,6 @@ async def test_adapter_backend_error_never_acks() -> None:
         )
 
     assert raised.value is error
-    assert session.ack_attempts == []
-
-
-@pytest.mark.asyncio
-async def test_adapter_cancellation_never_acks() -> None:
-    entered, release = asyncio.Event(), asyncio.Event()
-    session = _AdapterSession(_batch())
-    admission = _AdapterAdmission(entered=entered, release=release)
-    consuming = asyncio.create_task(
-        consume_one_ingestion_batch(
-            session,  # type: ignore[arg-type]
-            admission,
-            account_id=ACCOUNT_ID,
-            device_id=DEVICE_ID,
-        )
-    )
-    await entered.wait()
-    consuming.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await consuming
     assert session.ack_attempts == []
 
 
@@ -2035,7 +2652,7 @@ async def test_adapter_ack_failure_redelivers_exact_duplicate(
             account_id=ACCOUNT_ID,
             device_id=DEVICE_ID,
         )
-        is AdmissionResult.DUPLICATE
+        == REPLAY_FACTS
     )
     assert session.next_calls == [{"max_records": 1}, {"max_records": 1}]
     assert session.ack_attempts == [batch.ref, batch.ref]

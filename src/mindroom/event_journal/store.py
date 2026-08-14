@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
     from .backend import Backend, Transaction
     from .models import (
+        AdmissionFacts,
         AdmissionResult,
         ConversationCursor,
         ConversationPage,
@@ -112,7 +113,7 @@ class PrincipalStore:
     async def admit_ingestion_batch(
         self,
         admission: IngestionBatchAdmission,
-    ) -> AdmissionResult:
+    ) -> AdmissionFacts:
         """Atomically persist one authenticated nio ingestion record."""
         return await self._backend.write(
             lambda tx: journal.admit_ingestion_batch(tx, self._principal_id, admission),

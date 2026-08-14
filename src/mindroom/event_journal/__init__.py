@@ -15,9 +15,11 @@ from mindroom.history_recovery import (
 
 from .approvals import RecordedApprovalDecision, StoredApprovalCard
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
+from .journal import validate_ingestion_batch_admission
 from .membership import MembershipFence, MembershipView
 from .models import (
     TURN_BACKED_KINDS,
+    AdmissionFacts,
     AdmissionResult,
     ConversationCursor,
     ConversationPage,
@@ -37,6 +39,7 @@ from .models import (
     IngestionBatchValidationError,
     IngestionConsumer,
     IngestionConsumerBindingError,
+    IngestionRecordDisposition,
     JournalEvent,
     OutboxDelivery,
     PendingPage,
@@ -62,6 +65,7 @@ from .views import (
 
 __all__ = [
     "TURN_BACKED_KINDS",
+    "AdmissionFacts",
     "AdmissionResult",
     "AdmissionView",
     "ApprovalView",
@@ -90,6 +94,7 @@ __all__ = [
     "IngestionBatchValidationError",
     "IngestionConsumer",
     "IngestionConsumerBindingError",
+    "IngestionRecordDisposition",
     "JournalEvent",
     "MembershipFence",
     "MembershipView",
@@ -114,5 +119,6 @@ __all__ = [
     "encode_thread_id",
     "replacement_target",
     "thread_root",
+    "validate_ingestion_batch_admission",
     "visible_content",
 ]

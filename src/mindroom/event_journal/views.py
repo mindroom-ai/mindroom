@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
     from .approvals import RecordedApprovalDecision, StoredApprovalCard
     from .models import (
+        AdmissionFacts,
         AdmissionResult,
         ConversationCursor,
         ConversationPage,
@@ -62,8 +63,8 @@ class AdmissionView(Protocol):
 class IngestionBatchAdmissionView(Protocol):
     """Admitting one authenticated nio batch, and nothing else."""
 
-    async def admit_ingestion_batch(self, admission: IngestionBatchAdmission) -> AdmissionResult:  # fmt: skip
-        """Persist one event, projection, receipt, and frontier atomically."""
+    async def admit_ingestion_batch(self, admission: IngestionBatchAdmission) -> AdmissionFacts:  # fmt: skip
+        """Persist one record disposition, receipt, and frontier atomically."""
         ...
 
 
@@ -420,6 +421,7 @@ __all__ = [
     "DispatchView",
     "HistoryRecoveryRecordView",
     "HydrationView",
+    "IngestionBatchAdmissionView",
     "OutboxView",
     "PendingTurnView",
     "RelationView",
