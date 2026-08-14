@@ -246,6 +246,28 @@ async def test_action_delivery_resolver_reads_the_exact_router_card(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_action_delivery_resolver_ignores_a_room_the_router_does_not_serve(tmp_path: Path) -> None:
+    client = MagicMock(
+        user_id="@mindroom_router:localhost",
+        room_get_event=AsyncMock(),
+    )
+    router = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset(),
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: router if name == "router" else None,
+        cards_provider=lambda: None,
+    )
+
+    assert await transport.resolve_approval_action_delivery("!direct:localhost", "$ordinary-reply") is None
+    client.room_get_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_action_delivery_resolver_retries_an_unreadable_exact_card(tmp_path: Path) -> None:
     client = MagicMock(
         user_id="@mindroom_router:localhost",

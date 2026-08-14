@@ -404,10 +404,12 @@ class ApprovalMatrixTransport:
 
     async def resolve_approval_action_delivery(self, room_id: str, card_event_id: str) -> str | None:
         """Return the generic delivery ID carried by one exact visible card."""
-        bot = self.transport_bot(room_id)
-        if bot is None or bot.client is None:
+        bot = self.bot_provider(ROUTER_AGENT_NAME)
+        if bot is None or not bot.running or bot.client is None:
             msg = f"Router approval transport cannot read {room_id} to verify a card action"
             raise ToolApprovalTransportError(msg)
+        if not self._bot_has_approval_room(bot, room_id):
+            return None
         response = await bot.client.room_get_event(room_id, card_event_id)
         if not isinstance(response, nio.RoomGetEventResponse):
             msg = f"Matrix could not verify approval card {card_event_id!r}: {response}"

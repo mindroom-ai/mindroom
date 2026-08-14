@@ -1297,8 +1297,11 @@ class AgentBot:
         self._calls_reconcile_pending = self._call_manager is not None
         preserve_reply_memberships = self._preserve_reply_memberships_on_next_sync_start
         self._preserve_reply_memberships_on_next_sync_start = False
-        if self.agent_name == ROUTER_AGENT_NAME and not preserve_reply_memberships:
-            self._invalidate_agent_reply_memberships(reason="sync_loop_started")
+        if self.agent_name == ROUTER_AGENT_NAME:
+            if preserve_reply_memberships:
+                self._schedule_agent_reply_membership_refresh()
+            else:
+                self._invalidate_agent_reply_memberships(reason="sync_loop_started")
         mark_matrix_sync_loop_started(self.agent_name)
 
     def preserve_reply_memberships_on_next_sync_start(self) -> None:

@@ -326,6 +326,25 @@ def test_router_prepared_startup_snapshot_survives_only_the_first_sync_start(tmp
 
 
 @pytest.mark.asyncio
+async def test_router_prepared_startup_snapshot_refreshes_after_the_first_sync(tmp_path: Path) -> None:
+    """The first response closes the gap between the pre-sync snapshot and receive start."""
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+
+    bot.preserve_reply_memberships_on_next_sync_start()
+    bot.mark_sync_loop_started()
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+    ):
+        await bot._on_sync_response(_empty_classic_sync_response("s-first-post-snapshot-refresh"))
+
+    orchestrator.invalidate_agent_reply_memberships.assert_not_called()
+    orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_router_first_response_refreshes_room_backed_grants(tmp_path: Path) -> None:
     """The first successful response in each receive generation rebuilds grants."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
