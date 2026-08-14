@@ -502,6 +502,26 @@ def expire_cards_for_departed_continuations(
     reason: str,
 ) -> None:
     """Preserve router-owned Matrix cleanup when a responder leaves the room."""
+    # A click locks its continuation before the card delivery shared with this
+    # cleanup. Keep the same order before fencing the deliveries and deleting
+    # the continuation, otherwise the two transactions can deadlock.
+    transaction.execute(
+        """
+        UPDATE approval_continuations SET state = state
+        WHERE principal_id = ?
+          AND EXISTS (
+              SELECT 1
+              FROM approval_continuation_sources AS sources
+              JOIN journal_events AS events
+                ON events.principal_id = sources.principal_id
+               AND events.event_id = sources.event_id
+              WHERE sources.principal_id = approval_continuations.principal_id
+                AND sources.approval_id = approval_continuations.approval_id
+                AND events.room_id = ?
+          )
+        """,
+        (continuation_principal_id, room_id),
+    )
     rows = transaction.fetchall(
         """
         SELECT cards.principal_id, cards.delivery_id, initial.event_type,

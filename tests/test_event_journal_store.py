@@ -352,32 +352,12 @@ async def _assert_legacy_delivery_state_migrated(store: EventJournalStore) -> No
     await _assert_legacy_unavailable_notices_migrated(store)
 
     router = store.principal("router@shared")
-    initial = await router.load_matrix_delivery(
-        delivery_id="approval-txn",
-        stage=DeliveryStage.INITIAL,
-    )
-    terminal = await router.load_matrix_delivery(
-        delivery_id="approval-txn",
-        stage=DeliveryStage.FINAL,
-    )
-    assert initial is None
-    assert terminal is not None
-    assert terminal.event_type == "io.mindroom.tool_approval"
-    assert terminal.edits_event_id == "$approval"
-    assert terminal.payload["status"] == "approved"
-    assert terminal.attempted is False
+    for delivery_id in ("approval-txn", "approval-pending-txn"):
+        for stage in DeliveryStage:
+            assert await router.load_matrix_delivery(delivery_id=delivery_id, stage=stage) is None
 
     assert await router.pending_approval_card(room_id=ROOM, card_event_id="$approval") is None
     assert await router.is_terminal_approval_card(room_id=ROOM, card_event_id="$approval")
-
-    expired_terminal = await router.load_matrix_delivery(
-        delivery_id="approval-pending-txn",
-        stage=DeliveryStage.FINAL,
-    )
-    assert expired_terminal is not None
-    assert expired_terminal.edits_event_id == "$pending-approval"
-    assert expired_terminal.payload["status"] == "expired"
-    assert expired_terminal.payload["approvable"] is False
     assert await router.is_terminal_approval_card(room_id=ROOM, card_event_id="$pending-approval")
 
     for stage in DeliveryStage:
@@ -5457,6 +5437,76 @@ class TestApprovalContinuations:
         assert current.state == "ready"
         assert current.calls[0].decision is ApprovalDecision.APPROVED
 
+    async def test_exact_call_decision_serializes_with_responder_departure(
+        self,
+        rival_stores: RivalStores,
+    ) -> None:
+        """A click and responder departure lock continuation before card delivery."""
+        responder = rival_stores.first.principal("agent@alice")
+        router = rival_stores.first.principal("router@shared")
+        await self.admit_sources(responder)
+        await responder.create_approval_continuation(
+            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
+        )
+        await self.remember_card(router)
+        continuation_locked = threading.Event()
+        release_decision = threading.Event()
+        departure_finished = threading.Event()
+
+        def pause_after_continuation_lock() -> None:
+            continuation_locked.set()
+            assert release_decision.wait(_WORKER_WAIT_SECONDS), "the decision was never released"
+
+        deciding = EventJournalStore(
+            backend=_PausingBackend(
+                rival_stores.first.backend,
+                pause_after_continuation_lock,
+                statement_matches=lambda sql: (
+                    "UPDATE approval_continuations SET state = state WHERE approval_id" in sql
+                ),
+            ),
+        ).principal("router@shared")
+        decision = asyncio.create_task(
+            deciding.resolve_continuation_approval_card(
+                card_event_id="$approval",
+                requested_status="approved",
+                reason=None,
+                resolution={"status": "approved", "body": "Approved: shell"},
+            ),
+        )
+        try:
+            await asyncio.to_thread(continuation_locked.wait, _WORKER_WAIT_SECONDS)
+            assert continuation_locked.is_set(), "the decision never locked its continuation"
+            departure = asyncio.create_task(
+                rival_stores.second.principal("agent@alice").fence_departure(
+                    ROOM,
+                    source=DepartureSource.REPORTED,
+                ),
+            )
+            departure.add_done_callback(lambda _: departure_finished.set())
+            await asyncio.to_thread(
+                _watch_until_queued_or_finished,
+                rival_stores.database_url,
+                rival_stores.racer_application_name,
+                departure_finished,
+            )
+        finally:
+            release_decision.set()
+
+        recorded, departed = await asyncio.gather(decision, departure)
+
+        assert recorded.recorded
+        assert recorded.resolution is not None
+        assert recorded.resolution["status"] == "approved"
+        assert departed.fenced
+        assert await responder.approval_continuation("approval-1") is None
+        terminal = await router.load_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+        )
+        assert terminal is not None
+        assert terminal.payload["status"] == "approved"
+
     async def test_failure_request_is_guarded_by_observed_state(self, alice: PrincipalStore) -> None:
         """A stale failure observer cannot fence work that already made progress."""
         await self.admit_sources(alice)
@@ -5827,6 +5877,72 @@ class TestApprovalContinuations:
         assert await alice.approval_continuation_for_source("$source-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
+
+    async def test_finish_serializes_with_responder_departure(
+        self,
+        rival_stores: RivalStores,
+    ) -> None:
+        """Terminal completion locks its continuation before settling sources."""
+        responder = rival_stores.first.principal("agent@alice")
+        await self.admit_sources(responder)
+        await responder.create_approval_continuation(self.continuation())
+        await responder.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await responder.enqueue_matrix_delivery(
+            delivery_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("finished"),
+        )
+        await responder.claim_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.FINAL)
+        await responder.acknowledge_matrix_delivery(
+            delivery_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$finished",
+            delivered_projections=(),
+        )
+        source_settled = threading.Event()
+        release_finish = threading.Event()
+        departure_finished = threading.Event()
+
+        def pause_after_source_settlement() -> None:
+            source_settled.set()
+            assert release_finish.wait(_WORKER_WAIT_SECONDS), "continuation completion was never released"
+
+        finishing = EventJournalStore(
+            backend=_PausingBackend(
+                rival_stores.first.backend,
+                pause_after_source_settlement,
+                statement_matches=lambda sql: "UPDATE journal_events" in sql and "event_id =" in sql,
+            ),
+        ).principal("agent@alice")
+        finish = asyncio.create_task(finishing.finish_approval_continuation("approval-1"))
+        try:
+            await asyncio.to_thread(source_settled.wait, _WORKER_WAIT_SECONDS)
+            assert source_settled.is_set(), "completion never settled its first source"
+            departure = asyncio.create_task(
+                rival_stores.second.principal("agent@alice").fence_departure(
+                    ROOM,
+                    source=DepartureSource.REPORTED,
+                ),
+            )
+            departure.add_done_callback(lambda _: departure_finished.set())
+            await asyncio.to_thread(
+                _watch_until_queued_or_finished,
+                rival_stores.database_url,
+                rival_stores.racer_application_name,
+                departure_finished,
+            )
+        finally:
+            release_finish.set()
+
+        completed, departed = await asyncio.gather(finish, departure)
+
+        assert completed
+        assert departed.fenced
+        assert await responder.approval_continuation("approval-1") is None
+        assert not await responder.is_pending("$source-1")
+        assert not await responder.is_pending("$source-2")
 
     async def test_permanently_unavailable_owner_can_discard_fenced_sources(
         self,

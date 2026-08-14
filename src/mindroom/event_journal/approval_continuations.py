@@ -625,7 +625,7 @@ def finish(
     approval_id: str,
 ) -> bool:
     """Release sources only after the continuation's FINAL delivery is acknowledged."""
-    continuation = get(transaction, principal_id, approval_id=approval_id)
+    continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return False
     delivered = transaction.fetchone(
@@ -654,7 +654,7 @@ def discard_unavailable(
     notice_principal_id: str,
 ) -> bool:
     """Release a permanently unavailable owner's sources after visible card cleanup."""
-    continuation = get(transaction, principal_id, approval_id=approval_id)
+    continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None or continuation.state != "failing":
         return False
     delivered = transaction.fetchone(
@@ -673,3 +673,20 @@ def discard_unavailable(
         (principal_id, approval_id),
     )
     return True
+
+
+def _get_locked(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+) -> ApprovalContinuation | None:
+    """Lock one aggregate before terminal paths settle its journal sources."""
+    transaction.execute(
+        """
+        UPDATE approval_continuations SET state = state
+        WHERE principal_id = ? AND approval_id = ?
+        """,
+        (principal_id, approval_id),
+    )
+    return get(transaction, principal_id, approval_id=approval_id)

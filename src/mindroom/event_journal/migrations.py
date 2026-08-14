@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import json
-from typing import TYPE_CHECKING, Any
-
-from . import outbox
-from .models import DeliveryStage
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .backend import Transaction
 
 _LEGACY_APPROVAL_EXPIRY_REASON = "Tool approval request expired during delivery upgrade."
-_APPROVAL_EVENT_TYPE = "io.mindroom.tool_approval"
 
 
 def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: bool) -> bool:
@@ -70,75 +65,16 @@ def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approv
           )
         """,
     )
-    rows = transaction.fetchall(
+    transaction.execute(
         """
-        SELECT principal_id, room_id, transaction_id, card_event_id,
-               card_json, resolution_json
+        INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
+        SELECT principal_id, room_id, card_event_id
         FROM approval_cards_legacy_delivery
-        WHERE card_event_id IS NOT NULL
+        WHERE card_event_id IS NOT NULL AND card_event_id != ''
+        ON CONFLICT (principal_id, card_event_id) DO NOTHING
         """,
     )
-    for row in rows:
-        principal_id = str(row["principal_id"])
-        room_id = str(row["room_id"])
-        card_event_id = str(row["card_event_id"])
-        if not card_event_id:
-            continue
-        transaction.execute(
-            """
-            INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
-            VALUES (?, ?, ?)
-            ON CONFLICT (principal_id, card_event_id) DO NOTHING
-            """,
-            (principal_id, room_id, card_event_id),
-        )
-        card = _object_json(row["card_json"])
-        if card is None:
-            continue
-        content = card.get("content")
-        if not isinstance(content, dict):
-            continue
-        if row["resolution_json"] is None:
-            resolution = _expired_content(content)
-        else:
-            resolution = _object_json(row["resolution_json"])
-            if resolution is None:
-                continue
-        event_type = card.get("type")
-        thread_id = content.get("thread_id")
-        outbox.enqueue(
-            transaction,
-            principal_id,
-            delivery_id=str(row["transaction_id"]),
-            stage=DeliveryStage.FINAL,
-            event_type=event_type if isinstance(event_type, str) and event_type else _APPROVAL_EVENT_TYPE,
-            room_id=room_id,
-            thread_id=thread_id if isinstance(thread_id, str) and thread_id else None,
-            payload=resolution,
-            edits_event_id=card_event_id,
-        )
     transaction.execute("DROP TABLE approval_cards_legacy_delivery")
-
-
-def _object_json(value: object) -> dict[str, Any] | None:
-    try:
-        decoded = json.loads(str(value))
-    except json.JSONDecodeError:
-        return None
-    return decoded if isinstance(decoded, dict) else None
-
-
-def _expired_content(content: dict[str, Any]) -> dict[str, Any]:
-    expired = {
-        **content,
-        "status": "expired",
-        "approvable": False,
-        "resolution_reason": _LEGACY_APPROVAL_EXPIRY_REASON,
-        "resolved_by": None,
-    }
-    tool_name = content.get("tool_name")
-    expired["body"] = f"Expired: {tool_name}" if isinstance(tool_name, str) else "Approval expired"
-    return expired
 
 
 def _table_exists(transaction: Transaction, table: str, *, postgres: bool) -> bool:
