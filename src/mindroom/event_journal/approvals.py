@@ -105,8 +105,8 @@ class RecordedApprovalDecision:
     source_event_ids: tuple[str, ...] = ()
 
 
-def legacy_delivery_pending(transaction: Transaction, principal_id: str) -> bool:
-    """Return whether this principal still owns any #1834 delivery migration debt."""
+def legacy_delivery_pending(transaction: Transaction, principal_id: str, continuation_id: str | None = None) -> bool:
+    """Return whether this principal still owns matching #1834 delivery migration debt."""
     return (
         transaction.fetchone(
             """
@@ -115,9 +115,10 @@ def legacy_delivery_pending(transaction: Transaction, principal_id: str) -> bool
               AND continuation_id IS NOT NULL
               AND continuation_generation IS NOT NULL
               AND tool_call_id IS NOT NULL
+              AND continuation_id = COALESCE(?, continuation_id)
             LIMIT 1
             """,
-            (principal_id,),
+            (principal_id, continuation_id),
         )
         is not None
     )

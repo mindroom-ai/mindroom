@@ -169,8 +169,8 @@ A settled row is retained for exactly that reason, with only its replay payload 
 It shares the journal's database, so a terminal turn record and the settlement of the journal sources it answers commit in one transaction instead of two substrates approximately agreeing.
 Its scope is the agent rather than the sync principal, because the proof that a message was already answered stays true across a re-login.
 
-Delivery itself is owned by the `response_outbox` table, keyed `(principal_id, turn_id, stage)` over an `INITIAL` placeholder and a `FINAL` answer.
-A row's payload is claimed before the first send attempt and its Matrix transaction ID is deterministic, so a crash between sending and recording resolves by resending the same row rather than by generating a second, different answer.
+Delivery itself is owned by the `matrix_delivery_outbox` table, keyed `(principal_id, delivery_id, stage)` over `INITIAL` events and `FINAL` edits.
+Each row freezes its explicit Matrix event type, payload, and deterministic transaction ID before the first send attempt, so ordinary responses and tool-approval cards recover through the same worker after a crash between sending and recording.
 The claim also stores the sending device, because a transaction ID is only idempotent for the device that used it and a re-login would otherwise let a resend post a duplicate.
 
 ## Room Cleanup

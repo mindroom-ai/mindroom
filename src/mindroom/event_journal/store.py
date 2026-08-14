@@ -868,10 +868,10 @@ class PrincipalStore:
             ),
         )
 
-    async def legacy_approval_delivery_pending(self) -> bool:
-        """Return whether approval actions must wait for one-way delivery migration."""
+    async def legacy_approval_delivery_pending(self, continuation_id: str | None = None) -> bool:
+        """Return whether matching approval state still awaits one-way delivery migration."""
         return await self._backend.read(
-            lambda transaction: approvals.legacy_delivery_pending(transaction, self._principal_id),
+            lambda transaction: approvals.legacy_delivery_pending(transaction, self._principal_id, continuation_id),
         )
 
     async def claim_legacy_approval_delivery(

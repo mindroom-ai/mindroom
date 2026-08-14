@@ -249,10 +249,17 @@ async def test_legacy_same_device_retry_fetches_the_transaction_winner_before_pr
 async def test_approval_action_waits_while_legacy_delivery_ownership_is_being_migrated(tmp_path: Path) -> None:
     """A click admitted during startup remains journal work until its exact card owner is promoted."""
     cards = MagicMock()
+    cards.pending_approval_card = AsyncMock(return_value=None)
+    cards.is_terminal_approval_card = AsyncMock(return_value=False)
     cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
-    initialize_approval_store(test_runtime_paths(tmp_path), cards=cards)
+    manager = initialize_approval_store(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
+    recovery = AsyncMock()
+    worker = MagicMock(recover=recovery)
 
-    with pytest.raises(RuntimeError, match="migration has not established"):
+    with (
+        patch.object(manager, "_worker", return_value=worker),
+        pytest.raises(RuntimeError, match="migration has not established"),
+    ):
         await handle_matrix_approval_action(
             MatrixApprovalAction(
                 room_id="!room:localhost",
@@ -263,7 +270,34 @@ async def test_approval_action_waits_while_legacy_delivery_ownership_is_being_mi
             ),
         )
 
-    cards.pending_approval_card.assert_not_called()
+    assert cards.pending_approval_card.await_count == 2
+    recovery.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_terminal_approval_action_is_not_blocked_by_unrelated_legacy_delivery(tmp_path: Path) -> None:
+    """A current tombstone remains authoritative while an unrelated old card awaits migration."""
+    cards = MagicMock()
+    cards.pending_approval_card = AsyncMock(return_value=None)
+    cards.is_terminal_approval_card = AsyncMock(return_value=True)
+    cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
+    initialize_approval_store(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
+    before_consume = AsyncMock()
+
+    result = await handle_matrix_approval_action(
+        MatrixApprovalAction(
+            room_id="!room:localhost",
+            sender_id="@approver:localhost",
+            card_event_id="$approval",
+            status="approved",
+            reason=None,
+        ),
+        before_consume=before_consume,
+    )
+
+    assert result.consumed is True
+    before_consume.assert_awaited_once_with()
+    cards.legacy_approval_delivery_pending.assert_not_awaited()
 
 
 def test_tool_approval_config_coerces_numeric_timeout_strings() -> None:
@@ -374,10 +408,14 @@ async def test_click_recovers_a_card_accepted_before_its_acknowledgement(tmp_pat
         sent.append(delivery.stage)
         return card_event_id if delivery.stage is DeliveryStage.INITIAL else "$terminal-edit"
 
+    legacy_pending = AsyncMock(return_value=True)
+    cards = MagicMock(wraps=router)
+    cards.principal_id = router.principal_id
+    cards.legacy_approval_delivery_pending = legacy_pending
     manager = _ApprovalManager(
         test_runtime_paths(tmp_path),
         send_delivery=send,
-        cards=router,
+        cards=cards,
         transport_sender=lambda: "@mindroom_router:localhost",
         sending_device=lambda: "DEVICE",
     )
@@ -392,6 +430,7 @@ async def test_click_recovers_a_card_accepted_before_its_acknowledgement(tmp_pat
 
         assert result.consumed is True
         assert result.resolved is True
+        legacy_pending.assert_not_awaited()
         assert sent == [DeliveryStage.INITIAL, DeliveryStage.FINAL]
         decided = await responder.approval_continuation(approval_id)
         assert decided is not None
@@ -544,8 +583,8 @@ async def test_startup_unavailable_owner_cleanup_walks_cursor_pages(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_startup_unavailable_cleanup_waits_for_legacy_card_upgrade(tmp_path: Path) -> None:
-    """Unavailable-owner cleanup cannot delete a continuation still owned by legacy delivery debt."""
+async def test_startup_unavailable_cleanup_scans_owners_while_legacy_upgrade_remains_retryable(tmp_path: Path) -> None:
+    """One stuck legacy card does not prevent cleanup from settling unrelated continuations."""
     transport = approval_transport.ApprovalMatrixTransport(
         runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda _name: None,
@@ -570,36 +609,36 @@ async def test_startup_unavailable_cleanup_waits_for_legacy_card_upgrade(tmp_pat
     ):
         await transport._run_startup_cleanup_if_ready()
 
-    reconcile.assert_not_awaited()
+    reconcile.assert_awaited_once_with()
     schedule_retry.assert_called_once_with()
     assert transport._startup_cleanup_done is False
 
 
 @pytest.mark.asyncio
-async def test_live_unavailable_cleanup_waits_for_legacy_card_upgrade(tmp_path: Path) -> None:
-    """A failed entity cannot lose a continuation still owned by staged delivery debt."""
+async def test_unavailable_cleanup_waits_for_the_exact_continuations_legacy_card(tmp_path: Path) -> None:
+    """A failed entity cannot lose the continuation still owned by staged delivery debt."""
     cards = MagicMock()
     cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
+    continuation = MagicMock(approval_id="approval-staged")
+    principal = MagicMock(
+        approval_continuation=AsyncMock(return_value=continuation),
+        load_matrix_delivery=AsyncMock(),
+        request_approval_failure=AsyncMock(),
+    )
+    journal = MagicMock()
+    journal.principal.return_value = principal
     transport = approval_transport.ApprovalMatrixTransport(
         runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda _name: None,
         cards_provider=lambda: cards,
-        journal_provider=lambda: None,
+        journal_provider=lambda: journal,
     )
 
-    with (
-        patch.object(
-            transport,
-            "_reconcile_unavailable_owner_pages",
-            new=AsyncMock(return_value=True),
-        ) as reconcile,
-        patch.object(transport, "_schedule_startup_cleanup_retry") as schedule_retry,
-    ):
-        await transport.reconcile_unavailable_entities({"removed"})
+    assert not await transport._discard_unavailable("agent@removed", continuation, "unavailable")
 
-    reconcile.assert_not_awaited()
-    schedule_retry.assert_called_once_with()
-    assert transport._startup_cleanup_done is False
+    cards.legacy_approval_delivery_pending.assert_awaited_once_with("approval-staged")
+    principal.load_matrix_delivery.assert_not_awaited()
+    principal.request_approval_failure.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -681,10 +720,14 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
         approval_room_ids=frozenset({"!room:localhost"}),
         approval_store=notice_store,
     )
+    cards = MagicMock()
+    cards.legacy_approval_delivery_pending = AsyncMock(
+        side_effect=lambda continuation_id=None: continuation_id != "approval-removed",
+    )
     transport = approval_transport.ApprovalMatrixTransport(
         runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: None,
+        cards_provider=lambda: cards,
         journal_provider=lambda: journal,
         entity_configured=lambda name: name != "removed",
     )
@@ -698,6 +741,7 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
     content = client.room_send.await_args.kwargs["content"]
     assert content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$waiting"}
     assert "no longer available" in content["body"]
+    cards.legacy_approval_delivery_pending.assert_awaited_once_with("approval-removed")
     assert client.room_send.await_args.kwargs["tx_id"] == transaction_id
     principal.discard_unavailable_approval_continuation.assert_awaited_once_with(
         "approval-removed",

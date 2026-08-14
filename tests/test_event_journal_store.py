@@ -352,6 +352,8 @@ async def _assert_legacy_unacknowledged_card_promotes_after_wire_preparation(rou
     assert legacy.attempted is False
     assert "m.relates_to" not in legacy.payload
     assert legacy.payload["full_arguments"] == {"command": "x" * 60_000}
+    assert await router.legacy_approval_delivery_pending("approval-1")
+    assert not await router.legacy_approval_delivery_pending("unrelated-approval")
 
     promoted_payload = {
         **legacy.payload,

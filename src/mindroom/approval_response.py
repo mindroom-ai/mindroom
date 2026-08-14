@@ -292,7 +292,7 @@ class ApprovalResponseCoordinator:
         reason: str,
     ) -> ApprovalContinuation | None:
         """Fence exactly the state a failed lifecycle observed and wake settlement."""
-        await require_approval_delivery_migrated()
+        await require_approval_delivery_migrated(continuation.approval_id)
         failing = await self.store.request_approval_failure(
             continuation.approval_id,
             reason,
@@ -316,7 +316,9 @@ class ApprovalResponseCoordinator:
             return True
         if await self.successful_final_delivery(current) is not None:
             return False
-        if current.state != "failing":
+        if current.state == "failing":
+            await require_approval_delivery_migrated(current.approval_id)
+        else:
             current = await self.request_failure(current, reason)
             if current is None:
                 return False

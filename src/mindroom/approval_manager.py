@@ -44,6 +44,7 @@ DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
 )
 DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
+DELIVERY_MIGRATION_PENDING_REASON = "Approval delivery migration has not established the generic card owner yet"
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the tool arguments are too large to show in full, so a human cannot review "
     "exactly what would run. Retry with a smaller payload — for example save large content to a "
@@ -363,6 +364,8 @@ class _ApprovalManager:
                 card_event_id=card_event_id,
             )
             if stored is None:
+                if await cards.legacy_approval_delivery_pending():
+                    raise RuntimeError(DELIVERY_MIGRATION_PENDING_REASON)
                 return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
         transport_sender = None if self.transport_sender is None else self.transport_sender()
         pending = (

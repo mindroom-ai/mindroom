@@ -3797,6 +3797,7 @@ class TestMultiAgentOrchestrator:
         general_bot.config = old_config
         general_bot.enable_streaming = True
         general_bot._set_presence_with_model_info = AsyncMock()
+        _bind_empty_legacy_approval_store(router_bot)
         orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
 
         new_bot = MagicMock()

@@ -283,7 +283,6 @@ async def handle_matrix_approval_action(
     sanitized_reason = action.reason.strip() if isinstance(action.reason, str) and action.reason.strip() else None
     if action.card_event_id is None:
         return ApprovalActionResult(consumed=False, resolved=False)
-    await require_approval_delivery_migrated()
     return await manager.handle_card_response(
         room_id=action.room_id,
         sender_id=action.sender_id,
@@ -294,12 +293,12 @@ async def handle_matrix_approval_action(
     )
 
 
-async def require_approval_delivery_migrated() -> None:
-    """Keep approval-mutating events journal-owned until generic delivery owns every card."""
+async def require_approval_delivery_migrated(continuation_id: str) -> None:
+    """Keep one continuation unchanged until generic delivery owns all of its cards."""
     manager = approval_manager.get_approval_store()
-    if manager is not None and manager.cards is not None and await manager.cards.legacy_approval_delivery_pending():
-        msg = "Approval delivery migration has not established the generic card owner yet"
-        raise RuntimeError(msg)
+    cards = None if manager is None else manager.cards
+    if cards is not None and await cards.legacy_approval_delivery_pending(continuation_id):
+        raise RuntimeError(approval_manager.DELIVERY_MIGRATION_PENDING_REASON)
 
 
 def is_process_active_approval_card(card_event_id: str) -> bool:

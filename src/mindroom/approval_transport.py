@@ -190,11 +190,6 @@ class ApprovalMatrixTransport:
         names = set(entity_names)
         if not names:
             return
-        cards = self.cards_provider()
-        if cards is not None and await cards.legacy_approval_delivery_pending():
-            self._startup_cleanup_done = False
-            self._schedule_startup_cleanup_retry()
-            return
         if not await self._reconcile_unavailable_owner_pages(names):
             self._startup_cleanup_done = False
             self._schedule_startup_cleanup_retry()
@@ -327,8 +322,9 @@ class ApprovalMatrixTransport:
         assert self.journal_provider is not None
         store = self.journal_provider().principal(principal_id)
         current = await store.approval_continuation(continuation.approval_id)
-        if current is None:
-            return True
+        cards = self.cards_provider()
+        if current is None or (cards is not None and await cards.legacy_approval_delivery_pending(current.approval_id)):
+            return current is None
         final_delivery = await store.load_matrix_delivery(
             delivery_id=current.source_event_ids[0],
             stage=DeliveryStage.FINAL,
@@ -561,15 +557,14 @@ class ApprovalMatrixTransport:
             self._startup_cleanup_attempts += 1
             cards_recovered = await self._recover_approval_cards_on_startup()
             owners_settled = False
-            if cards_recovered:
-                try:
-                    owners_settled = await self._reconcile_startup_unavailable()
-                except Exception:
-                    logger.warning(
-                        "tool_approval_unavailable_owner_cleanup_failed",
-                        attempt=self._startup_cleanup_attempts,
-                        exc_info=True,
-                    )
+            try:
+                owners_settled = await self._reconcile_startup_unavailable()
+            except Exception:
+                logger.warning(
+                    "tool_approval_unavailable_owner_cleanup_failed",
+                    attempt=self._startup_cleanup_attempts,
+                    exc_info=True,
+                )
             if not cards_recovered or not owners_settled:
                 self._schedule_startup_cleanup_retry()
                 return
