@@ -1421,6 +1421,17 @@ def _claimed_card_body(approval_id: str) -> dict[str, Any]:
     }
 
 
+def _signalling_editor() -> tuple[AsyncMock, asyncio.Event]:
+    """Return a successful editor and an event set after its first call."""
+    called = asyncio.Event()
+
+    async def edit(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
+        called.set()
+        return True
+
+    return AsyncMock(side_effect=edit), called
+
+
 @pytest.mark.asyncio
 async def test_a_restart_adopts_a_card_whose_send_never_came_back(tmp_path: Path) -> None:
     """The window between claiming a card and learning what it became.
@@ -1435,7 +1446,7 @@ async def test_a_restart_adopts_a_card_whose_send_never_came_back(tmp_path: Path
     await cards.store_unsent_card("txn-stranded", "!room:localhost", _claimed_card_body("stranded-approval"))
     # The homeserver already has this card; the repeat resolves to that event.
     sender = AsyncMock(return_value=SentApprovalEvent("$stranded"))
-    editor = AsyncMock(return_value=True)
+    editor, edited = _signalling_editor()
     restarted = initialize_approval_store(
         test_runtime_paths(tmp_path),
         sender=sender,
@@ -1448,8 +1459,7 @@ async def test_a_restart_adopts_a_card_whose_send_never_came_back(tmp_path: Path
 
     assert (await restarted.discard_pending_on_startup()).discarded == 0
     async with asyncio.timeout(1):
-        while editor.await_count == 0:
-            await asyncio.sleep(0)
+        await edited.wait()
     # The repeat carries the stored transaction, which is the only reason it
     # can converge on the card already in the room instead of adding a second.
     assert sender.await_args.args == ("!room:localhost", "$thread", ANY, "txn-stranded")
@@ -1476,7 +1486,7 @@ async def test_a_restart_does_not_resend_a_card_it_already_has_an_event_for(tmp_
         {**_claimed_card_body("recorded-approval"), "event_id": "$recorded"},
     )
     sender = AsyncMock()
-    editor = AsyncMock(return_value=True)
+    editor, edited = _signalling_editor()
     restarted = initialize_approval_store(
         test_runtime_paths(tmp_path),
         sender=sender,
@@ -1488,8 +1498,7 @@ async def test_a_restart_does_not_resend_a_card_it_already_has_an_event_for(tmp_
 
     assert (await restarted.discard_pending_on_startup()).discarded == 0
     async with asyncio.timeout(1):
-        while editor.await_count == 0:
-            await asyncio.sleep(0)
+        await edited.wait()
     sender.assert_not_awaited()
     await restarted.shutdown(reason="test complete")
 
@@ -1596,7 +1605,7 @@ async def test_a_restart_adopts_and_expires_the_card_a_previous_device_left(tmp_
         sending_device_id="ANOTHERDEVICE",
     )
     sender = AsyncMock(return_value=SentApprovalEvent("$second-card"))
-    editor = AsyncMock(return_value=True)
+    editor, edited = _signalling_editor()
     locate_card = AsyncMock(return_value="$stranded")
     restarted = initialize_approval_store(
         test_runtime_paths(tmp_path),
@@ -1611,8 +1620,7 @@ async def test_a_restart_adopts_and_expires_the_card_a_previous_device_left(tmp_
 
     assert (await restarted.discard_pending_on_startup()).discarded == 0
     async with asyncio.timeout(1):
-        while editor.await_count == 0:
-            await asyncio.sleep(0)
+        await edited.wait()
     # Located by the approval id, which is device-independent, and never by the
     # transaction, which is not.
     assert locate_card.await_args.args == ("!room:localhost", "@mindroom_router:localhost", "stranded-approval")
@@ -1745,7 +1753,7 @@ async def test_a_restart_still_expires_an_acknowledged_card_from_another_device(
         {**_claimed_card_body("recorded-approval"), "event_id": "$recorded"},
     )
     sender = AsyncMock()
-    editor = AsyncMock(return_value=True)
+    editor, edited = _signalling_editor()
     restarted = initialize_approval_store(
         test_runtime_paths(tmp_path),
         sender=sender,
@@ -1758,8 +1766,7 @@ async def test_a_restart_still_expires_an_acknowledged_card_from_another_device(
 
     assert (await restarted.discard_pending_on_startup()).discarded == 0
     async with asyncio.timeout(1):
-        while editor.await_count == 0:
-            await asyncio.sleep(0)
+        await edited.wait()
     sender.assert_not_awaited()
     assert editor.await_args.args[:2] == ("!room:localhost", "$recorded")
     await restarted.shutdown(reason="test complete")

@@ -765,7 +765,7 @@ class _ApprovalManager:
             dropped_never_attempted=tally.dropped_never_attempted,
         )
 
-    async def _settle_recovered_card(  # noqa: PLR0911
+    async def _settle_recovered_card(
         self,
         *,
         room_id: str,

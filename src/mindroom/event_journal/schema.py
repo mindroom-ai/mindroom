@@ -426,6 +426,7 @@ _INDEXES = (
     """,
 )
 
+
 def _expand_byte_order(sql: str, dialect: _Dialect) -> str:
     """Spell the byte-order pin for one backend."""
     return sql.replace(_BYTE_ORDER_MARKER, dialect.order_by_bytes)

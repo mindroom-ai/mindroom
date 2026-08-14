@@ -121,7 +121,7 @@ def _native_identity(card: Mapping[str, Any]) -> tuple[str, int, str]:
     content = card.get("content")
     if not isinstance(content, dict):
         msg = "Approval card is missing native continuation identity."
-        raise ValueError(msg)
+        raise TypeError(msg)
     continuation_id = content.get("continuation_id")
     generation = content.get("continuation_generation")
     tool_call_id = content.get("tool_call_id")
@@ -705,23 +705,26 @@ def _card(row: Row) -> StoredApprovalCard | None:
             int(row["continuation_generation"]),
             cast("str", row["tool_call_id"]),
         )
-        if _native_identity(card) != stored_identity:
-            raise ValueError
-        return StoredApprovalCard(
-            card=card,
-            resolution=_resolution(row["resolution_json"]),
-            transaction_id=str(row["transaction_id"]),
-            card_event_id=row["card_event_id"],
-            attempted=bool(row["attempted"]),
-            sending_device_id=row["sending_device_id"],
-            created_at_ns=int(row["created_at_ns"]),
-            continuation_id=stored_identity[0],
-            continuation_generation=stored_identity[1],
-            tool_call_id=stored_identity[2],
-        )
+        card_identity = _native_identity(card)
+        resolution = _resolution(row["resolution_json"])
     except (json.JSONDecodeError, TypeError, ValueError):
         _log_unreadable_card(row)
         return None
+    if card_identity != stored_identity:
+        _log_unreadable_card(row)
+        return None
+    return StoredApprovalCard(
+        card=card,
+        resolution=resolution,
+        transaction_id=str(row["transaction_id"]),
+        card_event_id=row["card_event_id"],
+        attempted=bool(row["attempted"]),
+        sending_device_id=row["sending_device_id"],
+        created_at_ns=int(row["created_at_ns"]),
+        continuation_id=stored_identity[0],
+        continuation_generation=stored_identity[1],
+        tool_call_id=stored_identity[2],
+    )
 
 
 def _log_unreadable_card(row: Row) -> None:

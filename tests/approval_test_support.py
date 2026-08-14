@@ -112,7 +112,7 @@ class FakeApprovalCards:
         content = card.get("content")
         if not isinstance(content, dict):
             msg = "Approval card is missing native continuation identity."
-            raise ValueError(msg)
+            raise TypeError(msg)
         continuation_id = content.get("continuation_id")
         continuation_generation = content.get("continuation_generation")
         tool_call_id = content.get("tool_call_id")
@@ -123,7 +123,7 @@ class FakeApprovalCards:
             or not isinstance(tool_call_id, str)
         ):
             msg = "Approval card is missing native continuation identity."
-            raise ValueError(msg)
+            raise TypeError(msg)
         self.claimed.append(transaction_id)
         self._claims += 1
         self.rows[transaction_id] = _StoredRow(
