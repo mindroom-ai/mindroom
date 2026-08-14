@@ -233,6 +233,9 @@ _TABLES = (
         transaction_id TEXT NOT NULL,
         payload_json TEXT NOT NULL,
         edits_event_id TEXT,
+        -- A durable edit can be reserved before the INITIAL event ID exists.
+        -- Its claim waits until INITIAL acknowledgement fills the target.
+        edit_target_pending INTEGER NOT NULL DEFAULT 0,
         attempted INTEGER NOT NULL DEFAULT 0,
         -- The device whose transaction ID the homeserver may already hold. A
         -- transaction ID deduplicates within one device, so a row attempted by

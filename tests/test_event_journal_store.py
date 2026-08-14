@@ -194,6 +194,29 @@ def _install_legacy_delivery_state(connection: object, *, postgres: bool) -> Non
             20,
         ),
     )
+    unattempted_card_content = {
+        **card_content,
+        "approval_id": "approval-card-2",
+        "tool_call_id": "call-2",
+    }
+    insert(
+        "INSERT INTO approval_cards VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "router@shared",
+            ROOM,
+            "approval-unattempted-txn",
+            None,
+            0,
+            None,
+            json.dumps({"type": "io.mindroom.tool_approval", "content": unattempted_card_content}),
+            json.dumps({**unattempted_card_content, "status": "expired", "body": "Expired: shell"}),
+            "approval-1",
+            0,
+            "call-2",
+            0,
+            21,
+        ),
+    )
     context = {
         "run_id": "run-1",
         "session_id": "session-1",
@@ -214,6 +237,10 @@ def _install_legacy_delivery_state(connection: object, *, postgres: bool) -> Non
     insert(
         "INSERT INTO approval_continuation_calls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ("agent@alice", "approval-1", 0, "call-1", 0, "shell", "agent", 999_999, "approved", None),
+    )
+    insert(
+        "INSERT INTO approval_continuation_calls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("agent@alice", "approval-1", 0, "call-2", 1, "shell", "agent", 999_999, "expired", "departed"),
     )
 
 
@@ -259,9 +286,56 @@ async def _assert_legacy_delivery_state_migrated(store: EventJournalStore) -> No
     assert stored_card.delivery_id == "approval-txn"
     assert stored_card.resolution is not None
     assert stored_card.resolution["status"] == "approved"
+
+    unattempted = await router.load_matrix_delivery(
+        delivery_id="approval-unattempted-txn",
+        stage=DeliveryStage.INITIAL,
+    )
+    unattempted_terminal = await router.load_matrix_delivery(
+        delivery_id="approval-unattempted-txn",
+        stage=DeliveryStage.FINAL,
+    )
+    assert unattempted is not None
+    assert unattempted.attempted is False
+    assert unattempted.acknowledged_event_id is None
+    assert unattempted_terminal is not None
+    assert unattempted_terminal.payload["status"] == "expired"
+    migrated_debts = [
+        delivery
+        for delivery in await router.unacknowledged_matrix_deliveries(event_type="io.mindroom.tool_approval")
+        if delivery.delivery_id == "approval-unattempted-txn"
+    ]
+    assert [delivery.stage for delivery in migrated_debts] == [DeliveryStage.INITIAL, DeliveryStage.FINAL]
+
+    assert (
+        await router.claim_matrix_delivery(
+            delivery_id="approval-unattempted-txn",
+            stage=DeliveryStage.INITIAL,
+        )
+        is not None
+    )
+    await router.acknowledge_matrix_delivery(
+        delivery_id="approval-unattempted-txn",
+        stage=DeliveryStage.INITIAL,
+        event_id="$migrated-pending",
+        delivered_projections=(),
+    )
+    migrated_terminal = await router.load_matrix_delivery(
+        delivery_id="approval-unattempted-txn",
+        stage=DeliveryStage.FINAL,
+    )
+    assert migrated_terminal is not None
+    assert migrated_terminal.edits_event_id == "$migrated-pending"
+    claimed_terminal = await router.claim_matrix_delivery(
+        delivery_id="approval-unattempted-txn",
+        stage=DeliveryStage.FINAL,
+    )
+    assert claimed_terminal is not None
+    assert claimed_terminal.edits_event_id == "$migrated-pending"
+
     continuation = await store.principal("agent@alice").approval_continuation("approval-1")
     assert continuation is not None
-    assert continuation.calls[0].decision is ApprovalDecision.APPROVED
+    assert [call.decision for call in continuation.calls] == [ApprovalDecision.APPROVED, ApprovalDecision.EXPIRED]
 
 
 # How long a claimer that is already inside its transaction waits for a second

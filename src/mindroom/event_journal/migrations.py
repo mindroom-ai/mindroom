@@ -47,6 +47,15 @@ def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: boo
             transaction.execute(
                 "ALTER TABLE matrix_delivery_outbox ADD COLUMN event_type TEXT NOT NULL DEFAULT 'm.room.message'",
             )
+    if _table_exists(transaction, "matrix_delivery_outbox", postgres=postgres) and not _column_exists(
+        transaction,
+        "matrix_delivery_outbox",
+        "edit_target_pending",
+        postgres=postgres,
+    ):
+        transaction.execute(
+            "ALTER TABLE matrix_delivery_outbox ADD COLUMN edit_target_pending INTEGER NOT NULL DEFAULT 0",
+        )
     legacy_approvals = _column_exists(transaction, "approval_cards", "transaction_id", postgres=postgres)
     if legacy_approvals:
         transaction.execute("ALTER TABLE approval_cards RENAME TO approval_cards_legacy_delivery")
@@ -119,13 +128,16 @@ def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approv
         if row["resolution_json"] is None:
             continue
         resolution = _object_json(row["resolution_json"], description="approval resolution")
+        # A departure could decide a legacy card before its first send. Recovery
+        # must publish that initial before this edit; ``final`` sorts before
+        # ``initial`` when scan timestamps tie, so preserve their causal order.
         transaction.execute(
             """
             INSERT INTO matrix_delivery_outbox (
                 principal_id, delivery_id, stage, event_type, room_id, thread_id,
-                transaction_id, payload_json, edits_event_id, attempted,
+                transaction_id, payload_json, edits_event_id, edit_target_pending, attempted,
                 sending_device_id, acknowledged_event_id, created_at_ns
-            ) VALUES (?, ?, 'final', ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?)
+            ) VALUES (?, ?, 'final', ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?)
             ON CONFLICT (principal_id, delivery_id, stage) DO NOTHING
             """,
             (
@@ -137,7 +149,8 @@ def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approv
                 delivery_transaction_id(str(row["principal_id"]), delivery_id, "final"),
                 _encoded(resolution),
                 row["card_event_id"],
-                int(row["created_at_ns"]),
+                int(row["card_event_id"] is None),
+                int(row["created_at_ns"]) + 1,
             ),
         )
     transaction.execute("DROP TABLE approval_cards_legacy_delivery")

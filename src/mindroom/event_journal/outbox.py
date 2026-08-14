@@ -183,7 +183,7 @@ def claim(
     _lock_delivery_stages(transaction, principal_id, delivery_id)
     current = transaction.fetchone(
         """
-        SELECT attempted, edits_event_id FROM matrix_delivery_outbox
+        SELECT attempted, edits_event_id, edit_target_pending FROM matrix_delivery_outbox
         WHERE principal_id = ? AND delivery_id = ? AND stage = ?
         """,
         (principal_id, delivery_id, stage.value),
@@ -193,12 +193,12 @@ def claim(
     if stage is DeliveryStage.INITIAL and not bool(current["attempted"]):
         final = transaction.fetchone(
             """
-            SELECT 1 AS present FROM matrix_delivery_outbox
+            SELECT edit_target_pending FROM matrix_delivery_outbox
             WHERE principal_id = ? AND delivery_id = ? AND stage = ?
             """,
             (principal_id, delivery_id, DeliveryStage.FINAL.value),
         )
-        if final is not None:
+        if final is not None and not bool(final["edit_target_pending"]):
             transaction.execute(
                 """
                 DELETE FROM matrix_delivery_outbox
@@ -207,7 +207,27 @@ def claim(
                 (principal_id, delivery_id, DeliveryStage.INITIAL.value),
             )
             return None
-    if stage is DeliveryStage.FINAL and current["edits_event_id"] is None:
+    current_edits_event_id = current["edits_event_id"]
+    if stage is DeliveryStage.FINAL and bool(current["edit_target_pending"]):
+        initial = transaction.fetchone(
+            """
+            SELECT acknowledged_event_id FROM matrix_delivery_outbox
+            WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+            """,
+            (principal_id, delivery_id, DeliveryStage.INITIAL.value),
+        )
+        if initial is None or initial["acknowledged_event_id"] is None:
+            return None
+        current_edits_event_id = initial["acknowledged_event_id"]
+        transaction.execute(
+            """
+            UPDATE matrix_delivery_outbox
+            SET edits_event_id = ?, edit_target_pending = 0
+            WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+            """,
+            (current_edits_event_id, principal_id, delivery_id, DeliveryStage.FINAL.value),
+        )
+    if stage is DeliveryStage.FINAL and current_edits_event_id is None:
         unresolved_initial = transaction.fetchone(
             """
             SELECT 1 AS present FROM matrix_delivery_outbox
@@ -308,9 +328,11 @@ def acknowledge(
     if bound is not None and stage is DeliveryStage.INITIAL:
         transaction.execute(
             """
-            UPDATE matrix_delivery_outbox SET edits_event_id = ?
+            UPDATE matrix_delivery_outbox
+            SET edits_event_id = ?, edit_target_pending = 0
             WHERE principal_id = ? AND delivery_id = ? AND stage = ?
-              AND edits_event_id IS NULL AND attempted = 0
+              AND attempted = 0
+              AND (edits_event_id IS NULL OR edit_target_pending = 1)
             """,
             (event_id, principal_id, delivery_id, DeliveryStage.FINAL.value),
         )
