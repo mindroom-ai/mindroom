@@ -183,17 +183,31 @@ class ApprovalMatrixTransport:
     async def reconcile_unavailable_entities(self, entity_names: Iterable[str]) -> None:
         """Fail closed continuations whose owner cannot ever run them."""
         names = set(entity_names)
-        journal = None if self.journal_provider is None else self.journal_provider()
-        if not names or journal is None:
+        if not names:
             return
+        if not await self._reconcile_unavailable_owner_pages(names):
+            self._startup_cleanup_done = False
+            self._schedule_startup_cleanup_retry()
+
+    async def _reconcile_unavailable_owner_pages(self, entity_names: set[str] | None) -> bool:
+        """Settle unavailable owners across one complete cursor scan."""
+        journal = None if self.journal_provider is None else self.journal_provider()
+        if journal is None:
+            return True
         complete = True
         cursor: tuple[str, str] | None = None
         while True:
-            owners = await journal.approval_continuations_for_entities(
-                names,
-                limit=_UNAVAILABLE_OWNER_SCAN_LIMIT,
-                after=cursor,
-            )
+            if entity_names is None:
+                owners = await journal.approval_continuations(
+                    limit=_UNAVAILABLE_OWNER_SCAN_LIMIT,
+                    after=cursor,
+                )
+            else:
+                owners = await journal.approval_continuations_for_entities(
+                    entity_names,
+                    limit=_UNAVAILABLE_OWNER_SCAN_LIMIT,
+                    after=cursor,
+                )
             if not owners:
                 break
             cursor = (owners[-1][1].entity_name, owners[-1][1].approval_id)
@@ -203,9 +217,7 @@ class ApprovalMatrixTransport:
                     complete = await self._discard_unavailable(principal_id, continuation, reason) and complete
             if len(owners) < _UNAVAILABLE_OWNER_SCAN_LIMIT:
                 break
-        if not complete:
-            self._startup_cleanup_done = False
-            self._schedule_startup_cleanup_retry()
+        return complete
 
     @staticmethod
     def _is_unavailable_notice(event_source: Mapping[str, Any], *, approval_id: str) -> bool:
@@ -337,26 +349,7 @@ class ApprovalMatrixTransport:
 
     async def _reconcile_startup_unavailable(self) -> bool:
         """Clean rows left by entities removed while the process was offline."""
-        journal = None if self.journal_provider is None else self.journal_provider()
-        if journal is None:
-            return True
-        complete = True
-        cursor: tuple[str, str] | None = None
-        while True:
-            owners = await journal.approval_continuations(
-                limit=_UNAVAILABLE_OWNER_SCAN_LIMIT,
-                after=cursor,
-            )
-            if not owners:
-                break
-            cursor = (owners[-1][1].entity_name, owners[-1][1].approval_id)
-            for principal_id, continuation in owners:
-                reason = self._unavailable_entity_reason(continuation.entity_name)
-                if reason is not None:
-                    complete = await self._discard_unavailable(principal_id, continuation, reason) and complete
-            if len(owners) < _UNAVAILABLE_OWNER_SCAN_LIMIT:
-                break
-        return complete
+        return await self._reconcile_unavailable_owner_pages(None)
 
     async def _approval_thread_relation(
         self,
