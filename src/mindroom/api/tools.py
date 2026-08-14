@@ -334,7 +334,9 @@ def _update_tools_statuses(
         auth_provider = tool.get("auth_provider")
         if auth_provider:
             provider = context.oauth_providers.get(auth_provider)
-            use_request_target = provider is not None and context.worker_target is not None
+            use_request_target = (
+                provider is not None and provider.requester_scoped_credentials and context.worker_target is not None
+            )
             manual_auth_configured = _check_manual_oauth_fallback_configured(
                 tool,
                 (

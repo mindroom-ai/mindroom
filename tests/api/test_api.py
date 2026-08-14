@@ -1,6 +1,7 @@
 """Tests for the dashboard backend API endpoints."""
 
 import asyncio
+import copy
 import json
 import os
 import threading
@@ -1940,6 +1941,77 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     assert connected_tool["status"] == "available"
 
 
+def test_get_tools_non_requester_oauth_keeps_non_authoritative_shared_preview(
+    test_client: TestClient,
+) -> None:
+    """Existing OAuth providers must not expose requester stores through non-authoritative status."""
+    runtime_paths = use_trusted_upstream_runtime(main.app)
+    config = _config_with_worker_scope(
+        "user",
+        authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google_drive_oauth_client",
+        {"client_id": "client-id", "client_secret": "client-secret"},
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    oauth_target = resolve_worker_target("user", "general", execution_identity=identity)
+    save_scoped_credentials(
+        "google_drive_oauth",
+        {
+            "token": "drive-token",
+            "refresh_token": "drive-refresh-token",
+            "client_id": "client-id",
+            "scopes": [
+                "openid",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "https://www.googleapis.com/auth/userinfo.profile",
+                "https://www.googleapis.com/auth/drive",
+            ],
+            "_source": "oauth",
+            "_oauth_provider": "google_drive",
+        },
+        credentials_manager=manager,
+        worker_target=oauth_target,
+    )
+    tools = [
+        {
+            "name": "google_drive",
+            "display_name": "Google Drive",
+            "description": "Drive access",
+            "category": "productivity",
+            "status": "requires_config",
+            "setup_type": "oauth",
+            "auth_provider": "google_drive",
+            "config_fields": [],
+        },
+    ]
+    headers = trusted_upstream_headers(
+        user_id="alice",
+        email="alice@example.org",
+        matrix_user_id="@alice:example.org",
+    )
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["status_authoritative"] is False
+    assert response.json()["tools"][0]["status"] == "requires_config"
+
+
 def test_get_tools_marks_google_oauth_tool_available_with_service_account(
     test_client: TestClient,
     tmp_path: Path,
@@ -2077,11 +2149,9 @@ def test_get_tools_reports_requester_scoped_github_manual_fallback(test_client: 
 
     with (
         patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
-        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+        patch("mindroom.api.tools.export_tools_metadata", side_effect=lambda *_: copy.deepcopy(tools)),
     ):
         alice_response = test_client.get("/api/tools/?agent_name=general", headers=alice_headers)
-        tools[0]["status"] = "requires_config"
-        tools[0].pop("manual_auth_configured", None)
         bob_response = test_client.get("/api/tools/?agent_name=general", headers=bob_headers)
 
     assert alice_response.status_code == 200

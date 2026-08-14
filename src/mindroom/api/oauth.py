@@ -138,6 +138,7 @@ def _resolve_oauth_credentials_target(
     execution_scope_override: WorkerScope | None = None,
 ) -> RequestCredentialsTarget:
     if provider.requester_scoped_credentials:
+        # Requester-scoped providers always bind to the user's store, so agent scope overrides cannot change it.
         return resolve_requester_credentials_target(
             request,
             agent_name=agent_name,

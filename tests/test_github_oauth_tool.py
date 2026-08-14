@@ -5,8 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
-import importlib.util
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -22,6 +20,7 @@ from mindroom.credentials import (
     load_scoped_credentials,
     save_scoped_credentials,
 )
+from mindroom.custom_tools.github import GithubTools
 from mindroom.oauth.providers import OAuthRefreshRejectedError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 
@@ -101,10 +100,7 @@ def _oauth_target(requester_id: str) -> ResolvedWorkerTarget:
 
 
 def _tool_class() -> type[Any]:
-    spec = importlib.util.find_spec("mindroom.custom_tools.github")
-    assert spec is not None, "the MindRoom GitHub wrapper module is missing"
-    module = importlib.import_module("mindroom.custom_tools.github")
-    return module.GithubTools
+    return GithubTools
 
 
 def _save_client_config(runtime_paths: RuntimePaths) -> CredentialsManager:

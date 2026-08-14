@@ -599,7 +599,7 @@ Some tools need additional setup:
 - **telegram** - Create a Telegram bot and get token
 - **email** - Configure SMTP server details
 
-### Tools requiring OAuth:
+### Tools requiring OAuth or credentials:
 - **github** - GitHub App user OAuth, with an explicit access token or `GITHUB_ACCESS_TOKEN` as a higher-precedence alternative
 - **gmail**, **google_calendar**, **google_docs**, **google_drive**, **google_sheets** - Google OAuth
 - **homeassistant** - Home Assistant OAuth or long-lived access token

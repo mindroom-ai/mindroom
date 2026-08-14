@@ -5,8 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
-import importlib.util
 import time
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -14,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.service import refresh_scoped_oauth_credentials
 
 if TYPE_CHECKING:
@@ -31,10 +30,7 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 
 def _provider() -> OAuthProvider:
-    spec = importlib.util.find_spec("mindroom.oauth.github")
-    assert spec is not None, "the built-in GitHub OAuth provider module is missing"
-    module = importlib.import_module("mindroom.oauth.github")
-    return module.github_oauth_provider()
+    return github_oauth_provider()
 
 
 def _save_client_config(runtime_paths: RuntimePaths) -> None:

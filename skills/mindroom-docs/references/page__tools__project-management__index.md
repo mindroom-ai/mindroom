@@ -46,7 +46,7 @@ The file-management surface includes `create_file()`, `get_file_content()`, `upd
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `access_token` | `password` | `no` | `null` | Optional explicit GitHub access token; takes precedence over OAuth when set. |
+| `access_token` | `password` | `no` | `null` | Optional explicit GitHub access token; takes precedence over OAuth when non-blank. |
 | `base_url` | `url` | `no` | `null` | Optional GitHub Enterprise API base URL such as `https://github.example.com/api/v3`. |
 
 ### OAuth Setup
@@ -59,7 +59,8 @@ When a requester has not connected GitHub, tool calls return a structured `OAuth
 MindRoom refreshes expiring access tokens through the existing scoped OAuth refresh flow and persists rotated access and refresh tokens.
 
 Choose **Use access token** instead to save an explicit token, or set `GITHUB_ACCESS_TOKEN` in the runtime environment.
-An explicit token always takes precedence over requester-scoped OAuth credentials.
+A non-blank saved `access_token` takes precedence over a non-blank `GITHUB_ACCESS_TOKEN`, which takes precedence over requester-scoped OAuth credentials.
+Whitespace-only token values are treated as absent.
 
 ### Example
 
