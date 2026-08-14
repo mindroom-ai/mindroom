@@ -147,7 +147,9 @@ def _table_exists(transaction: Transaction, table: str, *, postgres: bool) -> bo
     if postgres:
         row = transaction.fetchone("SELECT to_regclass(?) AS table_name", (table,))
         return row is not None and row["table_name"] is not None
-    return transaction.fetchone("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)) is not None
+    return (
+        transaction.fetchone("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)) is not None
+    )
 
 
 def _column_exists(transaction: Transaction, table: str, column: str, *, postgres: bool) -> bool:
