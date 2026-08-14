@@ -359,6 +359,54 @@ def test_router_limited_sync_invalidates_before_timeline_admission(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["classic", "sliding"])
+async def test_router_departure_revokes_grant_before_timeline_admission(
+    tmp_path: Path,
+    transport: str,
+) -> None:
+    """A final router departure must close its grant before sibling timeline events are admitted."""
+    room_id = "!grant:localhost"
+    second_room_id = "!second-grant:localhost"
+    sender_id = "@alice:localhost"
+    bot, _orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot.config.authorization.agent_reply_permissions = {
+        "router": AgentReplyPermission(joined_rooms=["grant", "second-grant"]),
+    }
+    state = MatrixState.load(runtime_paths=bot.runtime_paths)
+    state.add_room("grant", room_id, "#grant:localhost", "Grant")
+    state.add_room("second-grant", second_room_id, "#second-grant:localhost", "Second Grant")
+    state.save(runtime_paths=bot.runtime_paths)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id, second_room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[
+            nio.RoomMember(bot.agent_user.user_id, None, None),
+            nio.RoomMember(sender_id, None, None),
+        ],
+        room_id=room_id,
+    )
+    await bot._runtime_view.agent_reply_memberships.refresh(bot.config, bot.runtime_paths, client)
+    response = (
+        _sync_response_with_room_membership_section(room_id, membership="leave")
+        if transport == "classic"
+        else _sliding_response_with_room_membership(room_id, membership="leave")
+    )
+    if isinstance(response, nio.SyncResponse):
+        response.rooms.leave[second_room_id] = response.rooms.leave[room_id]
+    else:
+        response.rooms[second_room_id] = nio.SlidingSyncRoom(membership="leave")
+
+    bot._before_sync_response_admission(response)
+
+    assert not bot._runtime_view.agent_reply_memberships.is_allowed(
+        sender_id,
+        ["grant", "second-grant"],
+        bot.config.authorization,
+    )
+    assert bot._reply_membership_refresh_pending
+
+
+@pytest.mark.asyncio
 async def test_failed_membership_refresh_is_backed_off_between_sync_responses(tmp_path: Path) -> None:
     """An unavailable grant room must not cause one Matrix API refresh for every incoming message."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)

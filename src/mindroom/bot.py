@@ -1823,11 +1823,30 @@ class AgentBot:
             self._journal_dispatcher.timeline_member_provenance.clear()
 
     def _before_sync_response_admission(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
-        """Fail closed on a visible sync gap before nio admits its timeline."""
-        if self.agent_name != ROUTER_AGENT_NAME or not _sync_response_has_uncertain_membership(response):
+        """Fail closed on a sync gap or router departure before timeline admission."""
+        if self.agent_name != ROUTER_AGENT_NAME:
             return
-        self._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
-        self._preinvalidated_sync_response = response
+        if _sync_response_has_uncertain_membership(response):
+            self._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+            self._preinvalidated_sync_response = response
+            return
+
+        membership = (
+            own_membership_from_sync(response, self_user_id=self.agent_user.user_id)
+            if isinstance(response, nio.SyncResponse)
+            else own_membership_from_sliding_sync(response, self_user_id=self.agent_user.user_id)
+        )
+        grant_room_departed = False
+        for room_id in membership.left_room_ids:
+            room_was_grant = self._runtime_view.agent_reply_memberships.mark_control_room_unready(
+                self.config,
+                self.runtime_paths,
+                room_id,
+                reason="control_client_departed",
+            )
+            grant_room_departed = room_was_grant or grant_room_departed
+        if grant_room_departed:
+            self._schedule_agent_reply_membership_refresh()
 
     async def _apply_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Apply one certified sync response through its transport owners."""
