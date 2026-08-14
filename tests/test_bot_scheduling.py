@@ -495,6 +495,7 @@ class TestBotTaskRestoration:
             # Mock the necessary methods
             with (
                 patch("mindroom.matrix.users.login") as mock_login,
+                patch("mindroom.bot.set_before_sync_response_callback") as set_before_sync_response_callback,
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
@@ -521,6 +522,10 @@ class TestBotTaskRestoration:
                 # Verify restore was called for the room with config
                 mock_restore.assert_called_once()
                 assert mock_restore.call_args.args[1] == "!test:server"
+                set_before_sync_response_callback.assert_called_once_with(
+                    mock_client,
+                    bot._before_sync_response_admission,
+                )
 
                 # Just verify restore was called - logger testing is complex with the bind() method
                 assert mock_restore.called

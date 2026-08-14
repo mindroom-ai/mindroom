@@ -1080,6 +1080,7 @@ async def test_orchestrated_entity_start_defers_turn_recovery_to_coordinator(
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch("mindroom.bot.set_before_sync_response_callback") as set_before_sync_response_callback,
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
     ):
@@ -1090,6 +1091,10 @@ async def test_orchestrated_entity_start_defers_turn_recovery_to_coordinator(
     # replay stays gated until the coordinator releases it.
     start_worker.assert_called_once_with()
     release_turn_replay.assert_not_called()
+    if agent_name == ROUTER_AGENT_NAME:
+        set_before_sync_response_callback.assert_called_once_with(client, bot._before_sync_response_admission)
+    else:
+        set_before_sync_response_callback.assert_not_called()
 
 
 @pytest.mark.asyncio
