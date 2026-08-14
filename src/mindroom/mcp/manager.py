@@ -11,8 +11,6 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
 import mcp.types as mcp_types
-from authlib.common.errors import AuthlibBaseError
-from httpx import HTTPError
 from mcp import ClientSession
 
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
@@ -342,8 +340,6 @@ class MCPServerManager:
                 has_refresh_token = exc.refresh_had_token
             if exc.refresh_expires_at is not None:
                 expires_at = exc.refresh_expires_at
-        cause = exc.__cause__
-        safe_cause = isinstance(cause, AuthlibBaseError | HTTPError)
         logger.warning(
             "MCP OAuth token refresh failed",
             provider_id=provider_id,
@@ -351,11 +347,7 @@ class MCPServerManager:
             has_refresh_token=has_refresh_token,
             expires_at=expires_at,
             error_type=type(exc).__name__,
-            error=str(exc),
-            oauth_error=exc.oauth_error,
-            error_description=exc.oauth_error_description,
-            cause_type=type(cause).__name__ if safe_cause else None,
-            cause=str(cause) if safe_cause else None,
+            refresh_rejected=isinstance(exc, OAuthRefreshRejectedError),
         )
 
     @staticmethod

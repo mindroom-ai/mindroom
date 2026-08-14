@@ -607,6 +607,34 @@ def test_agent_role_keeps_direct_toolkit_local_when_worker_routing_is_requested(
 
 
 @patch("mindroom.agent_storage.SqliteDb")
+def test_agent_role_keeps_oauth_connections_local_when_worker_routing_is_requested(
+    _mock_storage: MagicMock,  # noqa: PT019
+    tmp_path: Path,
+) -> None:
+    """Credential-reset authority must stay in the primary runtime with full request context."""
+    config = _test_config()
+    config.agents["general"].tools = ["oauth_connections"]
+    config.agents["general"].include_default_tools = False
+    config.agents["general"].worker_tools = ["oauth_connections"]
+    config.agents["general"].worker_scope = "user_agent"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+        },
+    )
+
+    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
+
+    assert [tool.name for tool in agent.tools] == ["oauth_connections"]
+    assert "All available tools run in the primary MindRoom runtime: `oauth_connections`." in agent.role
+    assert "No tools use a worker runtime." in agent.role
+    assert "Worker backend:" not in agent.role
+
+
+@patch("mindroom.agent_storage.SqliteDb")
 def test_restricted_agent_omits_tool_execution_environment(
     _mock_storage: MagicMock,  # noqa: PT019
 ) -> None:

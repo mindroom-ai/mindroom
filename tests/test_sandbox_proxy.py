@@ -5763,6 +5763,7 @@ class TestWorkerToolsOverride:
             "google_sheets",
             "homeassistant",
             "invite_router",
+            "oauth_connections",
             "todo",
         ],
     )

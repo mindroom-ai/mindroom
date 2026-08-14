@@ -535,7 +535,7 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
 
         async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, object]:
             error = "invalid_grant"
-            description = "refresh grant rejected"
+            description = "refresh grant rejected: provider-token-value"
             raise OAuthError(error, description)
 
     monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", RejectingOAuth2Client)
@@ -560,14 +560,11 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
         "has_refresh_token": True,
         "expires_at": 900.0,
         "error_type": "OAuthRefreshRejectedError",
-        "error": "OAuth token refresh failed: invalid_grant: refresh grant rejected",
-        "oauth_error": "invalid_grant",
-        "error_description": "refresh grant rejected",
-        "cause_type": "OAuthError",
-        "cause": "invalid_grant: refresh grant rejected",
+        "refresh_rejected": True,
     }
     assert "expired-access-token-secret" not in str(warning_call)
     assert "stored-refresh-token-secret" not in str(warning_call)
+    assert "provider-token-value" not in str(warning_call)
 
 
 @pytest.mark.asyncio
