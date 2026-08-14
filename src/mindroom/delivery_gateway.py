@@ -684,7 +684,6 @@ class DeliveryGateway:
         *,
         room_id: str,
         event_id: str,
-        content: dict[str, object] | None,
     ) -> ProjectedEvent | None:
         """Read one event's authoritative ordering metadata from Matrix."""
         client = self._client()
@@ -711,12 +710,10 @@ class DeliveryGateway:
         unsigned = source.get("unsigned") if isinstance(source, dict) else None
         if isinstance(unsigned, dict) and "redacted_because" in unsigned:
             return None
-        if content is None:
-            fetched_content = source.get("content") if isinstance(source, dict) else None
-            if not isinstance(fetched_content, dict):
-                msg = f"Matrix returned delivered event {event_id!r} without content"
-                raise _DeliveryObservationError(msg)
-            content = fetched_content
+        content = source.get("content") if isinstance(source, dict) else None
+        if not isinstance(content, dict):
+            msg = f"Matrix returned delivered event {event_id!r} without content"
+            raise _DeliveryObservationError(msg)
         return ProjectedEvent(
             event_id=event_id,
             room_id=room_id,
@@ -737,7 +734,6 @@ class DeliveryGateway:
             target = await self._observe_matrix_event(
                 room_id=claimed.room_id,
                 event_id=claimed.edits_event_id,
-                content=None,
             )
             if target is None:
                 return ()
@@ -745,7 +741,6 @@ class DeliveryGateway:
         delivered = await self._observe_matrix_event(
             room_id=claimed.room_id,
             event_id=event_id,
-            content=dict(claimed.payload),
         )
         if delivered is None:
             return ()

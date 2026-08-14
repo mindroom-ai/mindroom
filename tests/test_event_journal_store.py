@@ -824,10 +824,9 @@ class TestEditReduction:
     async def test_edit_churn_leaves_one_row_and_no_history(
         self,
         alice: PrincipalStore,
-        journal_store: EventJournalStore,
         edit_count: int,
     ) -> None:
-        """Streaming rewrites one row and creates no interactive revision ledger."""
+        """Streaming rewrites one projected row rather than accumulating messages."""
         await admit(alice, "$original", content=text("chunk 0"))
         for index in range(1, edit_count + 1):
             await admit(
@@ -841,11 +840,6 @@ class TestEditReduction:
         assert len(page.messages) == 1
         assert page.messages[0].content["body"] == f"chunk {edit_count}"
         assert page.messages[0].logical_event_id == "$original"
-        revision_count = await journal_store.backend.read(
-            lambda transaction: transaction.fetchone("SELECT COUNT(*) AS count FROM interactive_revision_order"),
-        )
-        assert revision_count is not None
-        assert revision_count["count"] == 0
 
 
 class TestRedaction:
@@ -1628,6 +1622,46 @@ class TestLatestVisibleEvent:
 class TestProjectedInteractivePrompts:
     """The Matrix-visible revision is the sole active-prompt authority."""
 
+    @pytest.mark.parametrize(
+        ("prompt_event_id", "prompt_ts", "reaction_event_id", "reaction_ts"),
+        [
+            ("$target", 2_000, "$reaction", 1_000),
+            ("$z-target", 2_000, "$a-reaction", 2_000),
+        ],
+    )
+    async def test_reaction_snapshots_the_current_prompt_without_comparing_origin_clocks(
+        self,
+        alice: PrincipalStore,
+        prompt_event_id: str,
+        prompt_ts: int,
+        reaction_event_id: str,
+        reaction_ts: int,
+    ) -> None:
+        """Admission order is local truth; unrelated Matrix origin clocks are not causal order."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread", ts=500)
+        await admit(
+            alice,
+            prompt_event_id,
+            sender="alice",
+            thread_id="$thread",
+            ts=prompt_ts,
+            content=interactive_prompt("Choose?", "yes", source_event_id="$turn"),
+        )
+
+        await admit(
+            alice,
+            reaction_event_id,
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content(prompt_event_id, "1"),
+            thread_id="$thread",
+            ts=reaction_ts,
+        )
+
+        selection = await alice.claim_interactive_reaction(source_event_id=reaction_event_id)
+        assert selection is not None
+        assert (selection.question_text, selection.selected_value) == ("Choose?", "yes")
+
     async def test_delivery_acknowledgement_projects_a_prompt_before_its_echo(
         self,
         alice: PrincipalStore,
@@ -1671,138 +1705,6 @@ class TestProjectedInteractivePrompts:
             selected_value="yes",
             thread_id="$thread",
         )
-
-    async def test_reaction_uses_the_prompt_visible_at_its_matrix_order(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A proactively projected newer edit cannot reinterpret an older click."""
-        await admit(alice, "$turn", sender=BOB, thread_id="$thread", ts=1_000)
-        await admit(
-            alice,
-            "$target",
-            sender="alice",
-            thread_id="$thread",
-            ts=2_000,
-            content=interactive_prompt("Old?", "old", source_event_id="$turn"),
-        )
-        await admit(
-            alice,
-            "$new-prompt",
-            sender="alice",
-            thread_id="$thread",
-            ts=4_000,
-            content=interactive_edit("$target", "New?", "new", source_event_id="$turn"),
-        )
-
-        await admit(
-            alice,
-            "$reaction",
-            sender=BOB,
-            kind=EventKind.REACTION,
-            content=reaction_content("$target", "1"),
-            thread_id="$thread",
-            ts=3_000,
-        )
-
-        selection = await alice.claim_interactive_reaction(source_event_id="$reaction")
-        assert selection is not None
-        assert (selection.question_text, selection.selected_value) == ("Old?", "old")
-
-    async def test_numeric_answer_does_not_cross_an_intervening_plain_revision(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A plain edit visible at source order leaves no prompt to select."""
-        await admit(alice, "$turn", sender=BOB, thread_id="$thread", ts=1_000)
-        await admit(
-            alice,
-            "$target",
-            sender="alice",
-            thread_id="$thread",
-            ts=2_000,
-            content=interactive_prompt("Old?", "old", source_event_id="$turn"),
-        )
-        await admit(
-            alice,
-            "$plain",
-            sender="alice",
-            thread_id="$thread",
-            ts=3_000,
-            content=edit("$target", "Not a question"),
-        )
-        await admit(
-            alice,
-            "$new-prompt",
-            sender="alice",
-            thread_id="$thread",
-            ts=4_000,
-            content=interactive_edit("$target", "New?", "new", source_event_id="$turn"),
-        )
-
-        await admit(
-            alice,
-            "$numeric",
-            sender=BOB,
-            thread_id="$thread",
-            ts=3_500,
-            content=text("1"),
-        )
-
-        assert await alice.claim_interactive_text(source_event_id="$numeric") is None
-
-    async def test_reaction_uses_the_revision_visible_after_an_edit_redaction(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A redacted edit cannot mask the earlier prompt at source order."""
-        await admit(alice, "$turn", sender=BOB, thread_id="$thread", ts=1_000)
-        await admit(
-            alice,
-            "$target",
-            sender="alice",
-            thread_id="$thread",
-            ts=2_000,
-            content=interactive_prompt("Original?", "original", source_event_id="$turn"),
-        )
-        await admit(
-            alice,
-            "$deleted-prompt",
-            sender="alice",
-            thread_id="$thread",
-            ts=4_000,
-            content=interactive_edit("$target", "Deleted?", "deleted", source_event_id="$turn"),
-        )
-        await admit(
-            alice,
-            "$redaction",
-            sender=BOB,
-            kind=EventKind.REDACTION,
-            redacts="$deleted-prompt",
-            ts=5_000,
-        )
-        await admit(
-            alice,
-            "$future-prompt",
-            sender="alice",
-            thread_id="$thread",
-            ts=7_000,
-            content=interactive_edit("$target", "Future?", "future", source_event_id="$turn"),
-        )
-
-        await admit(
-            alice,
-            "$reaction",
-            sender=BOB,
-            kind=EventKind.REACTION,
-            content=reaction_content("$target", "1"),
-            thread_id="$thread",
-            ts=6_000,
-        )
-
-        selection = await alice.claim_interactive_reaction(source_event_id="$reaction")
-        assert selection is not None
-        assert (selection.question_text, selection.selected_value) == ("Original?", "original")
 
     async def test_interactive_source_waits_for_an_attempted_delivery_to_be_projected(
         self,
@@ -2149,34 +2051,6 @@ class TestProjectedInteractivePrompts:
                 "SELECT question_json FROM interactive_questions WHERE revision_event_id = ?",
                 ("$edit",),
             ),
-        )
-        assert rows == ()
-
-    async def test_redacting_a_prompt_target_removes_its_revision_ledger(
-        self,
-        alice: PrincipalStore,
-        journal_store: EventJournalStore,
-    ) -> None:
-        """Revision order cannot outlive the logical message that owns it."""
-        await admit(alice, "$turn", sender=BOB)
-        await admit(
-            alice,
-            "$target",
-            sender="alice",
-            content=interactive_prompt("Secret?", "secret", source_event_id="$turn"),
-        )
-
-        await admit(
-            alice,
-            "$redaction",
-            sender=BOB,
-            ts=2_000,
-            kind=EventKind.REDACTION,
-            redacts="$target",
-        )
-
-        rows = await journal_store.backend.read(
-            lambda transaction: transaction.fetchall("SELECT revision_event_id FROM interactive_revision_order"),
         )
         assert rows == ()
 

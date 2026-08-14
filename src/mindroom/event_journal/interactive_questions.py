@@ -135,11 +135,11 @@ def record_projected_prompt(
     sender: str,
     membership_epoch: int,
     content: Mapping[str, object],
-) -> bool:
-    """Record one authorized prompt and report whether this revision carries it."""
+) -> None:
+    """Record one authorized prompt revision."""
     prompt = interactive_prompt_from_content(content)
     if prompt is None or principal_id != f"{prompt.creator_agent}@{sender}":
-        return False
+        return
     prompt_membership_epoch = _prompt_membership_epoch(
         transaction,
         principal_id,
@@ -156,7 +156,7 @@ def record_projected_prompt(
             expected_membership_epoch=prompt_membership_epoch,
         )
     ):
-        return False
+        return
     transaction.execute(
         """
         INSERT INTO interactive_questions (
@@ -172,7 +172,6 @@ def record_projected_prompt(
             _prompt_json(prompt),
         ),
     )
-    return True
 
 
 def _selection_from_row(row: Row, selection_key: str) -> InteractiveSelection | None:
@@ -277,7 +276,7 @@ def _snapshot_reaction_candidate(  # noqa: PLR0911 - malformed or unrelated reac
         return False
     source = transaction.fetchone(
         """
-        SELECT membership_epoch, origin_server_ts
+        SELECT membership_epoch
         FROM journal_events
         WHERE principal_id = ? AND event_id = ? AND state = ?
         """,
@@ -286,13 +285,11 @@ def _snapshot_reaction_candidate(  # noqa: PLR0911 - malformed or unrelated reac
     if source is None:
         return True
     membership_epoch = int(source["membership_epoch"])
-    question_row = _question_row_at_source(
+    question_row = _active_question_row(
         transaction,
         principal_id,
         room_id=event.room_id,
         question_event_id=question_event_id,
-        source_event_id=event.event_id,
-        source_ts=int(source["origin_server_ts"]),
     )
     if (
         question_row is None
@@ -313,7 +310,7 @@ def _snapshot_reaction_candidate(  # noqa: PLR0911 - malformed or unrelated reac
     return True
 
 
-def _snapshot_text_candidate(  # noqa: PLR0911 - each invalid source shape is terminal
+def _snapshot_text_candidate(
     transaction: Transaction,
     principal_id: str,
     event: InboundEvent,
@@ -330,7 +327,7 @@ def _snapshot_text_candidate(  # noqa: PLR0911 - each invalid source shape is te
         return False
     source = transaction.fetchone(
         """
-        SELECT room_id, thread_id, membership_epoch, origin_server_ts
+        SELECT room_id, thread_id, membership_epoch
         FROM journal_events
         WHERE principal_id = ? AND event_id = ? AND state = ?
         """,
@@ -338,41 +335,22 @@ def _snapshot_text_candidate(  # noqa: PLR0911 - each invalid source shape is te
     )
     if source is None:
         return True
-    candidate_questions = transaction.fetchall(
+    question_row = transaction.fetchone(
         """
-        SELECT DISTINCT iq.question_event_id/*bytes*/ AS question_event_id
+        SELECT iq.question_event_id, iq.revision_event_id, iq.question_json,
+               vm.room_id, vm.thread_id, vm.membership_epoch, vm.revision_ts
         FROM interactive_questions AS iq
         JOIN visible_messages AS vm
           ON vm.principal_id = iq.principal_id
          AND vm.room_id = iq.room_id
          AND vm.logical_event_id = iq.question_event_id
+         AND vm.revision_event_id = iq.revision_event_id
         WHERE iq.principal_id = ? AND vm.room_id = ? AND vm.thread_id = ?
           AND vm.membership_epoch = ? AND iq.consumed_by_source_event_id IS NULL
-        ORDER BY iq.question_event_id/*bytes*/
+        ORDER BY vm.revision_ts, iq.question_event_id/*bytes*/
+        LIMIT 1
         """,
         (principal_id, source["room_id"], source["thread_id"], source["membership_epoch"]),
-    )
-    source_ts = int(source["origin_server_ts"])
-    questions = tuple(
-        row
-        for question in candidate_questions
-        if (
-            row := _question_row_at_source(
-                transaction,
-                principal_id,
-                room_id=str(source["room_id"]),
-                question_event_id=str(question["question_event_id"]),
-                source_event_id=event.event_id,
-                source_ts=source_ts,
-            )
-        )
-        is not None
-    )
-    if not questions:
-        return True
-    question_row = min(
-        questions,
-        key=lambda row: (int(row["revision_ts"]), str(row["question_event_id"])),
     )
     if question_row is None or (selection := _selection_from_row(question_row, selection_key)) is None:
         return True
@@ -412,16 +390,14 @@ def _source_row(transaction: Transaction, principal_id: str, source_event_id: st
     )
 
 
-def _question_row_at_source(
+def _active_question_row(
     transaction: Transaction,
     principal_id: str,
     *,
     room_id: str,
     question_event_id: str,
-    source_event_id: str,
-    source_ts: int,
 ) -> Row | None:
-    """Lock one target and return the prompt revision visible at source order."""
+    """Lock one target and return its currently visible unconsumed prompt."""
     visible = transaction.fetchone(
         """
         UPDATE visible_messages
@@ -435,55 +411,18 @@ def _question_row_at_source(
         return None
     return transaction.fetchone(
         """
-        WITH revision_at_source AS (
-            SELECT revisions.revision_event_id, revisions.revision_ts
-            FROM interactive_revision_order AS revisions
-            WHERE revisions.principal_id = ? AND revisions.room_id = ?
-              AND revisions.logical_event_id = ?
-              AND (revisions.revision_ts, revisions.revision_event_id/*bytes*/) <= (?, ?)
-              AND (
-                  revisions.redacted_ts IS NULL
-                  OR (revisions.redacted_ts, revisions.redacted_by_event_id/*bytes*/) > (?, ?)
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM interactive_revision_order AS original
-                  WHERE original.principal_id = revisions.principal_id
-                    AND original.room_id = revisions.room_id
-                    AND original.logical_event_id = revisions.logical_event_id
-                    AND original.revision_event_id = revisions.logical_event_id
-                    AND original.redacted_ts IS NOT NULL
-                    AND (original.redacted_ts, original.redacted_by_event_id/*bytes*/) <= (?, ?)
-              )
-            ORDER BY revisions.revision_ts DESC, revisions.revision_event_id/*bytes*/ DESC
-            LIMIT 1
-        )
         SELECT iq.question_event_id, iq.revision_event_id, iq.question_json,
-               vm.room_id, vm.thread_id, vm.membership_epoch,
-               revision_at_source.revision_ts
-        FROM revision_at_source
-        JOIN interactive_questions AS iq
-          ON iq.principal_id = ?
-         AND iq.question_event_id = ?
-         AND iq.revision_event_id = revision_at_source.revision_event_id
+               vm.room_id, vm.thread_id, vm.membership_epoch, vm.revision_ts
+        FROM interactive_questions AS iq
         JOIN visible_messages AS vm
           ON vm.principal_id = iq.principal_id
          AND vm.room_id = iq.room_id
          AND vm.logical_event_id = iq.question_event_id
-        WHERE iq.consumed_by_source_event_id IS NULL
+         AND vm.revision_event_id = iq.revision_event_id
+        WHERE iq.principal_id = ? AND iq.question_event_id = ?
+          AND iq.consumed_by_source_event_id IS NULL
         """,
-        (
-            principal_id,
-            room_id,
-            question_event_id,
-            source_ts,
-            source_event_id,
-            source_ts,
-            source_event_id,
-            source_ts,
-            source_event_id,
-            principal_id,
-            question_event_id,
-        ),
+        (principal_id, question_event_id),
     )
 
 

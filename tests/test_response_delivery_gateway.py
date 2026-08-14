@@ -241,6 +241,43 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             "source_event_id": "$cause",
         }
 
+    async def test_adopted_event_projection_uses_the_content_matrix_returned(self, tmp_path: Path) -> None:
+        """Recovery must not project one frozen candidate onto a different adopted event."""
+        outbox = FakeOutbox()
+        frozen = {
+            "msgtype": "m.text",
+            "body": "Choose",
+            "io.mindroom.interactive": {
+                "creator_agent": "agent",
+                "option_labels": {"1": "Yes"},
+                "options": {"1": "yes"},
+                "question_text": "Choose?",
+                "source_event_id": "$cause",
+            },
+        }
+        await outbox.enqueue_delivery(
+            turn_id="$cause",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload=frozen,
+        )
+        claimed = await outbox.load_delivery(turn_id="$cause", stage=DeliveryStage.FINAL)
+        assert claimed is not None
+        gateway = _gateway(tmp_path, outbox)
+        visible = {"msgtype": "m.text", "body": "A different reply already in the room"}
+        gateway.deps.runtime.client.room_get_event.return_value = _delivered_event_response(
+            _ROOM_ID,
+            "$adopted",
+            content=visible,
+        )
+        gateway.deps.runtime.client.room_get_event.side_effect = None
+
+        projections = await gateway._observe_delivered(claimed, "$adopted")
+
+        assert len(projections) == 1
+        assert projections[0].content == visible
+
     async def test_an_edit_acknowledgement_projects_its_target_before_the_edit(self, tmp_path: Path) -> None:
         """A missed target echo cannot leave an acknowledged prompt edit unresolved."""
         outbox = FakeOutbox()

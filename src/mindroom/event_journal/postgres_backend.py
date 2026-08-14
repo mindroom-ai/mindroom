@@ -15,7 +15,8 @@ import psycopg
 from psycopg.rows import dict_row
 
 from .offloading import ThreadOffload
-from .schema import POSTGRES_DIALECT, approval_card_upgrade_statements, render, schema_statements
+from .schema import POSTGRES_DIALECT, render, schema_statements
+from .schema_migrations import migration_statements, validate_interactive_question_columns
 
 # An arbitrary constant that only this schema setup uses, so the lock it
 # takes cannot collide with an application advisory lock.
@@ -118,22 +119,18 @@ class PostgresBackend:
             cursor.execute(cast("LiteralString", f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK_KEY})"))
             cursor.execute(
                 """
-                SELECT 1
+                SELECT column_name
                 FROM information_schema.columns
                 WHERE table_schema = current_schema()
                   AND table_name = 'interactive_questions'
-                  AND column_name = 'claimed_source_event_id'
                 """,
             )
-            if cursor.fetchone() is not None:
-                msg = (
-                    "This event journal uses the incompatible pre-selection schema; "
-                    "recreate the event journal database before starting MindRoom"
-                )
-                raise RuntimeError(msg)
+            validate_interactive_question_columns(
+                frozenset(str(row["column_name"]) for row in cursor.fetchall()),
+            )
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
-            for statement in approval_card_upgrade_statements(POSTGRES_DIALECT):
+            for statement in migration_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
         self._writer.commit()
 

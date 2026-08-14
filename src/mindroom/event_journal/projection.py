@@ -244,13 +244,12 @@ def _project_original(
             membership_epoch,
         ),
     )
-    _record_revision(
+    record_projected_prompt(
         transaction,
         principal_id,
         room_id=event.room_id,
-        logical_event_id=event.event_id,
+        question_event_id=event.event_id,
         revision_event_id=event.event_id,
-        revision_ts=event.origin_server_ts,
         sender=event.sender,
         membership_epoch=membership_epoch,
         content=event.content,
@@ -297,13 +296,12 @@ def _apply_unresolved_edit(
     if _is_tombstoned(transaction, principal_id, event.room_id, held["edit_event_id"]):
         return
     content = visible_content(_loads(held["content_json"]))
-    _record_revision(
+    record_projected_prompt(
         transaction,
         principal_id,
         room_id=event.room_id,
-        logical_event_id=event.event_id,
+        question_event_id=event.event_id,
         revision_event_id=str(held["edit_event_id"]),
-        revision_ts=int(held["edit_ts"]),
         sender=event.sender,
         membership_epoch=membership_epoch,
         content=content,
@@ -345,13 +343,12 @@ def _project_edit(
     if current["sender"] != event.sender:
         return
     content = visible_content(event.content)
-    _record_revision(
+    record_projected_prompt(
         transaction,
         principal_id,
         room_id=event.room_id,
-        logical_event_id=target_event_id,
+        question_event_id=target_event_id,
         revision_event_id=event.event_id,
-        revision_ts=event.origin_server_ts,
         sender=event.sender,
         membership_epoch=membership_epoch,
         content=content,
@@ -370,55 +367,6 @@ def _project_edit(
         revision_ts=event.origin_server_ts,
         content=content,
         receipt_order=receipt_order,
-    )
-
-
-def _record_revision(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    room_id: str,
-    logical_event_id: str,
-    revision_event_id: str,
-    revision_ts: int,
-    sender: str,
-    membership_epoch: int,
-    content: Mapping[str, object],
-) -> None:
-    """Remember revision order only for logical messages that expose prompts."""
-    carries_prompt = record_projected_prompt(
-        transaction,
-        principal_id,
-        room_id=room_id,
-        question_event_id=logical_event_id,
-        revision_event_id=revision_event_id,
-        sender=sender,
-        membership_epoch=membership_epoch,
-        content=content,
-    )
-    transaction.execute(
-        """
-        INSERT INTO interactive_revision_order (
-            principal_id, room_id, logical_event_id, revision_event_id, revision_ts
-        )
-        SELECT ?, ?, ?, ?, ?
-        WHERE ? = 1 OR EXISTS (
-            SELECT 1 FROM interactive_revision_order
-            WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
-        )
-        ON CONFLICT (principal_id, room_id, revision_event_id) DO NOTHING
-        """,
-        (
-            principal_id,
-            room_id,
-            logical_event_id,
-            revision_event_id,
-            revision_ts,
-            int(carries_prompt),
-            principal_id,
-            room_id,
-            logical_event_id,
-        ),
     )
 
 
@@ -532,28 +480,6 @@ def _project_redaction(
     if target is None:
         return
     _record_tombstone(transaction, principal_id, event.room_id, target)
-    transaction.execute(
-        """
-        UPDATE interactive_revision_order
-        SET redacted_by_event_id = ?, redacted_ts = ?
-        WHERE principal_id = ? AND room_id = ? AND revision_event_id = ?
-          AND (
-              redacted_ts IS NULL
-              OR redacted_ts > ?
-              OR (redacted_ts = ? AND redacted_by_event_id/*bytes*/ > ?)
-          )
-        """,
-        (
-            event.event_id,
-            event.origin_server_ts,
-            principal_id,
-            event.room_id,
-            target,
-            event.origin_server_ts,
-            event.origin_server_ts,
-            event.event_id,
-        ),
-    )
     # Prompt revisions retain their text for replay and consumed-revision
     # proof, so a redaction must erase that payload explicitly. Selections
     # bound to the revision disappear through their foreign-key cascade.
@@ -682,13 +608,12 @@ def install_refetched_revision(
     )
     if row is None:
         return False
-    _record_revision(
+    record_projected_prompt(
         transaction,
         principal_id,
         room_id=room_id,
-        logical_event_id=logical_event_id,
+        question_event_id=logical_event_id,
         revision_event_id=revision_event_id,
-        revision_ts=revision_ts,
         sender=str(row["sender"]),
         membership_epoch=int(row["membership_epoch"]),
         content=content,
