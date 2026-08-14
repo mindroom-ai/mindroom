@@ -2519,6 +2519,7 @@ async def test_start_runtime_waits_for_authoritative_memberships_before_sync_and
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=blocked_setup),
         patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=runtime_ready.set),
     ):
@@ -2530,15 +2531,21 @@ async def test_start_runtime_waits_for_authoritative_memberships_before_sync_and
             assert not runtime_ready.is_set()
 
             setup_can_finish.set()
-            await asyncio.wait_for(
-                asyncio.gather(*(event.wait() for event in sync_started_by_entity.values())),
-                timeout=1.0,
-            )
+            await asyncio.wait_for(sync_started_by_entity["router"].wait(), timeout=1.0)
+            await asyncio.sleep(0)
+            assert not sync_started_by_entity["general"].is_set()
+            assert not runtime_ready.is_set()
+            assert orchestrator._response_admission_gate.closed
+            assert not orchestrator._response_admission_gate.close_if_idle()
+
+            await orchestrator.handle_bot_ready(router_bot)
+            await asyncio.wait_for(sync_started_by_entity["general"].wait(), timeout=1.0)
             await asyncio.wait_for(runtime_ready.wait(), timeout=1.0)
 
             setup_finished = call_order.index("setup_finished")
             assert setup_finished < call_order.index("sync_started:router")
-            assert setup_finished < call_order.index("sync_started:general")
+            assert call_order.index("sync_started:router") < call_order.index("sync_started:general")
+            assert not orchestrator._response_admission_gate.closed
         finally:
             setup_can_finish.set()
             await orchestrator.stop()

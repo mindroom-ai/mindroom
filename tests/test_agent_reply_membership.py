@@ -202,6 +202,7 @@ async def test_non_join_transition_revokes_ready_member(tmp_path: Path, membersh
 
     index.apply_member_event(
         config,
+        runtime_paths,
         room_id,
         _member_event("@alice:example.com", membership),
         control_user_id="@mindroom_router:example.com",
@@ -224,6 +225,7 @@ async def test_join_transition_adds_member_to_ready_snapshot(tmp_path: Path) -> 
 
     index.apply_member_event(
         config,
+        runtime_paths,
         room_id,
         _member_event("@alice:example.com", "join"),
         control_user_id="@mindroom_router:example.com",
@@ -254,6 +256,7 @@ async def test_alias_departure_preserves_other_joined_identity_for_canonical_use
 
     index.apply_member_event(
         config,
+        runtime_paths,
         room_id,
         _member_event("@telegram_alice:example.com", "leave"),
         control_user_id="@mindroom_router:example.com",
@@ -277,6 +280,7 @@ async def test_control_client_departure_marks_grant_room_unready(tmp_path: Path)
 
     index.apply_member_event(
         config,
+        runtime_paths,
         room_id,
         _member_event(router_user_id, "leave"),
         control_user_id=router_user_id,
@@ -323,13 +327,49 @@ async def test_authoritative_control_departure_fences_inflight_initial_snapshot(
     assert not index.is_allowed("@alice:example.com", ["project"], config.authorization)
 
 
+@pytest.mark.asyncio
+async def test_unrelated_membership_event_does_not_fence_inflight_refresh(tmp_path: Path) -> None:
+    """Only transitions from configured grant rooms can obsolete their snapshot."""
+    room_id = "!project:example.com"
+    config, runtime_paths = _runtime_config(tmp_path, joined_rooms=["project"])
+    _persist_room(runtime_paths, "project", room_id)
+    query_started = asyncio.Event()
+    release_query = asyncio.Event()
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        query_started.set()
+        await release_query.wait()
+        return _joined_members(room_id, "@alice:example.com")
+
+    client = AsyncMock()
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.side_effect = joined_members
+    index = AgentReplyMembershipIndex()
+    index.invalidate(config, reason="reload")
+    refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
+    await query_started.wait()
+
+    index.apply_member_event(
+        config,
+        runtime_paths,
+        "!unrelated:example.com",
+        _member_event("@bob:example.com", "leave"),
+        control_user_id="@mindroom_router:example.com",
+    )
+    release_query.set()
+    await refresh_task
+
+    assert index.is_allowed("@alice:example.com", ["project"], config.authorization)
+
+
 def test_transition_cannot_make_unready_room_authoritative(tmp_path: Path) -> None:
     """A single live join must not replace the missing full membership baseline."""
-    config, _runtime_paths = _runtime_config(tmp_path, joined_rooms=["project"])
+    config, runtime_paths = _runtime_config(tmp_path, joined_rooms=["project"])
     index = AgentReplyMembershipIndex()
 
     index.apply_member_event(
         config,
+        runtime_paths,
         "!project:example.com",
         _member_event("@alice:example.com", "join"),
         control_user_id="@mindroom_router:example.com",
@@ -460,6 +500,7 @@ async def test_live_transition_fences_refresh_for_newly_resolved_room(tmp_path: 
 
     index.apply_member_event(
         config,
+        runtime_paths,
         room_id,
         _member_event("@alice:example.com", "leave"),
         control_user_id="@mindroom_router:example.com",

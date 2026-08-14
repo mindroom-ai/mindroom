@@ -261,6 +261,11 @@ class _MultiAgentOrchestrator:
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
+    _router_reply_memberships_live_sync_ready: asyncio.Event = field(
+        default_factory=asyncio.Event,
+        init=False,
+        repr=False,
+    )
     _external_trigger_runtime: ExternalTriggerRuntimeCoordinator = field(init=False, repr=False)
     _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
     _startup_maintenance: StartupMaintenanceController = field(init=False, repr=False)
@@ -1262,6 +1267,8 @@ class _MultiAgentOrchestrator:
 
     async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
         """Handle bot-ready notifications through the public runtime protocol."""
+        if bot.agent_name == ROUTER_AGENT_NAME:
+            self._router_reply_memberships_live_sync_ready.set()
         await self._approval_transport.handle_bot_ready(bot)
         self._schedule_ready_turn_dispatch_recovery()
 
@@ -1315,6 +1322,7 @@ class _MultiAgentOrchestrator:
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
+        self._router_reply_memberships_live_sync_ready.clear()
         self._approval_transport.reset_startup_cleanup_gate()
         phase_started = log_startup_phase_started("wait_for_matrix_homeserver")
         await wait_for_matrix_homeserver(runtime_paths=self.runtime_paths)
@@ -1353,7 +1361,10 @@ class _MultiAgentOrchestrator:
 
         startup_cutoff_ms = int(time.time() * 1000)
         self._startup_maintenance.start(started_bots, config, startup_cutoff_ms=startup_cutoff_ms)
-        if self.agent_reply_memberships.needs_refresh(config.authorization):
+        room_membership_policy_configured = any(
+            policy.joined_rooms for policy in config.authorization.agent_reply_permissions.values()
+        )
+        if room_membership_policy_configured:
             set_runtime_starting("Establishing Matrix room memberships")
             await self._startup_maintenance.wait_for_rooms_and_memberships()
             router_bot.preserve_reply_memberships_on_next_sync_start()
@@ -1361,15 +1372,17 @@ class _MultiAgentOrchestrator:
         if runtime_shutdown_event.is_set():
             return
 
-        self._schedule_ready_turn_dispatch_recovery()
-
         # Expose live sync callbacks only after room-backed reply grants have an
         # authoritative startup snapshot.
         set_runtime_starting("Starting Matrix sync loops")
         phase_started = log_startup_phase_started("start_matrix_sync_loops")
-        for entity_name, bot in self.agent_bots.items():
-            if bot.running:
-                self._start_sync_task(entity_name, bot)
+        sync_started = await self._start_sync_tasks_after_membership_publication(
+            router_bot,
+            runtime_shutdown_event,
+            room_membership_policy_configured=room_membership_policy_configured,
+        )
+        if not sync_started:
+            return
         log_startup_phase_finished("start_matrix_sync_loops", phase_started)
 
         for entity_name in start_results.retryable_entities:
@@ -1384,6 +1397,57 @@ class _MultiAgentOrchestrator:
         # self._sync_tasks, so awaiting the initial task generation would let a
         # config-triggered restart look like normal orchestrator completion.
         await runtime_shutdown_event.wait()
+
+    async def _start_sync_tasks_after_membership_publication(
+        self,
+        router_bot: AgentBot | TeamBot,
+        runtime_shutdown_event: asyncio.Event,
+        *,
+        room_membership_policy_configured: bool,
+    ) -> bool:
+        """Start receive loops without exposing responders to a stale grant snapshot."""
+        self._schedule_ready_turn_dispatch_recovery()
+        if not room_membership_policy_configured:
+            for entity_name, bot in self.agent_bots.items():
+                if bot.running:
+                    self._start_sync_task(entity_name, bot)
+            return True
+
+        self._response_admission_gate.close()
+        try:
+            self._start_sync_task(ROUTER_AGENT_NAME, router_bot)
+            router_ready = await self._wait_for_router_reply_memberships_or_shutdown(runtime_shutdown_event)
+        finally:
+            self._response_admission_gate.reopen()
+        if not router_ready:
+            return False
+        for entity_name, bot in self.agent_bots.items():
+            if entity_name != ROUTER_AGENT_NAME and bot.running:
+                self._start_sync_task(entity_name, bot)
+        return True
+
+    async def _wait_for_router_reply_memberships_or_shutdown(
+        self,
+        runtime_shutdown_event: asyncio.Event,
+    ) -> bool:
+        """Wait until router sync closes the startup snapshot gap, or shutdown wins."""
+        ready_wait = asyncio.create_task(self._router_reply_memberships_live_sync_ready.wait())
+        shutdown_wait = asyncio.create_task(runtime_shutdown_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {ready_wait, shutdown_wait},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return (
+                shutdown_wait not in done
+                and ready_wait in done
+                and self._router_reply_memberships_live_sync_ready.is_set()
+            )
+        finally:
+            for task in (ready_wait, shutdown_wait):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(ready_wait, shutdown_wait, return_exceptions=True)
 
     async def _load_initial_config(self, new_config: Config) -> bool:
         """Handle config loading before the runtime has an active config."""

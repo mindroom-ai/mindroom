@@ -1887,6 +1887,7 @@ class AgentBot:
         for room_id, event in negative_member_events_from_sync(response):
             changed = index.apply_member_event(
                 self.config,
+                self.runtime_paths,
                 room_id,
                 event,
                 control_user_id=self.agent_user.user_id,
@@ -2689,6 +2690,7 @@ class AgentBot:
             return
         changed = self._runtime_view.agent_reply_memberships.apply_member_event(
             self.config,
+            self.runtime_paths,
             room_id,
             event,
             control_user_id=self.matrix_id.full_id,

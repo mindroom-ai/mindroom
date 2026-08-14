@@ -227,6 +227,7 @@ class AgentReplyMembershipIndex:
     def apply_member_event(
         self,
         config: Config,
+        runtime_paths: RuntimePaths,
         room_id: str,
         event: nio.RoomMemberEvent,
         *,
@@ -237,18 +238,25 @@ class AgentReplyMembershipIndex:
         if self._desired_signature != signature:
             return False
 
-        # Fence any in-flight authoritative query before inspecting the currently
-        # published room IDs. A newly configured room has no ID in the fail-closed
-        # snapshot yet, but a live transition for it must still prevent an older
-        # roster captured concurrently from being published.
-        self._epoch += 1
         snapshot = self._snapshot
         if snapshot.policy_signature != signature:
             return False
 
         matching_room_keys = tuple(room.room_key for room in snapshot.rooms if room.room_id == room_id)
         if not matching_room_keys:
+            state = matrix_state_for_runtime(runtime_paths)
+            matching_room_keys = tuple(
+                room.room_key
+                for room in snapshot.rooms
+                if (managed_room := state.rooms.get(room.room_key)) is not None and managed_room.room_id == room_id
+            )
+        if not matching_room_keys:
             return False
+
+        # A newly configured room can still lack an ID in the fail-closed
+        # snapshot. Its persisted managed-room identity nevertheless proves
+        # that a live transition must fence any older query in flight.
+        self._epoch += 1
 
         updated_rooms_tuple = tuple(
             _apply_transition_to_room(

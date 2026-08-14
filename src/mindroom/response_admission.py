@@ -89,7 +89,7 @@ class ResponseAdmissionGate:
 
     def close_if_idle(self) -> bool:
         """Close admission when no response is in flight, so an apply can start."""
-        if self._in_flight_response_count > 0:
+        if self._closed or self._in_flight_response_count > 0:
             return False
         self._closed = True
         self._open_event.clear()
