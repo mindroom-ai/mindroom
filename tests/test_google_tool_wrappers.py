@@ -9,9 +9,16 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from agno.tools.function import Function
+from google.auth.exceptions import RefreshError, TransportError
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
+from mindroom.credentials import (
+    CredentialsManager,
+    get_runtime_credentials_manager,
+    load_scoped_credentials,
+    save_scoped_credentials,
+)
 from mindroom.custom_tools import google_service
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
@@ -312,6 +319,148 @@ def test_scoped_oauth_client_connection_required_uses_shared_instruction(
     assert exc.provider_id == "google_drive"
     assert exc.connect_url == "https://connect.example.test"
     assert seen == [(GoogleDriveTools._oauth_provider, "https://connect.example.test")]
+
+
+@pytest.mark.parametrize(
+    ("refresh_error", "expected_reason", "credential_remains"),
+    [
+        (RefreshError("refresh rejected", {"error": "invalid_grant"}), "refresh_rejected", False),
+        (TransportError("provider unavailable"), None, True),
+    ],
+)
+def test_google_wrapper_refresh_failure_recovery_is_terminal_only(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+    refresh_error: Exception,
+    expected_reason: str | None,
+    credential_remains: bool,
+) -> None:
+    """Only a terminal Google refresh rejection should clear the current credential scope."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target(
+        "user_agent",
+        "general",
+        execution_identity=identity,
+    )
+    token_data = {
+        "token": "expired-access-token",
+        "refresh_token": "stored-refresh-token",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": "client-id",
+        "expires_at": 1.0,
+        "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+        "_source": "oauth",
+        "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+    }
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        token_data,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    def fail_refresh(*_args: object, **_kwargs: object) -> None:
+        raise refresh_error
+
+    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", fail_refresh)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    result = tool._ensure_structured_auth()
+
+    assert result is not None
+    payload = json.loads(result)
+    assert payload["oauth_connection_required"] is True
+    assert payload.get("reason") == expected_reason
+    stored = load_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    assert (stored is not None) is credential_remains
+
+
+def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """A provider rejection swallowed by an upstream tool should still become a reconnect response."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target(
+        "user_agent",
+        "general",
+        execution_identity=identity,
+    )
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "valid-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    def fail_refresh(*_args: object, **_kwargs: object) -> None:
+        message = "refresh rejected"
+        raise RefreshError(message, {"error": "invalid_grant"})
+
+    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", fail_refresh)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    def swallowed_failure() -> str:
+        try:
+            tool.creds.refresh(object())
+        except RefreshError as exc:
+            return f"Unexpected error: {exc}"
+        return "unexpected success"
+
+    tool.functions = {"swallowed_failure": Function(name="swallowed_failure", entrypoint=swallowed_failure)}
+    tool._wrap_oauth_function_entrypoints()
+
+    payload = json.loads(tool.swallowed_failure())
+
+    assert payload["oauth_connection_required"] is True
+    assert payload["reason"] == "refresh_rejected"
+    assert (
+        load_scoped_credentials(
+            GoogleDriveTools._oauth_provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        is None
+    )
 
 
 def test_google_wrapper_skips_stored_oauth_when_service_account_env_is_configured(

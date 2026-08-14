@@ -21,6 +21,7 @@ from mindroom.api.credentials_target import (
 )
 from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
 from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
+from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.mcp.oauth import disconnect_mcp_oauth_request_session
 from mindroom.oauth import (
@@ -41,6 +42,7 @@ from mindroom.oauth.service import (
     oauth_success_redirect_url,
     refresh_scoped_oauth_credentials,
     sanitized_oauth_token_result,
+    scoped_oauth_credentials_refresh_lock_path,
 )
 
 if TYPE_CHECKING:
@@ -440,19 +442,25 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
         safe_result = sanitized_oauth_token_result(provider, token_result)
         worker_target = worker_target_for_credentials_target(target)
         credentials_manager = target.base_manager
-        existing_credentials = load_scoped_credentials(
+        lock_path = scoped_oauth_credentials_refresh_lock_path(
             provider.credential_service,
             credentials_manager=credentials_manager,
             worker_target=worker_target,
-            allowed_shared_services=target.allowed_shared_services,
         )
-        token_data = _token_data_preserving_refresh_token(existing_credentials, safe_result.token_data)
-        save_scoped_credentials(
-            provider.credential_service,
-            token_data,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
+        async with async_exclusive_file_lock(lock_path):
+            existing_credentials = load_scoped_credentials(
+                provider.credential_service,
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+                allowed_shared_services=target.allowed_shared_services,
+            )
+            token_data = _token_data_preserving_refresh_token(existing_credentials, safe_result.token_data)
+            save_scoped_credentials(
+                provider.credential_service,
+                token_data,
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
     except OAuthClaimValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OAuthProviderError as exc:
@@ -516,6 +524,16 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
                 provider_id=provider.id,
                 error_type=type(exc).__name__,
             )
+            credentials = (
+                load_scoped_credentials(
+                    provider.credential_service,
+                    credentials_manager=target.base_manager,
+                    worker_target=worker_target,
+                    allowed_shared_services=target.allowed_shared_services,
+                )
+                or {}
+            )
+            credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
         else:
             credentials = refreshed_credentials or {}
             credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)

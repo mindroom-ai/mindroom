@@ -269,6 +269,14 @@ async def test_scoped_oauth_refresh_logs_terminal_failure_without_tokens(
             worker_target=worker_target,
         )
 
+    assert (
+        load_scoped_credentials(
+            "demo_oauth",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        is None
+    )
     assert logger.info_calls == []
     assert logger.warning_calls == [
         (
@@ -321,6 +329,14 @@ async def test_scoped_oauth_refresh_logs_non_recoverable_provider_failure_withou
             worker_target=worker_target,
         )
 
+    assert (
+        load_scoped_credentials(
+            "demo_oauth",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        is not None
+    )
     assert logger.info_calls == []
     assert logger.warning_calls == [
         (

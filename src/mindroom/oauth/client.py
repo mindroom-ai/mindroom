@@ -9,12 +9,15 @@ from enum import Enum, auto
 from functools import wraps
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport import requests as google_requests
 
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProvider, oauth_connection_required_payload
 from mindroom.oauth.service import (
     build_oauth_connect_instruction,
+    build_oauth_reconnect_instruction,
+    invalidate_scoped_oauth_credentials_if_current,
     oauth_connect_url,
     oauth_credentials_have_required_scopes,
     oauth_credentials_match_client_id,
@@ -92,6 +95,7 @@ class ScopedOAuthClientMixin:
         self.functions = {}
         self._defer_to_original_auth = defer_to_original_auth
         self._original_auth_completed = False
+        self._oauth_refresh_rejected = False
         if provided_creds is not None:
             return provided_creds
         if defer_to_original_auth:
@@ -117,7 +121,10 @@ class ScopedOAuthClientMixin:
             ) -> object:
                 if result := self._ensure_structured_auth():
                     return result
-                return _entrypoint(*args, **kwargs)
+                result = _entrypoint(*args, **kwargs)
+                if self._consume_oauth_refresh_rejection():
+                    return self._structured_auth_failure(self._connection_required(reason="refresh_rejected"))
+                return result
 
             function.entrypoint = oauth_entrypoint
             setattr(self, function.name, oauth_entrypoint)
@@ -139,16 +146,22 @@ class ScopedOAuthClientMixin:
             worker_target=self._worker_target,
         )
 
-    def _connection_required(self) -> OAuthConnectionRequired:
+    def _connection_required(self, *, reason: str | None = None) -> OAuthConnectionRequired:
         connect_url = oauth_connect_url(
             self._oauth_provider,
             self._runtime_paths,
             worker_target=self._worker_target,
         )
+        instruction = (
+            build_oauth_reconnect_instruction(self._oauth_provider, connect_url)
+            if reason == "refresh_rejected"
+            else build_oauth_connect_instruction(self._oauth_provider, connect_url)
+        )
         return OAuthConnectionRequired(
-            build_oauth_connect_instruction(self._oauth_provider, connect_url),
+            instruction,
             provider_id=self._oauth_provider.id,
             connect_url=connect_url,
+            reason=reason,
         )
 
     def _raise_connection_required(self) -> NoReturn:
@@ -201,7 +214,7 @@ class ScopedOAuthClientMixin:
         scopes = token_data.get("scopes")
         if not isinstance(scopes, list):
             scopes = list(self._oauth_provider.scopes)
-        return GoogleOAuthCredentials(
+        credentials = GoogleOAuthCredentials(
             token=token_data.get("token"),
             refresh_token=token_data.get("refresh_token"),
             token_uri=token_data.get("token_uri") or self._oauth_provider.token_url,
@@ -210,6 +223,33 @@ class ScopedOAuthClientMixin:
             scopes=scopes,
             expiry=self._token_expiry(token_data),
         )
+        original_refresh = credentials.refresh
+        expected_refresh_token = token_data.get("refresh_token")
+
+        def tracked_refresh(request: object) -> None:
+            try:
+                original_refresh(request)
+            except RefreshError as exc:
+                if isinstance(expected_refresh_token, str) and _google_refresh_was_terminally_rejected(exc):
+                    self._oauth_refresh_rejected = invalidate_scoped_oauth_credentials_if_current(
+                        self._oauth_provider.credential_service,
+                        credentials_manager=self._creds_manager,
+                        worker_target=self._worker_target,
+                        expected_refresh_token=expected_refresh_token,
+                    )
+                    self.service = None
+                raise
+
+        credentials.refresh = tracked_refresh
+        return credentials
+
+    def _consume_oauth_refresh_rejection(self) -> bool:
+        rejected = self._oauth_refresh_rejected
+        self._oauth_refresh_rejected = False
+        if rejected:
+            self.creds = None
+            self.service = None
+        return rejected
 
     def _load_stored_credentials(self) -> Any | None:  # noqa: ANN401
         """Load stored credentials for the current execution scope."""
@@ -297,6 +337,10 @@ class ScopedOAuthClientMixin:
             self._oauth_logger.info("oauth_authentication_succeeded", tool_name=self._oauth_tool_name)
         except OAuthConnectionRequired:
             raise
+        except RefreshError as exc:
+            if self._consume_oauth_refresh_rejection():
+                raise self._connection_required(reason="refresh_rejected") from exc
+            raise self._connection_required() from exc
         except Exception as exc:
             self._oauth_logger.warning(
                 "oauth_authentication_failed",
@@ -314,3 +358,13 @@ class ScopedOAuthClientMixin:
             self._auth_with_original_fallback()
             return
         self._auth_with_stored_oauth()
+
+
+def _google_refresh_was_terminally_rejected(exc: RefreshError) -> bool:
+    """Return whether Google supplied a structured terminal refresh-grant error."""
+    for value in exc.args:
+        if isinstance(value, dict):
+            error = value.get("error")
+            if isinstance(error, str) and error.strip().lower() in {"invalid_grant", "invalid_refresh_token"}:
+                return True
+    return False

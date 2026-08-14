@@ -8,8 +8,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlencode, urlparse
 
-from mindroom.credentials import load_scoped_credentials, save_scoped_credentials, scoped_credentials_path
-from mindroom.file_locks import async_exclusive_file_lock
+from mindroom.credentials import (
+    delete_scoped_credentials,
+    load_scoped_credentials,
+    save_scoped_credentials,
+    scoped_credentials_path,
+)
+from mindroom.file_locks import advisory_file_lock, async_exclusive_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import (
     OAuthClaimValidationError,
@@ -76,6 +81,7 @@ __all__ = [
     "build_oauth_connect_instruction",
     "build_oauth_reconnect_instruction",
     "consume_oauth_connect_token",
+    "invalidate_scoped_oauth_credentials_if_current",
     "lookup_oauth_connect_token",
     "oauth_connect_url",
     "oauth_credential_target_payload",
@@ -89,6 +95,7 @@ __all__ = [
     "oauth_success_redirect_url",
     "refresh_scoped_oauth_credentials",
     "refresh_scoped_oauth_credentials_with_result",
+    "reset_scoped_oauth_credentials",
     "sanitized_oauth_token_result",
     "scoped_oauth_credentials_refresh_lock_path",
 ]
@@ -150,6 +157,63 @@ def scoped_oauth_credentials_refresh_lock_path(
         worker_target=worker_target,
     )
     return credentials_path.with_name(f"{credentials_path.name}.oauth-refresh.lock")
+
+
+def invalidate_scoped_oauth_credentials_if_current(
+    service: str,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+    expected_refresh_token: str,
+) -> bool:
+    """Delete one credential only while its refresh token still matches the failed grant."""
+    lock_path = scoped_oauth_credentials_refresh_lock_path(
+        service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    with advisory_file_lock(lock_path):
+        credentials = load_scoped_credentials(
+            service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        if _refresh_token_value(credentials) != expected_refresh_token:
+            return False
+        delete_scoped_credentials(
+            service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        return True
+
+
+async def reset_scoped_oauth_credentials(
+    service: str,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+) -> bool:
+    """Idempotently delete one scoped OAuth credential under its refresh lock."""
+    lock_path = scoped_oauth_credentials_refresh_lock_path(
+        service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    async with async_exclusive_file_lock(lock_path):
+        credentials = load_scoped_credentials(
+            service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        if credentials is None:
+            return False
+        delete_scoped_credentials(
+            service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        return True
 
 
 async def refresh_scoped_oauth_credentials(
@@ -244,6 +308,12 @@ async def _refresh_scoped_oauth_credentials_locked(
             or latest_refresh_token == attempted_refresh_token
             or not oauth_credentials_usable(provider, runtime_paths, latest_credentials)
         ):
+            if latest_refresh_token == attempted_refresh_token:
+                delete_scoped_credentials(
+                    provider.credential_service,
+                    credentials_manager=credentials_manager,
+                    worker_target=worker_target,
+                )
             _log_oauth_refresh_failed(
                 provider,
                 credentials,
@@ -255,6 +325,12 @@ async def _refresh_scoped_oauth_credentials_locked(
         try:
             refreshed_credentials = await provider.refresh_token_data(latest_credentials, runtime_paths)
         except OAuthProviderError as retry_exc:
+            if _is_recoverable_stale_refresh_rejection(retry_exc):
+                delete_scoped_credentials(
+                    provider.credential_service,
+                    credentials_manager=credentials_manager,
+                    worker_target=worker_target,
+                )
             _log_oauth_refresh_failed(
                 provider,
                 latest_credentials,

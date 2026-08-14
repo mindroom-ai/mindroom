@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=["agno", "pydantic", "pyyaml"],
     docs_url="https://github.com/mindroom-ai/mindroom",
-    function_names=("get_info", "manage_config", "manage_agent", "manage_team"),
+    function_names=("get_info", "manage_config", "manage_agent", "manage_team", "reset_oauth_connection"),
 )
 def config_manager_tools() -> type[ConfigManagerTools]:
     """Return full configuration-management tools."""
