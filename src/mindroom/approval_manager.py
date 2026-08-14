@@ -352,7 +352,18 @@ class _ApprovalManager:
             )
             if terminal and before_consume is not None:
                 await before_consume()
-            return ApprovalActionResult(consumed=terminal, resolved=False, card_event_id=card_event_id)
+            if terminal or cards is None or self.send_delivery is None:
+                return ApprovalActionResult(consumed=terminal, resolved=False, card_event_id=card_event_id)
+            # Matrix can expose a card whose send response died with its
+            # process. Let the shared delivery owner recover that event ID
+            # before deciding this reaction targets nothing durable.
+            await self._worker().recover()
+            stored = await cards.pending_approval_card(
+                room_id=room_id,
+                card_event_id=card_event_id,
+            )
+            if stored is None:
+                return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
         transport_sender = None if self.transport_sender is None else self.transport_sender()
         pending = (
             None

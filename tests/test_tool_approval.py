@@ -30,6 +30,7 @@ from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.event_journal import (
     ApprovalCall,
+    ApprovalCardReservation,
     ApprovalContinuation,
     DeliveryAcknowledgement,
     DeliveryStage,
@@ -90,6 +91,127 @@ def test_tool_approval_config_coerces_numeric_timeout_strings() -> None:
 
     assert config.tool_approval.timeout_days == 7.0
     assert config.tool_approval.rules[0].timeout_days == 3.0
+
+
+@pytest.mark.asyncio
+async def test_click_recovers_a_card_accepted_before_its_acknowledgement(tmp_path: Path) -> None:
+    """The first post-crash click must bind through generic delivery recovery."""
+    journal = EventJournalStore.open_sqlite(tmp_path / "approval-click-before-ack.db")
+    responder = journal.principal("agent@code")
+    router = journal.principal("router@shared")
+    room_id = "!room:localhost"
+    source_event_id = "$source"
+    card_event_id = "$approval"
+    approval_id = "approval-1"
+    card_delivery_id = "approval-card-1"
+    await responder.admit(
+        InboundEvent(
+            event_id=source_event_id,
+            room_id=room_id,
+            thread_id="$thread",
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1_000,
+            source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
+        ),
+    )
+    continuation = ApprovalContinuation(
+        approval_id=approval_id,
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="code",
+        room_id=room_id,
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=(source_event_id,),
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="shell",
+                invoking_agent="code",
+                expires_at_ns=9_000_000_000_000_000_000,
+            ),
+        ),
+        state="waiting",
+        runtime_generation="runtime-a",
+    )
+    assert await responder.create_approval_continuation(continuation) == continuation
+    requested_at = datetime.now(UTC)
+    card_content = _ApprovalManager._pending_event_content(
+        approval_id=card_delivery_id,
+        tool_name="shell",
+        arguments={"command": "true"},
+        arguments_truncated=False,
+        agent_name="code",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@approver:localhost",
+        requested_at=requested_at,
+        expires_at=requested_at + timedelta(days=1),
+        status="pending",
+    )
+    card_content.update(
+        continuation_id=approval_id,
+        continuation_generation=0,
+        tool_call_id="call-1",
+    )
+    assert await router.reserve_approval_card_deliveries(
+        continuation_principal_id=responder.principal_id,
+        continuation_id=approval_id,
+        expected_generation=0,
+        cards=(
+            ApprovalCardReservation(
+                delivery_id=card_delivery_id,
+                tool_call_id="call-1",
+                event_type="io.mindroom.tool_approval",
+                payload=card_content,
+            ),
+        ),
+    )
+    assert await router.claim_matrix_delivery(
+        delivery_id=card_delivery_id,
+        stage=DeliveryStage.INITIAL,
+    )
+    await router.record_matrix_delivery_device(
+        delivery_id=card_delivery_id,
+        stage=DeliveryStage.INITIAL,
+        device_id="DEVICE",
+    )
+    sent: list[DeliveryStage] = []
+
+    async def send(delivery: MatrixDelivery) -> str:
+        sent.append(delivery.stage)
+        return card_event_id if delivery.stage is DeliveryStage.INITIAL else "$terminal-edit"
+
+    manager = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        send_delivery=send,
+        cards=router,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: "DEVICE",
+    )
+    try:
+        result = await manager.handle_card_response(
+            room_id=room_id,
+            sender_id="@approver:localhost",
+            card_event_id=card_event_id,
+            status="approved",
+            reason=None,
+        )
+
+        assert result.consumed is True
+        assert result.resolved is True
+        assert sent == [DeliveryStage.INITIAL, DeliveryStage.FINAL]
+        decided = await responder.approval_continuation(approval_id)
+        assert decided is not None
+        assert decided.calls[0].decision.value == "approved"
+        assert await router.is_terminal_approval_card(room_id=room_id, card_event_id=card_event_id)
+    finally:
+        await manager.shutdown(reason="test complete")
+        await journal.close()
 
 
 @pytest.mark.asyncio
