@@ -1225,6 +1225,21 @@ async def test_manager_rechecks_active_call_after_reply_policy_reload(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_reply_recheck_does_not_clear_state_after_tracked_call_already_ended(tmp_path: Path) -> None:
+    """A stale recheck task must not disturb state created after its call ended."""
+    manager = _manager(_client(), FakeBridge(), tmp_path)
+    expiry = MagicMock(spec=asyncio.TimerHandle)
+    manager._pending_keys[ROOM_ID] = {}
+    manager._expiry_handles[ROOM_ID] = expiry
+
+    await manager._reconcile_room_reply_authorization(ROOM_ID)
+
+    assert ROOM_ID in manager._pending_keys
+    assert manager._expiry_handles[ROOM_ID] is expiry
+    expiry.cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_manager_leaves_call_when_room_call_empties(tmp_path: Path) -> None:
     """Manager leaves call when room call empties."""
     client = _client()

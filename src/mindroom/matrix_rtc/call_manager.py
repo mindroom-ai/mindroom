@@ -355,9 +355,9 @@ class CallManager:
                 )
                 if requester_id is not None
             }
-            if requester_ids and all(
-                self._is_authorized_call_member(requester_id, room_id) for requester_id in requester_ids
-            ):
+            if not requester_ids:
+                return
+            if all(self._is_authorized_call_member(requester_id, room_id) for requester_id in requester_ids):
                 return
             self._clear_logical_call(room_id)
             self._pending_keys.pop(room_id, None)
