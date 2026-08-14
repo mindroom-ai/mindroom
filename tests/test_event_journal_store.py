@@ -3068,46 +3068,6 @@ class TestInteractiveQuestionConsumption:
         assert await _interactive_selection_rows(journal_store) == []
 
 
-class TestIncompatibleInteractiveSchemaRefusal:
-    """An old question-claim shape must not be read under new ownership semantics."""
-
-    async def test_sqlite_refuses_the_legacy_claim_column(self, tmp_path: Path) -> None:
-        """SQLite fails loudly instead of treating an owned question as active."""
-        database_path = tmp_path / "legacy.db"
-        with sqlite3.connect(database_path) as database:
-            database.execute(
-                """
-                CREATE TABLE interactive_questions (
-                    principal_id TEXT NOT NULL,
-                    question_event_id TEXT NOT NULL,
-                    claimed_source_event_id TEXT
-                )
-                """,
-            )
-
-        with pytest.raises(RuntimeError, match="incompatible pre-selection schema"):
-            EventJournalStore.open_sqlite(database_path)
-
-    async def test_postgres_refuses_the_legacy_claim_column(self, postgres_journal_url: str) -> None:
-        """PostgreSQL applies the same explicit schema boundary as SQLite."""
-        import psycopg  # noqa: PLC0415
-
-        database_url = postgres_journal_schema_url(postgres_journal_url)
-        with psycopg.connect(database_url, autocommit=True) as database:
-            database.execute(
-                """
-                CREATE TABLE interactive_questions (
-                    principal_id TEXT NOT NULL,
-                    question_event_id TEXT NOT NULL,
-                    claimed_source_event_id TEXT
-                )
-                """,
-            )
-
-        with pytest.raises(RuntimeError, match="incompatible pre-selection schema"):
-            EventJournalStore.open_postgres(database_url)
-
-
 class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
     """A turn that outlived its membership must not answer into the next one.
 
@@ -6579,6 +6539,324 @@ class TestConnectionSecretsStayOutOfLogs:
         assert "hunter2" not in rendered
         assert "someone" not in rendered
         assert "db.example" not in rendered
+
+
+class TestSchemaUpgrades:
+    """Opening the journal preserves old rows and enables current writes."""
+
+    @staticmethod
+    async def _assert_legacy_questions_are_archived(backend: Backend) -> None:
+        archived = await backend.read(
+            lambda transaction: transaction.fetchall(
+                """
+                SELECT question_event_id, claimed_source_event_id
+                FROM interactive_questions_pre_selection
+                ORDER BY question_event_id
+                """,
+            ),
+        )
+        assert [(row["question_event_id"], row["claimed_source_event_id"]) for row in archived] == [
+            ("$claimed", "$selection"),
+            ("$open", None),
+        ]
+
+    @staticmethod
+    async def _assert_current_questions_work(backend: Backend) -> None:
+        journal = EventJournalStore(backend)
+        assert await _interactive_question_rows(journal) == []
+
+        alice = journal.principal("agent@alice")
+        await admit(alice, "$turn")
+        await _activate_interactive_question(alice, "$current")
+
+        current = await _interactive_question_rows(journal)
+        assert [row["question_event_id"] for row in current] == ["$current"]
+
+    @staticmethod
+    def _create_legacy_questions_sqlite(database: sqlite3.Connection) -> None:
+        database.execute(
+            """
+            CREATE TABLE interactive_questions (
+                principal_id TEXT NOT NULL,
+                question_event_id TEXT NOT NULL,
+                room_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                creator_agent TEXT NOT NULL,
+                question_json TEXT NOT NULL,
+                membership_epoch BIGINT NOT NULL,
+                claimed_source_event_id TEXT,
+                created_at_ns BIGINT NOT NULL,
+                PRIMARY KEY (principal_id, question_event_id),
+                UNIQUE (principal_id, claimed_source_event_id)
+            )
+            """,
+        )
+        database.execute(
+            """
+            CREATE INDEX interactive_questions_active
+            ON interactive_questions (
+                principal_id, room_id, thread_id, creator_agent,
+                created_at_ns, question_event_id
+            )
+            WHERE claimed_source_event_id IS NULL
+            """,
+        )
+        database.executemany(
+            """
+            INSERT INTO interactive_questions (
+                principal_id, question_event_id, room_id, thread_id,
+                creator_agent, question_json, membership_epoch,
+                claimed_source_event_id, created_at_ns
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ("agent@alice", "$open", ROOM, "$thread", "agent", '{"question_text":"Open"}', 0, None, 1),
+                (
+                    "agent@alice",
+                    "$claimed",
+                    ROOM,
+                    "$thread",
+                    "agent",
+                    '{"question_text":"Claimed"}',
+                    0,
+                    "$selection",
+                    2,
+                ),
+            ),
+        )
+
+    async def test_sqlite_archives_the_previous_question_schema_and_reopens(self, tmp_path: Path) -> None:
+        """SQLite keeps legacy prompts inert while the current projection remains writable."""
+        database_path = tmp_path / "previous-questions.db"
+        with sqlite3.connect(database_path) as database:
+            self._create_legacy_questions_sqlite(database)
+
+        backend = SqliteBackend.open(database_path)
+        try:
+            await self._assert_legacy_questions_are_archived(backend)
+            await self._assert_current_questions_work(backend)
+        finally:
+            await backend.close()
+
+        reopened = SqliteBackend.open(database_path)
+        try:
+            await self._assert_legacy_questions_are_archived(reopened)
+            current = await _interactive_question_rows(EventJournalStore(reopened))
+            assert [row["question_event_id"] for row in current] == ["$current"]
+        finally:
+            await reopened.close()
+
+    async def test_postgres_archives_the_previous_question_schema_and_reopens(
+        self,
+        postgres_journal_url: str,
+    ) -> None:
+        """PostgreSQL applies the same inert archival upgrade under its schema lock."""
+        import psycopg  # noqa: PLC0415 - optional backend exercised only by this test
+
+        from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        with psycopg.connect(database_url) as database:
+            database.execute(
+                """
+                CREATE TABLE interactive_questions (
+                    principal_id TEXT NOT NULL,
+                    question_event_id TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    creator_agent TEXT NOT NULL,
+                    question_json TEXT NOT NULL,
+                    membership_epoch BIGINT NOT NULL,
+                    claimed_source_event_id TEXT,
+                    created_at_ns BIGINT NOT NULL,
+                    PRIMARY KEY (principal_id, question_event_id),
+                    UNIQUE (principal_id, claimed_source_event_id)
+                )
+                """,
+            )
+            database.execute(
+                """
+                CREATE INDEX interactive_questions_active
+                ON interactive_questions (
+                    principal_id, room_id, thread_id, creator_agent,
+                    created_at_ns, question_event_id
+                )
+                WHERE claimed_source_event_id IS NULL
+                """,
+            )
+            with database.cursor() as cursor:
+                cursor.executemany(
+                    """
+                    INSERT INTO interactive_questions (
+                        principal_id, question_event_id, room_id, thread_id,
+                        creator_agent, question_json, membership_epoch,
+                        claimed_source_event_id, created_at_ns
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        (
+                            "agent@alice",
+                            "$open",
+                            ROOM,
+                            "$thread",
+                            "agent",
+                            '{"question_text":"Open"}',
+                            0,
+                            None,
+                            1,
+                        ),
+                        (
+                            "agent@alice",
+                            "$claimed",
+                            ROOM,
+                            "$thread",
+                            "agent",
+                            '{"question_text":"Claimed"}',
+                            0,
+                            "$selection",
+                            2,
+                        ),
+                    ),
+                )
+
+        backend = PostgresBackend.open(database_url)
+        try:
+            await self._assert_legacy_questions_are_archived(backend)
+            await self._assert_current_questions_work(backend)
+        finally:
+            await backend.close()
+
+        reopened = PostgresBackend.open(database_url)
+        try:
+            await self._assert_legacy_questions_are_archived(reopened)
+            current = await _interactive_question_rows(EventJournalStore(reopened))
+            assert [row["question_event_id"] for row in current] == ["$current"]
+        finally:
+            await reopened.close()
+
+    @staticmethod
+    async def _assert_old_row_is_inert_and_new_card_works(backend: Backend) -> None:
+        old = await backend.read(
+            lambda transaction: transaction.fetchone(
+                """
+                SELECT card_event_id, continuation_id, continuation_generation, tool_call_id
+                FROM approval_cards_legacy_delivery WHERE principal_id = ? AND transaction_id = ?
+                """,
+                ("agent@alice", "legacy"),
+            ),
+        )
+        assert old is not None
+        assert old["card_event_id"] == "$legacy"
+        assert old["continuation_id"] is None
+        assert old["continuation_generation"] is None
+        assert old["tool_call_id"] is None
+
+        await backend.write(
+            lambda transaction: transaction.execute(
+                """
+                INSERT INTO approval_cards (
+                    principal_id, delivery_id, continuation_id,
+                    continuation_generation, tool_call_id, membership_epoch
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("agent@alice", "native", "continuation-native", 0, "native", 0),
+            ),
+        )
+        stored = await backend.read(
+            lambda transaction: transaction.fetchone(
+                """
+                SELECT delivery_id, continuation_id, continuation_generation, tool_call_id
+                FROM approval_cards WHERE principal_id = ? AND delivery_id = ?
+                """,
+                ("agent@alice", "native"),
+            ),
+        )
+        assert stored is not None
+        assert stored["delivery_id"] == "native"
+        assert stored["continuation_id"] == "continuation-native"
+        assert stored["continuation_generation"] == 0
+        assert stored["tool_call_id"] == "native"
+
+    async def test_sqlite_open_adds_native_identity_to_the_previous_card_schema(self, tmp_path: Path) -> None:
+        """SQLite upgrades the previous table without activating its old row."""
+        database_path = tmp_path / "previous-schema.db"
+        with sqlite3.connect(database_path) as database:
+            database.execute(
+                """
+                CREATE TABLE approval_cards (
+                    principal_id TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    transaction_id TEXT NOT NULL,
+                    card_event_id TEXT,
+                    attempted INTEGER NOT NULL,
+                    sending_device_id TEXT,
+                    card_json TEXT NOT NULL,
+                    resolution_json TEXT,
+                    membership_epoch BIGINT NOT NULL,
+                    created_at_ns BIGINT NOT NULL,
+                    PRIMARY KEY (principal_id, transaction_id)
+                )
+                """,
+            )
+            database.execute(
+                """
+                INSERT INTO approval_cards (
+                    principal_id, room_id, transaction_id, card_event_id, attempted,
+                    sending_device_id, card_json, resolution_json, membership_epoch, created_at_ns
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("agent@alice", ROOM, "legacy", "$legacy", 1, DEVICE, '{"body":"old"}', None, 1, 1),
+            )
+
+        backend = SqliteBackend.open(database_path)
+        try:
+            await self._assert_old_row_is_inert_and_new_card_works(backend)
+        finally:
+            await backend.close()
+
+    async def test_postgres_open_adds_native_identity_to_the_previous_card_schema(
+        self,
+        postgres_journal_url: str,
+    ) -> None:
+        """PostgreSQL upgrades the previous table without activating its old row."""
+        import psycopg  # noqa: PLC0415 - optional backend exercised only by this test
+
+        from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        with psycopg.connect(database_url) as database:
+            database.execute(
+                """
+                CREATE TABLE approval_cards (
+                    principal_id TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    transaction_id TEXT NOT NULL,
+                    card_event_id TEXT,
+                    attempted INTEGER NOT NULL,
+                    sending_device_id TEXT,
+                    card_json TEXT NOT NULL,
+                    resolution_json TEXT,
+                    membership_epoch BIGINT NOT NULL,
+                    created_at_ns BIGINT NOT NULL,
+                    PRIMARY KEY (principal_id, transaction_id)
+                )
+                """,
+            )
+            database.execute(
+                """
+                INSERT INTO approval_cards (
+                    principal_id, room_id, transaction_id, card_event_id, attempted,
+                    sending_device_id, card_json, resolution_json, membership_epoch, created_at_ns
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                ("agent@alice", ROOM, "legacy", "$legacy", 1, DEVICE, '{"body":"old"}', None, 1, 1),
+            )
+
+        backend = PostgresBackend.open(database_url)
+        try:
+            await self._assert_old_row_is_inert_and_new_card_works(backend)
+        finally:
+            await backend.close()
 
 
 class TestHotQueriesAreIndexCovered:

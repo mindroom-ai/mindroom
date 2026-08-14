@@ -38,7 +38,7 @@ from mindroom.logging_config import get_logger
 from .migrations import finish_matrix_delivery_migration, prepare_matrix_delivery_migration
 from .offloading import ThreadOffload, settled
 from .schema import SQLITE_DIALECT, render, schema_statements
-from .schema_migrations import validate_interactive_question_columns
+from .schema_migrations import migration_statements, pre_schema_migration_statements
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -203,21 +203,32 @@ class SqliteBackend:
         # gap the certifier can see. Readers commit nothing, so this is the
         # writer's cost alone.
         _configure(connection, synchronous="FULL")
-        interactive_question_columns = frozenset(
-            str(row[1]) for row in connection.execute("PRAGMA table_info(interactive_questions)")
-        )
+        connection.execute("BEGIN IMMEDIATE")
         try:
-            validate_interactive_question_columns(interactive_question_columns)
-        except RuntimeError:
+            interactive_question_columns = frozenset(
+                str(row[1]) for row in connection.execute("PRAGMA table_info(interactive_questions)")
+            )
+            for statement in pre_schema_migration_statements(
+                interactive_question_columns=interactive_question_columns,
+            ):
+                connection.execute(statement)
+            transaction = _SqliteTransaction(connection)
+            migrate_approvals = prepare_matrix_delivery_migration(transaction, postgres=False)
+            for statement in schema_statements(SQLITE_DIALECT):
+                connection.execute(statement)
+            approval_card_columns = frozenset(
+                str(row[1]) for row in connection.execute("PRAGMA table_info(approval_cards)")
+            )
+            for statement in migration_statements(
+                SQLITE_DIALECT,
+                approval_card_columns=approval_card_columns,
+            ):
+                connection.execute(statement)
+            finish_matrix_delivery_migration(transaction, migrate_approvals=migrate_approvals)
+            connection.execute("COMMIT")
+        except BaseException:
             connection.close()
             raise
-        connection.execute("BEGIN IMMEDIATE")
-        transaction = _SqliteTransaction(connection)
-        migrate_approvals = prepare_matrix_delivery_migration(transaction, postgres=False)
-        for statement in schema_statements(SQLITE_DIALECT):
-            connection.execute(statement)
-        finish_matrix_delivery_migration(transaction, migrate_approvals=migrate_approvals)
-        connection.execute("COMMIT")
         return connection
 
     def _reader(self) -> sqlite3.Connection:
