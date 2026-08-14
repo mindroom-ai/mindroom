@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import nio
 
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.event_journal import DeliveryStage, unavailable_notice_turn_id
+from mindroom.event_journal import DeliveryStage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     can_send_to_encrypted_room,
@@ -288,7 +288,7 @@ class ApprovalMatrixTransport:
                 sending_device_id=self.transport_device_id(),
                 resolve_delivered=resolve_delivered,
             ).deliver(
-                delivery_id=unavailable_notice_turn_id(continuation.approval_id),
+                delivery_id=continuation.response_event_id,
                 stage=DeliveryStage.FINAL,
                 room_id=continuation.room_id,
                 thread_id=continuation.thread_id,

@@ -470,11 +470,6 @@ def all_owners(
     return _load_owners(transaction, rows)
 
 
-def unavailable_notice_turn_id(approval_id: str) -> str:
-    """Return the outbox turn that durably terminalizes an unavailable owner."""
-    return f"approval-unavailable:{approval_id}"
-
-
 def claim(
     transaction: Transaction,
     principal_id: str,
@@ -663,7 +658,7 @@ def discard_unavailable(
         WHERE principal_id = ? AND delivery_id = ? AND stage = ?
           AND acknowledged_event_id IS NOT NULL
         """,
-        (notice_principal_id, unavailable_notice_turn_id(approval_id), DeliveryStage.FINAL.value),
+        (notice_principal_id, continuation.response_event_id, DeliveryStage.FINAL.value),
     )
     if delivered is None:
         return False

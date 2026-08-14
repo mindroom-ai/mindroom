@@ -5580,18 +5580,18 @@ class TestApprovalContinuations:
 
         router = journal_store.principal("router@alice")
         await router.enqueue_matrix_delivery(
-            delivery_id="approval-unavailable:approval-1",
+            delivery_id="$waiting",
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id="$thread",
             payload=text("agent removed"),
         )
         await router.claim_matrix_delivery(
-            delivery_id="approval-unavailable:approval-1",
+            delivery_id="$waiting",
             stage=DeliveryStage.FINAL,
         )
         await router.acknowledge_matrix_delivery(
-            delivery_id="approval-unavailable:approval-1",
+            delivery_id="$waiting",
             stage=DeliveryStage.FINAL,
             event_id="$unavailable",
             delivered_projections=(),

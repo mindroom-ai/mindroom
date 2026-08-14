@@ -19,7 +19,6 @@ from .approval_continuations import (
     ApprovalContinuation,
     ApprovalDecision,
     ApprovalMemoryTurn,
-    unavailable_notice_turn_id,
 )
 from .approvals import ApprovalCardReservation, RecordedApprovalDecision, StoredApprovalCard
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
@@ -116,6 +115,5 @@ __all__ = [
     "encode_thread_id",
     "replacement_target",
     "thread_root",
-    "unavailable_notice_turn_id",
     "visible_content",
 ]

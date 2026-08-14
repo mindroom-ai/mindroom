@@ -17,15 +17,15 @@ from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.event_journal import DeliveryStage
+from mindroom.event_journal.models import DeliveryStage
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from mindroom.event_journal import MatrixDelivery, MatrixDeliveryView
-    from mindroom.event_journal.models import TerminalTurnWrite
+    from mindroom.event_journal.models import MatrixDelivery, TerminalTurnWrite
     from mindroom.event_journal.projection import ProjectedEvent
+    from mindroom.event_journal.views import MatrixDeliveryView
 
 logger = get_logger(__name__)
 
