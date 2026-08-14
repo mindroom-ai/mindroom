@@ -704,6 +704,21 @@ def _approval_card(
     }
 
 
+@pytest.mark.parametrize("identity_field", ["continuation_id", "tool_call_id"])
+@pytest.mark.asyncio
+async def test_fake_approval_cards_reject_empty_native_identity(identity_field: str) -> None:
+    """The shared card fake must reject every identity production rejects."""
+    card = _approval_card()
+    card["content"][identity_field] = ""
+
+    with pytest.raises(ValueError, match="native continuation identity"):
+        await FakeApprovalCards().claim_approval_card(
+            room_id="!room:localhost",
+            transaction_id="approval-card",
+            card=card,
+        )
+
+
 def _approval_edit(
     card: dict[str, Any],
     *,
@@ -1417,6 +1432,8 @@ def _claimed_card_body(approval_id: str) -> dict[str, Any]:
             "approver_user_id": "@user:localhost",
             "arguments": {"path": "notes.txt"},
             "thread_id": "$thread",
+            "requested_at": "2020-01-01T00:00:00+00:00",
+            "expires_at": "2020-01-01T00:01:00+00:00",
         },
     }
 
@@ -1457,7 +1474,7 @@ async def test_a_restart_adopts_a_card_whose_send_never_came_back(tmp_path: Path
         sending_device=lambda: CLAIMING_DEVICE_ID,
     )
 
-    assert (await restarted.discard_pending_on_startup()).discarded == 0
+    assert (await restarted.recover_cards_on_startup()).discarded == 0
     async with asyncio.timeout(1):
         await edited.wait()
     # The repeat carries the stored transaction, which is the only reason it
@@ -1496,7 +1513,7 @@ async def test_a_restart_does_not_resend_a_card_it_already_has_an_event_for(tmp_
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert (await restarted.discard_pending_on_startup()).discarded == 0
+    assert (await restarted.recover_cards_on_startup()).discarded == 0
     async with asyncio.timeout(1):
         await edited.wait()
     sender.assert_not_awaited()
@@ -1525,7 +1542,7 @@ async def test_a_restart_keeps_the_claim_when_the_repeat_send_fails(tmp_path: Pa
         sending_device=lambda: CLAIMING_DEVICE_ID,
     )
 
-    assert (await restarted.discard_pending_on_startup()).discarded == 0
+    assert (await restarted.recover_cards_on_startup()).discarded == 0
     editor.assert_not_awaited()
     remaining = await cards.pending_approval_cards(room_id="!room:localhost")
     assert [card.transaction_id for card in remaining] == ["txn-stranded"]
@@ -1573,7 +1590,7 @@ async def test_a_restart_expires_an_unsent_card_it_cannot_prove_the_device_for(
         locate_card=locate_card,
     )
 
-    assert (await restarted.discard_pending_on_startup()).discarded == 0
+    assert (await restarted.recover_cards_on_startup()).discarded == 0
     # The whole point: no second card, and nothing edited, because there is no
     # event id this process is entitled to claim.
     sender.assert_not_awaited()
@@ -1618,7 +1635,7 @@ async def test_a_restart_adopts_and_expires_the_card_a_previous_device_left(tmp_
         locate_card=locate_card,
     )
 
-    assert (await restarted.discard_pending_on_startup()).discarded == 0
+    assert (await restarted.recover_cards_on_startup()).discarded == 0
     async with asyncio.timeout(1):
         await edited.wait()
     # Located by the approval id, which is device-independent, and never by the
@@ -1687,7 +1704,7 @@ async def test_a_restart_keeps_a_card_whose_room_lookup_could_not_run(tmp_path: 
         locate_card=AsyncMock(side_effect=RuntimeError("the homeserver is unreachable")),
     )
 
-    sweep = await restarted.discard_pending_on_startup()
+    sweep = await restarted.recover_cards_on_startup()
 
     assert sweep == ApprovalStartupSweep(discarded=0, failed=1)
     assert sweep.complete is False
@@ -1728,7 +1745,7 @@ async def test_a_restart_drops_a_claim_whose_send_was_never_attempted(tmp_path: 
         locate_card=locate_card,
     )
 
-    sweep = await restarted.discard_pending_on_startup()
+    sweep = await restarted.recover_cards_on_startup()
 
     assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
     sender.assert_not_awaited()
@@ -1764,7 +1781,7 @@ async def test_a_restart_still_expires_an_acknowledged_card_from_another_device(
         sending_device=lambda: "ADIFFERENTDEVICE",
     )
 
-    assert (await restarted.discard_pending_on_startup()).discarded == 0
+    assert (await restarted.recover_cards_on_startup()).discarded == 0
     async with asyncio.timeout(1):
         await edited.wait()
     sender.assert_not_awaited()
@@ -1814,7 +1831,7 @@ async def test_a_store_failure_while_binding_owes_one_row_not_the_page(tmp_path:
         locate_card=AsyncMock(return_value=None),
     )
 
-    sweep = await store.discard_pending_on_startup()
+    sweep = await store.recover_cards_on_startup()
 
     assert sweep == ApprovalStartupSweep(discarded=0, failed=1)
     assert cards.rows, "the row is owed, so it must survive for the next pass"
@@ -2182,7 +2199,7 @@ async def test_startup_discovers_pending_rooms_no_longer_in_runtime_config(tmp_p
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    sweep = await store.discard_pending_on_startup()
+    sweep = await store.recover_cards_on_startup()
 
     assert sweep.scanned == 1
     assert sweep.discarded == 0
@@ -2204,7 +2221,7 @@ async def test_startup_discovers_cached_native_cards_without_history_scan(tmp_pa
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    sweep = await store.discard_pending_on_startup()
+    sweep = await store.recover_cards_on_startup()
 
     assert sweep.scanned == 1
     assert sweep.discarded == 0
@@ -2256,8 +2273,8 @@ async def test_a_page_of_undeliverable_cards_does_not_starve_the_ones_behind_it(
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    with patch("mindroom.approval_manager._STARTUP_DISCARD_SCAN_PAGE", 2):
-        sweep = await store.discard_pending_on_startup()
+    with patch("mindroom.approval_manager._STARTUP_RECOVERY_SCAN_PAGE", 2):
+        sweep = await store.recover_cards_on_startup()
 
     assert sweep.discarded == 1
     assert sweep.failed == 2
@@ -2285,7 +2302,7 @@ async def test_a_card_left_unsettled_is_reported_as_still_owed(tmp_path: Path) -
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    sweep = await store.discard_pending_on_startup()
+    sweep = await store.recover_cards_on_startup()
 
     assert sweep == ApprovalStartupSweep(discarded=0, failed=1)
     assert sweep.complete is False
@@ -2316,14 +2333,14 @@ async def test_a_card_no_device_can_resend_is_not_reported_as_owed(tmp_path: Pat
         locate_card=AsyncMock(return_value=None),
     )
 
-    sweep = await store.discard_pending_on_startup()
+    sweep = await store.recover_cards_on_startup()
 
     assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
     assert sweep.complete is True
 
 
 @pytest.mark.asyncio
-async def test_discard_pending_on_startup_scans_more_than_500_cached_cards(tmp_path: Path) -> None:
+async def test_recover_cards_on_startup_scans_more_than_500_cached_cards(tmp_path: Path) -> None:
     cards = FakeApprovalCards()
     for index in range(501):
         event_id = f"$approval-{index}"
@@ -2345,7 +2362,7 @@ async def test_discard_pending_on_startup_scans_more_than_500_cached_cards(tmp_p
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    sweep = await store.discard_pending_on_startup()
+    sweep = await store.recover_cards_on_startup()
 
     assert sweep.scanned == 501
     assert sweep.discarded == 0
@@ -2354,7 +2371,7 @@ async def test_discard_pending_on_startup_scans_more_than_500_cached_cards(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_discard_pending_on_startup_skips_cross_router_cached_cards(
+async def test_recover_cards_on_startup_skips_cross_router_cached_cards(
     tmp_path: Path,
 ) -> None:
     cards = FakeApprovalCards()
@@ -2368,7 +2385,7 @@ async def test_discard_pending_on_startup_skips_cross_router_cached_cards(
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert (await store.discard_pending_on_startup()).discarded == 0
+    assert (await store.recover_cards_on_startup()).discarded == 0
     editor.assert_not_awaited()
 
 
@@ -2398,7 +2415,7 @@ async def test_a_restart_redelivers_a_decision_instead_of_expiring_it(tmp_path: 
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert (await store.discard_pending_on_startup()).discarded == 1
+    assert (await store.recover_cards_on_startup()).discarded == 1
     assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
     assert editor.await_args.args[2]["status"] == "approved"
     assert editor.await_args.args[2]["resolution_reason"] == "Looks fine."
@@ -2481,7 +2498,7 @@ async def test_the_decision_is_recorded_before_the_edit_is_attempted(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_discard_pending_on_startup_skips_other_routers_cards(tmp_path: Path) -> None:
+async def test_recover_cards_on_startup_skips_other_routers_cards(tmp_path: Path) -> None:
     cards = FakeApprovalCards()
     await cards.store_card("$approval", "!room:localhost", _approval_card(sender="@other_router:localhost"))
     editor = AsyncMock(return_value=True)
@@ -2493,7 +2510,7 @@ async def test_discard_pending_on_startup_skips_other_routers_cards(tmp_path: Pa
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert (await store.discard_pending_on_startup()).discarded == 0
+    assert (await store.recover_cards_on_startup()).discarded == 0
     editor.assert_not_awaited()
 
 
