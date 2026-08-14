@@ -18,8 +18,8 @@ def _chroma_store() -> ChromaDB:
     store.insert(
         vectors=[[1.0, 0.0, 0.0], [0.8, 0.6, 0.0], [0.0, 0.0, 1.0]],
         payloads=[
-            {"data": "IonQ MindRoom COI lawyer review", "user_id": "agent_general"},
-            {"data": "IonQ hardware notes", "user_id": "agent_general"},
+            {"data": "PR review", "user_id": "agent_general"},
+            {"data": "Hardware notes", "user_id": "agent_general"},
             {"data": "unrelated grocery list", "user_id": "agent_general"},
         ],
         ids=["verbatim", "related", "unrelated"],
