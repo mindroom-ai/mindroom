@@ -4286,3 +4286,16 @@ def test_required_scope_check_accepts_google_scope_supersets() -> None:
         sheets_provider,
         {"scope": "https://www.googleapis.com/auth/spreadsheets"},
     )
+
+
+def test_required_scope_check_accepts_refresh_token_for_offline_access() -> None:
+    provider = _fake_provider(scopes=("scope.read", "offline_access"))
+
+    assert oauth_service.oauth_credentials_have_required_scopes(
+        provider,
+        {"scopes": ["scope.read"], "refresh_token": "refresh-token"},
+    )
+    assert not oauth_service.oauth_credentials_have_required_scopes(
+        provider,
+        {"scopes": ["scope.read"]},
+    )
