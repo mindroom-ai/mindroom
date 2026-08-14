@@ -469,6 +469,78 @@ def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
     )
 
 
+@pytest.mark.asyncio
+async def test_google_wrapper_replaces_swallowed_async_upload_refresh_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Async uploads should return the same reconnect response as synchronous calls."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target(
+        "user_agent",
+        "general",
+        execution_identity=identity,
+    )
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "valid-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    def fail_refresh(*_args: object, **_kwargs: object) -> None:
+        message = "refresh rejected"
+        raise RefreshError(message, {"error": "invalid_grant"})
+
+    def swallowed_upload(self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
+        try:
+            self.creds.refresh(object())
+        except RefreshError as exc:
+            return f"Unexpected error: {exc}"
+        return "unexpected success"
+
+    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", fail_refresh)
+    monkeypatch.setattr(GoogleDriveTools, "_upload_file", swallowed_upload)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    entrypoint = tool.async_functions["google_drive_upload_file"].entrypoint
+    assert entrypoint is not None
+
+    payload = json.loads(await entrypoint("unused"))
+
+    assert payload["oauth_connection_required"] is True
+    assert payload["reason"] == "refresh_rejected"
+    assert (
+        load_scoped_credentials(
+            GoogleDriveTools._oauth_provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        is None
+    )
+
+
 def test_google_wrapper_keeps_refresh_rejection_state_per_call(
     monkeypatch: pytest.MonkeyPatch,
     runtime_paths: RuntimePaths,

@@ -320,7 +320,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         if result := self._write_scope_upgrade_result():
             return result
         return await asyncio.to_thread(
-            self._upload_file,
+            self.upload_file,
             local_path,
             folder_id=folder_id,
             name=name,
