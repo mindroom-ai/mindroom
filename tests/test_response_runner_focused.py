@@ -1817,8 +1817,14 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
         calls=plan.calls,
         state="waiting",
     )
-    send_card = AsyncMock(return_value=object())
-    with patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card):
+    approval_store = MagicMock(
+        prepare_detached_approval=AsyncMock(return_value=object()),
+        reserve_and_publish=AsyncMock(return_value=True),
+    )
+    with patch(
+        "mindroom.approval_response.approval_manager.get_approval_store",
+        return_value=approval_store,
+    ):
         await runner._approval_responses._publish_cards(
             continuation,
             plan,
@@ -1828,8 +1834,9 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
 
     assert plan.waiting_text == "Waiting for approval: `conditional_write`"
     assert [call.decision for call in plan.calls] == [ApprovalDecision.APPROVED, None]
-    send_card.assert_awaited_once()
-    assert send_card.await_args.args[0].tool_name == "conditional_write"
+    approval_store.prepare_detached_approval.assert_awaited_once()
+    assert approval_store.prepare_detached_approval.await_args.kwargs["tool_name"] == "conditional_write"
+    approval_store.reserve_and_publish.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1871,8 +1878,14 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
         calls=plan.calls,
         state="waiting",
     )
-    send_card = AsyncMock(return_value=object())
-    with patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card):
+    approval_store = MagicMock(
+        prepare_detached_approval=AsyncMock(return_value=object()),
+        reserve_and_publish=AsyncMock(return_value=True),
+    )
+    with patch(
+        "mindroom.approval_response.approval_manager.get_approval_store",
+        return_value=approval_store,
+    ):
         await runner._approval_responses._publish_cards(
             continuation,
             plan,
@@ -1882,7 +1895,11 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
 
     assert plan.waiting_text == "Waiting for approval: `dangerous_one`, `dangerous_two`"
     assert [call.decision for call in plan.calls] == [None, None]
-    assert [awaited.args[0].tool_name for awaited in send_card.await_args_list] == ["dangerous_one", "dangerous_two"]
+    assert [awaited.kwargs["tool_name"] for awaited in approval_store.prepare_detached_approval.await_args_list] == [
+        "dangerous_one",
+        "dangerous_two",
+    ]
+    approval_store.reserve_and_publish.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1922,7 +1939,6 @@ async def test_automatic_pause_preserves_thinking_placeholder_and_wakes_continua
     )
     edit_text = AsyncMock(return_value=True)
     send_text = AsyncMock(return_value="$unexpected")
-    send_card = AsyncMock(return_value=object())
     retry_sources = Mock()
     runner._approval_responses.retry_sources = retry_sources
 
@@ -1933,7 +1949,6 @@ async def test_automatic_pause_preserves_thinking_placeholder_and_wakes_continua
             "mindroom.approval_response.resolve_tool_approval_approver",
             return_value="@user:localhost",
         ),
-        patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card),
     ):
         outcome = await runner._suspend_for_approval(
             paused,
@@ -1947,7 +1962,6 @@ async def test_automatic_pause_preserves_thinking_placeholder_and_wakes_continua
 
     edit_text.assert_not_awaited()
     send_text.assert_not_awaited()
-    send_card.assert_not_awaited()
     retry_sources.assert_called_once_with(("$source",))
     assert outcome.final_visible_body is None
     assert outcome.delivery_kind is None
@@ -2019,7 +2033,6 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
         user_id=request.user_id,
     )
     edit_text = AsyncMock(return_value=True)
-    send_card = AsyncMock(return_value=object())
     retry_sources = Mock()
     runner._approval_responses.retry_sources = retry_sources
 
@@ -2030,7 +2043,6 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
             "mindroom.approval_response.evaluate_tool_approval",
             new=AsyncMock(return_value=(True, 60.0)),
         ),
-        patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card),
     ):
         outcome = await runner._suspend_for_approval(
             paused,
@@ -2047,7 +2059,6 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
     assert continuation.state == "ready"
     assert continuation.calls[0].decision is ApprovalDecision.DENIED
     edit_text.assert_not_awaited()
-    send_card.assert_not_awaited()
     retry_sources.assert_called_once_with(("$source",))
     assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
 
@@ -2107,7 +2118,10 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         ),
     )
     edit_text = AsyncMock(return_value=True)
-    send_card = AsyncMock(return_value=object())
+    approval_store = MagicMock(
+        prepare_detached_approval=AsyncMock(return_value=object()),
+        reserve_and_publish=AsyncMock(return_value=True),
+    )
     retry_sources = Mock()
     runner._approval_responses.retry_sources = retry_sources
 
@@ -2121,7 +2135,10 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
             return_value="@user:localhost",
         ),
         patch("mindroom.approval_response.evaluate_tool_approval", side_effect=evaluate),
-        patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=approval_store,
+        ),
     ):
         waiting_text = await runner._approval_responses.advance_pause(
             current,
@@ -2141,7 +2158,9 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     assert edit_request.extra_content == {
         STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING if expected_text else STREAM_STATUS_PENDING,
     }
-    assert [awaited.args[0].tool_name for awaited in send_card.await_args_list] == expected_cards
+    assert [
+        awaited.kwargs["tool_name"] for awaited in approval_store.prepare_detached_approval.await_args_list
+    ] == expected_cards
     if expected_state == "ready":
         retry_sources.assert_called_once_with(("$source",))
         restarted = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
