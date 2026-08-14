@@ -40,7 +40,7 @@ def test_approval_receipt_distinguishes_human_and_policy_decisions() -> None:
         (
             ApprovalCall(
                 tool_call_id="call-human",
-                tool_name="publish_report",
+                tool_name="update_report",
                 invoking_agent="writer",
                 expires_at_ns=1,
                 decision=ApprovalDecision.APPROVED,
@@ -48,7 +48,7 @@ def test_approval_receipt_distinguishes_human_and_policy_decisions() -> None:
             ),
             ApprovalCall(
                 tool_call_id="call-policy",
-                tool_name="read_report",
+                tool_name="update_report",
                 invoking_agent="reader",
                 expires_at_ns=1,
                 decision=ApprovalDecision.APPROVED,
@@ -57,8 +57,10 @@ def test_approval_receipt_distinguishes_human_and_policy_decisions() -> None:
         ),
     )
 
-    assert "`publish_report`: an approval card was shown and approved before execution." in receipt
-    assert "`read_report`: human approval was not required; policy approved execution." in receipt
+    assert "`update_report` (call `call-human`): an approval card was shown and approved before execution." in receipt
+    assert (
+        "`update_report` (call `call-policy`): human approval was not required; policy approved execution." in receipt
+    )
     assert "Do not infer approval policy from tool success alone." in receipt
 
 
@@ -76,7 +78,10 @@ def test_approval_receipt_keeps_legacy_provenance_unknown() -> None:
         ),
     )
 
-    assert "`legacy_action`: approval was granted, but its approval provenance is unavailable." in receipt
+    assert (
+        "`legacy_action` (call `call-legacy`): approval was granted, but its approval provenance is unavailable."
+        in receipt
+    )
 
 
 def test_approval_receipt_reports_denied_and_expired_calls_as_unexecuted() -> None:
@@ -102,8 +107,8 @@ def test_approval_receipt_reports_denied_and_expired_calls_as_unexecuted() -> No
         ),
     )
 
-    assert "`delete_report`: approval was denied; the tool was not executed." in receipt
-    assert "`publish_report`: human approval expired; the tool was not executed." in receipt
+    assert "`delete_report` (call `call-denied`): approval was denied; the tool was not executed." in receipt
+    assert "`publish_report` (call `call-expired`): human approval expired; the tool was not executed." in receipt
 
 
 def test_approval_receipt_rejects_unsettled_calls() -> None:

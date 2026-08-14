@@ -63,7 +63,7 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
         if call.decision is None:
             msg = f"Cannot build trusted receipt for pending approval call {call.tool_call_id!r}"
             raise ValueError(msg)
-        tool = f"`{call.tool_name}`"
+        call_label = f"`{call.tool_name}` (call `{call.tool_call_id}`)"
         if call.decision is ContinuationDecision.APPROVED:
             if call.human_approval_required is True:
                 outcome = "an approval card was shown and approved before execution."
@@ -75,7 +75,7 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
             outcome = "human approval expired; the tool was not executed."
         else:
             outcome = "approval was denied; the tool was not executed."
-        lines.append(f"- {tool}: {outcome}")
+        lines.append(f"- {call_label}: {outcome}")
     return "\n".join(lines)
 
 

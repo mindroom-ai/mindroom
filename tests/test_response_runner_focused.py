@@ -1509,7 +1509,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         patch("mindroom.approval_execution.typing_indicator", _noop_typing),
         patch("mindroom.approval_execution.close_agent_runtime_state_dbs"),
         patch("mindroom.approval_execution.ai_runtime.install_queued_message_notice_hook") as install_notice,
-        patch("mindroom.approval_execution.install_approval_receipt_hook") as install_receipt,
+        patch("mindroom.approval_execution.install_approval_receipt_hooks") as install_receipt,
         patch("mindroom.approval_execution.ai_runtime.register_queued_notice_storage") as register_notice,
         approval_receipt.approval_receipt_context("trusted approval receipt"),
     ):
@@ -1538,7 +1538,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         agent.model,
         notice_text=runner.deps.runtime.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
     )
-    install_receipt.assert_called_once_with(agent.model)
+    install_receipt.assert_called_once_with(agent.model, agent.fallback_config)
     register_notice.assert_called_once()
     assert register_notice.call_args.kwargs["session_id"] == "session-1"
     assert register_notice.call_args.kwargs["session_type"] is SessionType.AGENT
@@ -2823,7 +2823,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
 
     async def continue_run(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
         model = RecordingModel(id="approval-receipt", provider="fake")
-        approval_receipt.install_approval_receipt_hook(model)
+        approval_receipt.install_approval_receipt_hooks(model, None)
         await model.aresponse(
             messages=[
                 Message(role="system", content="base rules"),
@@ -2855,7 +2855,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
             "base rules\n\n"
             "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
             "paused tool calls were authorized. Do not infer approval policy from tool success alone.\n"
-            "- `publish_report`: an approval card was shown and approved before execution.",
+            "- `publish_report` (call `call-1`): an approval card was shown and approved before execution.",
         ),
         ("tool", "published"),
     ]

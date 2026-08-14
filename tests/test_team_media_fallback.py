@@ -343,7 +343,7 @@ async def test_paused_team_scope_open_failure_closes_materialized_member_databas
 
     with (
         patch("mindroom.teams.materialize_exact_team_members", return_value=members),
-        patch("mindroom.teams.install_approval_receipt_hook") as install_receipt,
+        patch("mindroom.teams.install_approval_receipt_hooks") as install_receipt,
         patch("mindroom.teams.open_bound_scope_session_context", return_value=ThrowingScope()),
         patch("mindroom.teams.close_team_runtime_state_dbs") as close_dbs,
         pytest.raises(RuntimeError, match="scope open failed"),
@@ -369,7 +369,7 @@ async def test_paused_team_scope_open_failure_closes_materialized_member_databas
         team_db=None,
         shared_scope_storage=None,
     )
-    install_receipt.assert_called_once_with(agent.model)
+    install_receipt.assert_called_once_with(agent.model, agent.fallback_config)
 
 
 @pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])

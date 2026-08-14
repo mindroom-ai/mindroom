@@ -14,7 +14,9 @@ import nio
 import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.db.base import BaseDb, SessionType
+from agno.exceptions import ModelProviderError
 from agno.media import Image
+from agno.models.fallback import FallbackConfig, acall_model_with_fallback
 from agno.models.message import Message
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
@@ -3028,7 +3030,7 @@ def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call()
 async def test_model_call_hook_appends_one_trusted_approval_receipt_after_tool_results() -> None:
     """A resumed model must see approval provenance after its protocol-required tool result."""
     model = RecordingModel(id="approval-receipt", provider="fake")
-    approval_receipt.install_approval_receipt_hook(model)
+    approval_receipt.install_approval_receipt_hooks(model, None)
     messages = [
         Message(role="system", content="base rules"),
         Message(role="assistant", content="calling tool"),
@@ -3048,6 +3050,31 @@ async def test_model_call_hook_appends_one_trusted_approval_receipt_after_tool_r
         ("system", "base rules"),
         ("assistant", "calling tool"),
         ("tool", "tool result"),
+        ("assistant", "ok"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_approval_receipt_reaches_fallback_model_after_primary_failure() -> None:
+    """A resumed fallback call must receive the same trusted approval provenance."""
+    primary = RecordingModel(id="primary", provider="fake")
+    fallback = RecordingModel(id="fallback", provider="fake")
+    vars(primary)["aresponse"] = AsyncMock(side_effect=ModelProviderError("primary failed"))
+    fallback_config = FallbackConfig(on_error=[fallback])
+    approval_receipt.install_approval_receipt_hooks(primary, fallback_config)
+    messages = [Message(role="system", content="base rules")]
+
+    with approval_receipt.approval_receipt_context("trusted approval receipt"):
+        response = await acall_model_with_fallback(
+            primary,
+            fallback_config,
+            messages=messages,
+        )
+
+    assert response.content == "ok"
+    assert fallback.seen_messages[0].content == "base rules\n\ntrusted approval receipt"
+    assert [(message.role, message.content) for message in messages] == [
+        ("system", "base rules"),
     ]
 
 
@@ -3056,8 +3083,8 @@ async def test_approval_receipt_reaches_each_concurrent_model_once() -> None:
     """Every model participating in one resumed team run must receive the trusted receipt."""
     first = RecordingModel(id="first-member", provider="fake")
     second = RecordingModel(id="second-member", provider="fake")
-    approval_receipt.install_approval_receipt_hook(first)
-    approval_receipt.install_approval_receipt_hook(second)
+    approval_receipt.install_approval_receipt_hooks(first, None)
+    approval_receipt.install_approval_receipt_hooks(second, None)
 
     with approval_receipt.approval_receipt_context("trusted approval receipt"):
         await asyncio.gather(
