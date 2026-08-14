@@ -84,6 +84,11 @@ class _OAuthProviderNotConfiguredError(OAuthProviderError):
 _TERMINAL_REFRESH_ERROR_CODES = frozenset({"invalid_grant", "invalid_refresh_token"})
 
 
+def is_terminal_oauth_refresh_error_code(value: object) -> bool:
+    """Return whether a provider code permanently rejects token refresh."""
+    return isinstance(value, str) and value.strip().lower() in _TERMINAL_REFRESH_ERROR_CODES
+
+
 class OAuthClaimValidationError(OAuthProviderError):
     """Raised when verified provider claims do not satisfy configured policy."""
 
@@ -353,7 +358,7 @@ def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError) -> OAuthProviderErro
 
     msg = "OAuth token refresh failed"
     if detail is not None:
-        if error_code in _TERMINAL_REFRESH_ERROR_CODES:
+        if is_terminal_oauth_refresh_error_code(error_code):
             return OAuthRefreshRejectedError(
                 f"{msg}: {detail}",
                 oauth_error=error_code,
@@ -364,7 +369,7 @@ def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError) -> OAuthProviderErro
             oauth_error=error_code,
             oauth_error_description=error_description,
         )
-    if error_code in _TERMINAL_REFRESH_ERROR_CODES:
+    if is_terminal_oauth_refresh_error_code(error_code):
         return OAuthRefreshRejectedError(
             f"{msg}: {error_code}",
             oauth_error=error_code,

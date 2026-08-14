@@ -28,6 +28,7 @@ from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     OAuthConnectionRequired,
     OAuthProviderError,
+    is_terminal_oauth_refresh_error_code,
     oauth_connection_required_payload,
 )
 from mindroom.oauth.service import build_oauth_connect_instruction, build_oauth_reconnect_instruction
@@ -51,6 +52,20 @@ GOOGLE_NARROW_EXTRA_AUTH_PARAMS = {
     "access_type": "offline",
     "prompt": "consent",
 }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("invalid_grant", True),
+        (" Invalid_Refresh_Token ", True),
+        ("temporarily_unavailable", False),
+        (None, False),
+    ],
+)
+def test_terminal_oauth_refresh_error_classification(value: object, expected: bool) -> None:
+    """All refresh paths should share one normalized terminal-code policy."""
+    assert is_terminal_oauth_refresh_error_code(value) is expected
 
 
 @pytest.mark.parametrize(

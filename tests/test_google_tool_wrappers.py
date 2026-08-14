@@ -331,6 +331,7 @@ def test_scoped_oauth_client_connection_required_uses_shared_instruction(
     ("refresh_error", "expected_reason", "credential_remains"),
     [
         (RefreshError("refresh rejected", {"error": "invalid_grant"}), "refresh_rejected", False),
+        (RefreshError("refresh rejected", {"error": "invalid_refresh_token"}), "refresh_rejected", False),
         (TransportError("provider unavailable"), None, True),
     ],
 )

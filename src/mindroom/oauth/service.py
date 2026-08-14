@@ -21,6 +21,7 @@ from mindroom.oauth.providers import (
     OAuthProviderError,
     OAuthRefreshRejectedError,
     OAuthTokenResult,
+    is_terminal_oauth_refresh_error_code,
     oauth_connect_url_requires_host_browser,
 )
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
@@ -38,7 +39,6 @@ if TYPE_CHECKING:
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = 600
 _OAUTH_CONNECT_TOKEN_KIND = "conversation_oauth_connect"  # noqa: S105
 _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
-_RECOVERABLE_REFRESH_ERROR_CODES = frozenset({"invalid_grant", "invalid_refresh_token"})
 logger = get_logger(__name__)
 _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
     {
@@ -480,8 +480,7 @@ def _refresh_token_value(credentials: Mapping[str, Any] | None) -> str | None:
 
 
 def _is_recoverable_stale_refresh_rejection(exc: OAuthProviderError) -> bool:
-    error_code = _normalized_oauth_error_code(exc.oauth_error)
-    return error_code in _RECOVERABLE_REFRESH_ERROR_CODES
+    return is_terminal_oauth_refresh_error_code(exc.oauth_error)
 
 
 def _normalized_oauth_error_code(value: object) -> str | None:

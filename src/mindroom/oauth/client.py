@@ -15,7 +15,12 @@ from google.auth.transport import requests as google_requests
 
 from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
 from mindroom.file_locks import advisory_file_lock
-from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProvider, oauth_connection_required_payload
+from mindroom.oauth.providers import (
+    OAuthConnectionRequired,
+    OAuthProvider,
+    is_terminal_oauth_refresh_error_code,
+    oauth_connection_required_payload,
+)
 from mindroom.oauth.service import (
     build_oauth_connect_instruction,
     build_oauth_reconnect_instruction,
@@ -412,6 +417,6 @@ def _google_refresh_was_terminally_rejected(exc: RefreshError) -> bool:
     for value in exc.args:
         if isinstance(value, dict):
             error = value.get("error")
-            if isinstance(error, str) and error.strip().lower() in {"invalid_grant", "invalid_refresh_token"}:
+            if is_terminal_oauth_refresh_error_code(error):
                 return True
     return False

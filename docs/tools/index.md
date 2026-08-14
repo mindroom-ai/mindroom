@@ -68,7 +68,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 - [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Calendar & Scheduling](calendar-and-scheduling.md) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](memory-and-storage.md) - Explicit memory tools and external memory providers.
-- [Agent Orchestration](agent-orchestration.md) - Subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Agent Orchestration](agent-orchestration.md) - OAuth connection recovery, subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
 - [Dynamic Tools](dynamic-tools.md) - Per-tool lazy loading for optional agent capabilities.
 - [Automation & Platforms](automation-and-platforms.md) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](location-commerce-and-home.md) - Maps, weather, commerce, and Home Assistant.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -12,8 +12,10 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
+from mindroom.custom_tools import oauth_connections as oauth_connections_module
 from mindroom.custom_tools.oauth_connections import OAuthConnectionTools
 from mindroom.message_target import MessageTarget
+from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.service import lookup_oauth_connect_token
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -21,6 +23,10 @@ from tests.conftest import make_conversation_reader_mock, make_relation_lookup, 
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.credentials import CredentialsManager
+    from mindroom.oauth.providers import OAuthProvider
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
 def _tool_and_context(
@@ -64,6 +70,23 @@ def _connect_url_from_result(result: str) -> str:
     marker = "`connect_url`: "
     assert marker in result
     return result.split(marker, maxsplit=1)[1].split(";", maxsplit=1)[0]
+
+
+def _save_test_credentials(
+    context: ToolRuntimeContext,
+    provider: OAuthProvider,
+    refresh_token: str,
+) -> tuple[CredentialsManager, ResolvedWorkerTarget, dict[str, str]]:
+    worker_target = context.resolve_worker_target()
+    credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
+    credentials = {"refresh_token": refresh_token}
+    save_scoped_credentials(
+        provider.credential_service,
+        credentials,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    return credentials_manager, worker_target, credentials
 
 
 def test_oauth_connections_exposes_only_approval_gated_reset(tmp_path: Path) -> None:
@@ -149,3 +172,98 @@ async def test_reset_oauth_connection_refuses_shared_scope(tmp_path: Path) -> No
         )
         is not None
     )
+
+
+@pytest.mark.asyncio
+async def test_reset_oauth_connection_denies_unauthorized_requester_before_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reply permissions must deny reset before credential or MCP state changes."""
+    tool, context = _tool_and_context(tmp_path, worker_scope="user_agent")
+    context.config.authorization.agent_reply_permissions = {"research": ["@bob:example.org"]}
+    provider = google_drive_oauth_provider()
+    credentials_manager, worker_target, credentials = _save_test_credentials(
+        context,
+        provider,
+        "unauthorized-refresh-token",
+    )
+    disconnect = AsyncMock()
+    monkeypatch.setattr(oauth_connections_module, "disconnect_mcp_oauth_request_session", disconnect)
+
+    with tool_runtime_context(context):
+        result = await tool.reset_oauth_connection(provider.id)
+
+    assert "not authorized" in result
+    assert (
+        load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        == credentials
+    )
+    disconnect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reset_oauth_connection_denies_provider_not_backing_agent_tool_before_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only providers backing the current agent's tools may be reset."""
+    tool, context = _tool_and_context(tmp_path, worker_scope="user_agent")
+    provider = google_calendar_oauth_provider()
+    credentials_manager, worker_target, credentials = _save_test_credentials(
+        context,
+        provider,
+        "unavailable-refresh-token",
+    )
+    disconnect = AsyncMock()
+    monkeypatch.setattr(oauth_connections_module, "disconnect_mcp_oauth_request_session", disconnect)
+
+    with tool_runtime_context(context):
+        result = await tool.reset_oauth_connection(provider.id)
+
+    assert "is not available to this agent" in result
+    assert (
+        load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        == credentials
+    )
+    disconnect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reset_oauth_connection_denies_unconfigured_provider_before_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A catalog-allowed provider must still exist in the active OAuth registry."""
+    tool, context = _tool_and_context(tmp_path, worker_scope="user_agent")
+    provider = google_drive_oauth_provider()
+    credentials_manager, worker_target, credentials = _save_test_credentials(
+        context,
+        provider,
+        "unconfigured-refresh-token",
+    )
+    disconnect = AsyncMock()
+    monkeypatch.setattr(oauth_connections_module, "load_oauth_providers", lambda *_args: {})
+    monkeypatch.setattr(oauth_connections_module, "disconnect_mcp_oauth_request_session", disconnect)
+
+    with tool_runtime_context(context):
+        result = await tool.reset_oauth_connection(provider.id)
+
+    assert "is not configured" in result
+    assert (
+        load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        == credentials
+    )
+    disconnect.assert_not_awaited()
