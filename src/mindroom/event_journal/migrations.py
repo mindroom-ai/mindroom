@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 _MESSAGE_EVENT_TYPE = "m.room.message"
 _APPROVAL_EVENT_TYPE = "io.mindroom.tool_approval"
+_LEGACY_UNAVAILABLE_NOTICE_PREFIX = "approval-unavailable:"
 
 
 def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: bool) -> bool:
@@ -56,10 +57,49 @@ def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: boo
         transaction.execute(
             "ALTER TABLE matrix_delivery_outbox ADD COLUMN edit_target_pending INTEGER NOT NULL DEFAULT 0",
         )
+    if _table_exists(transaction, "matrix_delivery_outbox", postgres=postgres) and _table_exists(
+        transaction,
+        "approval_continuations",
+        postgres=postgres,
+    ):
+        _migrate_unavailable_notice_delivery_ids(transaction)
     legacy_approvals = _column_exists(transaction, "approval_cards", "transaction_id", postgres=postgres)
     if legacy_approvals:
         transaction.execute("ALTER TABLE approval_cards RENAME TO approval_cards_legacy_delivery")
     return legacy_approvals
+
+
+def _migrate_unavailable_notice_delivery_ids(transaction: Transaction) -> None:
+    """Move #1834 notice debt onto the response event ID used by the generic flow."""
+    rows = transaction.fetchall(
+        """
+        SELECT principal_id, delivery_id
+        FROM matrix_delivery_outbox
+        WHERE stage = 'final' AND delivery_id LIKE ?
+        """,
+        (f"{_LEGACY_UNAVAILABLE_NOTICE_PREFIX}%",),
+    )
+    for row in rows:
+        old_delivery_id = str(row["delivery_id"])
+        approval_id = old_delivery_id.removeprefix(_LEGACY_UNAVAILABLE_NOTICE_PREFIX)
+        continuation = transaction.fetchone(
+            "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+            (approval_id,),
+        )
+        if continuation is None:
+            continue
+        context = _object_json(continuation["context_json"], description="approval continuation context")
+        response_event_id = context.get("response_event_id")
+        if not isinstance(response_event_id, str) or not response_event_id:
+            msg = f"Legacy approval continuation {approval_id!r} has no response event ID"
+            raise ValueError(msg)
+        transaction.execute(
+            """
+            UPDATE matrix_delivery_outbox SET delivery_id = ?
+            WHERE principal_id = ? AND delivery_id = ? AND stage = 'final'
+            """,
+            (response_event_id, str(row["principal_id"]), old_delivery_id),
+        )
 
 
 def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approvals: bool) -> None:

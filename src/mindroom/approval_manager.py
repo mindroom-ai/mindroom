@@ -532,7 +532,16 @@ class _ApprovalManager:
                         retired += int(settled)
                         failed += int(not settled)
                         continue
-                    expires_at = parse_approval_datetime(cast("str | None", stored.card["content"].get("expires_at")))
+                    try:
+                        expires_at = parse_approval_datetime(
+                            cast("str | None", stored.card["content"].get("expires_at")),
+                        )
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "approval_card_expiry_unreadable",
+                            delivery_id=stored.delivery_id,
+                        )
+                        continue
                     if expires_at is not None and expires_at <= _utcnow():
                         settled = await self._expire_stored(room_id, stored)
                         retired += int(settled)

@@ -230,6 +230,48 @@ async def test_continuation_decision_wakes_its_owning_bot_sources(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_startup_recovery_skips_a_malformed_expiry_without_starving_later_cards(tmp_path: Path) -> None:
+    """One corrupt visible deadline cannot abort the room's remaining recovery page."""
+    cards = MagicMock()
+    cards.unacknowledged_matrix_deliveries = AsyncMock(return_value=())
+    cards.pending_approval_room_ids = AsyncMock(return_value=("!room:localhost",))
+    cards.pending_approval_cards = AsyncMock(
+        return_value=(
+            MagicMock(
+                resolution=None,
+                card={"content": {"expires_at": "not-a-datetime"}},
+                created_at_ns=1,
+                delivery_id="malformed-card",
+            ),
+            MagicMock(
+                resolution={"status": "denied"},
+                card={"content": {"expires_at": "2030-01-01T00:00:00+00:00"}},
+                created_at_ns=2,
+                delivery_id="recoverable-card",
+            ),
+        ),
+    )
+    manager = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        send_delivery=AsyncMock(),
+        cards=cards,
+        sending_device=lambda: "DEVICE",
+    )
+
+    try:
+        with patch.object(manager, "_expire_stored", new=AsyncMock(return_value=True)) as expire:
+            sweep = await manager.recover_cards_on_startup()
+
+        assert sweep.scanned == 2
+        assert sweep.discarded == 1
+        assert sweep.failed == 0
+        expire.assert_awaited_once()
+        assert expire.await_args.args[1].delivery_id == "recoverable-card"
+    finally:
+        await manager.shutdown(reason="test complete")
+
+
+@pytest.mark.asyncio
 async def test_transient_removed_owner_cleanup_rearms_startup_retry(tmp_path: Path) -> None:
     """A failed card edit cannot abandon a removed entity's fenced journal work."""
     continuation = MagicMock(

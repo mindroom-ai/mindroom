@@ -167,6 +167,29 @@ def _install_legacy_delivery_state(connection: object, *, postgres: bool) -> Non
             10,
         ),
     )
+    for approval_id, event_id, created_at_ns in (
+        ("approval-1", None, 11),
+        ("approval-2", "$unavailable-notice", 12),
+    ):
+        insert(
+            """
+            INSERT INTO response_outbox VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "router@shared",
+                f"approval-unavailable:{approval_id}",
+                "final",
+                ROOM,
+                "$thread",
+                f"unavailable-txn-{approval_id}",
+                json.dumps({"body": f"{approval_id} unavailable", "msgtype": "m.notice"}),
+                None,
+                1,
+                DEVICE,
+                event_id,
+                created_at_ns,
+            ),
+        )
     card_content = {
         "approval_id": "approval-card-1",
         "continuation_id": "approval-1",
@@ -231,6 +254,20 @@ def _install_legacy_delivery_state(connection: object, *, postgres: bool) -> Non
         ("agent@alice", "approval-1", "agent", "ready", 0, None, None, json.dumps(context), 15),
     )
     insert(
+        "INSERT INTO approval_continuations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "agent@alice",
+            "approval-2",
+            "agent",
+            "failing",
+            0,
+            None,
+            "agent unavailable",
+            json.dumps({**context, "response_event_id": "$waiting-acknowledged"}),
+            16,
+        ),
+    )
+    insert(
         "INSERT INTO approval_continuation_sources VALUES (?, ?, ?, ?)",
         ("agent@alice", "approval-1", "$source-1", 0),
     )
@@ -259,6 +296,8 @@ async def _assert_legacy_delivery_state_migrated(store: EventJournalStore) -> No
     assert response.attempted is True
     assert response.sending_device_id == DEVICE
     assert response.acknowledged_event_id is None
+
+    await _assert_legacy_unavailable_notices_migrated(store)
 
     router = store.principal("router@shared")
     initial = await router.load_matrix_delivery(
@@ -336,6 +375,30 @@ async def _assert_legacy_delivery_state_migrated(store: EventJournalStore) -> No
     continuation = await store.principal("agent@alice").approval_continuation("approval-1")
     assert continuation is not None
     assert [call.decision for call in continuation.calls] == [ApprovalDecision.APPROVED, ApprovalDecision.EXPIRED]
+
+
+async def _assert_legacy_unavailable_notices_migrated(store: EventJournalStore) -> None:
+    """Legacy unavailable-owner notice IDs become the generic response delivery ID."""
+    for response_event_id, old_delivery_id, event_id in (
+        ("$waiting", "approval-unavailable:approval-1", None),
+        ("$waiting-acknowledged", "approval-unavailable:approval-2", "$unavailable-notice"),
+    ):
+        notice = await store.principal("router@shared").load_matrix_delivery(
+            delivery_id=response_event_id,
+            stage=DeliveryStage.FINAL,
+        )
+        assert notice is not None
+        assert notice.transaction_id == f"unavailable-txn-{old_delivery_id.removeprefix('approval-unavailable:')}"
+        assert notice.attempted is True
+        assert notice.sending_device_id == DEVICE
+        assert notice.acknowledged_event_id == event_id
+        assert (
+            await store.principal("router@shared").load_matrix_delivery(
+                delivery_id=old_delivery_id,
+                stage=DeliveryStage.FINAL,
+            )
+            is None
+        )
 
 
 # How long a claimer that is already inside its transaction waits for a second
@@ -5817,6 +5880,66 @@ class TestApprovalContinuations:
             is None
         )
 
+    async def test_responder_departure_discards_a_predecided_card_that_never_became_visible(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """A reserved INITIAL and FINAL that Matrix never saw cannot outlive their continuation."""
+        from mindroom.event_journal import ApprovalCardReservation  # noqa: PLC0415
+
+        router = journal_store.principal("router@shared")
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(
+            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
+        )
+        assert await router.reserve_approval_card_deliveries(
+            continuation_principal_id="agent@alice",
+            continuation_id="approval-1",
+            expected_generation=0,
+            cards=(
+                ApprovalCardReservation(
+                    delivery_id="approval-card-1",
+                    tool_call_id="call-1",
+                    event_type="io.mindroom.tool_approval",
+                    payload={
+                        "approval_id": "approval-card-1",
+                        "continuation_id": "approval-1",
+                        "continuation_generation": 0,
+                        "tool_call_id": "call-1",
+                        "status": "pending",
+                    },
+                ),
+            ),
+        )
+        await router.enqueue_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            event_type="io.mindroom.tool_approval",
+            room_id=ROOM,
+            thread_id="$thread",
+            payload={"status": "expired"},
+        )
+
+        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+
+        assert await alice.approval_continuation("approval-1") is None
+        assert await router.pending_approval_cards(room_id=ROOM) == ()
+        assert (
+            await router.load_matrix_delivery(
+                delivery_id="approval-card-1",
+                stage=DeliveryStage.INITIAL,
+            )
+            is None
+        )
+        assert (
+            await router.load_matrix_delivery(
+                delivery_id="approval-card-1",
+                stage=DeliveryStage.FINAL,
+            )
+            is None
+        )
+
     async def test_initial_acknowledgement_binds_a_precommitted_terminal_edit(
         self,
         journal_store: EventJournalStore,
@@ -5954,6 +6077,36 @@ class TestApprovalContinuations:
 
         assert await alice.pending_approval_cards(room_id=ROOM) == ()
         assert await alice.is_terminal_approval_card(room_id=ROOM, card_event_id="$approval") is True
+
+    async def test_card_owner_departure_keeps_a_precommitted_terminal_edit_recoverable_after_rejoin(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """A committed exact-call decision retains visible cleanup ownership across membership epochs."""
+        router = journal_store.principal("router@shared")
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(
+            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
+        )
+        await self.remember_card(router)
+        recorded = await router.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="denied",
+            reason="Unsafe.",
+            resolution={"status": "denied", "resolution_reason": "Unsafe."},
+        )
+        assert recorded.recorded is True
+
+        await router.fence_departure(ROOM, source=DepartureSource.REPORTED)
+        await router.note_membership_restarted(ROOM)
+
+        stored = await router.pending_approval_card(room_id=ROOM, card_event_id="$approval")
+        assert stored is not None
+        assert stored.resolution == {"status": "denied", "resolution_reason": "Unsafe."}
+        continuation = await alice.approval_continuation("approval-1")
+        assert continuation is not None
+        assert continuation.calls[0].decision is ApprovalDecision.DENIED
 
     async def test_router_departure_denies_a_card_that_was_never_attempted(
         self,

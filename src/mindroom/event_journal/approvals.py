@@ -463,7 +463,8 @@ def expire_cards_for_departed_continuations(
         """
         SELECT cards.principal_id, cards.delivery_id, initial.event_type,
                initial.room_id, initial.thread_id, initial.payload_json,
-               initial.attempted, initial.acknowledged_event_id
+               initial.attempted, initial.acknowledged_event_id,
+               final.delivery_id AS final_delivery_id
         FROM approval_cards AS cards
         JOIN approval_continuations AS continuations
           ON continuations.approval_id = cards.continuation_id
@@ -475,7 +476,7 @@ def expire_cards_for_departed_continuations(
           ON final.principal_id = cards.principal_id
          AND final.delivery_id = cards.delivery_id
          AND final.stage = 'final'
-        WHERE continuations.principal_id = ? AND final.delivery_id IS NULL
+        WHERE continuations.principal_id = ?
           AND EXISTS (
               SELECT 1
               FROM approval_continuation_sources AS sources
@@ -493,17 +494,9 @@ def expire_cards_for_departed_continuations(
         card_principal_id = str(row["principal_id"])
         delivery_id = str(row["delivery_id"])
         if not bool(row["attempted"]):
-            transaction.execute(
-                "DELETE FROM approval_cards WHERE principal_id = ? AND delivery_id = ?",
-                (card_principal_id, delivery_id),
-            )
-            transaction.execute(
-                """
-                DELETE FROM matrix_delivery_outbox
-                WHERE principal_id = ? AND delivery_id = ? AND stage = 'initial' AND attempted = 0
-                """,
-                (card_principal_id, delivery_id),
-            )
+            _delete_unattempted_card_delivery(transaction, card_principal_id, delivery_id)
+            continue
+        if row["final_delivery_id"] is not None:
             continue
         try:
             content = json.loads(str(row["payload_json"]))
@@ -569,7 +562,7 @@ def fail_continuations_for_departed_card_owner(
         SELECT cards.delivery_id, cards.continuation_id, cards.continuation_generation,
                cards.tool_call_id, initial.event_type, initial.room_id, initial.thread_id,
                initial.payload_json, initial.attempted, initial.acknowledged_event_id,
-               membership.membership_epoch
+               membership.membership_epoch, final.delivery_id AS final_delivery_id
         FROM approval_cards AS cards
         JOIN matrix_delivery_outbox AS initial
           ON initial.principal_id = cards.principal_id
@@ -582,12 +575,24 @@ def fail_continuations_for_departed_card_owner(
           ON final.principal_id = cards.principal_id
          AND final.delivery_id = cards.delivery_id
          AND final.stage = 'final'
-        WHERE cards.principal_id = ? AND initial.room_id = ? AND final.delivery_id IS NULL
+        WHERE cards.principal_id = ? AND initial.room_id = ?
         """,
         (card_principal_id, room_id),
     )
     for row in rows:
         delivery_id = str(row["delivery_id"])
+        if not bool(row["attempted"]):
+            _delete_unattempted_card_delivery(transaction, card_principal_id, delivery_id)
+            continue
+        if row["final_delivery_id"] is not None:
+            transaction.execute(
+                """
+                UPDATE approval_cards SET membership_epoch = ?
+                WHERE principal_id = ? AND delivery_id = ?
+                """,
+                (int(row["membership_epoch"]), card_principal_id, delivery_id),
+            )
+            continue
         transaction.execute(
             """
             UPDATE approval_continuation_calls SET decision = 'denied', reason = ?
@@ -600,12 +605,6 @@ def fail_continuations_for_departed_card_owner(
                 str(row["tool_call_id"]),
             ),
         )
-        if not bool(row["attempted"]):
-            transaction.execute(
-                "DELETE FROM approval_cards WHERE principal_id = ? AND delivery_id = ?",
-                (card_principal_id, delivery_id),
-            )
-            continue
         try:
             content = json.loads(str(row["payload_json"]))
         except (json.JSONDecodeError, TypeError):
@@ -640,6 +639,25 @@ def fail_continuations_for_departed_card_owner(
             """,
             (int(row["membership_epoch"]), card_principal_id, delivery_id),
         )
+
+
+def _delete_unattempted_card_delivery(
+    transaction: Transaction,
+    principal_id: str,
+    delivery_id: str,
+) -> None:
+    """Retire a card and every stage that provably never reached Matrix."""
+    transaction.execute(
+        "DELETE FROM approval_cards WHERE principal_id = ? AND delivery_id = ?",
+        (principal_id, delivery_id),
+    )
+    transaction.execute(
+        """
+        DELETE FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND delivery_id = ? AND attempted = 0
+        """,
+        (principal_id, delivery_id),
+    )
 
 
 def retire(
