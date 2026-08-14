@@ -1800,6 +1800,48 @@ class TestProjectedInteractivePrompts:
 
         assert await _interactive_question_rows(journal_store) == []
 
+    async def test_redacting_a_prompt_revision_erases_its_pending_selection(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A deleted prompt cannot survive in a source snapshot waiting to run."""
+        await admit(alice, "$turn", sender=BOB)
+        await admit(alice, "$target", sender="alice", content=text("Plain"))
+        await admit(
+            alice,
+            "$edit",
+            sender="alice",
+            ts=2_000,
+            content=interactive_edit("$target", "Secret?", "secret", source_event_id="$turn"),
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+        )
+        assert await _interactive_selection_rows(journal_store)
+
+        await admit(
+            alice,
+            "$redaction",
+            sender=BOB,
+            ts=3_000,
+            kind=EventKind.REDACTION,
+            redacts="$edit",
+        )
+
+        assert await alice.claim_interactive_reaction(source_event_id="$reaction") is None
+        rows = await journal_store.backend.read(
+            lambda transaction: transaction.fetchall(
+                "SELECT question_json FROM interactive_questions WHERE revision_event_id = ?",
+                ("$edit",),
+            ),
+        )
+        assert rows == ()
+
     async def test_another_sender_cannot_forge_a_prompt_for_this_principal(
         self,
         alice: PrincipalStore,

@@ -556,7 +556,7 @@ def claim_text(
     *,
     source_event_id: str,
 ) -> InteractiveSelection | None:
-    """Atomically claim the oldest matching question for one text source."""
+    """Atomically claim the prompt selection frozen for one text source."""
     candidate_source = transaction.fetchone(
         """
         SELECT room_id, thread_id, kind, membership_epoch, semantic_consumer

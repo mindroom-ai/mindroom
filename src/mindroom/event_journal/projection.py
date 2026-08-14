@@ -460,6 +460,16 @@ def _project_redaction(
     if target is None:
         return
     _record_tombstone(transaction, principal_id, event.room_id, target)
+    # Prompt revisions retain their text for replay and consumed-revision
+    # proof, so a redaction must erase that payload explicitly. Selections
+    # bound to the revision disappear through their foreign-key cascade.
+    transaction.execute(
+        """
+        DELETE FROM interactive_questions
+        WHERE principal_id = ? AND room_id = ? AND revision_event_id = ?
+        """,
+        (principal_id, event.room_id, target),
+    )
     transaction.execute(
         """
         DELETE FROM unresolved_edits
