@@ -592,7 +592,11 @@ depends_on = [
     "mindroom.matrix_delivery",
     "mindroom.tool_system.tool_calls",
 ]
-visibility = ["mindroom.tool_approval"]
+visibility = [
+    "mindroom.approval_response",
+    "mindroom.approval_transport",
+    "mindroom.tool_approval",
+]
 
 [[modules]]
 path = "mindroom.approval_events"
@@ -605,6 +609,7 @@ visibility = ["mindroom.approval_manager"]
 [[modules]]
 path = "mindroom.approval_transport"
 depends_on = [
+    "mindroom.approval_manager",
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.logging_config",
@@ -636,6 +641,7 @@ visibility = ["mindroom.response_runner"]
 [[modules]]
 path = "mindroom.approval_response"
 depends_on = [
+    "mindroom.approval_manager",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.event_journal",
@@ -4616,20 +4622,12 @@ expose = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
-    "ApprovalStartupSweep",
     "MatrixApprovalAction",
-    "ToolApprovalCall",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "evaluate_tool_approval",
-    "expire_continuation_approval_cards",
     "handle_matrix_approval_action",
-    "initialize_approval_runtime",
     "is_process_active_approval_card",
-    "prepare_suspended_tool_approval",
-    "publish_suspended_tool_approvals",
-    "recover_approval_cards_on_startup",
-    "require_approval_delivery_migrated",
     "resolve_tool_approval_approver",
     "shutdown_approval_runtime",
     "tool_may_require_approval",

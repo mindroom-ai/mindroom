@@ -733,8 +733,8 @@ async def test_user_stop_fences_waiting_approval_before_terminal_turn_record(tmp
 
     with (
         patch(
-                "mindroom.approval_response.approval_manager.get_approval_store",
-                return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
         ),
         patch.object(DeliveryGateway, "edit_text", new=AsyncMock(side_effect=acknowledge_stop_edit)),
     ):

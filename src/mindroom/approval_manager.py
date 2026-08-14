@@ -27,12 +27,12 @@ if TYPE_CHECKING:
 
 _ApprovalStatus = Literal["approved", "denied", "expired"]
 _ResolutionStatus = Literal["approved", "denied"]
-MatrixEventPreparer = Callable[[str, str | None, dict[str, Any]], Awaitable[dict[str, Any] | None]]
-MatrixDeliverySender = Callable[[MatrixDelivery], Awaitable[str]]
-MatrixDeliveryResolver = Callable[[MatrixDelivery], Awaitable[str | None]]
-TransportSenderProvider = Callable[[], str | None]
-SendingDeviceProvider = Callable[[], str | None]
-ContinuationReadyHandler = Callable[[str, tuple[str, ...]], Awaitable[None] | None]
+_MatrixEventPreparer = Callable[[str, str | None, dict[str, Any]], Awaitable[dict[str, Any] | None]]
+_MatrixDeliverySender = Callable[[MatrixDelivery], Awaitable[str]]
+_MatrixDeliveryResolver = Callable[[MatrixDelivery], Awaitable[str | None]]
+_TransportSenderProvider = Callable[[], str | None]
+_SendingDeviceProvider = Callable[[], str | None]
+_ContinuationReadyHandler = Callable[[str, tuple[str, ...]], Awaitable[None] | None]
 
 _STARTUP_RECOVERY_SCAN_PAGE = 256
 _DEADLINE_SWEEP_SECONDS = 60.0
@@ -155,7 +155,7 @@ def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | N
 
 
 @dataclass(frozen=True, slots=True)
-class ApprovalStartupSweep:
+class _ApprovalStartupSweep:
     """What one generic recovery pass settled and still owes."""
 
     discarded: int
@@ -184,13 +184,13 @@ class _ApprovalManager:
     """Own approval semantics while the generic worker owns Matrix delivery."""
 
     runtime_paths: RuntimePaths
-    prepare_event: MatrixEventPreparer | None = None
-    send_delivery: MatrixDeliverySender | None = None
-    resolve_delivery: MatrixDeliveryResolver | None = None
+    prepare_event: _MatrixEventPreparer | None = None
+    send_delivery: _MatrixDeliverySender | None = None
+    resolve_delivery: _MatrixDeliveryResolver | None = None
     cards: ApprovalDeliveryView | None = None
-    transport_sender: TransportSenderProvider | None = None
-    sending_device: SendingDeviceProvider | None = None
-    continuation_ready: ContinuationReadyHandler | None = None
+    transport_sender: _TransportSenderProvider | None = None
+    sending_device: _SendingDeviceProvider | None = None
+    continuation_ready: _ContinuationReadyHandler | None = None
     _resolving_card_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _live_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _deadline_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
@@ -199,13 +199,13 @@ class _ApprovalManager:
     def configure_transport(
         self,
         *,
-        prepare_event: MatrixEventPreparer | None = None,
-        send_delivery: MatrixDeliverySender | None = None,
-        resolve_delivery: MatrixDeliveryResolver | None = None,
+        prepare_event: _MatrixEventPreparer | None = None,
+        send_delivery: _MatrixDeliverySender | None = None,
+        resolve_delivery: _MatrixDeliveryResolver | None = None,
         cards: ApprovalDeliveryView | None = None,
-        transport_sender: TransportSenderProvider | None = None,
-        sending_device: SendingDeviceProvider | None = None,
-        continuation_ready: ContinuationReadyHandler | None = None,
+        transport_sender: _TransportSenderProvider | None = None,
+        sending_device: _SendingDeviceProvider | None = None,
+        continuation_ready: _ContinuationReadyHandler | None = None,
     ) -> None:
         """Rebind transport collaborators after runtime reload."""
         if prepare_event is not None:
@@ -522,10 +522,10 @@ class _ApprovalManager:
         if wake is not None:
             await wake
 
-    async def recover_cards_on_startup(self) -> ApprovalStartupSweep:
+    async def recover_cards_on_startup(self) -> _ApprovalStartupSweep:
         """Run generic delivery recovery, deadline decisions, and domain retirement."""
         if self.cards is None or self.send_delivery is None:
-            return ApprovalStartupSweep(discarded=0, failed=1)
+            return _ApprovalStartupSweep(discarded=0, failed=1)
         outcome = await self._worker().recover()
         scanned = 0
         retired = 0
@@ -565,7 +565,7 @@ class _ApprovalManager:
                 if len(page) < _STARTUP_RECOVERY_SCAN_PAGE:
                     break
         self._ensure_deadline_sweep()
-        return ApprovalStartupSweep(discarded=retired, failed=failed, scanned=scanned)
+        return _ApprovalStartupSweep(discarded=retired, failed=failed, scanned=scanned)
 
     def _ensure_deadline_sweep(self) -> None:
         if self._deadline_task is None or self._deadline_task.done():
@@ -736,13 +736,13 @@ def get_approval_store() -> _ApprovalManager | None:
 def initialize_approval_store(
     runtime_paths: RuntimePaths,
     *,
-    prepare_event: MatrixEventPreparer | None = None,
-    send_delivery: MatrixDeliverySender | None = None,
-    resolve_delivery: MatrixDeliveryResolver | None = None,
+    prepare_event: _MatrixEventPreparer | None = None,
+    send_delivery: _MatrixDeliverySender | None = None,
+    resolve_delivery: _MatrixDeliveryResolver | None = None,
     cards: ApprovalDeliveryView | None = None,
-    transport_sender: TransportSenderProvider | None = None,
-    sending_device: SendingDeviceProvider | None = None,
-    continuation_ready: ContinuationReadyHandler | None = None,
+    transport_sender: _TransportSenderProvider | None = None,
+    sending_device: _SendingDeviceProvider | None = None,
+    continuation_ready: _ContinuationReadyHandler | None = None,
 ) -> _ApprovalManager:
     """Initialize the module-level approval domain for one runtime context."""
     global _MANAGER
