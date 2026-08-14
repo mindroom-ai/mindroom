@@ -1628,6 +1628,8 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.running = False
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        bot.approval_store.claim_legacy_approval_delivery = AsyncMock(return_value=None)
+        bot.approval_store.legacy_approval_delivery_pending = AsyncMock(return_value=False)
 
         async def _start_bot() -> bool:
             bot.running = True
