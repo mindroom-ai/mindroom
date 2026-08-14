@@ -3449,13 +3449,13 @@ def test_recovery_cliff_drain_counts_only_live_journal_and_outbox_rows() -> None
         database_path.parent.mkdir(parents=True)
         with closing(sqlite3.connect(database_path)) as database:
             database.execute("CREATE TABLE journal_events(state TEXT NOT NULL)")
-            database.execute("CREATE TABLE response_outbox(acknowledged_event_id TEXT)")
+            database.execute("CREATE TABLE matrix_delivery_outbox(acknowledged_event_id TEXT)")
             database.executemany(
                 "INSERT INTO journal_events(state) VALUES (?)",
                 (("pending",), ("settled",)),
             )
             database.executemany(
-                "INSERT INTO response_outbox(acknowledged_event_id) VALUES (?)",
+                "INSERT INTO matrix_delivery_outbox(acknowledged_event_id) VALUES (?)",
                 ((None,), ("$response",)),
             )
             database.commit()
@@ -3488,11 +3488,11 @@ def test_recovery_cliff_debt_counts_only_exact_workload_final_rows() -> None:
         database_path.parent.mkdir(parents=True)
         with closing(sqlite3.connect(database_path)) as database:
             database.execute(
-                "CREATE TABLE response_outbox("
-                "principal_id TEXT, turn_id TEXT, stage TEXT, attempted INTEGER, acknowledged_event_id TEXT)",
+                "CREATE TABLE matrix_delivery_outbox("
+                "principal_id TEXT, delivery_id TEXT, stage TEXT, attempted INTEGER, acknowledged_event_id TEXT)",
             )
             database.executemany(
-                "INSERT INTO response_outbox VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO matrix_delivery_outbox VALUES (?, ?, ?, ?, ?)",
                 (
                     (expected_principal, "$source-0", "final", 1, None),
                     ("router@@mindroom_router:example", "$source-0", "final", 1, None),
@@ -5020,8 +5020,8 @@ def test_missing_reply_diagnosis_reads_the_production_journal_schema() -> None:
                         source={"event_id": event_id},
                     ),
                 )
-            await principal.enqueue_delivery(
-                turn_id="$staged",
+            await principal.enqueue_matrix_delivery(
+                delivery_id="$staged",
                 stage=DeliveryStage.INITIAL,
                 room_id="!room:example",
                 thread_id=None,

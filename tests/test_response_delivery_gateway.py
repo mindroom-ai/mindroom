@@ -32,8 +32,8 @@ from mindroom.delivery_gateway import (
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
+from mindroom.matrix_delivery import MatrixDeliveryWorker, RecoveryOutcome
 from mindroom.message_target import MessageTarget
-from mindroom.response_delivery import RecoveryOutcome, ResponseDelivery
 from mindroom.streaming import PROGRESS_PLACEHOLDER
 from tests.conftest import (
     FakeOutbox,
@@ -53,8 +53,8 @@ if TYPE_CHECKING:
     from mindroom.event_journal import (
         DeliveryAcknowledgement,
         EventJournalStore,
-        OutboxDelivery,
-        OutboxView,
+        MatrixDelivery,
+        MatrixDeliveryView,
         PrincipalStore,
         ProjectedEvent,
         TerminalTurnWrite,
@@ -119,8 +119,9 @@ def alice(journal_store: EventJournalStore) -> PrincipalStore:
 
 def _gateway(
     tmp_path: Path,
-    outbox: OutboxView | None = None,
+    outbox: MatrixDeliveryView | None = None,
     *,
+    sending_device_id: str | None = None,
     terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None,
     terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> DeliveryGateway:
@@ -156,6 +157,7 @@ def _gateway(
             response_hooks=MagicMock(_apply_before_response=AsyncMock(), emit_after_response=AsyncMock()),
             outbox=outbox if outbox is not None else make_outbox_mock(),
             turn_handoff=ignore_final_delivery_handoff,
+            sending_device_id=lambda: sending_device_id,
             terminal_turn_for=terminal_turn_for,
             terminal_turn_committed=terminal_turn_committed,
         ),
@@ -255,14 +257,14 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 "source_event_id": "$cause",
             },
         }
-        await outbox.enqueue_delivery(
-            turn_id="$cause",
+        await outbox.enqueue_matrix_delivery(
+            delivery_id="$cause",
             stage=DeliveryStage.FINAL,
             room_id=_ROOM_ID,
             thread_id=None,
             payload=frozen,
         )
-        claimed = await outbox.load_delivery(turn_id="$cause", stage=DeliveryStage.FINAL)
+        claimed = await outbox.load_matrix_delivery(delivery_id="$cause", stage=DeliveryStage.FINAL)
         assert claimed is not None
         gateway = _gateway(tmp_path, outbox)
         visible = {"msgtype": "m.text", "body": "A different reply already in the room"}
@@ -304,7 +306,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert (
             await delivery.deliver(
-                turn_id="$cause",
+                delivery_id="$cause",
                 stage=DeliveryStage.FINAL,
                 room_id=_ROOM_ID,
                 thread_id=None,
@@ -357,7 +359,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         with pytest.raises(RuntimeError, match="could not decrypt delivered event"):
             await delivery.deliver(
-                turn_id="$cause",
+                delivery_id="$cause",
                 stage=DeliveryStage.FINAL,
                 room_id=_ROOM_ID,
                 thread_id=None,
@@ -1132,18 +1134,18 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 ),
             )
 
-        real_acknowledge = outbox.acknowledge_delivery
+        real_acknowledge = outbox.acknowledge_matrix_delivery
 
         async def acknowledge(
             *,
-            turn_id: str,
+            delivery_id: str,
             stage: DeliveryStage,
             event_id: str,
             delivered_projections: tuple[ProjectedEvent, ...],
             terminal_turn: TerminalTurnWrite | None = None,
         ) -> DeliveryAcknowledgement:
             acknowledged = await real_acknowledge(
-                turn_id=turn_id,
+                delivery_id=delivery_id,
                 stage=stage,
                 event_id=event_id,
                 delivered_projections=delivered_projections,
@@ -1151,14 +1153,14 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             )
             if stage is DeliveryStage.INITIAL:
                 await real_acknowledge(
-                    turn_id="$cause",
+                    delivery_id="$cause",
                     stage=DeliveryStage.FINAL,
                     event_id="$other-final",
                     delivered_projections=(),
                 )
             return acknowledged
 
-        outbox.acknowledge_delivery = acknowledge  # type: ignore[method-assign]
+        outbox.acknowledge_matrix_delivery = acknowledge  # type: ignore[method-assign]
         with patch(
             "mindroom.delivery_gateway.send_message_outcome",
             AsyncMock(return_value=placeholder),
@@ -1179,11 +1181,11 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        real_acknowledge = outbox.acknowledge_delivery
+        real_acknowledge = outbox.acknowledge_matrix_delivery
 
         async def acknowledge(
             *,
-            turn_id: str,
+            delivery_id: str,
             stage: DeliveryStage,
             event_id: str,
             delivered_projections: tuple[ProjectedEvent, ...],
@@ -1191,21 +1193,21 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         ) -> DeliveryAcknowledgement:
             if stage is DeliveryStage.FINAL:
                 await real_acknowledge(
-                    turn_id=turn_id,
+                    delivery_id=delivery_id,
                     stage=stage,
                     event_id="$winner",
                     delivered_projections=(),
                     terminal_turn=terminal_turn,
                 )
             return await real_acknowledge(
-                turn_id=turn_id,
+                delivery_id=delivery_id,
                 stage=stage,
                 event_id=event_id,
                 delivered_projections=delivered_projections,
                 terminal_turn=terminal_turn,
             )
 
-        outbox.acknowledge_delivery = acknowledge  # type: ignore[method-assign]
+        outbox.acknowledge_matrix_delivery = acknowledge  # type: ignore[method-assign]
         sent = DeliveredMatrixEvent("$loser", {"body": "the answer"})
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=sent)):
             outcome = await gateway.deliver_final(self._final_request("the answer"))
@@ -1627,8 +1629,8 @@ class TestARacedAcknowledgementSpeaksForTheRow:
     @staticmethod
     async def _enqueue(alice: PrincipalStore) -> None:
         """Record one FINAL answer as durably owed, ready to be flushed twice."""
-        transaction_id = await alice.enqueue_delivery(
-            turn_id="turn-1",
+        transaction_id = await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
             stage=DeliveryStage.FINAL,
             room_id=_ROOM_ID,
             thread_id=None,
@@ -1645,34 +1647,34 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         losing_send_started = asyncio.Event()
         finish_losing_send = asyncio.Event()
 
-        async def losing_send(_claimed: OutboxDelivery) -> str:
+        async def losing_send(_claimed: MatrixDelivery) -> str:
             losing_send_started.set()
             await finish_losing_send.wait()
             return "$loser"
 
-        async def winning_send(_claimed: OutboxDelivery) -> str:
+        async def winning_send(_claimed: MatrixDelivery) -> str:
             return "$winner"
 
-        losing = ResponseDelivery(
+        losing = MatrixDeliveryWorker(
             store=alice,
             send=losing_send,
             observe_delivered=ignore_delivered_projection,
             sending_device_id="DEVICE1",
         )
-        winning = ResponseDelivery(
+        winning = MatrixDeliveryWorker(
             store=alice,
             send=winning_send,
             observe_delivered=ignore_delivered_projection,
             sending_device_id="DEVICE1",
         )
 
-        loser = asyncio.create_task(losing.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
+        loser = asyncio.create_task(losing.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL))
         await losing_send_started.wait()
-        assert await winning.flush(turn_id="turn-1", stage=DeliveryStage.FINAL) == "$winner"
+        assert await winning.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL) == "$winner"
         finish_losing_send.set()
 
         assert await loser == "$winner", "the losing send reported its own event upward"
-        stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.acknowledged_event_id == "$winner"
 
@@ -1688,32 +1690,36 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         still has exactly one winner.
         """
         await self._enqueue(alice)
-        await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
-        await alice.record_sending_device(turn_id="turn-1", stage=DeliveryStage.FINAL, device_id="OLD-DEVICE")
+        await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        await alice.record_matrix_delivery_device(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            device_id="OLD-DEVICE",
+        )
 
         losing_lookup_started = asyncio.Event()
         finish_losing_lookup = asyncio.Event()
 
-        async def losing_lookup(_claimed: OutboxDelivery) -> str | None:
+        async def losing_lookup(_claimed: MatrixDelivery) -> str | None:
             losing_lookup_started.set()
             await finish_losing_lookup.wait()
             return "$loser"
 
-        async def winning_lookup(_claimed: OutboxDelivery) -> str | None:
+        async def winning_lookup(_claimed: MatrixDelivery) -> str | None:
             return "$winner"
 
-        async def never_sends(_claimed: OutboxDelivery) -> str:
+        async def never_sends(_claimed: MatrixDelivery) -> str:
             msg = "an adopted answer is already in the room"
             raise AssertionError(msg)
 
-        losing = ResponseDelivery(
+        losing = MatrixDeliveryWorker(
             store=alice,
             send=never_sends,
             observe_delivered=ignore_delivered_projection,
             sending_device_id="NEW-DEVICE",
             resolve_delivered=losing_lookup,
         )
-        winning = ResponseDelivery(
+        winning = MatrixDeliveryWorker(
             store=alice,
             send=never_sends,
             observe_delivered=ignore_delivered_projection,
@@ -1721,13 +1727,13 @@ class TestARacedAcknowledgementSpeaksForTheRow:
             resolve_delivered=winning_lookup,
         )
 
-        loser = asyncio.create_task(losing.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
+        loser = asyncio.create_task(losing.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL))
         await losing_lookup_started.wait()
-        assert await winning.flush(turn_id="turn-1", stage=DeliveryStage.FINAL) == "$winner"
+        assert await winning.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL) == "$winner"
         finish_losing_lookup.set()
 
         assert await loser == "$winner", "the losing adoption reported its own event upward"
-        stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.acknowledged_event_id == "$winner"
 
@@ -1747,12 +1753,12 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         losing_send_started = asyncio.Event()
         finish_losing_send = asyncio.Event()
 
-        async def losing_send(_claimed: OutboxDelivery) -> str:
+        async def losing_send(_claimed: MatrixDelivery) -> str:
             losing_send_started.set()
             await finish_losing_send.wait()
             return "$deduplicated"
 
-        async def winning_send(_claimed: OutboxDelivery) -> str:
+        async def winning_send(_claimed: MatrixDelivery) -> str:
             return "$deduplicated"
 
         losing_publishes: list[tuple[str, str]] = []
@@ -1764,14 +1770,14 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         async def winning_publish(turn_id: str, event_id: str) -> None:
             winning_publishes.append((turn_id, event_id))
 
-        losing = ResponseDelivery(
+        losing = MatrixDeliveryWorker(
             store=alice,
             send=losing_send,
             observe_delivered=ignore_delivered_projection,
             sending_device_id="DEVICE1",
             terminal_turn_committed=losing_publish,
         )
-        winning = ResponseDelivery(
+        winning = MatrixDeliveryWorker(
             store=alice,
             send=winning_send,
             observe_delivered=ignore_delivered_projection,
@@ -1779,9 +1785,9 @@ class TestARacedAcknowledgementSpeaksForTheRow:
             terminal_turn_committed=winning_publish,
         )
 
-        loser = asyncio.create_task(losing.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
+        loser = asyncio.create_task(losing.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL))
         await losing_send_started.wait()
-        assert await winning.flush(turn_id="turn-1", stage=DeliveryStage.FINAL) == "$deduplicated"
+        assert await winning.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL) == "$deduplicated"
         finish_losing_send.set()
         assert await loser == "$deduplicated"
 
@@ -1789,13 +1795,167 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         assert losing_publishes == [], "a caller that bound nothing published a record anyway"
 
 
+class TestGenericDeliveryDeviceChangePolicy:
+    """Non-idempotent custom events retain debt when history cannot prove absence."""
+
+    async def test_first_claim_crash_replays_a_card_from_the_same_device(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Claim and device intent commit together before any process can die."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+            event_type="io.mindroom.tool_approval",
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"status": "pending"},
+        )
+        await alice.claim_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+            sending_device_id="DEVICE1",
+        )
+        sent: list[MatrixDelivery] = []
+
+        async def send(delivery: MatrixDelivery) -> str:
+            sent.append(delivery)
+            return "$approval"
+
+        worker = MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            event_type="io.mindroom.tool_approval",
+            resend_after_reconciliation_miss=False,
+            sending_device_id="DEVICE1",
+            resolve_delivered=AsyncMock(return_value=None),
+        )
+
+        assert await worker.flush(delivery_id="approval-card-1", stage=DeliveryStage.INITIAL) == "$approval"
+        assert len(sent) == 1
+
+    async def test_reconciliation_miss_never_resends_a_clickable_event_from_a_new_device(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A room-history miss is uncertainty, not proof that a prior card never landed."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+            event_type="io.mindroom.tool_approval",
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"status": "pending"},
+        )
+        await alice.claim_matrix_delivery(delivery_id="approval-card-1", stage=DeliveryStage.INITIAL)
+        await alice.record_matrix_delivery_device(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+            device_id="OLD-DEVICE",
+        )
+        sent: list[MatrixDelivery] = []
+
+        async def send(delivery: MatrixDelivery) -> str:
+            sent.append(delivery)
+            return "$duplicate"
+
+        async def history_miss(_delivery: MatrixDelivery) -> str | None:
+            return None
+
+        worker = MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            event_type="io.mindroom.tool_approval",
+            resend_after_reconciliation_miss=False,
+            sending_device_id="NEW-DEVICE",
+            resolve_delivered=history_miss,
+        )
+
+        assert await worker.flush(delivery_id="approval-card-1", stage=DeliveryStage.INITIAL) is None
+        assert sent == []
+        retained = await alice.load_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+        )
+        assert retained is not None
+        assert retained.acknowledged_event_id is None
+        assert retained.sending_device_id == "OLD-DEVICE"
+
+    @pytest.mark.parametrize("accepted_before_crash", [True, False], ids=["accepted", "history-miss"])
+    async def test_router_recovery_never_duplicates_an_unavailable_notice_after_device_change(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        *,
+        accepted_before_crash: bool,
+    ) -> None:
+        """Generic message recovery adopts the exact notice and treats a miss as uncertainty."""
+        delivery_id = "approval-unavailable:approval-1"
+        payload = {
+            "msgtype": "m.notice",
+            "body": "Requesting agent is unavailable.",
+            "io.mindroom.approval_unavailable_id": "approval-1",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$waiting"}},
+        }
+        await alice.enqueue_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload=payload,
+        )
+        await alice.claim_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=DeliveryStage.FINAL,
+            sending_device_id="OLD-DEVICE",
+        )
+        prior_notice = nio.Event.parse_event(
+            {
+                "event_id": "$notice-old-device",
+                "room_id": _ROOM_ID,
+                "sender": _AGENT_USER_ID,
+                "origin_server_ts": 2_000,
+                "type": "m.room.message",
+                "content": payload,
+            },
+        )
+        assert isinstance(prior_notice, nio.Event)
+        gateway = _gateway(tmp_path, alice, sending_device_id="NEW-DEVICE")
+        gateway.deps.runtime.client.room_messages = AsyncMock(
+            return_value=nio.RoomMessagesResponse(
+                room_id=_ROOM_ID,
+                chunk=[prior_notice] if accepted_before_crash else [],
+                start="start",
+                end=None,
+            ),
+        )
+        sent: list[MatrixDelivery] = []
+
+        async def send(delivery: MatrixDelivery) -> str:
+            sent.append(delivery)
+            return "$duplicate"
+
+        outcome = await gateway._response_delivery(send, handoff=None).recover()
+
+        assert sent == []
+        recovered = await alice.load_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+        assert recovered is not None
+        if accepted_before_crash:
+            assert outcome == RecoveryOutcome(recovered=1, failed=0)
+            assert recovered.acknowledged_event_id == "$notice-old-device"
+        else:
+            assert outcome == RecoveryOutcome(recovered=0, failed=1)
+            assert recovered.acknowledged_event_id is None
+            assert recovered.sending_device_id == "OLD-DEVICE"
+
+
 class TestTurnDeliverySerialization:
     """The gateway shares one turn-scoped delivery order without leaking the lock."""
 
     @staticmethod
     async def _enqueue(alice: PrincipalStore, stage: DeliveryStage) -> None:
-        transaction_id = await alice.enqueue_delivery(
-            turn_id="turn-1",
+        transaction_id = await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
             stage=stage,
             room_id=_ROOM_ID,
             thread_id=None,
@@ -1815,7 +1975,7 @@ class TestTurnDeliverySerialization:
         accept_initial = asyncio.Event()
         accepted_stages: list[DeliveryStage] = []
 
-        async def send(delivery: OutboxDelivery) -> str:
+        async def send(delivery: MatrixDelivery) -> str:
             if delivery.stage is DeliveryStage.INITIAL:
                 initial_reached_matrix.set()
                 await accept_initial.wait()
@@ -1829,7 +1989,7 @@ class TestTurnDeliverySerialization:
         await initial_reached_matrix.wait()
         final = asyncio.create_task(
             live_delivery.deliver(
-                turn_id="turn-1",
+                delivery_id="turn-1",
                 stage=DeliveryStage.FINAL,
                 room_id=_ROOM_ID,
                 thread_id=None,
@@ -1858,7 +2018,7 @@ class TestTurnDeliverySerialization:
         accepted_stages: list[DeliveryStage] = []
         remote_requests: set[asyncio.Task[str]] = set()
 
-        async def send(delivery: OutboxDelivery) -> str:
+        async def send(delivery: MatrixDelivery) -> str:
             if delivery.stage is DeliveryStage.FINAL:
                 accepted_stages.append(delivery.stage)
                 return "$final"
@@ -1875,14 +2035,14 @@ class TestTurnDeliverySerialization:
 
         initial_delivery = gateway._response_delivery(send, handoff=None)
         final_delivery = gateway._response_delivery(send, handoff=None)
-        initial = asyncio.create_task(initial_delivery.flush(turn_id="turn-1", stage=DeliveryStage.INITIAL))
+        initial = asyncio.create_task(initial_delivery.flush(delivery_id="turn-1", stage=DeliveryStage.INITIAL))
         await initial_reached_matrix.wait()
         initial.cancel()
         await asyncio.sleep(0)
 
         final = asyncio.create_task(
             final_delivery.deliver(
-                turn_id="turn-1",
+                delivery_id="turn-1",
                 stage=DeliveryStage.FINAL,
                 room_id=_ROOM_ID,
                 thread_id=None,
@@ -1911,7 +2071,7 @@ class TestTurnDeliverySerialization:
         accept_final = asyncio.Event()
         published: list[tuple[str, str]] = []
 
-        async def send(_delivery: OutboxDelivery) -> str:
+        async def send(_delivery: MatrixDelivery) -> str:
             send_started.set()
             await accept_final.wait()
             return "$final"
@@ -1921,7 +2081,7 @@ class TestTurnDeliverySerialization:
 
         gateway = _gateway(tmp_path, alice, terminal_turn_committed=publish)
         delivery = gateway._response_delivery(send, handoff=None)
-        final = asyncio.create_task(delivery.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
+        final = asyncio.create_task(delivery.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL))
         await send_started.wait()
         final.cancel()
         accept_final.set()
@@ -1929,7 +2089,7 @@ class TestTurnDeliverySerialization:
         with pytest.raises(asyncio.CancelledError):
             await final
 
-        stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.acknowledged_event_id == "$final"
         assert published == [("turn-1", "$final")]
@@ -1941,13 +2101,14 @@ class TestTurnDeliverySerialization:
         outbox = FakeOutbox()
         enqueue_committed = asyncio.Event()
         return_from_enqueue = asyncio.Event()
-        original_enqueue = outbox.enqueue_delivery
+        original_enqueue = outbox.enqueue_matrix_delivery
         sent: list[DeliveryStage] = []
 
         async def enqueue_then_wait(
             *,
-            turn_id: str,
+            delivery_id: str,
             stage: DeliveryStage,
+            event_type: str = "m.room.message",
             room_id: str,
             thread_id: str | None,
             payload: Mapping[str, object],
@@ -1955,8 +2116,9 @@ class TestTurnDeliverySerialization:
             settle_source_event_ids: tuple[str, ...] = (),
         ) -> str | None:
             transaction_id = await original_enqueue(
-                turn_id=turn_id,
+                delivery_id=delivery_id,
                 stage=stage,
+                event_type=event_type,
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
@@ -1967,15 +2129,15 @@ class TestTurnDeliverySerialization:
             await return_from_enqueue.wait()
             return transaction_id
 
-        async def send(delivery: OutboxDelivery) -> str:
+        async def send(delivery: MatrixDelivery) -> str:
             sent.append(delivery.stage)
             return "$final"
 
-        delivery = ResponseDelivery(store=outbox, send=send, observe_delivered=ignore_delivered_projection)
-        with patch.object(outbox, "enqueue_delivery", side_effect=enqueue_then_wait):
+        delivery = MatrixDeliveryWorker(store=outbox, send=send, observe_delivered=ignore_delivered_projection)
+        with patch.object(outbox, "enqueue_matrix_delivery", side_effect=enqueue_then_wait):
             final = asyncio.create_task(
                 delivery.deliver(
-                    turn_id="turn-1",
+                    delivery_id="turn-1",
                     stage=DeliveryStage.FINAL,
                     room_id=_ROOM_ID,
                     thread_id=None,
@@ -1989,7 +2151,7 @@ class TestTurnDeliverySerialization:
             with pytest.raises(asyncio.CancelledError):
                 await final
 
-        stored = await outbox.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        stored = await outbox.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.acknowledged_event_id == "$final"
         assert sent == [DeliveryStage.FINAL]
@@ -2002,23 +2164,32 @@ class TestTurnDeliverySerialization:
         outbox = FakeOutbox()
         claim_started = asyncio.Event()
         finish_claim = asyncio.Event()
-        original_claim = outbox.claim_delivery
+        original_claim = outbox.claim_matrix_delivery
         sent: list[DeliveryStage] = []
 
-        async def claim_then_wait(*, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+        async def claim_then_wait(
+            *,
+            delivery_id: str,
+            stage: DeliveryStage,
+            sending_device_id: str | None = None,
+        ) -> MatrixDelivery | None:
             claim_started.set()
             await finish_claim.wait()
-            return await original_claim(turn_id=turn_id, stage=stage)
+            return await original_claim(
+                delivery_id=delivery_id,
+                stage=stage,
+                sending_device_id=sending_device_id,
+            )
 
-        async def send(delivery: OutboxDelivery) -> str:
+        async def send(delivery: MatrixDelivery) -> str:
             sent.append(delivery.stage)
             return "$final"
 
-        delivery = ResponseDelivery(store=outbox, send=send, observe_delivered=ignore_delivered_projection)
-        with patch.object(outbox, "claim_delivery", side_effect=claim_then_wait):
+        delivery = MatrixDeliveryWorker(store=outbox, send=send, observe_delivered=ignore_delivered_projection)
+        with patch.object(outbox, "claim_matrix_delivery", side_effect=claim_then_wait):
             final = asyncio.create_task(
                 delivery.deliver(
-                    turn_id="turn-1",
+                    delivery_id="turn-1",
                     stage=DeliveryStage.FINAL,
                     room_id=_ROOM_ID,
                     thread_id=None,
@@ -2032,7 +2203,7 @@ class TestTurnDeliverySerialization:
             with pytest.raises(asyncio.CancelledError):
                 await final
 
-        stored = await outbox.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        stored = await outbox.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.acknowledged_event_id == "$final"
         assert sent == [DeliveryStage.FINAL]
@@ -2046,13 +2217,13 @@ class TestTurnDeliverySerialization:
         """Publishing a committed FINAL runs after releasing its visible-delivery lock."""
         await self._enqueue(alice, DeliveryStage.FINAL)
         reentered: list[str | None] = []
-        reentrant_delivery: ResponseDelivery | None = None
+        reentrant_delivery: MatrixDeliveryWorker | None = None
 
         async def publish_committed(_turn_id: str, _event_id: str) -> None:
             assert reentrant_delivery is not None
-            reentered.append(await reentrant_delivery.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
+            reentered.append(await reentrant_delivery.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL))
 
-        async def send(_delivery: OutboxDelivery) -> str:
+        async def send(_delivery: MatrixDelivery) -> str:
             return "$answer"
 
         gateway = _gateway(tmp_path, alice, terminal_turn_committed=publish_committed)
@@ -2061,7 +2232,7 @@ class TestTurnDeliverySerialization:
 
         try:
             delivered = await asyncio.wait_for(
-                outer_delivery.flush(turn_id="turn-1", stage=DeliveryStage.FINAL),
+                outer_delivery.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL),
                 timeout=0.5,
             )
         except TimeoutError:
@@ -2130,8 +2301,8 @@ class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
             terminal_turn_for=turn_store.terminal_turn_record,
             terminal_turn_committed=turn_store.publish_committed_response,
         )
-        transaction_id = await alice.enqueue_delivery(
-            turn_id="$source",
+        transaction_id = await alice.enqueue_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             room_id=_ROOM_ID,
             thread_id=None,

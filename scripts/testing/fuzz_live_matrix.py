@@ -2408,7 +2408,7 @@ class ManagedTuwunelStack:
             unacknowledged_outbox_rows = cast(
                 "int",
                 database.execute(
-                    "SELECT COUNT(*) FROM response_outbox WHERE acknowledged_event_id IS NULL",
+                    "SELECT COUNT(*) FROM matrix_delivery_outbox WHERE acknowledged_event_id IS NULL",
                 ).fetchone()[0],
             )
         return RecoveryCliffDrainCounts(
@@ -2429,10 +2429,10 @@ class ManagedTuwunelStack:
         with closing(sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)) as database:
             row = database.execute(
                 f"""
-                SELECT COUNT(*) FROM response_outbox
+                SELECT COUNT(*) FROM matrix_delivery_outbox
                 WHERE principal_id = ? AND stage = 'final'
                   AND attempted = 1 AND acknowledged_event_id IS NULL
-                  AND turn_id IN ({placeholders})
+                  AND delivery_id IN ({placeholders})
                 """,  # noqa: S608 - placeholders are generated, values remain bound
                 (self._journal_principal_id(self.agent_id), *source_ids),
             ).fetchone()
@@ -2556,7 +2556,8 @@ class ManagedTuwunelStack:
                 acknowledged_event_id=None if row[3] is None else str(row[3]),
             )
             for row in self._journal_query(
-                "SELECT principal_id, stage, attempted, acknowledged_event_id FROM response_outbox WHERE turn_id = ?",
+                "SELECT principal_id, stage, attempted, acknowledged_event_id "
+                "FROM matrix_delivery_outbox WHERE delivery_id = ?",
                 (turn_id,),
             )
         )

@@ -11,7 +11,6 @@ here.
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -58,17 +57,12 @@ from mindroom.matrix.visible_body import visible_body_from_event_source
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable
+    from collections.abc import Callable, Collection, Iterable, Mapping
 
 logger = get_logger(__name__)
 
 _ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
-_APPROVAL_CARD_EVENT_TYPE = "io.mindroom.tool_approval"
-# An approval card is `io.mindroom.tool_approval` in a plain room and arrives
-# wrapped as `m.room.encrypted` in an encrypted one, where nio decrypts the
-# chunk in place and the plaintext type reappears on the event source.
-_APPROVAL_CARD_HISTORY_TYPES = (_APPROVAL_CARD_EVENT_TYPE, "m.room.encrypted")
-_MAX_APPROVAL_CARD_SCAN_PAGES = 10
+_MAX_EXACT_DELIVERY_SCAN_PAGES = 10
 _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
 
@@ -79,6 +73,24 @@ class OpaqueEncryptedThreadHistoryError(RuntimeError):
 
 class UnresolvedOpaqueRoomHistoryError(OpaqueEncryptedThreadHistoryError):
     """Raised when opaque room history cannot be assigned to a specific thread."""
+
+
+def _finish_exact_delivery_scan_at_bound(
+    *,
+    room_id: str,
+    pages_fetched: int,
+    delivery_found: bool,
+) -> bool:
+    """Finish with a bounded match, or raise when its absence remains unproven."""
+    if pages_fetched < _MAX_EXACT_DELIVERY_SCAN_PAGES:
+        return False
+    if delivery_found:
+        return True
+    msg = (
+        f"exact delivery room scan in {room_id} reached its "
+        f"{_MAX_EXACT_DELIVERY_SCAN_PAGES}-page bound with history left, so the delivery's absence is unproven"
+    )
+    raise RuntimeError(msg)
 
 
 @dataclass(slots=True)
@@ -216,129 +228,92 @@ async def find_response_event_ids_via_room_messages(
     response_sender: str,
     source_event_ids: Collection[str],
     response_source_filter: Callable[[Mapping[str, Any]], bool] | None = None,
+    response_content: Mapping[str, Any] | None = None,
+    event_types: Collection[str] = _ROOM_HISTORY_MESSAGE_TYPES,
 ) -> frozenset[str]:
-    """Find original responses to exact source events in recent room history."""
+    """Find responses by source relation or exact frozen content."""
     sources = set(source_event_ids)
     remaining_sources = set(sources)
     response_event_ids: set[str] = set()
     from_token: str | None = None
     seen_pagination_tokens: set[str] = set()
+    pages_fetched = 0
+    exact_delivery_scan_complete = False
 
-    while remaining_sources:
+    while not exact_delivery_scan_complete and (
+        remaining_sources or (not sources and response_content is not None and not response_event_ids)
+    ):
         response = await client.room_messages(
             room_id,
             start=from_token,
             limit=100,
-            message_filter={"types": list(_ROOM_HISTORY_MESSAGE_TYPES)},
+            message_filter={"types": list(event_types)},
             direction=nio.MessageDirection.back,
         )
         if not isinstance(response, nio.RoomMessagesResponse):
             msg = f"response recovery room scan failed for {room_id}: {response}"
             raise RuntimeError(msg)  # noqa: TRY004
-        if not response.chunk:
-            break
+        pages_fetched += 1
         for event in response.chunk:
             if not isinstance(event, nio.Event):
                 continue
             remaining_sources.discard(event.event_id)
             event_source = event.source if isinstance(event.source, dict) else {}
             event_info = EventInfo.from_event(event_source)
+            exact_content = response_content is not None and event_source.get("content") == response_content
+            replies_to_source = (
+                not event_info.is_edit and not event_info.is_thread_fallback and event_info.reply_to_event_id in sources
+            )
             if (
                 event_source.get("sender") == response_sender
-                and not event_info.is_edit
-                and not event_info.is_thread_fallback
-                and event_info.reply_to_event_id in sources
+                and (exact_content if response_content is not None else replies_to_source)
                 and (response_source_filter is None or response_source_filter(event_source))
             ):
                 response_event_ids.add(event.event_id)
+        # A standalone frozen delivery has no source event to bound the walk,
+        # so its exact content ends the scan as soon as it is found.
+        if (not sources and response_event_ids) or (sources and not remaining_sources):
+            break
         if not response.end:
             break
         if response.end in seen_pagination_tokens:
             msg = f"response recovery room scan repeated pagination token for {room_id}"
             raise RuntimeError(msg)
+        if response_content is not None:
+            exact_delivery_scan_complete = _finish_exact_delivery_scan_at_bound(
+                room_id=room_id,
+                pages_fetched=pages_fetched,
+                delivery_found=bool(response_event_ids),
+            )
         seen_pagination_tokens.add(response.end)
         from_token = response.end
 
     return frozenset(response_event_ids)
 
 
-def _is_approval_card_for(event_source: Mapping[str, Any], *, card_sender: str, approval_id: str) -> bool:
-    """Return whether one scanned event is the original card for this approval."""
-    if event_source.get("type") != _APPROVAL_CARD_EVENT_TYPE or event_source.get("sender") != card_sender:
-        return False
-    if EventInfo.from_event(dict(event_source)).is_edit:
-        # A terminal edit carries the same approval id as the card it replaces.
-        # Adopting the edit would bind every later write to an event the room
-        # renders as part of another, so only the original counts.
-        return False
-    content = event_source.get("content")
-    return isinstance(content, Mapping) and content.get("approval_id") == approval_id
-
-
-async def find_approval_card_event_id_via_room_messages(
+async def find_outbox_delivery_event_id_via_room_messages(
     client: nio.AsyncClient,
     room_id: str,
     *,
-    card_sender: str,
-    approval_id: str,
+    delivery_sender: str,
+    source_event_ids: Collection[str],
+    delivery_content: Mapping[str, Any],
+    delivery_event_type: str,
 ) -> str | None:
-    """Find the Matrix event one approval card became, in recent room history.
-
-    Asked when a card's row survived a crash unacknowledged and the frozen
-    transaction ID has stopped being proof, which is a re-login between the
-    send and the recovery. Presenting the transaction again from the new device
-    would put a second prompt in the room rather than converge on the first, so
-    the room itself is the only witness left.
-
-    Located by ``approval_id`` rather than by the transaction: the transaction
-    is device-scoped, which is the whole reason this lookup is being made. The
-    approval id is a per-request ``uuid4`` frozen into the card body before it
-    was sent, so at most one original card in the room carries it.
-
-    Bounded, and the bound is a real limit rather than a guess dressed up as
-    one. A card reachable from here was sent by a process that died moments
-    afterwards, so it sits near the tip of the room; running out of pages
-    before the end of history therefore means the answer was not established,
-    and that is raised rather than reported as absence. Returning None only
-    ever means the walk saw all the history there was and the card was not in
-    it.
-    """
-    from_token: str | None = None
-    seen_pagination_tokens: set[str] = set()
-
-    for _page in range(_MAX_APPROVAL_CARD_SCAN_PAGES):
-        response = await client.room_messages(
-            room_id,
-            start=from_token,
-            limit=100,
-            message_filter={"types": list(_APPROVAL_CARD_HISTORY_TYPES)},
-            direction=nio.MessageDirection.back,
-        )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            msg = f"approval card room scan failed for {room_id}: {response}"
-            raise RuntimeError(msg)  # noqa: TRY004
-        for event in response.chunk:
-            if not isinstance(event, nio.Event):
-                continue
-            event_source = event.source if isinstance(event.source, dict) else {}
-            if _is_approval_card_for(event_source, card_sender=card_sender, approval_id=approval_id):
-                return event.event_id
-        if not response.chunk or not response.end:
-            return None
-        if response.end in seen_pagination_tokens:
-            msg = f"approval card room scan repeated pagination token for {room_id}"
-            raise RuntimeError(msg)
-        seen_pagination_tokens.add(response.end)
-        from_token = response.end
-
-    # Raised rather than answered, and the same way every other failure here
-    # is: the caller separates "the room says no" from "the room did not say",
-    # and only the first retires anything.
-    msg = (
-        f"approval card room scan for {approval_id!r} in {room_id} reached its "
-        f"{_MAX_APPROVAL_CARD_SCAN_PAGES}-page bound with history left, so the card's absence is unproven"
+    """Find the one event carrying a frozen outbox payload."""
+    delivered = await find_response_event_ids_via_room_messages(
+        client,
+        room_id,
+        response_sender=delivery_sender,
+        source_event_ids=source_event_ids,
+        response_source_filter=lambda source: source.get("type") == delivery_event_type,
+        response_content=delivery_content,
+        event_types=(delivery_event_type, "m.room.encrypted"),
     )
-    raise RuntimeError(msg)
+    if len(delivered) > 1:
+        msg = f"Matrix delivery has {len(delivered)} exact copies in {room_id}"
+        raise RuntimeError(msg)
+    return next(iter(delivered), None)
 
 
 @dataclass(frozen=True)

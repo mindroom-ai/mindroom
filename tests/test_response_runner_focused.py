@@ -658,17 +658,17 @@ async def test_user_stop_fences_waiting_approval_before_terminal_turn_record(tmp
 
     async def acknowledge_stop_edit(request: EditTextRequest) -> bool:
         assert request.delivery_turn_id == "$source"
-        await runner.deps.approval_store.enqueue_delivery(
-            turn_id="$source",
+        await runner.deps.approval_store.enqueue_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             room_id="!room:localhost",
             thread_id="$thread",
             payload={"body": "Stopped by user."},
             edits_event_id="$waiting",
         )
-        await runner.deps.approval_store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL)
-        await runner.deps.approval_store.acknowledge_delivery(
-            turn_id="$source",
+        await runner.deps.approval_store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+        await runner.deps.approval_store.acknowledge_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$waiting",
             delivered_projections=(),
@@ -682,14 +682,17 @@ async def test_user_stop_fences_waiting_approval_before_terminal_turn_record(tmp
         return True
 
     with (
-        patch("mindroom.approval_response.expire_continuation_approval_cards", new=AsyncMock(return_value=True)),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
+        ),
         patch.object(DeliveryGateway, "edit_text", new=AsyncMock(side_effect=acknowledge_stop_edit)),
     ):
         stopped = await runner.finalize_user_stop(
             "$waiting",
             "$source",
             _target(thread_id="$thread"),
-            7,
+            8,
             Mock(return_value=True),
             finalize,
         )
@@ -725,22 +728,22 @@ async def test_user_stop_preserves_a_claimed_frozen_final_until_success_recovery
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
         payload={"body": "finished", "formatted_body": "finished"},
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
 
     acknowledge_final = False
 
     async def recover_final() -> None:
         if acknowledge_final:
-            await store.acknowledge_delivery(
-                turn_id="$source",
+            await store.acknowledge_matrix_delivery(
+                delivery_id="$source",
                 stage=DeliveryStage.FINAL,
                 event_id="$final",
                 delivered_projections=(),
@@ -752,7 +755,10 @@ async def test_user_stop_preserves_a_claimed_frozen_final_until_success_recovery
     with (
         patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock(side_effect=recover_final)),
         patch.object(runner, "_build_lifecycle", return_value=lifecycle),
-        patch("mindroom.approval_response.expire_continuation_approval_cards", new=expire_cards),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(cards=None, expire_continuation_cards=expire_cards),
+        ),
     ):
         assert not await runner.finalize_user_stop(
             "$waiting",
@@ -811,15 +817,15 @@ async def test_user_stop_retry_preserves_success_completed_by_source_worker(tmp_
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
         payload={"body": "finished", "formatted_body": "finished"},
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
 
     finalize_stop = AsyncMock(return_value=True)
     lifecycle = MagicMock(finalize=AsyncMock())
@@ -835,8 +841,8 @@ async def test_user_stop_retry_preserves_success_completed_by_source_worker(tmp_
             Mock(return_value=True),
             finalize_stop,
         )
-        await store.acknowledge_delivery(
-            turn_id="$source",
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$final",
             delivered_projections=(),
@@ -901,15 +907,15 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
         payload={"body": "finished", "formatted_body": "finished"},
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
 
     lifecycle = MagicMock(finalize=AsyncMock())
     finalize_stopped_response = AsyncMock(return_value=True)
@@ -930,8 +936,8 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
                 on_current_stop_finalized,
             )
 
-        await store.acknowledge_delivery(
-            turn_id="$source",
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$final-edit",
             delivered_projections=(),
@@ -997,8 +1003,8 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
         expected_runtime_generation=claimed.runtime_generation,
     )
     assert failing is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
@@ -1011,9 +1017,9 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
         },
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-    await store.acknowledge_delivery(
-        turn_id="$source",
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+    await store.acknowledge_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         event_id="$final-edit",
         delivered_projections=(),
@@ -1811,8 +1817,14 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
         calls=plan.calls,
         state="waiting",
     )
-    send_card = AsyncMock(return_value=object())
-    with patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card):
+    approval_store = MagicMock(
+        prepare_detached_approval=AsyncMock(return_value=object()),
+        reserve_and_publish=AsyncMock(return_value=True),
+    )
+    with patch(
+        "mindroom.approval_response.approval_manager.get_approval_store",
+        return_value=approval_store,
+    ):
         await runner._approval_responses._publish_cards(
             continuation,
             plan,
@@ -1822,8 +1834,9 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
 
     assert plan.waiting_text == "Waiting for approval: `conditional_write`"
     assert [call.decision for call in plan.calls] == [ApprovalDecision.APPROVED, None]
-    send_card.assert_awaited_once()
-    assert send_card.await_args.args[0].tool_name == "conditional_write"
+    approval_store.prepare_detached_approval.assert_awaited_once()
+    assert approval_store.prepare_detached_approval.await_args.kwargs["tool_name"] == "conditional_write"
+    approval_store.reserve_and_publish.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1865,8 +1878,14 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
         calls=plan.calls,
         state="waiting",
     )
-    send_card = AsyncMock(return_value=object())
-    with patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card):
+    approval_store = MagicMock(
+        prepare_detached_approval=AsyncMock(return_value=object()),
+        reserve_and_publish=AsyncMock(return_value=True),
+    )
+    with patch(
+        "mindroom.approval_response.approval_manager.get_approval_store",
+        return_value=approval_store,
+    ):
         await runner._approval_responses._publish_cards(
             continuation,
             plan,
@@ -1876,7 +1895,11 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
 
     assert plan.waiting_text == "Waiting for approval: `dangerous_one`, `dangerous_two`"
     assert [call.decision for call in plan.calls] == [None, None]
-    assert [awaited.args[0].tool_name for awaited in send_card.await_args_list] == ["dangerous_one", "dangerous_two"]
+    assert [awaited.kwargs["tool_name"] for awaited in approval_store.prepare_detached_approval.await_args_list] == [
+        "dangerous_one",
+        "dangerous_two",
+    ]
+    approval_store.reserve_and_publish.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1916,7 +1939,6 @@ async def test_automatic_pause_preserves_thinking_placeholder_and_wakes_continua
     )
     edit_text = AsyncMock(return_value=True)
     send_text = AsyncMock(return_value="$unexpected")
-    send_card = AsyncMock(return_value=object())
     retry_sources = Mock()
     runner._approval_responses.retry_sources = retry_sources
 
@@ -1927,7 +1949,6 @@ async def test_automatic_pause_preserves_thinking_placeholder_and_wakes_continua
             "mindroom.approval_response.resolve_tool_approval_approver",
             return_value="@user:localhost",
         ),
-        patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card),
     ):
         outcome = await runner._suspend_for_approval(
             paused,
@@ -1941,7 +1962,6 @@ async def test_automatic_pause_preserves_thinking_placeholder_and_wakes_continua
 
     edit_text.assert_not_awaited()
     send_text.assert_not_awaited()
-    send_card.assert_not_awaited()
     retry_sources.assert_called_once_with(("$source",))
     assert outcome.final_visible_body is None
     assert outcome.delivery_kind is None
@@ -2013,7 +2033,6 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
         user_id=request.user_id,
     )
     edit_text = AsyncMock(return_value=True)
-    send_card = AsyncMock(return_value=object())
     retry_sources = Mock()
     runner._approval_responses.retry_sources = retry_sources
 
@@ -2024,7 +2043,6 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
             "mindroom.approval_response.evaluate_tool_approval",
             new=AsyncMock(return_value=(True, 60.0)),
         ),
-        patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card),
     ):
         outcome = await runner._suspend_for_approval(
             paused,
@@ -2041,7 +2059,6 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
     assert continuation.state == "ready"
     assert continuation.calls[0].decision is ApprovalDecision.DENIED
     edit_text.assert_not_awaited()
-    send_card.assert_not_awaited()
     retry_sources.assert_called_once_with(("$source",))
     assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
 
@@ -2101,7 +2118,10 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         ),
     )
     edit_text = AsyncMock(return_value=True)
-    send_card = AsyncMock(return_value=object())
+    approval_store = MagicMock(
+        prepare_detached_approval=AsyncMock(return_value=object()),
+        reserve_and_publish=AsyncMock(return_value=True),
+    )
     retry_sources = Mock()
     runner._approval_responses.retry_sources = retry_sources
 
@@ -2115,7 +2135,10 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
             return_value="@user:localhost",
         ),
         patch("mindroom.approval_response.evaluate_tool_approval", side_effect=evaluate),
-        patch("mindroom.approval_response.send_suspended_tool_approval", new=send_card),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=approval_store,
+        ),
     ):
         waiting_text = await runner._approval_responses.advance_pause(
             current,
@@ -2135,7 +2158,9 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     assert edit_request.extra_content == {
         STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING if expected_text else STREAM_STATUS_PENDING,
     }
-    assert [awaited.args[0].tool_name for awaited in send_card.await_args_list] == expected_cards
+    assert [
+        awaited.kwargs["tool_name"] for awaited in approval_store.prepare_detached_approval.await_args_list
+    ] == expected_cards
     if expected_state == "ready":
         retry_sources.assert_called_once_with(("$source",))
         restarted = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -2303,19 +2328,19 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
         payload={"body": "finished", "formatted_body": "finished"},
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
 
     async def acknowledge_frozen_final() -> None:
-        await store.acknowledge_delivery(
-            turn_id="$source",
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$final",
             delivered_projections=(),
@@ -2365,8 +2390,8 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
@@ -2385,9 +2410,9 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
         },
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-    await store.acknowledge_delivery(
-        turn_id="$source",
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+    await store.acknowledge_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         event_id="$final",
         delivered_projections=(),
@@ -2431,17 +2456,17 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
         failure_reason="Tool approval continuation failed safely.",
     )
     assert await store.create_approval_continuation(continuation) == continuation
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
         payload={"body": "Tool approval continuation failed safely."},
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-    await store.acknowledge_delivery(
-        turn_id="$source",
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+    await store.acknowledge_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         event_id="$failure-edit",
         delivered_projections=(),
@@ -2484,8 +2509,8 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
     assert claimed is not None
 
     async def acknowledge_then_cancel(*_args: object, **_kwargs: object) -> tuple[object, object]:
-        await store.enqueue_delivery(
-            turn_id="$source",
+        await store.enqueue_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             room_id="!room:localhost",
             thread_id="$thread",
@@ -2495,9 +2520,9 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
             },
             edits_event_id="$waiting",
         )
-        assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-        await store.acknowledge_delivery(
-            turn_id="$source",
+        assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$final",
             delivered_projections=(),
@@ -2547,8 +2572,8 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
     assert await store.create_approval_continuation(continuation) == continuation
 
     async def acknowledge_then_cancel(claimed: ApprovalContinuation, **_kwargs: object) -> None:
-        await store.enqueue_delivery(
-            turn_id="$source",
+        await store.enqueue_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             room_id="!room:localhost",
             thread_id="$thread",
@@ -2559,9 +2584,9 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
             edits_event_id="$waiting",
         )
         assert claimed.state == "claimed"
-        assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-        await store.acknowledge_delivery(
-            turn_id="$source",
+        assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$final",
             delivered_projections=(),
@@ -2621,15 +2646,15 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
         payload={"body": "finished", "formatted_body": "finished"},
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
 
     with patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock()):
         event_id = await runner._recover_claimed_approval_lifecycle(
@@ -2643,7 +2668,7 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
     assert retained.state == "claimed"
     assert retained.runtime_generation == runner.deps.approval_runtime_generation
     assert await store.is_pending("$source")
-    final = await store.load_delivery(turn_id="$source", stage=DeliveryStage.FINAL)
+    final = await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     assert final is not None
     assert final.attempted
     assert final.acknowledged_event_id is None

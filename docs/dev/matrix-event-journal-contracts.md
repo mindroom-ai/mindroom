@@ -106,27 +106,29 @@ The point refetch, and nothing else.
 Exactly-once is the substance of this contract, and it is durable rather than in-process: `fence_departure(room_id, source=LOCAL|REPORTED)` returns a `DepartureOutcome`, and `rooms_owing_departure_reports` / `retire_owed_departure_reports` carry the owed-report set across a restart.
 An in-process marker was not enough — an advance that raised left the marker set and swallowed the echo, a restart lost it, and two leaves before one echo needed two markers.
 
-An epoch advance drops `conversation_hydration`, `visible_messages`, `unresolved_edits`, `redaction_tombstones`, `room_history_recovery`, and `approval_cards` in one transaction, plus unattempted outbox rows.
-**Attempted** rows survive deliberately: their outcome is unknown, so keeping the frozen payload and its transaction ID means a retry collapses onto the same event instead of posting a second answer.
+An epoch advance drops conversation projections, reconciles approval cards and continuations across their distinct principals, removes delivery rows proven unattempted, and retires fully acknowledged approval deliveries after tombstoning their card event IDs.
+**Attempted but unacknowledged** rows survive deliberately: their outcome is unknown, so keeping the frozen payload and its transaction ID means a retry collapses onto the same event instead of posting a second answer.
 
 The same transaction also **force-settles pending turn-backed events** for that room, clearing `source_json` and `semantic_consumer` while keeping the rows.
 This is what makes the enqueue refusal below *final* rather than permanent: left pending, the worker would offer the source again on every replay, the model would run again, and enqueue would refuse again, forever.
-Only turn-backed kinds are swept. A redaction, reaction, approval reply, or decryption failure enqueues no answer, so the epoch predicate never blocks it — and a redaction in particular still owes real cleanup, which sweeping it here would drop silently.
+Only turn-backed kinds and reactions already claimed by `INTERACTIVE_REACTION` are swept.
+Other reactions, redactions, approval replies, and decryption failures enqueue no answer, so the epoch predicate does not retire them; a redaction in particular still owes real cleanup that sweeping would drop silently.
+An interactive-reaction claim that races after departure is rejected and settles that stale reaction against the new membership epoch.
 
-The in-flight turn is fenced at enqueue: `_enqueue_delivery` compares the epoch that admitted the turn against the room's current one and refuses to write the row when they differ.
+The in-flight turn is fenced at enqueue: `_enqueue_matrix_delivery` compares the epoch that admitted the turn against the room's current one and refuses to write the row when they differ.
 
 ### 9. One backend, several narrow views
 
-Eleven structural protocols — ten in `event_journal/views.py` (`AdmissionView`, `ReplayView`, `DispatchView`, `PendingTurnView`, `RelationView`, `ConversationReadView`, `HistoryRecoveryRecordView`, `HydrationView`, `OutboxView`, `ApprovalView`) plus `MembershipView` in `event_journal/membership.py`.
+Eleven structural protocols — ten in `event_journal/views.py` (`AdmissionView`, `ReplayView`, `DispatchView`, `PendingTurnView`, `RelationView`, `ConversationReadView`, `HistoryRecoveryRecordView`, `HydrationView`, `MatrixDeliveryView`, `ApprovalDeliveryView`) plus `MembershipView` in `event_journal/membership.py`.
 Count them rather than quoting this line; the archived plan's count named two views that no longer exist and missed one that does.
-Each collaborator takes the slice it calls, and the type checker enforces it: a hydrator reaching for `enqueue_delivery` fails `ty` before any test runs.
+Each collaborator takes the slice it calls, and the type checker enforces it: a hydrator reaching for `enqueue_matrix_delivery` fails `ty` before any test runs.
 
-`grep -rn ": PrincipalStore" src/` returns nothing outside `event_journal/` itself.
+The generic worker accepts only `MatrixDeliveryView`, while approval collaborators accept `ApprovalDeliveryView` rather than the full principal store.
 
 ### 10. Special facts stay specialized
 
 Resolved sidecar plaintext belongs to the visible revision, so the projection refuses to store an unresolved preview and records the refresh debt instead.
-Approvals get their own `approval_cards` table behind `ApprovalView`, fenced by membership epoch.
+Approvals keep their exact-call identity in `approval_cards` behind `ApprovalDeliveryView`, while Matrix transport state stays in the generic outbox inherited through `MatrixDeliveryView`.
 The generic projection was not widened for either.
 
 ### 11. Recovery classification stays in nio — scoped to the timeline
@@ -189,7 +191,7 @@ Failure stays a visible readiness or request failure rather than reviving room-w
 
 ## Deterministic delivery
 
-Initial and final delivery stages use deterministic transaction IDs derived from principal, turn, and stage.
+Initial and final delivery stages use deterministic transaction IDs derived from principal, delivery ID, and stage.
 
 The completed model result is durable in `TurnStore` before final outbox enqueue, so recovery does not rerun a completed model call merely to rebuild delivery content.
 

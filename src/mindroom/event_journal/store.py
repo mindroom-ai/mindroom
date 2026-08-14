@@ -24,8 +24,10 @@ from .approval_continuations import (  # noqa: TC001 - runtime return and input 
     ApprovalContinuationState,
 )
 from .approvals import (  # noqa: TC001 - part of this module's runtime return types
+    ApprovalCardReservation,
     RecordedApprovalDecision,
     StoredApprovalCard,
+    UnreadableApprovalCard,
 )
 from .models import AdmissionResult, DeliveryAcknowledgement, DeliveryProjectionPendingError
 from .projection import drop_refetched_message, install_refetched_revision, project
@@ -48,11 +50,12 @@ if TYPE_CHECKING:
         HydrationCoverage,
         InboundEvent,
         JournalEvent,
-        OutboxDelivery,
+        MatrixDelivery,
         PendingPage,
         RefreshRequest,
         SemanticConsumer,
         TerminalTurnWrite,
+        UnreadableMatrixDelivery,
     )
     from .projection import ProjectedEvent
 
@@ -556,14 +559,15 @@ class PrincipalStore:
             ),
         )
 
-    async def enqueue_delivery(
+    async def enqueue_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
     ) -> str | None:
@@ -583,11 +587,12 @@ class PrincipalStore:
         replay the turn -- a second model run for a question already answered.
         """
         return await self._backend.write(
-            lambda transaction: _enqueue_delivery(
+            lambda transaction: _enqueue_matrix_delivery(
                 transaction,
                 self._principal_id,
-                turn_id=turn_id,
+                delivery_id=delivery_id,
                 stage=stage,
+                event_type=event_type,
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
@@ -607,50 +612,57 @@ class PrincipalStore:
             ),
         )
 
-    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def claim_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        sending_device_id: str | None = None,
+    ) -> MatrixDelivery | None:
         """Freeze one delivery before network I/O and return the row as it stood."""
         return await self._backend.write(
             lambda transaction: outbox.claim(
                 transaction,
                 self._principal_id,
-                turn_id=turn_id,
+                delivery_id=delivery_id,
                 stage=stage,
+                sending_device_id=sending_device_id,
             ),
         )
 
-    async def record_sending_device(
+    async def record_matrix_delivery_device(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         device_id: str | None,
     ) -> None:
         """Record the device namespace this delivery is about to send under."""
         await self._backend.write(
-            lambda transaction: outbox.record_sending_device(
+            lambda transaction: outbox.record_matrix_delivery_device(
                 transaction,
                 self._principal_id,
-                turn_id=turn_id,
+                delivery_id=delivery_id,
                 stage=stage,
                 device_id=device_id,
             ),
         )
 
-    async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
         return await self._backend.read(
             lambda transaction: outbox.load(
                 transaction,
                 self._principal_id,
-                turn_id=turn_id,
+                delivery_id=delivery_id,
                 stage=stage,
             ),
         )
 
-    async def acknowledge_delivery(
+    async def acknowledge_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
@@ -694,7 +706,7 @@ class PrincipalStore:
             bound = outbox.acknowledge(
                 transaction,
                 self._principal_id,
-                turn_id=turn_id,
+                delivery_id=delivery_id,
                 stage=stage,
                 event_id=event_id,
             )
@@ -732,10 +744,10 @@ class PrincipalStore:
             # the turn record end up naming different events.
             settled = transaction.fetchone(
                 """
-                SELECT acknowledged_event_id FROM response_outbox
-                WHERE principal_id = ? AND turn_id = ? AND stage = ?
+                SELECT acknowledged_event_id FROM matrix_delivery_outbox
+                WHERE principal_id = ? AND delivery_id = ? AND stage = ?
                 """,
-                (self._principal_id, turn_id, stage.value),
+                (self._principal_id, delivery_id, stage.value),
             )
             return DeliveryAcknowledgement(
                 settled_event_id=None if settled is None else str(settled["acknowledged_event_id"]),
@@ -744,71 +756,41 @@ class PrincipalStore:
 
         return await self._backend.write(acknowledge)
 
-    async def unacknowledged_deliveries(
+    async def unacknowledged_matrix_deliveries(
         self,
         *,
+        event_type: str = "m.room.message",
         limit: int = _DEFAULT_UNACKNOWLEDGED_LIMIT,
         after: tuple[int, str, str] | None = None,
-    ) -> tuple[OutboxDelivery, ...]:
+    ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first."""
         return await self._backend.read(
             lambda transaction: outbox.unacknowledged(
                 transaction,
                 self._principal_id,
                 limit=limit,
+                event_type=event_type,
                 after=after,
             ),
         )
 
-    async def claim_approval_card(
+    async def reserve_approval_card_deliveries(
         self,
         *,
-        room_id: str,
-        transaction_id: str,
-        card: Mapping[str, Any],
-    ) -> None:
-        """Record one approval card as awaiting a decision, before it is sent."""
-        await self._backend.write(
-            lambda transaction: approvals.claim(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                transaction_id=transaction_id,
-                card=card,
-            ),
-        )
-
-    async def mark_approval_card_attempted(
-        self,
-        *,
-        transaction_id: str,
-        sending_device_id: str | None,
+        continuation_principal_id: str,
+        continuation_id: str,
+        expected_generation: int,
+        cards: tuple[ApprovalCardReservation, ...],
     ) -> bool:
-        """Record that one claimed approval card is about to be offered to Matrix."""
+        """Atomically reserve every exact-call card and release its publication lease."""
         return await self._backend.write(
-            lambda transaction: approvals.mark_attempted(
+            lambda transaction: approvals.reserve_deliveries(
                 transaction,
                 self._principal_id,
-                transaction_id=transaction_id,
-                sending_device_id=sending_device_id,
-            ),
-        )
-
-    async def acknowledge_approval_card(
-        self,
-        *,
-        transaction_id: str,
-        card_event_id: str,
-        card: Mapping[str, Any],
-    ) -> None:
-        """Record the Matrix event one claimed approval card became."""
-        await self._backend.write(
-            lambda transaction: approvals.acknowledge(
-                transaction,
-                self._principal_id,
-                transaction_id=transaction_id,
-                card_event_id=card_event_id,
-                card=card,
+                continuation_principal_id=continuation_principal_id,
+                continuation_id=continuation_id,
+                expected_generation=expected_generation,
+                cards=cards,
             ),
         )
 
@@ -832,23 +814,31 @@ class PrincipalStore:
             ),
         )
 
-    async def forget_approval_card(self, *, transaction_id: str) -> None:
-        """Drop one approval card that has reached a terminal state."""
-        await self._backend.write(
-            lambda transaction: approvals.forget(
+    async def expire_unacknowledged_approval_card(
+        self,
+        *,
+        delivery_id: str,
+    ) -> RecordedApprovalDecision:
+        """Atomically expire a due call whose attempted card still lacks an event ID."""
+        return await self._backend.write(
+            lambda transaction: approvals.resolve_continuation(
                 transaction,
                 self._principal_id,
-                transaction_id=transaction_id,
+                card_event_id=None,
+                requested_status="expired",
+                reason=None,
+                resolution=None,
+                delivery_id=delivery_id,
             ),
         )
 
-    async def finish_approval_card(self, *, transaction_id: str, card_event_id: str) -> bool:
+    async def retire_approval_card(self, *, delivery_id: str, card_event_id: str) -> bool:
         """Retire delivered payload while preserving durable approval-only classification."""
         return await self._backend.write(
-            lambda transaction: approvals.finish(
+            lambda transaction: approvals.retire(
                 transaction,
                 self._principal_id,
-                transaction_id=transaction_id,
+                delivery_id=delivery_id,
                 card_event_id=card_event_id,
             ),
         )
@@ -892,7 +882,7 @@ class PrincipalStore:
         room_id: str,
         limit: int = _DEFAULT_ROOM_CARD_LIMIT,
         after: tuple[int, str] | None = None,
-    ) -> tuple[StoredApprovalCard, ...]:
+    ) -> tuple[StoredApprovalCard | UnreadableApprovalCard, ...]:
         """Return one room's unfinished cards, oldest first."""
         return await self._backend.read(
             lambda transaction: approvals.pending_cards(
@@ -1085,12 +1075,13 @@ def _admit(
     return result
 
 
-def _enqueue_delivery(
+def _enqueue_matrix_delivery(
     transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
     principal_id: str,
     *,
-    turn_id: str,
+    delivery_id: str,
     stage: DeliveryStage,
+    event_type: str,
     room_id: str,
     thread_id: str | None,
     payload: Mapping[str, object],
@@ -1118,15 +1109,16 @@ def _enqueue_delivery(
     would owe the answer afterwards; anything else settles every source the
     delivery accounts for, atomically with the row that now answers them.
     """
-    if not outbox.is_attempted(transaction, principal_id, turn_id=turn_id, stage=stage) and not (
-        _turn_membership_is_current(transaction, principal_id, turn_id=turn_id, room_id=room_id)
+    if not outbox.is_attempted(transaction, principal_id, delivery_id=delivery_id, stage=stage) and not (
+        _turn_membership_is_current(transaction, principal_id, turn_id=delivery_id, room_id=room_id)
     ):
         return None
     transaction_id = outbox.enqueue(
         transaction,
         principal_id,
-        turn_id=turn_id,
+        delivery_id=delivery_id,
         stage=stage,
+        event_type=event_type,
         room_id=room_id,
         thread_id=thread_id,
         payload=payload,
