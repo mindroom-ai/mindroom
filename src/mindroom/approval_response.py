@@ -58,11 +58,11 @@ class _ApprovalPausePlan:
 def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
     """Render trusted model context for one exact approval generation."""
     lines = [_APPROVAL_RECEIPT_HEADER]
-    for call in calls:
+    for call_ordinal, call in enumerate(calls, start=1):
         if call.decision is None:
-            msg = f"Cannot build trusted receipt for pending approval call {call.tool_call_id!r}"
+            msg = f"Cannot build trusted receipt for pending approval call #{call_ordinal}"
             raise ValueError(msg)
-        call_label = f"`{call.tool_name}` (call `{call.tool_call_id}`)"
+        call_label = f"`{call.tool_name}` (call #{call_ordinal})"
         if call.decision is ContinuationDecision.APPROVED:
             if call.human_approval_required is True:
                 outcome = "an approval card was shown and approved before execution."
