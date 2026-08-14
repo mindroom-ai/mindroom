@@ -177,15 +177,9 @@ def negative_member_events_from_sync(
     """Return deduplicated non-join member events before cross-room fan-out."""
     room_events: Iterable[tuple[str, Iterable[object]]]
     if isinstance(response, nio.SyncResponse):
-        room_events = (
-            (room_id, (*room.state, *room.timeline.events))
-            for room_id, room in response.rooms.join.items()
-        )
+        room_events = ((room_id, (*room.state, *room.timeline.events)) for room_id, room in response.rooms.join.items())
     else:
-        room_events = (
-            (room_id, (*room.required_state, *room.timeline))
-            for room_id, room in response.rooms.items()
-        )
+        room_events = ((room_id, (*room.required_state, *room.timeline)) for room_id, room in response.rooms.items())
 
     seen: set[tuple[str, str]] = set()
     transitions: list[tuple[str, nio.RoomMemberEvent]] = []
