@@ -32,6 +32,8 @@ export interface Integration {
   oauth_service_account_configured?: boolean;
   status_error?: string;
   config_service?: string;
+  oauth_fallback_fields?: string[];
+  manual_auth_configured?: boolean;
 }
 
 export interface IntegrationScope {

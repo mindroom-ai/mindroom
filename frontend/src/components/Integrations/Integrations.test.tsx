@@ -74,6 +74,7 @@ const {
   mockPlexOnAction,
   mockPlexOnDisconnect,
   mockGenericOAuthOnAction,
+  mockGenericOAuthOnDisconnect,
   mockGenericOAuthLoadStatus,
   mockGoogleDriveLoadStatus,
   mockGoogleGmailLoadStatus,
@@ -91,6 +92,7 @@ const {
   mockPlexOnAction: vi.fn(),
   mockPlexOnDisconnect: vi.fn(),
   mockGenericOAuthOnAction: vi.fn(),
+  mockGenericOAuthOnDisconnect: vi.fn(),
   mockGenericOAuthLoadStatus: vi
     .fn()
     .mockResolvedValue({ status: "available", connected: false }),
@@ -148,6 +150,8 @@ vi.mock("@/hooks/useTools", () => ({
     config_fields: tool.config_fields,
     helper_text: tool.helper_text,
     docs_url: tool.docs_url,
+    oauth_fallback_fields: tool.oauth_fallback_fields,
+    manual_auth_configured: tool.manual_auth_configured,
   }),
 }));
 
@@ -201,6 +205,7 @@ vi.mock("./integrations/index", () => ({
       return {
         integration: this.integration,
         onAction: () => mockGenericOAuthOnAction(this.providerId),
+        onDisconnect: () => mockGenericOAuthOnDisconnect(this.providerId),
       };
     }
 
@@ -368,6 +373,7 @@ describe("Integrations", () => {
     mockPlexOnAction.mockResolvedValue(undefined);
     mockPlexOnDisconnect.mockResolvedValue(undefined);
     mockGenericOAuthOnAction.mockResolvedValue(undefined);
+    mockGenericOAuthOnDisconnect.mockResolvedValue(undefined);
     mockEnhancedConfigDialogProps.mockClear();
     mockGenericOAuthLoadStatus.mockResolvedValue({
       status: "available",
@@ -1454,6 +1460,136 @@ describe("Integrations", () => {
     expect(
       screen.queryByText(/Connect acme_drive first/i),
     ).not.toBeInTheDocument();
+  });
+
+  it("offers OAuth and manual credentials for providers with a fallback", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        {
+          name: "github",
+          display_name: "GitHub",
+          description: "Manage GitHub repositories",
+          icon: "SiGithub",
+          icon_color: null,
+          category: "developer",
+          status: "requires_config",
+          setup_type: "oauth",
+          auth_provider: "github",
+          config_fields: [
+            {
+              name: "access_token",
+              label: "Access Token",
+              type: "password",
+              required: false,
+            },
+            {
+              name: "base_url",
+              label: "Base URL",
+              type: "url",
+              required: false,
+            },
+          ],
+          oauth_fallback_fields: ["access_token"],
+          manual_auth_configured: false,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+
+    render(<Integrations />);
+
+    const githubCard = await waitFor(() => {
+      const card = screen.getByText("GitHub").closest(".h-full");
+      expect(card).toBeInstanceOf(HTMLElement);
+      return card as HTMLElement;
+    });
+    expect(
+      within(githubCard).getByRole("button", { name: "Connect with GitHub" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(githubCard).getByRole("button", { name: "Use access token" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
+      expect(screen.getByText("Service: github")).toBeInTheDocument();
+    });
+    expect(mockGenericOAuthOnAction).not.toHaveBeenCalled();
+  });
+
+  it("edits and removes a configured OAuth fallback without disconnecting OAuth", async () => {
+    const refetch = vi.fn();
+    mockUseTools.mockReturnValue({
+      tools: [
+        {
+          name: "github",
+          display_name: "GitHub",
+          description: "Manage GitHub repositories",
+          icon: "SiGithub",
+          icon_color: null,
+          category: "developer",
+          status: "available",
+          setup_type: "oauth",
+          auth_provider: "github",
+          config_fields: [
+            {
+              name: "access_token",
+              label: "Access Token",
+              type: "password",
+              required: false,
+            },
+            {
+              name: "base_url",
+              label: "Base URL",
+              type: "url",
+              required: false,
+            },
+          ],
+          oauth_fallback_fields: ["access_token"],
+          manual_auth_configured: true,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      refetch,
+      statusAuthoritative: true,
+    });
+    global.fetch = vi.fn().mockResolvedValue({ ok: true });
+
+    render(<Integrations />);
+
+    const githubCard = await waitFor(() => {
+      const card = screen.getByText("GitHub").closest(".h-full");
+      expect(card).toBeInstanceOf(HTMLElement);
+      return card as HTMLElement;
+    });
+    expect(within(githubCard).getByText("Access Token")).toBeInTheDocument();
+    expect(
+      within(githubCard).getByRole("button", { name: "Edit access token" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(githubCard).getByRole("button", { name: "Remove access token" }),
+    );
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        "http://localhost:8080/api/credentials/github",
+        {
+          method: "DELETE",
+        },
+      );
+      expect(refetch).toHaveBeenCalledTimes(1);
+    });
+    expect(mockGenericOAuthOnDisconnect).not.toHaveBeenCalled();
   });
 
   it("ignores stale shared-scope reloads after switching scope mid-action", async () => {
