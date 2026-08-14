@@ -47,7 +47,7 @@ Force-push only the rebuilt #1836 branch after complete verification, then retar
 
 1. Add both-backend migration tests first using the exact predecessor schemas.
 2. Extend `event_journal/migrations.py`; do not create another migration framework.
-3. Backfill approval deliveries from exact approval-card facts.
+3. Expire legacy approval delivery debt, tombstone delivered card event IDs, and wake the affected continuations instead of retaining the removed transport rows.
 4. Backfill response deliveries only from exact same-room admitted-source facts.
 5. Delete never-attempted unverifiable rows and reject every attempted unacknowledged legacy row whose physical payload lacks the stable marker required for exact reconciliation.
 6. Preserve acknowledged legacy event IDs with unverifiable membership as retired stale-event tombstones.

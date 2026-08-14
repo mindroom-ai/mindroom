@@ -80,9 +80,11 @@ Retiring an edit that raced into projection will remove that revision and invali
 
 PR #1837's `event_journal/migrations.py` remains the only schema-migration module.
 
-The stacked migration will move the released `response_outbox` directly into the final membership-owned `matrix_delivery_outbox` while #1837's approval promotion runs in the same transaction.
+The stacked migration will move the released `response_outbox` directly into the final membership-owned `matrix_delivery_outbox`.
 
-Existing approval deliveries may derive their epoch only from their exact `approval_cards` ownership row.
+Legacy approval delivery rows will not be promoted into the generic outbox.
+
+The migration will expire their undecided calls, preserve delivered card IDs as action tombstones, wake waiting continuations, and drop the obsolete transport table in the same transaction.
 
 Existing response deliveries may derive their epoch only from an exact admitted journal source in the same room.
 
