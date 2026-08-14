@@ -209,16 +209,6 @@ class SqliteBackend:
                 "recreate the event journal database before starting MindRoom"
             )
             raise RuntimeError(msg)
-        legacy_selection_columns = {
-            str(row[1]) for row in connection.execute("PRAGMA table_info(interactive_selections)")
-        }
-        if "selection_json" in legacy_selection_columns:
-            connection.close()
-            msg = (
-                "This event journal uses an incompatible interactive selection schema; "
-                "recreate the event journal database before starting MindRoom"
-            )
-            raise RuntimeError(msg)
         connection.execute("BEGIN IMMEDIATE")
         for statement in schema_statements(SQLITE_DIALECT):
             connection.execute(statement)

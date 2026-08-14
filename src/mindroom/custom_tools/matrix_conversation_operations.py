@@ -17,12 +17,7 @@ from mindroom.custom_tools.attachments import (
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import is_human_requester_id
-from mindroom.interactive import (
-    InteractiveMetadata,
-    add_reaction_buttons,
-    build_prompt_content,
-    parse_and_format_interactive,
-)
+from mindroom.interactive import parse_and_format_interactive
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result, send_room_event_result
 from mindroom.matrix.client_visible_messages import (
@@ -46,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
+_DIRECT_INTERACTIVE_ERROR = "Interactive prompts are only supported in normal agent responses."
 
 
 @dataclass(frozen=True)
@@ -56,68 +52,10 @@ class MatrixMessageOperationResult:
     fields: dict[str, object]
 
 
-@dataclass(frozen=True)
-class _PreparedInteractiveText:
-    """Formatted text plus the membership proof carried by its prompt."""
-
-    formatted_text: str
-    metadata: InteractiveMetadata | None
-    membership_epoch: int | None
-    source_event_id: str | None
-    prompt_content: dict[str, object]
-
-
-async def _prepare_interactive_text(
-    context: ToolRuntimeContext,
-    *,
-    room_id: str,
-    text: str,
-) -> _PreparedInteractiveText:
-    """Build one direct Matrix message's prompt payload before transport."""
+def _format_direct_text(text: str) -> str | None:
+    """Format plain direct-tool text, rejecting prompts without durable ownership."""
     response = parse_and_format_interactive(text, extract_mapping=True)
-    metadata = response.interactive_metadata
-    membership = context.membership
-    if metadata is None or membership is None:
-        return _PreparedInteractiveText(response.formatted_text, None, None, None, {})
-    membership_epoch = await membership.membership_epoch(room_id)
-    source_event_id = context.membership_turn_id if room_id == context.room_id else None
-    return _PreparedInteractiveText(
-        formatted_text=response.formatted_text,
-        metadata=metadata,
-        membership_epoch=membership_epoch,
-        source_event_id=source_event_id,
-        prompt_content=build_prompt_content(
-            metadata,
-            creator_agent=context.agent_name,
-            source_event_id=source_event_id,
-            membership_epoch=membership_epoch,
-        ),
-    )
-
-
-async def _add_current_prompt_buttons(
-    context: ToolRuntimeContext,
-    *,
-    room_id: str,
-    event_id: str,
-    prepared: _PreparedInteractiveText,
-) -> None:
-    """Add buttons only while the prompt's membership proof remains current."""
-    membership = context.membership
-    if prepared.metadata is None or prepared.membership_epoch is None or membership is None:
-        return
-    if not await membership.interactive_prompt_membership_is_current(
-        room_id=room_id,
-        source_event_id=prepared.source_event_id,
-        fallback_membership_epoch=prepared.membership_epoch,
-    ):
-        return
-    await add_reaction_buttons(
-        context.client,
-        room_id,
-        event_id,
-        prepared.metadata.options_as_list(),
-    )
+    return response.formatted_text if response.interactive_metadata is None else None
 
 
 class MatrixMessageOperations:
@@ -140,7 +78,6 @@ class MatrixMessageOperations:
         ignore_mentions: bool,
         message_extras: list[MessageExtraSection] | None,
     ) -> str | None:
-        prepared = await _prepare_interactive_text(context, room_id=room_id, text=text)
         latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
             room_id=room_id,
             thread_id=thread_id,
@@ -157,25 +94,16 @@ class MatrixMessageOperations:
             extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
         if message_extras:
             extra_content.update(build_message_extras_content(message_extras))
-        extra_content.update(prepared.prompt_content)
         content = format_message_with_mentions(
             context.config,
             context.runtime_paths,
-            prepared.formatted_text,
+            text,
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
             extra_content=extra_content or None,
         )
         delivered = await send_message_result(context.client, room_id, content)
-        if delivered is not None:
-            await _add_current_prompt_buttons(
-                context,
-                room_id=room_id,
-                event_id=delivered.event_id,
-                prepared=prepared,
-            )
-            return delivered.event_id
-        return None
+        return delivered.event_id if delivered is not None else None
 
     async def _message_send_or_reply(  # noqa: C901, PLR0911, PLR0912
         self,
@@ -208,6 +136,10 @@ class MatrixMessageOperations:
                 room_id=room_id,
                 message="At least one of message, attachment_ids, or attachment_file_paths must be provided.",
             )
+        if text is not None:
+            text = _format_direct_text(text)
+            if text is None:
+                return self._result("error", action=action, room_id=room_id, message=_DIRECT_INTERACTIVE_ERROR)
 
         event_id: str | None = None
         if text is not None:
@@ -662,13 +594,14 @@ class MatrixMessageOperations:
         if new_text is None:
             return self._result("error", action="edit", message="message is required for edit.")
 
-        prepared = await _prepare_interactive_text(context, room_id=room_id, text=new_text)
+        formatted_text = _format_direct_text(new_text)
+        if formatted_text is None:
+            return self._result("error", action="edit", room_id=room_id, message=_DIRECT_INTERACTIVE_ERROR)
         extras_content = build_message_extras_content(message_extras) if message_extras else {}
-        extras_content.update(prepared.prompt_content)
         content = format_message_with_mentions(
             context.config,
             context.runtime_paths,
-            prepared.formatted_text,
+            formatted_text,
             extra_content=extras_content or None,
         )
         delivered = await edit_message_result(
@@ -676,7 +609,7 @@ class MatrixMessageOperations:
             room_id,
             target,
             content,
-            prepared.formatted_text,
+            formatted_text,
             extra_content=extras_content or None,
         )
         if delivered is None:
@@ -688,13 +621,6 @@ class MatrixMessageOperations:
                 target=target,
                 message="Failed to edit message in Matrix.",
             )
-        await _add_current_prompt_buttons(
-            context,
-            room_id=room_id,
-            event_id=target,
-            prepared=prepared,
-        )
-
         return self._result(
             "ok",
             action="edit",

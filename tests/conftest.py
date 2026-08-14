@@ -1039,11 +1039,15 @@ async def _empty_async_iterator() -> AsyncGenerator[object, None]:
         yield None
 
 
-def _make_room_get_event_response(event_id: str) -> nio.RoomGetEventResponse:
+def _make_room_get_event_response(
+    event_id: str,
+    *,
+    sender: str = "@user:localhost",
+) -> nio.RoomGetEventResponse:
     """Return a minimal RoomGetEventResponse containing one visible text event."""
     event = MagicMock(spec=nio.RoomMessageText)
     event.event_id = event_id
-    event.sender = "@user:localhost"
+    event.sender = sender
     event.body = event_id
     event.server_timestamp = 0
     event.source = {
@@ -1135,7 +1139,9 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.add_event_callback = MagicMock()
     client.add_response_callback = MagicMock()
     client.get_presence = AsyncMock(return_value=presence_response)
-    client.room_get_event = AsyncMock(side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id))
+    client.room_get_event = AsyncMock(
+        side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id, sender=user_id),
+    )
     client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
     client.room_messages = AsyncMock(return_value=room_messages_response)
     client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
@@ -1250,6 +1256,7 @@ class FakeOutbox:
         # What each acknowledgement carried alongside it, so a test can
         # assert the terminal record and the acknowledgement are one write.
         self.acknowledged_terminal_turns: list[tuple[str, TerminalTurnWrite | None]] = []
+        self.acknowledged_projections: list[tuple[ProjectedEvent, ...]] = []
         self.attempted: set[tuple[str, str]] = set()
         # Turns whose membership has ended, as the journal would report it.
         self.ended_membership_turn_ids: set[str] = set()
@@ -1372,6 +1379,7 @@ class FakeOutbox:
         turn_id: str,
         stage: DeliveryStage,
         event_id: str,
+        delivered_projections: tuple[ProjectedEvent, ...],
         terminal_turn: TerminalTurnWrite | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, and the turn it completes.
@@ -1389,6 +1397,7 @@ class FakeOutbox:
             return DeliveryAcknowledgement(settled_event_id=already, bound=False)
         self.rows[key] = replace(self.rows[key], acknowledged_event_id=event_id)
         self.acknowledged_terminal_turns.append((turn_id, terminal_turn))
+        self.acknowledged_projections.append(delivered_projections)
         return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
 
     async def unacknowledged_deliveries(
@@ -1519,6 +1528,7 @@ class DiesAfterAcknowledgement:
         turn_id: str,
         stage: DeliveryStage,
         event_id: str,
+        delivered_projections: tuple[ProjectedEvent, ...],
         terminal_turn: TerminalTurnWrite | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix outcome, then die before anything else can run."""
@@ -1526,6 +1536,7 @@ class DiesAfterAcknowledgement:
             turn_id=turn_id,
             stage=stage,
             event_id=event_id,
+            delivered_projections=delivered_projections,
             terminal_turn=terminal_turn,
         )
         msg = "crashed the instant the outcome was recorded"
@@ -1549,6 +1560,14 @@ ignore_final_delivery_handoff = TurnHandoff(
     sources_for_turn=lambda _turn_id: (),
     released=lambda _event_ids: None,
 )
+
+
+async def ignore_delivered_projection(
+    _delivery: OutboxDelivery,
+    _event_id: str,
+) -> tuple[ProjectedEvent, ...]:
+    """Return no projection for outbox-only tests."""
+    return ()
 
 
 @dataclass

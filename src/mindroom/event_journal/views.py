@@ -325,9 +325,10 @@ class OutboxView(Protocol):
         turn_id: str,
         stage: DeliveryStage,
         event_id: str,
+        delivered_projections: tuple[ProjectedEvent, ...],
         terminal_turn: TerminalTurnWrite | None = None,
     ) -> DeliveryAcknowledgement:
-        """Record the delivery's event and the turn it completes; name the event and who bound it."""
+        """Atomically record and project the delivery, plus the turn it completes."""
         ...
 
     async def unacknowledged_deliveries(

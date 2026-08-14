@@ -74,9 +74,11 @@ class TestInteractiveFunctions:
         assert "Which option?" in response.formatted_text
         assert "1. ✅ Approve" in response.formatted_text
         assert "```" not in response.formatted_text
-        assert response.option_map == {"✅": "approve", "1": "approve"}
-        assert response.options_list == [{"emoji": "✅", "label": "Approve", "value": "approve"}]
         assert response.interactive_metadata is not None
+        assert response.interactive_metadata.option_map == {"✅": "approve", "1": "approve"}
+        assert response.interactive_metadata.options_as_list() == [
+            {"emoji": "✅", "label": "Approve", "value": "approve"},
+        ]
         assert response.interactive_metadata.question_text == "Which option?"
         assert response.interactive_metadata.option_labels == {"✅": "Approve", "1": "Approve"}
 
@@ -96,9 +98,11 @@ class TestInteractiveFunctions:
         assert response.formatted_text.startswith("Please choose:")
         assert "Which option?" in response.formatted_text
         assert "1. ✅ Approve" in response.formatted_text
-        assert response.option_map == {"✅": "approve", "1": "approve"}
-        assert response.options_list == [{"emoji": "✅", "label": "Approve", "value": "approve"}]
         assert response.interactive_metadata is not None
+        assert response.interactive_metadata.option_map == {"✅": "approve", "1": "approve"}
+        assert response.interactive_metadata.options_as_list() == [
+            {"emoji": "✅", "label": "Approve", "value": "approve"},
+        ]
         assert response.interactive_metadata.question_text == "Which option?"
         assert response.interactive_metadata.option_labels == {"✅": "Approve", "1": "Approve"}
 
@@ -130,7 +134,8 @@ Whichever you pick, tell the other tool."""
             "\n"
             "Whichever you pick, tell the other tool."
         )
-        assert response.option_map == {"✅": "approve", "1": "approve"}
+        assert response.interactive_metadata is not None
+        assert response.interactive_metadata.option_map == {"✅": "approve", "1": "approve"}
 
     def test_parse_and_format_interactive_renders_extra_blocks_as_plain_text(self) -> None:
         """Only the first block gets reactions; later blocks render readably instead of as raw JSON."""
@@ -176,8 +181,8 @@ Second question:
             "1. 🔎 Verify\n"
             "2. ✋ Hold"
         )
-        assert response.option_map == {"✅": "approve", "1": "approve"}
         assert response.interactive_metadata is not None
+        assert response.interactive_metadata.option_map == {"✅": "approve", "1": "approve"}
         assert response.interactive_metadata.question_text == "Which option?"
         mock_warning.assert_called_once()
         assert mock_warning.call_args.args == (
@@ -197,7 +202,7 @@ Second question:
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
 
         assert response.formatted_text == response_text
-        assert response.option_map is None
+        assert response.interactive_metadata is None
 
     def test_parse_and_format_interactive_defaults_null_option_fields(self) -> None:
         """Explicit null option fields should use the same defaults as missing fields."""
@@ -215,9 +220,11 @@ Second question:
         assert response.formatted_text == (
             "Which option?\n\n1. ❓ Option\n\nReact with an emoji or type the number to respond."
         )
-        assert response.option_map == {"❓": "option", "1": "option"}
-        assert response.options_list == [{"emoji": "❓", "label": "Option", "value": "option"}]
         assert response.interactive_metadata is not None
+        assert response.interactive_metadata.option_map == {"❓": "option", "1": "option"}
+        assert response.interactive_metadata.options_as_list() == [
+            {"emoji": "❓", "label": "Option", "value": "option"},
+        ]
         assert response.interactive_metadata.option_labels == {"❓": "Option", "1": "Option"}
 
     def test_parse_and_format_interactive_removes_malformed_extra_blocks(self) -> None:
@@ -333,8 +340,7 @@ Broken extra: ```interactive {"question": "Bad extra"}```"""
             response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
 
         assert response.formatted_text == response_text
-        assert response.option_map is None
-        assert response.options_list is None
+        assert response.interactive_metadata is None
         mock_warning.assert_called_once()
         assert mock_warning.call_args.args == ("Interactive block not parsed",)
         assert "interactive" in mock_warning.call_args.kwargs["preview"].lower()
@@ -363,8 +369,7 @@ print("hello")
             response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
 
         assert response.formatted_text == response_text
-        assert response.option_map is None
-        assert response.options_list is None
+        assert response.interactive_metadata is None
         mock_warning.assert_not_called()
 
     def test_parse_and_format_interactive_skips_warning_for_closing_fence_followed_by_prose(self) -> None:
@@ -379,8 +384,7 @@ interactive"""
             response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
 
         assert response.formatted_text == response_text
-        assert response.option_map is None
-        assert response.options_list is None
+        assert response.interactive_metadata is None
         mock_warning.assert_not_called()
 
     @pytest.mark.parametrize("payload", ["[]", "true", "42"])
@@ -392,8 +396,7 @@ interactive"""
             response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
 
         assert response.formatted_text == response_text
-        assert response.option_map is None
-        assert response.options_list is None
+        assert response.interactive_metadata is None
         mock_warning.assert_called_once()
         assert mock_warning.call_args.args == ("Interactive JSON payload must be an object",)
 

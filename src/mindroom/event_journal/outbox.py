@@ -336,6 +336,25 @@ def unacknowledged(
     return tuple(_delivery(row) for row in rows)
 
 
+def has_attempted_unacknowledged_delivery(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+) -> bool:
+    """Return whether Matrix may already show a delivery not yet projected."""
+    row = transaction.fetchone(
+        """
+        SELECT 1 AS present FROM response_outbox
+        WHERE principal_id = ? AND room_id = ?
+          AND attempted = 1 AND acknowledged_event_id IS NULL
+        LIMIT 1
+        """,
+        (principal_id, room_id),
+    )
+    return row is not None
+
+
 def load(
     transaction: Transaction,
     principal_id: str,

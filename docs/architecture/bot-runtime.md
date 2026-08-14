@@ -197,7 +197,7 @@ journal event pending
   -> journal event remains pending while downstream owns work
   -> durable pending TurnStore record when response ownership begins
   -> final outbox enqueue settles the journal sources atomically
-  -> delivery acknowledgement binds the Matrix event and terminal TurnStore record
+  -> delivery acknowledgement projects the server-ordered Matrix event and binds its terminal TurnStore record atomically
 ```
 
 The pending claim must be acquired before normalization and released on every non-admission or failure path.

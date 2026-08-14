@@ -42,7 +42,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.pending_event_worker import PendingEventWorker
 from mindroom.response_delivery import ResponseDelivery, TurnHandoff
 from mindroom.turn_record import canonicalize_turn_record
-from tests.conftest import CrashError, DiesAfterNextWriteCommit
+from tests.conftest import CrashError, DiesAfterNextWriteCommit, ignore_delivered_projection
 from tests.test_live_message_coalescing import _make_bot
 
 if TYPE_CHECKING:
@@ -147,6 +147,7 @@ async def deliver_answer(
     delivery = ResponseDelivery(
         store=outbox if outbox is not None else bot._delivery_gateway.deps.outbox,
         send=send,
+        observe_delivered=ignore_delivered_projection,
         handoff=bot._delivery_gateway.deps.turn_handoff,
     )
     return await delivery.deliver(
@@ -255,6 +256,7 @@ class TestTheHandoffIsTheDurableEnqueue:
         delivery = ResponseDelivery(
             store=bot._delivery_gateway.deps.outbox,
             send=send,
+            observe_delivered=ignore_delivered_projection,
             handoff=bot._delivery_gateway.deps.turn_handoff,
         )
         await delivery.deliver(
@@ -379,6 +381,7 @@ class TestWhatARestartOwesAfterTheHandoff:
         delivery = ResponseDelivery(
             store=outbox,
             send=crash,
+            observe_delivered=ignore_delivered_projection,
             handoff=bot._delivery_gateway.deps.turn_handoff,
         )
         with pytest.raises(RuntimeError, match="crashed after the claim committed"):
@@ -397,7 +400,13 @@ class TestWhatARestartOwesAfterTheHandoff:
             sends.append(str(claimed.payload["body"]))
             return "$sent"
 
-        assert (await ResponseDelivery(store=outbox, send=send).recover()).recovered == 1
+        assert (
+            await ResponseDelivery(
+                store=outbox,
+                send=send,
+                observe_delivered=ignore_delivered_projection,
+            ).recover()
+        ).recovered == 1
         assert sends == ["the answer"]
 
     async def test_a_replayed_turn_deduplicates_onto_the_answer_it_already_wrote(
@@ -570,7 +579,11 @@ class TestTheHandoffIsOneCommit:
             sends.append(claimed.transaction_id)
             return f"$sent-{claimed.transaction_id}"
 
-        await ResponseDelivery(store=bot._delivery_gateway.deps.outbox, send=send).recover()
+        await ResponseDelivery(
+            store=bot._delivery_gateway.deps.outbox,
+            send=send,
+            observe_delivered=ignore_delivered_projection,
+        ).recover()
         await PendingEventWorker(store=journal(bot), handle=run_turn).drain_once()
 
         assert model_runs == 1, "the journal replayed a turn the outbox already owned"
@@ -598,6 +611,7 @@ class TestTheHandoffIsOneCommit:
         await ResponseDelivery(
             store=EventJournalStore(backend=cast("Any", backend)).principal(bot._journal_principal_id),
             send=send,
+            observe_delivered=ignore_delivered_projection,
             handoff=TurnHandoff(
                 sources_for_turn=handoff.sources_for_turn,
                 released=lambda event_ids: commits_when_released.append(backend.commits) or handoff.released(event_ids),

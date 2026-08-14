@@ -18,6 +18,7 @@ from typing_extensions import TypeIs
 
 from mindroom.event_journal import (
     AdmissionResult,
+    DeliveryProjectionPendingError,
     EventClass,
     EventKind,
     InboundEvent,
@@ -335,6 +336,7 @@ class JournalIngress:
     # A refused admission must also stop the sync checkpoint advancing past the
     # event, or the next process would never see it again.
     on_persist_failure: Callable[[], None] = lambda: None
+    on_delivery_recovery_needed: Callable[[], None] = lambda: None
     on_own_membership_transition: Callable[[str, str, bool], Awaitable[None]] | None = None
     # What nio said about the room-member events of the response being
     # delivered, for the consumers that run once the response is complete.
@@ -405,6 +407,10 @@ class JournalIngress:
             )
             if isinstance(event, nio.RoomMemberEvent):
                 await self._apply_own_membership_transition(room.room_id, event, provenance)
+        except DeliveryProjectionPendingError as error:
+            self.on_delivery_recovery_needed()
+            self.on_persist_failure()
+            raise nio.CallbackNotAcceptedError(str(error)) from error
         except Exception as error:
             # Refusing acceptance is the whole point: nio keeps the event for
             # redelivery and does not advance the checkpoint past it.

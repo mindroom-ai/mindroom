@@ -527,8 +527,7 @@ async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tm
 
     parsed = MagicMock()
     parsed.formatted_text = "formatted response"
-    parsed.option_map = None
-    parsed.options_list = None
+    parsed.interactive_metadata = None
 
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$response")) as mock_send_text,
@@ -570,8 +569,7 @@ async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messag
 
     parsed = MagicMock()
     parsed.formatted_text = "formatted response"
-    parsed.option_map = None
-    parsed.options_list = None
+    parsed.interactive_metadata = None
 
     with (
         patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)) as mock_edit_text,

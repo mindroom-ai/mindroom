@@ -27,10 +27,12 @@ if TYPE_CHECKING:
 
     from mindroom.event_journal import OutboxDelivery, OutboxView
     from mindroom.event_journal.models import TerminalTurnWrite
+    from mindroom.event_journal.projection import ProjectedEvent
 
 logger = get_logger(__name__)
 
 type SendDelivery = Callable[[OutboxDelivery], Awaitable[str]]
+type _ObserveDelivered = Callable[[OutboxDelivery, str], Awaitable[tuple[ProjectedEvent, ...]]]
 
 # Finding the Matrix event a previous attempt already produced, when the frozen
 # transaction ID can no longer prove there wasn't one. Returns the event ID if
@@ -96,6 +98,7 @@ class ResponseDelivery:
 
     store: OutboxView
     send: SendDelivery
+    observe_delivered: _ObserveDelivered
     # The device this process is logged in as, recorded on every claim. A
     # Matrix transaction ID is idempotent within one device and meaningless
     # across a change of one, so the row has to remember which device's
@@ -316,7 +319,7 @@ class ResponseDelivery:
         if not self._transaction_id_still_deduplicates(claimed):
             already_delivered = await self._delivered_before_device_changed(claimed)
             if already_delivered is not None:
-                return await self._acknowledge(turn_id, stage, already_delivered)
+                return await self._acknowledge(claimed, already_delivered)
         # Only now, with a send actually about to happen. Writing this at claim
         # time instead loses the fact that a lookup is still owed: a room scan
         # that raises would leave the row unacknowledged but stamped with this
@@ -353,9 +356,9 @@ class ResponseDelivery:
             device_id=self.sending_device_id,
         )
         event_id = await self.send(claimed)
-        return await self._acknowledge(claimed.turn_id, claimed.stage, event_id)
+        return await self._acknowledge(claimed, event_id)
 
-    async def _acknowledge(self, turn_id: str, stage: DeliveryStage, event_id: str) -> _FlushOutcome:
+    async def _acknowledge(self, claimed: OutboxDelivery, event_id: str) -> _FlushOutcome:
         """Bind the row and report whether its record needs publishing.
 
         The record commits inside the acknowledgement, so nothing else writes
@@ -387,17 +390,19 @@ class ResponseDelivery:
         record end up naming different events even though the acknowledgement
         itself was guarded.
         """
+        delivered_projections = await self.observe_delivered(claimed, event_id)
         acknowledged = await self.store.acknowledge_delivery(
-            turn_id=turn_id,
-            stage=stage,
+            turn_id=claimed.turn_id,
+            stage=claimed.stage,
             event_id=event_id,
-            terminal_turn=self._terminal_turn(turn_id, stage, event_id),
+            delivered_projections=delivered_projections,
+            terminal_turn=self._terminal_turn(claimed.turn_id, claimed.stage, event_id),
         )
         if acknowledged.settled_event_id is None:
             return _FlushOutcome(event_id=event_id)
         return _FlushOutcome(
             event_id=acknowledged.settled_event_id,
-            publish_committed_terminal=acknowledged.bound and stage is DeliveryStage.FINAL,
+            publish_committed_terminal=acknowledged.bound and claimed.stage is DeliveryStage.FINAL,
         )
 
     async def _finish_flush(self, turn_id: str, outcome: _FlushOutcome) -> str | None:

@@ -49,6 +49,7 @@ from mindroom.event_journal import (
     TerminalTurnWrite,
     delivery_transaction_id,
     reads,
+    replacement_target,
 )
 from mindroom.event_journal.offloading import settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
@@ -486,10 +487,15 @@ def message(
         sender=sender,
         origin_server_ts=ts,
         content=body,
-        replaces_event_id=None,
+        replaces_event_id=replacement_target(body),
         redacts_event_id=redacts,
     )
     return inbound, projected
+
+
+def projection(event_id: str, **kwargs: object) -> ProjectedEvent:
+    """Return only the projected half of one test event."""
+    return message(event_id, **kwargs)[1]  # type: ignore[arg-type]
 
 
 async def admit(store: PrincipalStore, *args: object, **kwargs: object) -> AdmissionResult:
@@ -1573,6 +1579,122 @@ class TestLatestVisibleEvent:
 class TestProjectedInteractivePrompts:
     """The Matrix-visible revision is the sole active-prompt authority."""
 
+    async def test_delivery_acknowledgement_projects_a_prompt_before_its_echo(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The durable delivery boundary must not wait for a later sync echo."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        content = interactive_prompt("Choose?", "yes", source_event_id="$turn")
+        await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=content,
+        )
+        await alice.claim_delivery(turn_id="$turn", stage=DeliveryStage.FINAL)
+
+        acknowledgement = await alice.acknowledge_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            event_id="$prompt",
+            delivered_projections=(
+                projection("$prompt", thread_id="$thread", sender="alice", ts=2_000, content=content),
+            ),
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$prompt", "1"),
+            thread_id="$thread",
+            ts=3_000,
+        )
+
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$prompt", bound=True)
+        assert await alice.claim_interactive_reaction(source_event_id="$reaction") == InteractiveSelection(
+            question_event_id="$prompt",
+            question_text="Choose?",
+            selection_key="1",
+            selected_label="Yes",
+            selected_value="yes",
+            thread_id="$thread",
+        )
+
+    async def test_interactive_source_waits_for_an_attempted_delivery_to_be_projected(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A visible-but-unacknowledged edit can still change the active prompt."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=interactive_prompt("Choose?", "yes", source_event_id="$turn"),
+        )
+        await alice.claim_delivery(turn_id="$turn", stage=DeliveryStage.FINAL)
+        reaction, _projected = message(
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$prompt", "1"),
+            thread_id="$thread",
+            ts=3_000,
+        )
+
+        with pytest.raises(RuntimeError, match="delivery projection is pending"):
+            await alice.admit(reaction)
+
+        assert await alice.load_event("$reaction") is None
+
+    async def test_edit_acknowledgement_projects_a_missing_target_before_its_prompt(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Target and edit share the ACK transaction when sync missed both echoes."""
+        await admit(alice, "$turn", sender=BOB, thread_id="$thread")
+        edit_content = interactive_edit("$target", "Choose?", "yes", source_event_id="$turn")
+        await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=edit_content,
+            edits_event_id="$target",
+        )
+        await alice.claim_delivery(turn_id="$turn", stage=DeliveryStage.FINAL)
+
+        await alice.acknowledge_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            event_id="$edit",
+            delivered_projections=(
+                projection("$target", thread_id="$thread", sender="alice", ts=2_000, content=text("Thinking...")),
+                projection("$edit", thread_id="$thread", sender="alice", ts=3_000, content=edit_content),
+            ),
+        )
+        await admit(
+            alice,
+            "$reaction",
+            sender=BOB,
+            kind=EventKind.REACTION,
+            content=reaction_content("$target", "1"),
+            thread_id="$thread",
+            ts=4_000,
+        )
+
+        selection = await alice.claim_interactive_reaction(source_event_id="$reaction")
+        assert selection is not None
+        assert (selection.question_event_id, selection.question_text, selection.selected_value) == (
+            "$target",
+            "Choose?",
+            "yes",
+        )
+
     async def test_admitting_a_self_authored_prompt_activates_it_before_its_reaction(
         self,
         alice: PrincipalStore,
@@ -2468,42 +2590,6 @@ class TestIncompatibleInteractiveSchemaRefusal:
         with pytest.raises(RuntimeError, match="incompatible pre-selection schema"):
             EventJournalStore.open_postgres(database_url)
 
-    async def test_sqlite_refuses_the_superseded_selection_payload(self, tmp_path: Path) -> None:
-        """SQLite rejects the interim duplicated selection snapshot shape."""
-        database_path = tmp_path / "legacy.db"
-        with sqlite3.connect(database_path) as database:
-            database.execute(
-                """
-                CREATE TABLE interactive_selections (
-                    principal_id TEXT NOT NULL,
-                    source_event_id TEXT NOT NULL,
-                    selection_json TEXT NOT NULL
-                )
-                """,
-            )
-
-        with pytest.raises(RuntimeError, match="incompatible interactive selection schema"):
-            EventJournalStore.open_sqlite(database_path)
-
-    async def test_postgres_refuses_the_superseded_selection_payload(self, postgres_journal_url: str) -> None:
-        """PostgreSQL rejects the same interim duplicated selection snapshot shape."""
-        import psycopg  # noqa: PLC0415
-
-        database_url = postgres_journal_schema_url(postgres_journal_url)
-        with psycopg.connect(database_url, autocommit=True) as database:
-            database.execute(
-                """
-                CREATE TABLE interactive_selections (
-                    principal_id TEXT NOT NULL,
-                    source_event_id TEXT NOT NULL,
-                    selection_json TEXT NOT NULL
-                )
-                """,
-            )
-
-        with pytest.raises(RuntimeError, match="incompatible interactive selection schema"):
-            EventJournalStore.open_postgres(database_url)
-
 
 class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
     """A turn that outlived its membership must not answer into the next one.
@@ -2989,7 +3075,12 @@ class TestMembershipEpoch:
             payload=text("answer"),
         )
         await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
-        await alice.acknowledge_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL, event_id="$sent")
+        await alice.acknowledge_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$sent",
+            delivered_projections=(),
+        )
 
         await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
@@ -3889,12 +3980,14 @@ class TestOutbox:
             turn_id="turn-1",
             stage=DeliveryStage.FINAL,
             event_id="$first",
+            delivered_projections=(),
             terminal_turn=record("$first"),
         )
         await alice.acknowledge_delivery(
             turn_id="turn-1",
             stage=DeliveryStage.FINAL,
             event_id="$second",
+            delivered_projections=(),
             terminal_turn=record("$second"),
         )
 
@@ -4007,6 +4100,7 @@ class TestOutbox:
                 turn_id="turn-1",
                 stage=DeliveryStage.FINAL,
                 event_id=event_id,
+                delivered_projections=(),
                 terminal_turn=TerminalTurnWrite(
                     agent_name="general",
                     index_event_ids=("$source",),
@@ -4169,6 +4263,7 @@ class TestOutbox:
             turn_id="turn-1",
             stage=DeliveryStage.FINAL,
             event_id="$sent",
+            delivered_projections=(),
         )
 
         assert await alice.unacknowledged_deliveries() == ()
@@ -4183,8 +4278,18 @@ class TestOutbox:
             payload=text("sent"),
         )
         await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
-        await alice.acknowledge_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL, event_id="$first")
-        await alice.acknowledge_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL, event_id="$second")
+        await alice.acknowledge_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$first",
+            delivered_projections=(),
+        )
+        await alice.acknowledge_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$second",
+            delivered_projections=(),
+        )
 
         stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None

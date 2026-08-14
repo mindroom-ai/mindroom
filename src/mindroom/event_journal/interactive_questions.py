@@ -306,24 +306,24 @@ def _snapshot_reaction_candidate(  # noqa: PLR0911 - malformed or unrelated reac
     transaction: Transaction,
     principal_id: str,
     event: InboundEvent,
-) -> None:
-    """Snapshot the prompt revision visible when one reaction is admitted."""
+) -> bool:
+    """Snapshot one reaction's visible prompt and report whether it could select."""
     if event.kind is not EventKind.REACTION or event.event_class is not EventClass.ACTIONABLE:
-        return
+        return False
     content = event.source.get("content")
     if not isinstance(content, dict):
-        return
+        return False
     content = cast("dict[str, object]", content)
     relation = content.get("m.relates_to")
     if not isinstance(relation, dict):
-        return
+        return False
     relation = cast("dict[str, object]", relation)
     if relation.get("rel_type") != "m.annotation":
-        return
+        return False
     question_event_id = relation.get("event_id")
     selection_key = relation.get("key")
     if not isinstance(question_event_id, str) or not isinstance(selection_key, str):
-        return
+        return False
     source = transaction.fetchone(
         """
         SELECT membership_epoch
@@ -333,7 +333,7 @@ def _snapshot_reaction_candidate(  # noqa: PLR0911 - malformed or unrelated reac
         (principal_id, event.event_id, PENDING_STATE),
     )
     if source is None:
-        return
+        return True
     membership_epoch = int(source["membership_epoch"])
     question_row = _active_question_row(
         transaction,
@@ -346,10 +346,10 @@ def _snapshot_reaction_candidate(  # noqa: PLR0911 - malformed or unrelated reac
         or question_row["room_id"] != event.room_id
         or int(question_row["membership_epoch"]) != membership_epoch
     ):
-        return
+        return True
     selection = _selection_from_row(question_row, selection_key)
     if selection is None:
-        return
+        return True
     _snapshot_selection(
         transaction,
         principal_id,
@@ -357,23 +357,24 @@ def _snapshot_reaction_candidate(  # noqa: PLR0911 - malformed or unrelated reac
         str(question_row["revision_event_id"]),
         selection,
     )
+    return True
 
 
-def _snapshot_text_candidate(
+def _snapshot_text_candidate(  # noqa: PLR0911 - each invalid source shape is terminal
     transaction: Transaction,
     principal_id: str,
     event: InboundEvent,
-) -> None:
-    """Snapshot the oldest prompt one numeric text answer can select."""
+) -> bool:
+    """Snapshot one numeric answer's oldest prompt and report whether it could select."""
     if event.kind is not EventKind.MESSAGE or event.event_class is not EventClass.ACTIONABLE:
-        return
+        return False
     content = event.source.get("content")
     if not isinstance(content, dict):
-        return
+        return False
     body = cast("dict[str, object]", content).get("body")
     selection_key = body.strip() if isinstance(body, str) else ""
     if len(selection_key) != 1 or not selection_key.isdigit():
-        return
+        return False
     source = transaction.fetchone(
         """
         SELECT room_id, thread_id, membership_epoch
@@ -383,7 +384,7 @@ def _snapshot_text_candidate(
         (principal_id, event.event_id, PENDING_STATE),
     )
     if source is None:
-        return
+        return True
     question = transaction.fetchone(
         """
         SELECT iq.question_event_id
@@ -407,7 +408,7 @@ def _snapshot_text_candidate(
         (principal_id, source["room_id"], source["thread_id"], source["membership_epoch"]),
     )
     if question is None:
-        return
+        return True
     question_row = _active_question_row(
         transaction,
         principal_id,
@@ -415,7 +416,7 @@ def _snapshot_text_candidate(
         question_event_id=str(question["question_event_id"]),
     )
     if question_row is None or (selection := _selection_from_row(question_row, selection_key)) is None:
-        return
+        return True
     _snapshot_selection(
         transaction,
         principal_id,
@@ -423,18 +424,20 @@ def _snapshot_text_candidate(
         str(question_row["revision_event_id"]),
         selection,
     )
+    return True
 
 
 def snapshot_source_candidate(
     transaction: Transaction,
     principal_id: str,
     event: InboundEvent,
-) -> None:
-    """Freeze the prompt revision an admitted interactive answer saw."""
+) -> bool:
+    """Freeze the visible prompt and report whether the source could select one."""
     if event.kind is EventKind.REACTION:
-        _snapshot_reaction_candidate(transaction, principal_id, event)
-    elif event.kind is EventKind.MESSAGE:
-        _snapshot_text_candidate(transaction, principal_id, event)
+        return _snapshot_reaction_candidate(transaction, principal_id, event)
+    if event.kind is EventKind.MESSAGE:
+        return _snapshot_text_candidate(transaction, principal_id, event)
+    return False
 
 
 def _source_row(transaction: Transaction, principal_id: str, source_event_id: str) -> Row | None:

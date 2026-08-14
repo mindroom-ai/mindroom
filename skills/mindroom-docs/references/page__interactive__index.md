@@ -86,5 +86,6 @@ agents:
 - Only **one active question per message**. If a response contains multiple interactive blocks, only the first is processed.
 - Questions and in-flight selections persist across restarts in the event journal and remain tied to the exact visible prompt revision.
 - Interactive metadata over 8,000 bytes is omitted, so the formatted question remains visible without reaction buttons or numeric selection.
+- Interactive blocks are supported in normal agent responses; direct `matrix_message` sends and edits reject them because those operations have no durable response identity.
 - Only human users can respond; reactions from other agents are ignored.
 - Only the agent that created the question processes reactions to it.

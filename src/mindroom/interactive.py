@@ -104,20 +104,6 @@ class _InteractiveResponse:
     formatted_text: str
     interactive_metadata: InteractiveMetadata | None = None
 
-    @property
-    def option_map(self) -> dict[str, str] | None:
-        """Return the emoji/number mapping when this response is interactive."""
-        if self.interactive_metadata is None:
-            return None
-        return dict(self.interactive_metadata.option_map)
-
-    @property
-    def options_list(self) -> list[dict[str, str]] | None:
-        """Return the button option list when this response is interactive."""
-        if self.interactive_metadata is None:
-            return None
-        return self.interactive_metadata.options_as_list()
-
 
 # Constants
 # Match interactive code blocks
@@ -313,7 +299,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         extract_mapping: Whether to extract option mapping and return options list
 
     Returns:
-        _InteractiveResponse with formatted_text, option_map, and options_list
+        The formatted response and any prompt metadata extracted from it.
 
     """
     matches = list(re.finditer(_INTERACTIVE_PATTERN, response_text, _INTERACTIVE_PATTERN_FLAGS))

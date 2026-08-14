@@ -23,6 +23,7 @@ from mindroom.constants import (
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.event_journal import (
+    DeliveryProjectionPendingError,
     DepartureSource,
     EventClass,
     EventKind,
@@ -1154,6 +1155,33 @@ class TestDurableAdmission:
 
         with pytest.raises(nio.CallbackNotAcceptedError):
             await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
+
+    async def test_a_pending_delivery_projection_schedules_recovery_before_refusing(self) -> None:
+        """The outbox must be woken before nio retries the blocked source."""
+
+        class ProjectionPending:
+            principal_id = "agent@alice"
+
+            async def admit(self, *_args: object, **_kwargs: object) -> None:
+                msg = "projection pending"
+                raise DeliveryProjectionPendingError(msg)
+
+        recovery_requests = 0
+
+        def schedule_recovery() -> None:
+            nonlocal recovery_requests
+            recovery_requests += 1
+
+        ingress = JournalIngress(
+            store=ProjectionPending(),  # type: ignore[arg-type]
+            self_sender=BOT,
+            on_delivery_recovery_needed=schedule_recovery,
+        )
+
+        with pytest.raises(nio.CallbackNotAcceptedError):
+            await ingress._admit(room(), text_event("$m", "1"), nio.TimelineEventProvenance.LIVE)
+
+        assert recovery_requests == 1
 
     async def test_redelivery_after_a_crash_creates_one_turn(
         self,

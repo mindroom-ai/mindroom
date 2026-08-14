@@ -10,11 +10,19 @@ from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 from weakref import WeakValueDictionary
 
+import nio
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
 from mindroom.constants import SKIP_MENTIONS_KEY
-from mindroom.event_journal import OutboxDelivery, OutboxView, TerminalTurnWrite
+from mindroom.event_journal import (
+    OutboxDelivery,
+    OutboxView,
+    ProjectedEvent,
+    TerminalTurnWrite,
+    replacement_target,
+    thread_root,
+)
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.hooks import (
@@ -75,7 +83,6 @@ from mindroom.streaming import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
-    import nio
     import structlog
 
     from mindroom.constants import RuntimePaths
@@ -111,6 +118,10 @@ def _is_placeholder_delivery_failure(failure_reason: str) -> bool:
 
 class _DeliveryRefusedError(RuntimeError):
     """Matrix declined one outbox delivery, leaving it unacknowledged."""
+
+
+class _DeliveryObservationError(RuntimeError):
+    """Matrix did not provide authoritative metadata for a delivered event."""
 
 
 @dataclass(frozen=True)
@@ -665,6 +676,74 @@ class DeliveryGateway:
             raise _DeliveryRefusedError(msg)
         return outcome
 
+    async def _observe_matrix_event(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        content: dict[str, object] | None,
+    ) -> ProjectedEvent | None:
+        """Read one event's authoritative ordering metadata from Matrix."""
+        client = self._client()
+        response = await client.room_get_event(room_id, event_id)
+        if not isinstance(response, nio.RoomGetEventResponse):
+            msg = f"Matrix could not read delivered event {event_id!r} in {room_id!r}"
+            raise _DeliveryObservationError(msg)
+        event = response.event
+        if event.event_id != event_id or event.sender != client.user_id:
+            msg = f"Matrix returned the wrong delivered event for {event_id!r}"
+            raise _DeliveryObservationError(msg)
+        source = event.source
+        source_room_id = source.get("room_id") if isinstance(source, dict) else None
+        if source_room_id is not None and source_room_id != room_id:
+            msg = f"Matrix returned delivered event {event_id!r} from the wrong room"
+            raise _DeliveryObservationError(msg)
+        timestamp = event.server_timestamp
+        if not isinstance(timestamp, int) or isinstance(timestamp, bool):
+            msg = f"Matrix returned delivered event {event_id!r} without a server timestamp"
+            raise _DeliveryObservationError(msg)
+        unsigned = source.get("unsigned") if isinstance(source, dict) else None
+        if isinstance(unsigned, dict) and "redacted_because" in unsigned:
+            return None
+        if content is None:
+            fetched_content = source.get("content") if isinstance(source, dict) else None
+            if not isinstance(fetched_content, dict):
+                msg = f"Matrix returned delivered event {event_id!r} without content"
+                raise _DeliveryObservationError(msg)
+            content = fetched_content
+        return ProjectedEvent(
+            event_id=event_id,
+            room_id=room_id,
+            thread_id=thread_root(content),
+            sender=event.sender,
+            origin_server_ts=timestamp,
+            content=content,
+            replaces_event_id=replacement_target(content),
+            redacts_event_id=None,
+        )
+
+    async def _observe_delivered(self, claimed: OutboxDelivery, event_id: str) -> tuple[ProjectedEvent, ...]:
+        """Return the target and result one delivered outbox row made visible."""
+        projections: list[ProjectedEvent] = []
+        if claimed.edits_event_id is not None:
+            target = await self._observe_matrix_event(
+                room_id=claimed.room_id,
+                event_id=claimed.edits_event_id,
+                content=None,
+            )
+            if target is None:
+                return ()
+            projections.append(target)
+        delivered = await self._observe_matrix_event(
+            room_id=claimed.room_id,
+            event_id=event_id,
+            content=dict(claimed.payload),
+        )
+        if delivered is None:
+            return ()
+        projections.append(delivered)
+        return tuple(projections)
+
     def _response_delivery(self, send: SendDelivery, *, handoff: TurnHandoff | None) -> ResponseDelivery:
         """Return the outbox writer, for a live delivery or for recovery.
 
@@ -680,6 +759,7 @@ class DeliveryGateway:
         return ResponseDelivery(
             store=self.deps.outbox,
             send=send,
+            observe_delivered=self._observe_delivered,
             sending_device_id=self.deps.sending_device_id(),
             resolve_delivered=self._delivered_under_a_previous_device,
             handoff=handoff,

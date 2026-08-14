@@ -131,21 +131,6 @@ class PostgresBackend:
                     "recreate the event journal database before starting MindRoom"
                 )
                 raise RuntimeError(msg)
-            cursor.execute(
-                """
-                SELECT 1
-                FROM information_schema.columns
-                WHERE table_schema = current_schema()
-                  AND table_name = 'interactive_selections'
-                  AND column_name = 'selection_json'
-                """,
-            )
-            if cursor.fetchone() is not None:
-                msg = (
-                    "This event journal uses an incompatible interactive selection schema; "
-                    "recreate the event journal database before starting MindRoom"
-                )
-                raise RuntimeError(msg)
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
         self._writer.commit()

@@ -69,6 +69,10 @@ class AdmissionResult(StrEnum):
     DUPLICATE = "duplicate"
 
 
+class DeliveryProjectionPendingError(RuntimeError):
+    """An interactive source arrived before a visible delivery was projected."""
+
+
 class DeliveryStage(StrEnum):
     """The delivery points that must survive a crash."""
 

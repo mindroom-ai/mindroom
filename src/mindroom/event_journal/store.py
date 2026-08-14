@@ -22,7 +22,7 @@ from .approvals import (  # noqa: TC001 - part of this module's runtime return t
     RecordedApprovalDecision,
     StoredApprovalCard,
 )
-from .models import AdmissionResult, DeliveryAcknowledgement
+from .models import AdmissionResult, DeliveryAcknowledgement, DeliveryProjectionPendingError
 from .projection import drop_refetched_message, install_refetched_revision, project
 
 if TYPE_CHECKING:
@@ -641,6 +641,7 @@ class PrincipalStore:
         turn_id: str,
         stage: DeliveryStage,
         event_id: str,
+        delivered_projections: tuple[ProjectedEvent, ...],
         terminal_turn: TerminalTurnWrite | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, if nothing else has.
@@ -669,6 +670,12 @@ class PrincipalStore:
         The two rows are scoped differently, one to this principal and one to
         an agent, and they still share a transaction because they share a
         database. That is the whole reason turn records were moved here.
+
+        ``delivered_projections`` is the server-ordered Matrix content this row
+        depends on and made visible. The winner projects it in this transaction
+        before any reaction or numeric answer can become durable. An empty
+        tuple means the server already redacted the event, so frozen plaintext
+        must not be resurrected.
         """
 
         def acknowledge(transaction: Transaction) -> DeliveryAcknowledgement:
@@ -691,6 +698,19 @@ class PrincipalStore:
                     anchor_event_id=terminal_turn.anchor_event_id,
                     record_json=terminal_turn.record_json,
                 )
+            if bound:
+                for delivered_projection in delivered_projections:
+                    project(
+                        transaction,
+                        self._principal_id,
+                        delivered_projection,
+                        receipt_order=0,
+                        membership_epoch=journal.current_membership_epoch(
+                            transaction,
+                            self._principal_id,
+                            delivered_projection.room_id,
+                        ),
+                    )
             if bound:
                 return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
             # Lost the row. Whatever is on it now is the answer this delivery
@@ -862,10 +882,19 @@ def _admit(
     event: InboundEvent,
     projected: ProjectedEvent | None,
 ) -> AdmissionResult:
-    """Admit one event and snapshot any interactive prompt its reaction saw."""
+    """Admit one event after any already-visible outbox delivery is projected."""
     result = journal.admit(transaction, principal_id, event, projected)
-    if result is AdmissionResult.ADMITTED:
-        interactive_questions.snapshot_source_candidate(transaction, principal_id, event)
+    if (
+        result is AdmissionResult.ADMITTED
+        and interactive_questions.snapshot_source_candidate(
+            transaction,
+            principal_id,
+            event,
+        )
+        and outbox.has_attempted_unacknowledged_delivery(transaction, principal_id, room_id=event.room_id)
+    ):
+        msg = f"Matrix delivery projection is pending in room {event.room_id!r}"
+        raise DeliveryProjectionPendingError(msg)
     return result
 
 
