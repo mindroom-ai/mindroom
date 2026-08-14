@@ -40,7 +40,9 @@ Response and approval callers will both use `MatrixDeliveryWorker` and `MatrixDe
 
 An approval continuation owns the logical obligation to show one unavailable-owner notice before its sources are released.
 
-One outbox row owns only one physical attempt under one immutable room-membership epoch.
+One outbox row normally owns one physical attempt under one immutable room-membership epoch.
+
+The deliberate exception is a visible approval card whose already-decided terminal cleanup survives router departure: the card and both of its delivery stages transfer together to the successor membership.
 
 If that attempt becomes stale, its row remains an identity tombstone and the still-live continuation creates a distinct delivery ID for the current membership epoch.
 
