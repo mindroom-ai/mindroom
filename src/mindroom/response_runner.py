@@ -805,27 +805,35 @@ class ResponseRunner:
         try:
             plan = await self._approval_responses.plan_pause(identified_tools, requester_id=requester_id)
             response_event_id = progress.tracked_event_id
-            delivery_kind: Literal["sent", "edited"] = "edited"
+            approval_pending = plan.waiting_text is not None
+            visible_text = plan.waiting_text or PROGRESS_PLACEHOLDER
+            stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
+            delivery_kind: Literal["sent", "edited"] | None = None
+            final_visible_body: str | None = None
             if response_event_id is None:
                 response_event_id = await self.deps.delivery_gateway.send_text(
                     SendTextRequest(
                         target=target,
-                        response_text=plan.waiting_text,
-                        extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
+                        response_text=visible_text,
+                        extra_content={STREAM_STATUS_KEY: stream_status},
                         delivery_turn_id=request.response_envelope.source_event_id,
                         delivery_stage=DeliveryStage.INITIAL,
                     ),
                 )
                 delivery_kind = "sent"
-            elif not await self.deps.delivery_gateway.edit_text(
+                final_visible_body = visible_text
+            elif approval_pending and not await self.deps.delivery_gateway.edit_text(
                 EditTextRequest(
                     target=target,
                     event_id=response_event_id,
-                    new_text=plan.waiting_text,
+                    new_text=visible_text,
                     extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
                 ),
             ):
                 response_event_id = None
+            elif approval_pending:
+                delivery_kind = "edited"
+                final_visible_body = visible_text
             if response_event_id is None:
                 msg = "Could not publish the suspended approval response"
                 raise RuntimeError(msg)  # noqa: TRY301
@@ -896,9 +904,9 @@ class ResponseRunner:
                 terminal_status="suspended",
                 event_id=response_event_id,
                 is_visible_response=True,
-                final_visible_body=plan.waiting_text,
+                final_visible_body=final_visible_body,
                 delivery_kind=delivery_kind,
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
+                extra_content={STREAM_STATUS_KEY: stream_status},
             )
         except (asyncio.CancelledError, Exception) as error:
             handoff = await self._failed_approval_handoff(
@@ -952,6 +960,7 @@ class ResponseRunner:
             result,
             target=target,
             tool_trace=tool_trace if self._show_tool_calls() else [],
+            pending_text=PROGRESS_PLACEHOLDER,
         )
         current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
         return (
@@ -959,10 +968,14 @@ class ResponseRunner:
                 terminal_status="suspended",
                 event_id=claimed.response_event_id,
                 is_visible_response=True,
-                final_visible_body=waiting_text,
+                final_visible_body=waiting_text or PROGRESS_PLACEHOLDER,
                 delivery_kind="edited",
                 tool_trace=tuple(tool_trace) if self._show_tool_calls() else (),
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
+                extra_content={
+                    STREAM_STATUS_KEY: (
+                        STREAM_STATUS_APPROVAL_PENDING if waiting_text is not None else STREAM_STATUS_PENDING
+                    ),
+                },
             ),
             current,
         )
