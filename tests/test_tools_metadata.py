@@ -23,6 +23,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
+from mindroom.tool_system.declarations import SetupType
 from mindroom.tool_system.metadata import (
     _AUTHORED_OVERRIDE_INHERIT,
     ConfigField,
@@ -496,6 +497,42 @@ def test_tool_metadata_consistency() -> None:
                 f"{tool_name} is metadata-only and should not declare managed init args: "
                 f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
             )
+
+
+def test_github_metadata_declares_oauth_and_manual_token_fallback() -> None:
+    """GitHub metadata should describe both managed OAuth and manual-token construction."""
+    metadata = TOOL_METADATA["github"]
+
+    assert metadata.setup_type == SetupType.OAUTH
+    assert metadata.auth_provider == "github"
+    assert metadata.oauth_fallback_fields == ("access_token",)
+    assert metadata.managed_init_args == (
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
+    )
+    assert {field.name for field in metadata.config_fields or []} == {"access_token", "base_url"}
+
+    exported = next(tool for tool in export_tools_metadata() if tool["name"] == "github")
+    assert exported["oauth_fallback_fields"] == ["access_token"]
+    assert "managed_init_args" not in exported
+
+
+def test_registration_rejects_missing_oauth_fallback_config_field() -> None:
+    """Fallback metadata should never reference a field the dashboard cannot configure."""
+    with pytest.raises(ValueError, match="missing_field"):
+
+        @register_tool_with_metadata(
+            name="invalid_oauth_fallback",
+            display_name="Invalid OAuth Fallback",
+            description="Invalid test metadata.",
+            category=ToolCategory.DEVELOPMENT,
+            setup_type=SetupType.OAUTH,
+            config_fields=[],
+            oauth_fallback_fields=("missing_field",),
+        )
+        def _invalid_oauth_fallback() -> type[Toolkit]:
+            return Toolkit
 
 
 def test_dynamic_tools_is_durable_metadata_only_builtin(tmp_path: Path) -> None:

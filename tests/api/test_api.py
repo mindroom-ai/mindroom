@@ -1,6 +1,7 @@
 """Tests for the dashboard backend API endpoints."""
 
 import asyncio
+import copy
 import json
 import os
 import threading
@@ -36,7 +37,7 @@ from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
 from mindroom.matrix.state import MatrixState
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
@@ -1940,6 +1941,77 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     assert connected_tool["status"] == "available"
 
 
+def test_get_tools_non_requester_oauth_keeps_non_authoritative_shared_preview(
+    test_client: TestClient,
+) -> None:
+    """Existing OAuth providers must not expose requester stores through non-authoritative status."""
+    runtime_paths = use_trusted_upstream_runtime(main.app)
+    config = _config_with_worker_scope(
+        "user",
+        authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google_drive_oauth_client",
+        {"client_id": "client-id", "client_secret": "client-secret"},
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    oauth_target = resolve_worker_target("user", "general", execution_identity=identity)
+    save_scoped_credentials(
+        "google_drive_oauth",
+        {
+            "token": "drive-token",
+            "refresh_token": "drive-refresh-token",
+            "client_id": "client-id",
+            "scopes": [
+                "openid",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "https://www.googleapis.com/auth/userinfo.profile",
+                "https://www.googleapis.com/auth/drive",
+            ],
+            "_source": "oauth",
+            "_oauth_provider": "google_drive",
+        },
+        credentials_manager=manager,
+        worker_target=oauth_target,
+    )
+    tools = [
+        {
+            "name": "google_drive",
+            "display_name": "Google Drive",
+            "description": "Drive access",
+            "category": "productivity",
+            "status": "requires_config",
+            "setup_type": "oauth",
+            "auth_provider": "google_drive",
+            "config_fields": [],
+        },
+    ]
+    headers = trusted_upstream_headers(
+        user_id="alice",
+        email="alice@example.org",
+        matrix_user_id="@alice:example.org",
+    )
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["status_authoritative"] is False
+    assert response.json()["tools"][0]["status"] == "requires_config"
+
+
 def test_get_tools_marks_google_oauth_tool_available_with_service_account(
     test_client: TestClient,
     tmp_path: Path,
@@ -2017,6 +2089,151 @@ def test_get_tools_does_not_treat_scoped_credentials_as_dashboard_truth(
     assert tool["status"] == "requires_config"
     assert tool["dashboard_configuration_supported"] is False
     mock_load_scoped_credentials.assert_not_called()
+
+
+def test_get_tools_reports_requester_scoped_github_manual_fallback(test_client: TestClient) -> None:
+    """GitHub manual auth status should use the authenticated requester's persisted agent target."""
+    runtime_paths = use_trusted_upstream_runtime(main.app)
+    config = _config_with_worker_scope(
+        "user_agent",
+        authorization={
+            "agent_reply_permissions": {
+                "general": ["@alice:example.org", "@bob:example.org"],
+            },
+        },
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    alice_target = resolve_worker_target("user_agent", "general", execution_identity=alice_identity)
+    manual_secret = "github-manual-secret"  # noqa: S105
+    save_scoped_credentials(
+        "github",
+        {"access_token": manual_secret, "base_url": "https://api.github.com"},
+        credentials_manager=manager,
+        worker_target=alice_target,
+    )
+    tools = [
+        {
+            "name": "github",
+            "display_name": "GitHub",
+            "description": "GitHub access",
+            "category": "development",
+            "status": "requires_config",
+            "setup_type": "oauth",
+            "auth_provider": "github",
+            "config_fields": [
+                {"name": "access_token", "required": False},
+                {"name": "base_url", "required": False},
+            ],
+            "oauth_fallback_fields": ["access_token"],
+        },
+    ]
+    alice_headers = trusted_upstream_headers(
+        user_id="alice",
+        email="alice@example.org",
+        matrix_user_id="@alice:example.org",
+    )
+    bob_headers = trusted_upstream_headers(
+        user_id="bob",
+        email="bob@example.org",
+        matrix_user_id="@bob:example.org",
+    )
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", side_effect=lambda *_: copy.deepcopy(tools)),
+    ):
+        alice_response = test_client.get("/api/tools/?agent_name=general", headers=alice_headers)
+        bob_response = test_client.get("/api/tools/?agent_name=general", headers=bob_headers)
+
+    assert alice_response.status_code == 200
+    assert alice_response.json()["status_authoritative"] is False
+    alice_tool = alice_response.json()["tools"][0]
+    assert alice_tool["status"] == "available"
+    assert alice_tool["manual_auth_configured"] is True
+    assert manual_secret not in alice_response.text
+
+    assert bob_response.status_code == 200
+    bob_tool = bob_response.json()["tools"][0]
+    assert bob_tool["status"] == "requires_config"
+    assert bob_tool["manual_auth_configured"] is False
+
+
+def test_get_tools_reports_requester_scoped_github_oauth_for_unscoped_agent(test_client: TestClient) -> None:
+    """An unscoped agent should inspect the authenticated requester's GitHub OAuth store."""
+    runtime_paths = use_trusted_upstream_runtime(main.app)
+    config = _config_with_worker_scope(
+        None,
+        authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "github_oauth_client",
+        {"client_id": "github-client-id", "client_secret": "github-client-secret"},
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    oauth_target = resolve_worker_target("user", "general", execution_identity=identity)
+    oauth_secret = "github-oauth-secret"  # noqa: S105
+    save_scoped_credentials(
+        "github_oauth",
+        {
+            "token": oauth_secret,
+            "refresh_token": "github-refresh-secret",
+            "client_id": "github-client-id",
+            "scopes": [],
+            "expires_at": 4_102_444_800.0,
+            "_source": "oauth",
+            "_oauth_provider": "github",
+        },
+        credentials_manager=manager,
+        worker_target=oauth_target,
+    )
+    tools = [
+        {
+            "name": "github",
+            "display_name": "GitHub",
+            "description": "GitHub access",
+            "category": "development",
+            "status": "requires_config",
+            "setup_type": "oauth",
+            "auth_provider": "github",
+            "config_fields": [{"name": "access_token", "required": False}],
+            "oauth_fallback_fields": ["access_token"],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get(
+            "/api/tools/?agent_name=general",
+            headers=trusted_upstream_headers(
+                user_id="alice",
+                email="alice@example.org",
+                matrix_user_id="@alice:example.org",
+            ),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["tools"][0]["status"] == "available"
+    assert oauth_secret not in response.text
 
 
 def test_get_tools_uses_one_runtime_snapshot(

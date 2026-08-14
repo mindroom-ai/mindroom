@@ -10,6 +10,7 @@ from fastapi import HTTPException, Request
 from mindroom.agent_policy import dashboard_credentials_supported_for_scope
 from mindroom.api import config_lifecycle
 from mindroom.api.dashboard_credential_scope import (
+    build_dashboard_execution_identity,
     dashboard_scope_label,
     reject_unbound_private_dashboard_requester,
     require_agent_credential_management_authorized,
@@ -192,6 +193,44 @@ def resolve_request_credentials_target(
         agent_name=scope_request.agent_name,
         execution_identity=execution_identity,
         allowed_shared_services=config.get_worker_grantable_credentials(),
+    )
+
+
+def resolve_requester_credentials_target(
+    request: Request,
+    *,
+    agent_name: str | None,
+    service_names: tuple[str, ...] = (),
+) -> RequestCredentialsTarget:
+    """Resolve credentials that must follow the authenticated requester, independent of worker reuse."""
+    base_target = resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=service_names,
+        execution_scope_override_provided=False,
+        execution_scope_override=None,
+        allow_private_scopes=True,
+    )
+    execution_identity = build_dashboard_execution_identity(
+        request,
+        agent_name or "oauth",
+        runtime_paths=base_target.runtime_paths,
+    )
+    reject_unbound_private_dashboard_requester("user", execution_identity)
+    worker_key = require_worker_key_for_scope(
+        "user",
+        execution_identity=execution_identity,
+        agent_name=agent_name,
+        failure_message="Could not resolve requester-scoped OAuth credentials.",
+    )
+    return RequestCredentialsTarget(
+        runtime_paths=base_target.runtime_paths,
+        base_manager=base_target.base_manager,
+        target_manager=base_target.base_manager.for_worker(worker_key),
+        worker_scope="user",
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+        allowed_shared_services=base_target.allowed_shared_services,
     )
 
 

@@ -41,6 +41,7 @@ _LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
         "callback_manager",
         "desktop",
         "external_trigger_manager",
+        "github",
         "gmail",
         "google_calendar",
         "google_docs",

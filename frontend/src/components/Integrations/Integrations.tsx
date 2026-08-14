@@ -62,9 +62,38 @@ const titleFromProviderId = (providerId: string) =>
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
 
+const oauthProviderDisplayName = (
+  providerId: string,
+  providerTool?: ToolInfo,
+) =>
+  providerTool?.display_name.replace(/\s+Tool$/, "") ??
+  titleFromProviderId(providerId);
+
 const oauthRedirectPlaceholderOrigin = () =>
   new URL(API_BASE_URL || window.location.origin, window.location.origin)
     .origin;
+
+const hasManualOAuthFallback = (integration: Integration) =>
+  integration.setup_type === "oauth" &&
+  Boolean(integration.oauth_fallback_fields?.length);
+
+const hasConfiguredOAuthFallback = (integration?: {
+  manual_auth_configured?: boolean;
+  environment_auth_configured?: boolean;
+}) =>
+  integration?.manual_auth_configured === true ||
+  integration?.environment_auth_configured === true;
+
+const manualOAuthFallbackLabel = (integration: Integration) => {
+  const fallbackFields = integration.oauth_fallback_fields ?? [];
+  if (fallbackFields.length !== 1) {
+    return "Manual credentials";
+  }
+  return (
+    integration.config_fields?.find((field) => field.name === fallbackFields[0])
+      ?.label ?? "Manual credentials"
+  );
+};
 
 export function Integrations() {
   const { agents, agentPoliciesByAgent } = useConfigStore();
@@ -229,13 +258,12 @@ export function Integrations() {
         const status = provider.loadStatus
           ? await provider.loadStatus(scope)
           : {};
+        const fallbackConfigured = hasConfiguredOAuthFallback(providerTool);
         loadedIntegrations.push({
           ...config.integration,
           config_fields:
             providerTool?.config_fields ?? config.integration.config_fields,
           docs_url: providerTool?.docs_url ?? config.integration.docs_url,
-          helper_text:
-            providerTool?.helper_text ?? config.integration.helper_text,
           dependencies:
             providerTool?.dependencies ?? config.integration.dependencies,
           icon_color: providerTool?.icon_color ?? config.integration.icon_color,
@@ -245,7 +273,21 @@ export function Integrations() {
           execution_scope_supported:
             providerTool?.execution_scope_supported ??
             config.integration.execution_scope_supported,
+          oauth_fallback_fields: providerTool?.oauth_fallback_fields,
+          manual_auth_configured: providerTool?.manual_auth_configured,
+          environment_auth_configured:
+            providerTool?.environment_auth_configured,
           ...status,
+          status: fallbackConfigured
+            ? "connected"
+            : (status.status ?? config.integration.status),
+          connected: fallbackConfigured || status.connected === true,
+          status_error: fallbackConfigured ? undefined : status.status_error,
+          helper_text: fallbackConfigured
+            ? providerTool?.helper_text
+            : (status.helper_text ??
+              providerTool?.helper_text ??
+              config.integration.helper_text),
           config_service:
             providerTool?.name ??
             status.config_service ??
@@ -267,10 +309,14 @@ export function Integrations() {
         const providerTool = backendTools.find(
           (tool) => tool.auth_provider === providerId,
         );
+        const providerDisplayName = oauthProviderDisplayName(
+          providerId,
+          providerTool,
+        );
         const integration: Integration = {
           id: providerId,
-          name: titleFromProviderId(providerId),
-          description: `Connect ${titleFromProviderId(providerId)} OAuth for ${providerTool?.display_name ?? "this tool"}.`,
+          name: providerDisplayName,
+          description: `Connect ${providerDisplayName} OAuth for ${providerTool?.display_name ?? "this tool"}.`,
           category: providerTool?.category ?? "productivity",
           icon: getIconForTool(
             providerTool?.icon ?? null,
@@ -289,15 +335,28 @@ export function Integrations() {
           dashboard_configuration_supported:
             providerTool?.dashboard_configuration_supported,
           execution_scope_supported: providerTool?.execution_scope_supported,
+          oauth_fallback_fields: providerTool?.oauth_fallback_fields,
+          manual_auth_configured: providerTool?.manual_auth_configured,
+          environment_auth_configured:
+            providerTool?.environment_auth_configured,
         };
         const provider = new GenericOAuthIntegrationProvider(
           integration,
           providerId,
         );
         const status = await provider.loadStatus?.(scope);
+        const fallbackConfigured = hasConfiguredOAuthFallback(providerTool);
         loadedIntegrations.push({
           ...integration,
           ...status,
+          status: fallbackConfigured
+            ? "connected"
+            : (status?.status ?? integration.status),
+          connected: fallbackConfigured || status?.connected === true,
+          status_error: fallbackConfigured ? undefined : status?.status_error,
+          helper_text: fallbackConfigured
+            ? providerTool?.helper_text
+            : (status?.helper_text ?? integration.helper_text),
           config_service:
             providerTool?.name ??
             status?.config_service ??
@@ -332,6 +391,8 @@ export function Integrations() {
                 : mapped.status,
             auth_provider: tool.auth_provider ?? undefined,
             config_service: tool.name,
+            oauth_fallback_fields: tool.oauth_fallback_fields,
+            manual_auth_configured: tool.manual_auth_configured,
           } as Integration & { auth_provider?: string };
         });
 
@@ -408,7 +469,7 @@ export function Integrations() {
         label: "Client ID",
         type: "text",
         required: true,
-        placeholder: "your-client-id.apps.googleusercontent.com",
+        placeholder: "OAuth app client ID",
         description: "OAuth app client ID",
       },
       {
@@ -555,14 +616,17 @@ export function Integrations() {
 
     setLoading(true);
     try {
-      if (provider?.getConfig(scope).onDisconnect) {
+      if (
+        integration.manual_auth_configured !== true &&
+        provider?.getConfig(scope).onDisconnect
+      ) {
         // Use provider's disconnect method if available
         await provider.getConfig(scope).onDisconnect!(integration.id);
       } else {
         // For generic tools, delete credentials via API
         const response = await fetch(
           withAgentExecutionScope(
-            `${API_BASE_URL}/api/credentials/${integration.id}`,
+            `${API_BASE_URL}/api/credentials/${integration.config_service ?? integration.id}`,
             effectiveScopeAgentName,
             selectedExecutionScope,
           ),
@@ -640,6 +704,21 @@ export function Integrations() {
           : "Use custom client"}
       </Button>
     ) : null;
+    const manualFallbackAvailable = hasManualOAuthFallback(integration);
+    const manualFallbackLabel = manualOAuthFallbackLabel(integration);
+    const manualFallbackActionLabel = manualFallbackLabel.toLocaleLowerCase();
+    const manualFallbackButton =
+      manualFallbackAvailable && !hasConfiguredOAuthFallback(integration) ? (
+        <Button
+          onClick={() => openToolConfigDialog(integration)}
+          disabled={loading}
+          variant="outline"
+          size="sm"
+        >
+          <Key className="h-4 w-4 mr-1" />
+          Use {manualFallbackActionLabel}
+        </Button>
+      ) : null;
 
     // Handle tools with delegated authentication
     const tool = integration;
@@ -772,6 +851,61 @@ export function Integrations() {
       }
     }
 
+    if (
+      manualFallbackAvailable &&
+      integration.environment_auth_configured === true &&
+      integration.manual_auth_configured !== true
+    ) {
+      return (
+        <div className="flex gap-2 items-center">
+          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+            <Key className="h-3 w-3 mr-1" />
+            Environment {manualFallbackLabel}
+          </Badge>
+          <Button
+            onClick={() => openToolConfigDialog(integration)}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+          >
+            Configure
+          </Button>
+          {oauthClientConfigButton}
+        </div>
+      );
+    }
+
+    if (
+      manualFallbackAvailable &&
+      integration.manual_auth_configured === true
+    ) {
+      return (
+        <div className="flex gap-2 items-center">
+          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+            <Key className="h-3 w-3 mr-1" />
+            {manualFallbackLabel}
+          </Badge>
+          <Button
+            onClick={() => openToolConfigDialog(integration)}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+          >
+            Edit {manualFallbackActionLabel}
+          </Button>
+          {oauthClientConfigButton}
+          <Button
+            onClick={() => handleDisconnect(integration)}
+            disabled={loading}
+            variant="destructive"
+            size="sm"
+          >
+            Remove {manualFallbackActionLabel}
+          </Button>
+        </div>
+      );
+    }
+
     if (integration.setup_type === "oauth" && integration.status_error) {
       return (
         <div className="flex gap-2 items-center">
@@ -779,6 +913,7 @@ export function Integrations() {
             Status unavailable
           </Button>
           {oauthClientConfigButton}
+          {manualFallbackButton}
           <Button
             onClick={() => void loadIntegrations(false)}
             disabled={loading}
@@ -809,9 +944,12 @@ export function Integrations() {
             ) : (
               <ExternalLink className="h-4 w-4" />
             )}
-            Connect
+            {manualFallbackAvailable
+              ? `Connect with ${integration.name}`
+              : "Connect"}
           </Button>
           {oauthClientConfigButton}
+          {manualFallbackButton}
         </div>
       );
     }
@@ -822,14 +960,34 @@ export function Integrations() {
       integration.oauth_service_account_configured !== true
     ) {
       return (
-        <Button
-          onClick={() => handleIntegrationAction(integration)}
-          disabled={loading || !integration.oauth_client_config_service}
-          variant="outline"
-          size="sm"
-        >
-          Configure client
-        </Button>
+        <div className="flex gap-2 items-center">
+          <Button
+            onClick={() => handleIntegrationAction(integration)}
+            disabled={loading || !integration.oauth_client_config_service}
+            variant="outline"
+            size="sm"
+          >
+            Configure client
+          </Button>
+          {manualFallbackButton}
+        </div>
+      );
+    }
+
+    if (integration.status === "connected" && manualFallbackAvailable) {
+      return (
+        <div className="flex gap-2">
+          {manualFallbackButton}
+          {oauthClientConfigButton}
+          <Button
+            onClick={() => handleDisconnect(integration)}
+            disabled={loading}
+            variant="destructive"
+            size="sm"
+          >
+            Disconnect
+          </Button>
+        </div>
       );
     }
 
@@ -874,7 +1032,7 @@ export function Integrations() {
         <Key className="h-4 w-4" />
       );
 
-    return (
+    const actionButton = (
       <Button
         onClick={() => handleIntegrationAction(integration)}
         disabled={loading}
@@ -882,8 +1040,19 @@ export function Integrations() {
         className="flex items-center gap-2"
       >
         {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : icon}
-        {buttonText}
+        {manualFallbackAvailable
+          ? `Connect with ${integration.name}`
+          : buttonText}
       </Button>
+    );
+
+    return manualFallbackButton ? (
+      <div className="flex gap-2 items-center">
+        {actionButton}
+        {manualFallbackButton}
+      </div>
+    ) : (
+      actionButton
     );
   };
 
@@ -1148,8 +1317,8 @@ export function Integrations() {
               <AlertDescription className="mt-2">
                 Home Assistant and Spotify remain shared-only unless the agent
                 has an effective shared runtime scope (
-                <code>worker_scope=shared</code>). OAuth-backed Google
-                integrations can be connected for this selected agent.
+                <code>worker_scope=shared</code>). OAuth-backed integrations can
+                be connected for this selected agent.
               </AlertDescription>
             </Alert>
           )}

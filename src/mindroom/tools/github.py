@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.github import GithubTools
+    from mindroom.custom_tools.github import GithubTools
 
 
 @register_tool_with_metadata(
@@ -21,7 +21,8 @@ if TYPE_CHECKING:
     description="Repository and issue management",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.API_KEY,
+    setup_type=SetupType.OAUTH,
+    auth_provider="github",
     icon="SiGithub",
     icon_color="text-gray-800",  # GitHub black
     config_fields=[
@@ -41,6 +42,12 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["PyGithub"],
+    oauth_fallback_fields=("access_token",),
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
+    ),
     docs_url="https://docs.agno.com/tools/toolkits/others/github",
     function_names=(
         "assign_issue",
@@ -86,6 +93,6 @@ if TYPE_CHECKING:
 )
 def github_tools() -> type[GithubTools]:
     """Return GitHub tools for repository management."""
-    from agno.tools.github import GithubTools
+    from mindroom.custom_tools.github import GithubTools
 
     return GithubTools

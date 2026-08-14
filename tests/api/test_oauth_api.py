@@ -81,7 +81,7 @@ def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) ->
 
 
 def _config_payload(
-    worker_scope: str = "user_agent",
+    worker_scope: str | None = "user_agent",
     *,
     authorization: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -182,6 +182,7 @@ def _fake_provider(
     scopes: tuple[str, ...] = ("scope.read",),
     client_config_services: tuple[str, ...] = ("test_drive_oauth_client",),
     shared_client_config_services: tuple[str, ...] = (),
+    requester_scoped_credentials: bool = False,
 ) -> OAuthProvider:
     async def _exchange(
         provider: OAuthProvider,
@@ -228,6 +229,7 @@ def _fake_provider(
         allowed_hosted_domains=allowed_hosted_domains,
         status_capabilities=("Test files",),
         token_exchanger=_exchange,
+        requester_scoped_credentials=requester_scoped_credentials,
     )
 
 
@@ -2081,6 +2083,115 @@ def test_shared_scope_oauth_token_uses_agent_store_not_shared_or_worker_path(tmp
     assert manager.shared_manager().load_credentials(provider.credential_service) is None
     assert manager.for_primary_runtime_agent_scope("other").load_credentials(provider.credential_service) is None
     assert manager.for_worker(worker_key).load_credentials(provider.credential_service) is None
+
+
+@pytest.mark.parametrize(
+    ("worker_scope", "agent_query"),
+    [
+        (None, ""),
+        ("shared", "?agent_name=general"),
+    ],
+)
+def test_requester_scoped_provider_uses_user_store_for_non_private_agent_runtime(
+    tmp_path: Path,
+    worker_scope: str | None,
+    agent_query: str,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope=worker_scope))
+    provider = _fake_provider(
+        provider_id="github",
+        credential_service="github_oauth",
+        requester_scoped_credentials=True,
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            connect_response = client.post(f"/api/oauth/{provider.id}/connect{agent_query}")
+            state = _state_from_auth_url(connect_response.json()["auth_url"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 307
+    user_credentials = manager.for_primary_runtime_scope("@alice:example.org", None).load_credentials(
+        provider.credential_service,
+    )
+    assert user_credentials is not None
+    assert user_credentials["token"] == "github-access-token"
+    assert manager.shared_manager().load_credentials(provider.credential_service) is None
+    assert manager.for_primary_runtime_agent_scope("general").load_credentials(provider.credential_service) is None
+
+
+def test_requester_scoped_conversation_link_for_user_agent_uses_user_store(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(
+            worker_scope="user_agent",
+            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        ),
+    )
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider(
+        provider_id="github",
+        credential_service="github_oauth",
+        requester_scoped_credentials=True,
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    runtime_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    oauth_target = oauth_service.oauth_credentials_worker_target(provider, runtime_target)
+    assert oauth_target is not None
+    assert oauth_target.worker_scope == "user"
+    connect_url = urlparse(oauth_service.oauth_connect_url(provider, runtime_paths, worker_target=oauth_target))
+    authorize_path = f"{connect_url.path}?{connect_url.query}"
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            authorize_response = client.get(
+                authorize_path,
+                headers=trusted_upstream_headers(),
+                follow_redirects=False,
+            )
+            state = _state_from_auth_url(authorize_response.headers["location"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                headers=trusted_upstream_headers(),
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 307
+    assert callback_response.status_code == 307
+    manager = get_runtime_credentials_manager(runtime_paths)
+    user_credentials = manager.for_primary_runtime_scope("@alice:example.org", None).load_credentials(
+        provider.credential_service,
+    )
+    assert user_credentials is not None
+    assert user_credentials["token"] == "github-access-token"
+    assert (
+        manager.for_primary_runtime_scope("@alice:example.org", "general").load_credentials(
+            provider.credential_service,
+        )
+        is None
+    )
 
 
 def test_shared_scope_plugin_oauth_token_uses_agent_store_not_shared_or_worker_path(tmp_path: Path) -> None:

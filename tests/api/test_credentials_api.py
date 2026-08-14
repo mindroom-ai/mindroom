@@ -464,6 +464,40 @@ class TestCredentialsAPI:
             "_source": "ui",
         }
 
+    def test_github_manual_access_token_round_trips_through_tool_config(
+        self,
+        client: TestClient,
+    ) -> None:
+        """The OAuth tool-config boundary must preserve declared manual fallbacks."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+
+        response = client.post(
+            "/api/credentials/github",
+            json={
+                "credentials": {
+                    "access_token": "github-manual-token",
+                    "base_url": "https://github.example.test/api/v3",
+                },
+            },
+        )
+        get_response = client.get("/api/credentials/github")
+
+        assert response.status_code == 200
+        assert manager.load_credentials("github") == {
+            "access_token": "github-manual-token",
+            "base_url": "https://github.example.test/api/v3",
+            "_source": "ui",
+        }
+        assert get_response.status_code == 200
+        assert get_response.json() == {
+            "service": "github",
+            "credentials": {
+                "access_token": "github-manual-token",
+                "base_url": "https://github.example.test/api/v3",
+            },
+        }
+
     def test_get_oauth_credentials_filters_token_fields(
         self,
         client: TestClient,

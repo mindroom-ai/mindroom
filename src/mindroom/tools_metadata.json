@@ -3663,7 +3663,7 @@
     },
     {
       "agent_override_fields": null,
-      "auth_provider": null,
+      "auth_provider": "github",
       "category": "development",
       "config_fields": [
         {
@@ -3744,8 +3744,11 @@
       "icon": "SiGithub",
       "icon_color": "text-gray-800",
       "name": "github",
+      "oauth_fallback_fields": [
+        "access_token"
+      ],
       "requires_room_context": false,
-      "setup_type": "api_key",
+      "setup_type": "oauth",
       "status": "requires_config"
     },
     {

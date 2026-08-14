@@ -14,7 +14,11 @@ from pydantic import BaseModel, Field
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import login_redirect_for_request, verify_user
 from mindroom.api.credentials_oauth_flows import consume_pending_oauth_request, issue_pending_oauth_state
-from mindroom.api.credentials_target import resolve_request_credentials_target, worker_target_for_credentials_target
+from mindroom.api.credentials_target import (
+    resolve_request_credentials_target,
+    resolve_requester_credentials_target,
+    worker_target_for_credentials_target,
+)
 from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
 from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
 from mindroom.logging_config import get_logger
@@ -42,6 +46,7 @@ from mindroom.oauth.service import (
 if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
 logger = get_logger(__name__)
@@ -124,6 +129,31 @@ async def _client_config_resolution_for_request(
     return None
 
 
+def _resolve_oauth_credentials_target(
+    request: Request,
+    provider: OAuthProvider,
+    *,
+    agent_name: str | None,
+    execution_scope_override_provided: bool | None = None,
+    execution_scope_override: WorkerScope | None = None,
+) -> RequestCredentialsTarget:
+    if provider.requester_scoped_credentials:
+        # Requester-scoped providers always bind to the user's store, so agent scope overrides cannot change it.
+        return resolve_requester_credentials_target(
+            request,
+            agent_name=agent_name,
+            service_names=(provider.credential_service,),
+        )
+    return resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=(provider.credential_service,),
+        execution_scope_override_provided=execution_scope_override_provided,
+        execution_scope_override=execution_scope_override,
+        allow_private_scopes=True,
+    )
+
+
 async def _issue_authorization_url(
     request: Request,
     provider: OAuthProvider,
@@ -145,11 +175,10 @@ async def _issue_authorization_url(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _verify_connect_target_authorized(request, connect_target, runtime_paths)
         _verify_connect_target_query(connect_target, agent_name, request.query_params.get("execution_scope"))
-        target = resolve_request_credentials_target(
+        target = _resolve_oauth_credentials_target(
             request,
+            provider,
             agent_name=agent_name,
-            service_names=(provider.credential_service,),
-            allow_private_scopes=True,
         )
         _verify_connect_target_binding(provider, connect_target, target)
         code_verifier = provider.issue_pkce_code_verifier()
@@ -178,11 +207,10 @@ async def _issue_authorization_url(
             completion_origin=_oauth_success_origin(provider, runtime_paths),
         )
 
-    target = resolve_request_credentials_target(
+    target = _resolve_oauth_credentials_target(
         request,
+        provider,
         agent_name=agent_name,
-        service_names=(provider.credential_service,),
-        allow_private_scopes=True,
     )
     try:
         code_verifier = provider.issue_pkce_code_verifier()
@@ -393,13 +421,12 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
     await _require_oauth_api_user(request)
     provider, runtime_paths = _load_provider(request, provider_id)
     pending = consume_pending_oauth_request(request, provider.id, state)
-    target = resolve_request_credentials_target(
+    target = _resolve_oauth_credentials_target(
         request,
+        provider,
         agent_name=pending.agent_name,
-        service_names=(provider.credential_service,),
         execution_scope_override_provided=pending.execution_scope_override_provided,
         execution_scope_override=pending.execution_scope_override,
-        allow_private_scopes=True,
     )
     _verify_pending_target_binding(provider, pending.payload, target)
 
@@ -446,11 +473,10 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
     """Return scoped connection status for one provider."""
     await _require_oauth_api_user(request)
     provider, runtime_paths = _load_provider(request, provider_id)
-    target = resolve_request_credentials_target(
+    target = _resolve_oauth_credentials_target(
         request,
+        provider,
         agent_name=agent_name,
-        service_names=(provider.credential_service,),
-        allow_private_scopes=True,
     )
     worker_target = worker_target_for_credentials_target(target)
     credentials = (
@@ -525,11 +551,10 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
     """Remove scoped OAuth credentials for one provider while preserving tool settings."""
     await _require_oauth_api_user(request)
     provider, _runtime_paths = _load_provider(request, provider_id)
-    target = resolve_request_credentials_target(
+    target = _resolve_oauth_credentials_target(
         request,
+        provider,
         agent_name=agent_name,
-        service_names=(provider.credential_service,),
-        allow_private_scopes=True,
     )
     worker_target = worker_target_for_credentials_target(target)
     delete_scoped_credentials(

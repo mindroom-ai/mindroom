@@ -397,6 +397,9 @@ class OAuthProvider:
     token_endpoint_auth_method: _TokenEndpointAuthMethod = _DEFAULT_TOKEN_ENDPOINT_AUTH_METHOD
     pkce_code_challenge_method: _PKCECodeChallengeMethod | None = None
     allow_empty_scopes: bool = False
+    requester_scoped_credentials: bool = False
+    tool_config_oauth_fallback_fields: tuple[str, ...] = ()
+    tool_config_oauth_fallback_env_vars: tuple[str, ...] = ()
     allowed_email_domains: tuple[str, ...] = ()
     allowed_hosted_domains: tuple[str, ...] = ()
     allowed_email_domains_env: str | Sequence[str] | None = None

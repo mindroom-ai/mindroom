@@ -158,6 +158,20 @@ def test_approved_egress_tool_stays_primary_even_when_sandbox_mode_all(tmp_path:
     )
 
 
+def test_github_oauth_tool_stays_primary_when_worker_routing_is_requested(tmp_path: Path) -> None:
+    """Requester OAuth credentials must remain in the primary runtime credential boundary."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={},
+    )
+
+    assert not sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
+        "github",
+        runtime_paths=runtime_paths,
+        worker_tools_override=["github"],
+    )
+
+
 def test_attachment_save_protocol_payload_fields_round_trip() -> None:
     """Attachment save payload helpers should preserve the current wire fields."""
     payload_bytes = b"attachment-bytes"
