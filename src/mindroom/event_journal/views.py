@@ -386,20 +386,6 @@ class ApprovalView(Protocol):
         """Record the Matrix event one claimed approval card became."""
         ...
 
-    async def resolve_approval_card(
-        self,
-        *,
-        card_event_id: str,
-        resolution: Mapping[str, Any],
-    ) -> RecordedApprovalDecision:
-        """Record the decision one card carries, before it is shown.
-
-        Returns what the durable row ends up carrying, because an update that
-        matched nothing is indistinguishable from one that committed unless
-        the store says so.
-        """
-        ...
-
     async def resolve_continuation_approval_card(
         self,
         *,

@@ -94,9 +94,9 @@ class StoredApprovalCard:
     # When the row was claimed. Half of the room scan's ordering, and therefore
     # half of the cursor a caller resumes that scan from.
     created_at_ns: int
-    continuation_id: str | None = None
-    continuation_generation: int | None = None
-    tool_call_id: str | None = None
+    continuation_id: str
+    continuation_generation: int
+    tool_call_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,66 +116,26 @@ class RecordedApprovalDecision:
     source_event_ids: tuple[str, ...] = ()
 
 
-def _native_identity(card: Mapping[str, Any]) -> tuple[str | None, int | None, str | None]:
+def _native_identity(card: Mapping[str, Any]) -> tuple[str, int, str]:
     """Extract strict native-continuation identity from one Matrix card body."""
     content = card.get("content")
     if not isinstance(content, dict):
-        return None, None, None
+        msg = "Approval card is missing native continuation identity."
+        raise TypeError(msg)
     continuation_id = content.get("continuation_id")
     generation = content.get("continuation_generation")
     tool_call_id = content.get("tool_call_id")
     if (
         not isinstance(continuation_id, str)
+        or not continuation_id
         or not isinstance(generation, int)
         or isinstance(generation, bool)
         or not isinstance(tool_call_id, str)
+        or not tool_call_id
     ):
-        return None, None, None
+        msg = "Approval card is missing native continuation identity."
+        raise ValueError(msg)
     return continuation_id, generation, tool_call_id
-
-
-def resolve(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    card_event_id: str,
-    resolution: Mapping[str, Any],
-) -> RecordedApprovalDecision:
-    """Record the decision this bot is about to show, before it shows it.
-
-    Written before the Matrix edit, so a crash between the two leaves an
-    answered card rather than a pending one. Startup then redelivers this exact
-    decision instead of expiring a card the room may already show as approved.
-
-    The update can match nothing, and the caller cannot act on a decision the
-    store did not take, so what the row actually ends up carrying is reported
-    rather than assumed.
-    """
-    offered = dict(resolution)
-    row = transaction.fetchone(
-        """
-        UPDATE approval_cards SET resolution_json = ?
-        WHERE principal_id = ? AND card_event_id = ? AND resolution_json IS NULL
-        RETURNING card_event_id
-        """,
-        (
-            json.dumps(offered, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
-            principal_id,
-            card_event_id,
-        ),
-    )
-    if row is not None:
-        return RecordedApprovalDecision(resolution=offered, recorded=True)
-    # Matching nothing has two causes that are not the same fact. Either no
-    # such card was ever stored, or the card already carries a decision that
-    # the ``resolution_json IS NULL`` guard exists to protect. Only the second
-    # leaves something a later startup will redeliver.
-    existing = transaction.fetchone(
-        "SELECT resolution_json FROM approval_cards WHERE principal_id = ? AND card_event_id = ?",
-        (principal_id, card_event_id),
-    )
-    stored = None if existing is None else _resolution(existing["resolution_json"])
-    return RecordedApprovalDecision(resolution=stored, recorded=False)
 
 
 def resolve_continuation(
@@ -199,13 +159,11 @@ def resolve_continuation(
     if card is None:
         return RecordedApprovalDecision(resolution=None, recorded=False)
     existing = _resolution(cast("str | None", card["resolution_json"]))
-    continuation_id = cast("str | None", card["continuation_id"])
+    continuation_id = cast("str", card["continuation_id"])
     generation_value = card["continuation_generation"]
-    tool_call_id = cast("str | None", card["tool_call_id"])
+    tool_call_id = cast("str", card["tool_call_id"])
     if existing is not None:
         return RecordedApprovalDecision(resolution=existing, recorded=False)
-    if continuation_id is None or generation_value is None or tool_call_id is None:
-        return RecordedApprovalDecision(resolution=None, recorded=False)
     generation = int(generation_value)
     continuation = transaction.fetchone(
         """
@@ -732,7 +690,7 @@ def pending_cards(
 
 
 def _card(row: Row) -> StoredApprovalCard | None:
-    """Decode one durable card, skipping corrupt legacy rows fail-closed."""
+    """Decode one durable native card, skipping corrupt rows fail-closed."""
     try:
         card = json.loads(row["card_json"])
     except (json.JSONDecodeError, TypeError):
@@ -742,23 +700,31 @@ def _card(row: Row) -> StoredApprovalCard | None:
         _log_unreadable_card(row)
         return None
     try:
-        return StoredApprovalCard(
-            card=card,
-            resolution=_resolution(row["resolution_json"]),
-            transaction_id=str(row["transaction_id"]),
-            card_event_id=row["card_event_id"],
-            attempted=bool(row["attempted"]),
-            sending_device_id=row["sending_device_id"],
-            created_at_ns=int(row["created_at_ns"]),
-            continuation_id=cast("str | None", row["continuation_id"]),
-            continuation_generation=(
-                int(row["continuation_generation"]) if row["continuation_generation"] is not None else None
-            ),
-            tool_call_id=cast("str | None", row["tool_call_id"]),
+        stored_identity = (
+            cast("str", row["continuation_id"]),
+            int(row["continuation_generation"]),
+            cast("str", row["tool_call_id"]),
         )
+        card_identity = _native_identity(card)
+        resolution = _resolution(row["resolution_json"])
     except (json.JSONDecodeError, TypeError, ValueError):
         _log_unreadable_card(row)
         return None
+    if card_identity != stored_identity:
+        _log_unreadable_card(row)
+        return None
+    return StoredApprovalCard(
+        card=card,
+        resolution=resolution,
+        transaction_id=str(row["transaction_id"]),
+        card_event_id=row["card_event_id"],
+        attempted=bool(row["attempted"]),
+        sending_device_id=row["sending_device_id"],
+        created_at_ns=int(row["created_at_ns"]),
+        continuation_id=stored_identity[0],
+        continuation_generation=stored_identity[1],
+        tool_call_id=stored_identity[2],
+    )
 
 
 def _log_unreadable_card(row: Row) -> None:

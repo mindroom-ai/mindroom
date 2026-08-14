@@ -53,10 +53,10 @@ __all__ = [
     "ToolApprovalTransportError",
     "evaluate_tool_approval",
     "expire_continuation_approval_cards",
-    "expire_orphaned_approval_cards_on_startup",
     "handle_matrix_approval_action",
     "initialize_approval_runtime",
     "is_process_active_approval_card",
+    "recover_approval_cards_on_startup",
     "resolve_tool_approval_approver",
     "send_suspended_tool_approval",
     "shutdown_approval_runtime",
@@ -313,12 +313,12 @@ async def expire_continuation_approval_cards(continuation_id: str) -> bool:
     return False if manager is None else await manager.expire_continuation_cards(continuation_id)
 
 
-async def expire_orphaned_approval_cards_on_startup() -> ApprovalStartupSweep:
-    """Settle legacy and orphaned approval cards without executing their tools."""
+async def recover_approval_cards_on_startup() -> ApprovalStartupSweep:
+    """Recover native approval-card publication, decisions, and deadlines."""
     manager = approval_manager.get_approval_store()
     if manager is None:
         return ApprovalStartupSweep(discarded=0, failed=0)
-    return await manager.discard_pending_on_startup()
+    return await manager.recover_cards_on_startup()
 
 
 async def shutdown_approval_runtime(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:

@@ -37,7 +37,7 @@ from mindroom.logging_config import get_logger
 
 from .offloading import ThreadOffload, settled
 from .schema import SQLITE_DIALECT, render, schema_statements
-from .schema_migrations import migration_statements, validate_interactive_question_columns
+from .schema_migrations import validate_interactive_question_columns
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -212,14 +212,6 @@ class SqliteBackend:
             raise
         connection.execute("BEGIN IMMEDIATE")
         for statement in schema_statements(SQLITE_DIALECT):
-            connection.execute(statement)
-        approval_card_columns = frozenset(
-            str(row[1]) for row in connection.execute("PRAGMA table_info(approval_cards)")
-        )
-        for statement in migration_statements(
-            SQLITE_DIALECT,
-            approval_card_columns=approval_card_columns,
-        ):
             connection.execute(statement)
         connection.execute("COMMIT")
         return connection

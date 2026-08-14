@@ -4481,7 +4481,13 @@ class TestApprovalCards:
             "event_id": event_id,
             "sender": sender,
             "type": "io.mindroom.tool_approval",
-            "content": {"approval_id": event_id.lstrip("$"), "status": "pending"},
+            "content": {
+                "approval_id": event_id.lstrip("$"),
+                "continuation_id": f"continuation-{event_id.lstrip('$')}",
+                "continuation_generation": 0,
+                "tool_call_id": event_id.lstrip("$"),
+                "status": "pending",
+            },
         }
 
     @classmethod
@@ -4515,6 +4521,15 @@ class TestApprovalCards:
 
         assert await alice.pending_approval_room_ids() == tuple(sorted((OTHER_ROOM, ROOM)))
 
+    async def test_approval_card_requires_native_identity(self, alice: PrincipalStore) -> None:
+        """A stored card must name the exact paused call it can authorize."""
+        card = self.card("$card")
+        content = cast("dict[str, object]", card["content"])
+        content.pop("tool_call_id")
+
+        with pytest.raises(ValueError, match="native continuation identity"):
+            await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=card)
+
     async def test_a_remembered_card_reads_back_whole(self, alice: PrincipalStore) -> None:
         """A remembered card reads back whole, and unanswered."""
         await self.remember(alice, "$card")
@@ -4525,8 +4540,8 @@ class TestApprovalCards:
         assert stored.resolution is None
         assert stored.card_event_id == "$card"
 
-    async def test_malformed_legacy_card_does_not_block_later_rows(self, alice: PrincipalStore) -> None:
-        """One unreadable old row must fail closed without poisoning the startup page."""
+    async def test_malformed_card_does_not_block_later_rows(self, alice: PrincipalStore) -> None:
+        """One unreadable row must fail closed without poisoning the startup page."""
         await self.remember(alice, "$malformed")
         await self.remember(alice, "$valid")
         await alice._backend.write(
@@ -4540,7 +4555,7 @@ class TestApprovalCards:
         scanned = await alice.pending_approval_cards(room_id=ROOM)
         assert [stored.card_event_id for stored in scanned] == ["$valid"]
 
-    async def test_full_page_of_malformed_legacy_cards_does_not_starve_valid_rows(
+    async def test_full_page_of_malformed_cards_does_not_starve_valid_rows(
         self,
         alice: PrincipalStore,
     ) -> None:
@@ -4562,11 +4577,11 @@ class TestApprovalCards:
 
         assert [stored.card_event_id for stored in scanned] == ["$valid"]
 
-    async def test_wrong_shaped_legacy_resolution_does_not_crash_startup_reader(
+    async def test_wrong_shaped_resolution_does_not_crash_startup_reader(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """Old or damaged resolution JSON is never reinterpreted as executable permission."""
+        """Damaged resolution JSON is never reinterpreted as executable permission."""
         await self.remember(alice, "$malformed")
         await self.remember(alice, "$valid")
         await alice._backend.write(
@@ -4646,23 +4661,6 @@ class TestApprovalCards:
         scanned = await alice.pending_approval_cards(room_id=ROOM)
         assert [(entry.attempted, entry.sending_device_id) for entry in scanned] == [(True, DEVICE)]
 
-    async def test_a_claim_cannot_carry_a_decision_before_its_send_returns(self, alice: PrincipalStore) -> None:
-        """A decision is recorded against an event, so there is nothing to record against yet.
-
-        Letting one land would mean answering a card whose place in the room is
-        still unknown, and the answer would have no event to be shown on.
-        """
-        await alice.claim_approval_card(
-            room_id=ROOM,
-            transaction_id="txn",
-            card=self.card("$card"),
-        )
-
-        refused = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
-
-        assert refused.recorded is False
-        assert refused.resolution is None
-
     async def test_acknowledging_twice_keeps_the_first_event(self, alice: PrincipalStore) -> None:
         """Two event ids for one transaction means the repeat was not collapsed.
 
@@ -4699,7 +4697,10 @@ class TestApprovalCards:
             transaction_id="txn",
             card=self.card("$card"),
         )
-        sent = {**self.card("$card"), "content": {"approval_id": "card", "status": "pending", "approvable": False}}
+        sent = {
+            **self.card("$card"),
+            "content": {**cast("dict[str, object]", self.card("$card")["content"]), "approvable": False},
+        }
         await alice.acknowledge_approval_card(transaction_id="txn", card_event_id="$card", card=sent)
 
         stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
@@ -4738,109 +4739,6 @@ class TestApprovalCards:
 
         assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
         assert await alice.is_terminal_approval_card(room_id=ROOM, card_event_id="$card")
-
-    async def test_a_recorded_decision_reads_back_with_the_card(self, alice: PrincipalStore) -> None:
-        """A card keeps its decision until the room is known to show it.
-
-        The decision is written before the Matrix edit is attempted, so this is
-        what a crash between the two leaves behind, and it is what tells the
-        next startup to redeliver rather than expire.
-        """
-        await self.remember(alice, "$card")
-        await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
-
-        stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
-        assert stored is not None
-        assert stored.resolution == {"status": "approved"}
-        assert stored.card == self.card("$card")
-        scanned = await alice.pending_approval_cards(room_id=ROOM)
-        assert [entry.resolution for entry in scanned] == [{"status": "approved"}]
-
-    async def test_recording_a_decision_reports_that_it_committed(self, alice: PrincipalStore) -> None:
-        """A caller must not have to infer a commit from the absence of an error.
-
-        Whether the tool runs turns on this answer, and the write is a guarded
-        update that can decline silently.
-        """
-        await self.remember(alice, "$card")
-
-        recorded = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
-
-        assert recorded.recorded is True
-        assert recorded.resolution == {"status": "approved"}
-
-    async def test_a_second_decision_does_not_replace_the_first(self, alice: PrincipalStore) -> None:
-        """The committed decision is the one that stands.
-
-        A retry after a failed edit resends what was decided; letting a later
-        write through would let a second click overwrite a decision whose tool
-        already ran. The refusal is reported along with the decision that won,
-        because a caller told only that no exception occurred would go on to
-        show and act on the decision the row rejected.
-        """
-        await self.remember(alice, "$card")
-        await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
-
-        refused = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "denied"})
-
-        assert refused.recorded is False
-        assert refused.resolution == {"status": "approved"}
-        stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
-        assert stored is not None
-        assert stored.resolution == {"status": "approved"}
-
-    async def test_a_decision_on_an_unknown_card_records_nothing(self, alice: PrincipalStore) -> None:
-        """Resolving a card that was never stored must not create one.
-
-        The update matches no row and raises nothing, so the only thing that
-        can stop the caller from treating this as a commit is being told that
-        no row carries the decision.
-        """
-        unrecorded = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
-
-        assert unrecorded.recorded is False
-        assert unrecorded.resolution is None
-        assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
-
-    async def test_a_forgotten_cards_decision_is_no_longer_recordable(self, alice: PrincipalStore) -> None:
-        """A dropped row is as unrecordable as one that never existed.
-
-        The two zero-row causes stay distinguishable: this one has nothing to
-        report back, where a card that already decided reports what it decided.
-        """
-        await self.remember(alice, "$card")
-        await alice.forget_approval_card(transaction_id=self.transaction("$card"))
-
-        unrecorded = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
-
-        assert unrecorded.recorded is False
-        assert unrecorded.resolution is None
-
-    async def test_one_principal_cannot_record_a_decision_on_anothers_card(
-        self,
-        journal_store: EventJournalStore,
-    ) -> None:
-        """Another bot's card is not a row this one may answer, or claim to have."""
-        alice = journal_store.principal("agent@alice")
-        bob = journal_store.principal("agent@bob")
-        await self.remember(alice, "$card")
-
-        unrecorded = await bob.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
-
-        assert unrecorded.recorded is False
-        assert unrecorded.resolution is None
-        stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
-        assert stored is not None
-        assert stored.resolution is None
-
-    async def test_a_forgotten_card_is_gone(self, alice: PrincipalStore) -> None:
-        """Resolving a card is what removes it, so presence means pending."""
-        await self.remember(alice, "$card")
-        await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
-        await alice.forget_approval_card(transaction_id=self.transaction("$card"))
-
-        assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
-        assert await alice.pending_approval_cards(room_id=ROOM) == ()
 
     async def test_a_card_is_not_readable_from_another_room(self, alice: PrincipalStore) -> None:
         """A card belongs to the room it was sent in."""
@@ -4924,27 +4822,6 @@ class TestApprovalCards:
 
         assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
         assert await alice.pending_approval_cards(room_id=ROOM) == ()
-
-    async def test_rejoining_drops_the_previous_memberships_cards(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A card the fence made unanswerable has to go, not merely stop being visible.
-
-        Every read of a card is filtered to the current membership, so a row
-        the fence steps over has no reader left and nothing that will ever
-        remove it. Nor is it inert while it sits there: a decision is recorded
-        against the card's event rather than against the epoch, so the
-        stranded row keeps accepting answers that no read can retrieve and no
-        startup can redeliver.
-        """
-        await self.remember(alice, "$card")
-
-        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
-
-        unanswerable = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
-        assert unanswerable.recorded is False
-        assert unanswerable.resolution is None
 
     async def test_rejoining_drops_only_the_room_that_was_left(
         self,
@@ -5976,119 +5853,6 @@ class TestConnectionSecretsStayOutOfLogs:
         assert "hunter2" not in rendered
         assert "someone" not in rendered
         assert "db.example" not in rendered
-
-
-class TestSchemaUpgrades:
-    """Opening the journal upgrades additive columns without losing old rows."""
-
-    async def test_opening_main_schema_adds_native_continuation_card_identity(self, tmp_path: Path) -> None:
-        """A card written by main remains readable after native continuation columns are added."""
-        database_path = tmp_path / "main-schema.db"
-        with sqlite3.connect(database_path) as database:
-            database.execute(
-                """
-                CREATE TABLE approval_cards (
-                    principal_id TEXT NOT NULL,
-                    room_id TEXT NOT NULL,
-                    transaction_id TEXT NOT NULL,
-                    card_event_id TEXT,
-                    attempted INTEGER NOT NULL,
-                    sending_device_id TEXT,
-                    card_json TEXT NOT NULL,
-                    resolution_json TEXT,
-                    membership_epoch BIGINT NOT NULL,
-                    created_at_ns BIGINT NOT NULL,
-                    PRIMARY KEY (principal_id, transaction_id)
-                )
-                """,
-            )
-            database.execute(
-                """
-                INSERT INTO approval_cards (
-                    principal_id, room_id, transaction_id, card_event_id, attempted,
-                    sending_device_id, card_json, resolution_json, membership_epoch, created_at_ns
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                ("agent@alice", ROOM, "legacy", "$legacy", 1, DEVICE, '{"body":"old"}', None, 1, 1),
-            )
-
-        backend = SqliteBackend.open(database_path)
-        try:
-            row = await backend.read(
-                lambda transaction: transaction.fetchone(
-                    """
-                    SELECT card_event_id, continuation_id, continuation_generation, tool_call_id
-                    FROM approval_cards WHERE principal_id = ? AND transaction_id = ?
-                    """,
-                    ("agent@alice", "legacy"),
-                ),
-            )
-        finally:
-            await backend.close()
-
-        assert row is not None
-        assert row["card_event_id"] == "$legacy"
-        assert row["continuation_id"] is None
-        assert row["continuation_generation"] is None
-        assert row["tool_call_id"] is None
-
-    async def test_postgres_opening_main_schema_adds_native_continuation_card_identity(
-        self,
-        postgres_journal_url: str,
-    ) -> None:
-        """PostgreSQL upgrades the same shipped card row without a destructive migration."""
-        import psycopg  # noqa: PLC0415 - optional backend exercised only by this test
-
-        from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415
-
-        database_url = postgres_journal_schema_url(postgres_journal_url)
-        with psycopg.connect(database_url) as database:
-            database.execute(
-                """
-                CREATE TABLE approval_cards (
-                    principal_id TEXT NOT NULL,
-                    room_id TEXT NOT NULL,
-                    transaction_id TEXT NOT NULL,
-                    card_event_id TEXT,
-                    attempted INTEGER NOT NULL,
-                    sending_device_id TEXT,
-                    card_json TEXT NOT NULL,
-                    resolution_json TEXT,
-                    membership_epoch BIGINT NOT NULL,
-                    created_at_ns BIGINT NOT NULL,
-                    PRIMARY KEY (principal_id, transaction_id)
-                )
-                """,
-            )
-            database.execute(
-                """
-                INSERT INTO approval_cards (
-                    principal_id, room_id, transaction_id, card_event_id, attempted,
-                    sending_device_id, card_json, resolution_json, membership_epoch, created_at_ns
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                ("agent@alice", ROOM, "legacy", "$legacy", 1, DEVICE, '{"body":"old"}', None, 1, 1),
-            )
-
-        backend = PostgresBackend.open(database_url)
-        try:
-            row = await backend.read(
-                lambda transaction: transaction.fetchone(
-                    """
-                    SELECT card_event_id, continuation_id, continuation_generation, tool_call_id
-                    FROM approval_cards WHERE principal_id = ? AND transaction_id = ?
-                    """,
-                    ("agent@alice", "legacy"),
-                ),
-            )
-        finally:
-            await backend.close()
-
-        assert row is not None
-        assert row["card_event_id"] == "$legacy"
-        assert row["continuation_id"] is None
-        assert row["continuation_generation"] is None
-        assert row["tool_call_id"] is None
 
 
 class TestHotQueriesAreIndexCovered:

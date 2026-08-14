@@ -24,6 +24,9 @@ class _StoredRow:
 
     room_id: str
     card: dict[str, Any]
+    continuation_id: str
+    continuation_generation: int
+    tool_call_id: str
     # None until the send comes back. Such a row is a card whose presence in
     # the room is unknown, which is a different thing from a card that is not
     # there, and the two must not be allowed to look alike here.
@@ -106,11 +109,31 @@ class FakeApprovalCards:
         """Record one card as pending before it is sent, keeping the first body seen."""
         if transaction_id in self.rows:
             return
+        content = card.get("content")
+        if not isinstance(content, dict):
+            msg = "Approval card is missing native continuation identity."
+            raise TypeError(msg)
+        continuation_id = content.get("continuation_id")
+        continuation_generation = content.get("continuation_generation")
+        tool_call_id = content.get("tool_call_id")
+        if (
+            not isinstance(continuation_id, str)
+            or not continuation_id
+            or not isinstance(continuation_generation, int)
+            or isinstance(continuation_generation, bool)
+            or not isinstance(tool_call_id, str)
+            or not tool_call_id
+        ):
+            msg = "Approval card is missing native continuation identity."
+            raise ValueError(msg)
         self.claimed.append(transaction_id)
         self._claims += 1
         self.rows[transaction_id] = _StoredRow(
             room_id=room_id,
             card=dict(card),
+            continuation_id=continuation_id,
+            continuation_generation=continuation_generation,
+            tool_call_id=tool_call_id,
             created_at_ns=self._claims,
         )
 
@@ -144,13 +167,16 @@ class FakeApprovalCards:
         row.card_event_id = card_event_id
         row.card = dict(card)
 
-    async def resolve_approval_card(
+    async def resolve_continuation_approval_card(
         self,
         *,
         card_event_id: str,
+        requested_status: Literal["approved", "denied", "expired"],
+        reason: str | None,
         resolution: Mapping[str, Any],
     ) -> RecordedApprovalDecision:
         """Commit one decision only against a stored card that has none yet."""
+        del requested_status, reason
         row = self._row_for_event(card_event_id)
         if row is None:
             return RecordedApprovalDecision(resolution=None, recorded=False)
@@ -270,16 +296,21 @@ def _stored(transaction_id: str, row: _StoredRow) -> StoredApprovalCard:
         attempted=row.attempted,
         sending_device_id=row.sending_device_id,
         created_at_ns=row.created_at_ns,
+        continuation_id=row.continuation_id,
+        continuation_generation=row.continuation_generation,
+        tool_call_id=row.tool_call_id,
     )
 
 
 class UnwritableApprovalCards(FakeApprovalCards):
     """A store that remembers cards but raises instead of committing a decision."""
 
-    async def resolve_approval_card(
+    async def resolve_continuation_approval_card(
         self,
         *,
         card_event_id: str,
+        requested_status: Literal["approved", "denied", "expired"],  # noqa: ARG002
+        reason: str | None,  # noqa: ARG002
         resolution: Mapping[str, Any],  # noqa: ARG002 - matches the view it stands in for
     ) -> RecordedApprovalDecision:
         """Fail loudly, the way a broken write does."""
