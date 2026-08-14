@@ -14,6 +14,7 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 from contextlib import suppress
 from pathlib import Path
 from threading import Event, Thread
@@ -21,6 +22,8 @@ from threading import Event, Thread
 import pytest
 
 import mindroom.knowledge.git_source as knowledge_git_source_module
+import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
+from mindroom import file_locks
 from mindroom.config.knowledge import KnowledgeGitConfig
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
@@ -260,6 +263,7 @@ async def test_run_git_inherits_owned_source_root_lock(
 ) -> None:
     """A Git descendant must keep refresh ownership if its Python parent exits."""
     manager = _git_manager(tmp_path)
+    monkeypatch.setenv(knowledge_git_source_module._REFRESH_SUBPROCESS_ENV, "1")
 
     class _SuccessfulProcess:
         returncode = 0
@@ -297,6 +301,91 @@ async def test_run_git_inherits_owned_source_root_lock(
     assert isinstance(inherited_fds, tuple)
     assert len(inherited_fds) == 1
     assert isinstance(inherited_fds[0], int)
+    assert subprocess_kwargs["start_new_session"] is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups and inherited file descriptors require POSIX")
+@pytest.mark.asyncio
+async def test_direct_run_git_cancellation_during_spawn_drains_descendants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after spawn but before handle delivery must drain descendants."""
+    manager = _git_manager(tmp_path)
+    key = resolve_published_index_key(
+        "docs",
+        config=manager.config,
+        runtime_paths=manager.runtime_paths,
+    )
+    source_root = source_root_for_published_index_key(key)
+    refresh_lock_path = knowledge_refresh_locks._refresh_file_lock_path(source_root)
+    real_create_subprocess_exec = asyncio.create_subprocess_exec
+    spawned = asyncio.Event()
+    release_spawn = asyncio.Event()
+    spawned_process: asyncio.subprocess.Process | None = None
+    helper_ready_path = tmp_path / "spawn-race-helper-ready"
+    script = f"""
+import os
+import signal
+import time
+
+child_pid = os.fork()
+if child_pid == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull_fd, 1)
+    os.dup2(devnull_fd, 2)
+    os.close(devnull_fd)
+    with open({str(helper_ready_path)!r}, "w") as ready_file:
+        ready_file.write("ready")
+    time.sleep(60)
+    os._exit(0)
+
+time.sleep(60)
+"""
+
+    async def _spawn_git_like_process(*_args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        nonlocal spawned_process
+        spawned_process = await real_create_subprocess_exec(sys.executable, "-c", script, **kwargs)
+        for _attempt in range(500):
+            if helper_ready_path.exists():
+                break
+            await asyncio.sleep(0.01)
+        else:
+            msg = "Git-like helper did not start"
+            raise AssertionError(msg)
+        spawned.set()
+        try:
+            await release_spawn.wait()
+        except asyncio.CancelledError:
+            spawned_process.kill()
+            await spawned_process.wait()
+            raise
+        return spawned_process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_git_like_process)
+    try:
+        async with refresh_source_root_lock(source_root):
+            task = asyncio.create_task(manager.git_source._run_git(["status"]))
+            await asyncio.wait_for(spawned.wait(), timeout=5)
+            task.cancel()
+            await asyncio.sleep(0)
+            release_spawn.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert file_locks.file_lock_is_held(refresh_lock_path) is False
+    finally:
+        release_spawn.set()
+        if spawned_process is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(spawned_process.pid, signal.SIGKILL)
+            with suppress(ProcessLookupError):
+                await spawned_process.wait()
+        for _attempt in range(100):
+            if not file_locks.file_lock_is_held(refresh_lock_path):
+                break
+            await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio
@@ -886,6 +975,193 @@ cat
     assert await _git_output(docs_path, "rev-parse", "HEAD") == await _git_output(remote_work, "rev-parse", "HEAD")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="process groups and POSIX shell filters are required")
+@pytest.mark.asyncio
+async def test_direct_refresh_timeout_drains_git_descendants_before_releasing_source_lock(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct refresh timeout must not leave a descendant holding its source lock."""
+    remote_work = tmp_path / "remote-work"
+    remote_work.mkdir()
+
+    async def _git(cwd: Path, *args: str) -> None:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    await _git(remote_work, "init", "-b", "main")
+    await _git(remote_work, "config", "user.email", "tests@example.com")
+    await _git(remote_work, "config", "user.name", "MindRoom Tests")
+    (remote_work / "doc.md").write_text("before timeout", encoding="utf-8")
+    await _git(remote_work, "add", "doc.md")
+    await _git(remote_work, "commit", "-m", "before")
+    remote_bare = tmp_path / "remote.git"
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    docs_path = tmp_path / "checkout"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={
+            "docs": KnowledgeGitConfig(
+                repo_url=str(remote_bare),
+                branch="main",
+                sync_timeout_seconds=5,
+            ),
+        },
+        modes={"docs": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    monkeypatch.setattr(GitKnowledgeSource, "_sync_timeout_seconds", lambda _self: 1.0)
+
+    ready_path = tmp_path / "filter-ready"
+    release_path = tmp_path / "filter-release"
+    filter_script = tmp_path / "blocking-smudge.sh"
+    filter_script.write_text(
+        """#!/bin/sh
+ready_path=$1
+release_path=$2
+trap '' TERM
+echo $$ > "$ready_path"
+while [ ! -e "$release_path" ]; do
+    sleep 0.05
+done
+cat
+""",
+        encoding="utf-8",
+    )
+    filter_script.chmod(0o755)
+    filter_command = " ".join(shlex.quote(str(path)) for path in (filter_script, ready_path, release_path))
+    await _git(docs_path, "config", "filter.blocking.smudge", filter_command)
+    await _git(docs_path, "config", "filter.blocking.clean", "cat")
+    await _git(docs_path, "config", "filter.blocking.required", "true")
+
+    (remote_work / ".gitattributes").write_text("doc.md filter=blocking\n", encoding="utf-8")
+    (remote_work / "doc.md").write_text("after timeout", encoding="utf-8")
+    await _git(remote_work, "add", ".gitattributes", "doc.md")
+    await _git(remote_work, "commit", "-m", "after")
+    await _git(remote_work, "push", str(remote_bare), "main")
+
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    source_root = source_root_for_published_index_key(key)
+    refresh_lock_path = knowledge_refresh_locks._refresh_file_lock_path(source_root)
+    filter_pid: int | None = None
+    watchdog_stop = Event()
+    watchdog_fired = Event()
+
+    def _release_filter_if_cleanup_stalls() -> None:
+        if not watchdog_stop.wait(timeout=5):
+            watchdog_fired.set()
+            release_path.touch()
+
+    watchdog = Thread(target=_release_filter_if_cleanup_stalls, daemon=True)
+    watchdog.start()
+    try:
+        with pytest.raises(RuntimeError, match=r"Git command timed out after 1s"):
+            await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+        filter_pid = int(ready_path.read_text(encoding="utf-8"))
+
+        assert watchdog_fired.is_set() is False
+        assert file_locks.file_lock_is_held(refresh_lock_path) is False
+    finally:
+        watchdog_stop.set()
+        release_path.touch()
+        watchdog.join(timeout=1)
+        if filter_pid is not None:
+            with suppress(ProcessLookupError):
+                os.kill(filter_pid, signal.SIGKILL)
+        for _attempt in range(100):
+            if not file_locks.file_lock_is_held(refresh_lock_path):
+                break
+            await asyncio.sleep(0.01)
+
+    index_lock_path = docs_path / ".git" / "index.lock"
+    index_lock_path.write_text("", encoding="utf-8")
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert index_lock_path.exists() is False
+    assert result.index_published is True
+    assert (docs_path / "doc.md").read_text(encoding="utf-8") == "after timeout"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups require POSIX")
+@pytest.mark.asyncio
+async def test_direct_run_git_drains_descendant_after_successful_leader_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful Git leader must not leave a helper holding its source lock."""
+    manager = _git_manager(tmp_path)
+    key = resolve_published_index_key(
+        "docs",
+        config=manager.config,
+        runtime_paths=manager.runtime_paths,
+    )
+    source_root = source_root_for_published_index_key(key)
+    refresh_lock_path = knowledge_refresh_locks._refresh_file_lock_path(source_root)
+    real_create_subprocess_exec = asyncio.create_subprocess_exec
+    spawned_process: asyncio.subprocess.Process | None = None
+    script = """
+import os
+import signal
+import time
+
+ready_read_fd, ready_write_fd = os.pipe()
+child_pid = os.fork()
+if child_pid == 0:
+    os.close(ready_read_fd)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull_fd, 1)
+    os.dup2(devnull_fd, 2)
+    os.close(devnull_fd)
+    os.write(ready_write_fd, b"1")
+    os.close(ready_write_fd)
+    time.sleep(60)
+    os._exit(0)
+
+os.close(ready_write_fd)
+os.read(ready_read_fd, 1)
+os.close(ready_read_fd)
+os._exit(0)
+"""
+
+    async def _spawn_git_like_process(*_args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        nonlocal spawned_process
+        spawned_process = await real_create_subprocess_exec(sys.executable, "-c", script, **kwargs)
+        return spawned_process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_git_like_process)
+    try:
+        async with refresh_source_root_lock(source_root):
+            assert await manager.git_source._run_git(["status"]) == ""
+
+        assert file_locks.file_lock_is_held(refresh_lock_path) is False
+    finally:
+        if spawned_process is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(spawned_process.pid, signal.SIGKILL)
+        for _attempt in range(100):
+            if not file_locks.file_lock_is_held(refresh_lock_path):
+                break
+            await asyncio.sleep(0.01)
+
+
 @pytest.mark.asyncio
 async def test_refresh_recovers_orphaned_index_lock_in_linked_worktree(tmp_path: Path) -> None:
     """Recovery must follow a linked worktree's .git pointer to its real index lock."""
@@ -1190,6 +1466,7 @@ async def test_run_git_redacts_credentials_in_error_message(
 ) -> None:
     """Git command errors should not leak embedded URL credentials."""
     manager = _git_manager(tmp_path)
+    monkeypatch.setenv(knowledge_git_source_module._REFRESH_SUBPROCESS_ENV, "1")
 
     class _FailingProcess:
         returncode = 128
@@ -1233,6 +1510,7 @@ async def test_run_git_timeout_kills_subprocess_and_raises_runtime_error(
     manager = _git_manager(tmp_path, sync_timeout_seconds=5)
 
     class _HangingProcess:
+        pid = 12345
         returncode: int | None = None
 
         def __init__(self) -> None:
@@ -1252,9 +1530,11 @@ async def test_run_git_timeout_kills_subprocess_and_raises_runtime_error(
             return -9
 
     process = _HangingProcess()
+    signalled_groups: list[tuple[int, signal.Signals]] = []
 
     async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _HangingProcess:
-        _ = args, kwargs
+        _ = args
+        assert kwargs["start_new_session"] is True
         return process
 
     async def _fake_wait_for(awaitable: object, **kwargs: float) -> tuple[bytes, bytes]:
@@ -1264,15 +1544,29 @@ async def test_run_git_timeout_kills_subprocess_and_raises_runtime_error(
             close()
         raise TimeoutError
 
+    async def _fake_wait_for_process_group_exit(_process_group_id: int, *, wait_seconds: float = 1.0) -> None:
+        _ = wait_seconds
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
     monkeypatch.setattr(asyncio, "wait_for", _fake_wait_for)
+    monkeypatch.setattr(
+        knowledge_git_source_module.os,
+        "killpg",
+        lambda process_group_id, sig: signalled_groups.append((process_group_id, sig)),
+    )
+    monkeypatch.setattr(
+        knowledge_git_source_module,
+        "_wait_for_process_group_exit",
+        _fake_wait_for_process_group_exit,
+    )
     monkeypatch.setattr(manager.git_source, "_sync_timeout_seconds", lambda: 1.0)
 
     with pytest.raises(RuntimeError, match=r"Git command timed out after 1s: git fetch origin main"):
         await manager.git_source._run_git(["fetch", "origin", "main"])
 
-    assert process.kill_called is True
+    assert process.kill_called is False
     assert process.wait_called is True
+    assert signalled_groups == [(12345, signal.SIGKILL)]
 
 
 @pytest.mark.asyncio
@@ -1282,6 +1576,7 @@ async def test_run_git_preserves_index_lock_and_does_not_retry(
 ) -> None:
     """Git lock failures should surface immediately without deleting the lock file."""
     manager = _git_manager(tmp_path)
+    monkeypatch.setenv(knowledge_git_source_module._REFRESH_SUBPROCESS_ENV, "1")
     repo_root = tmp_path / "repo"
     git_dir = repo_root / ".git"
     git_dir.mkdir(parents=True, exist_ok=True)
@@ -1326,6 +1621,7 @@ async def test_run_git_cancellation_kills_subprocess(
     wait_forever = asyncio.Event()
 
     class _HangingProcess:
+        pid = 12345
         returncode: int | None = None
 
         def __init__(self) -> None:
@@ -1345,12 +1641,27 @@ async def test_run_git_cancellation_kills_subprocess(
             return -9
 
     process = _HangingProcess()
+    signalled_groups: list[tuple[int, signal.Signals]] = []
 
     async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _HangingProcess:
-        _ = args, kwargs
+        _ = args
+        assert kwargs["start_new_session"] is True
         return process
 
+    async def _fake_wait_for_process_group_exit(_process_group_id: int, *, wait_seconds: float = 1.0) -> None:
+        _ = wait_seconds
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        knowledge_git_source_module.os,
+        "killpg",
+        lambda process_group_id, sig: signalled_groups.append((process_group_id, sig)),
+    )
+    monkeypatch.setattr(
+        knowledge_git_source_module,
+        "_wait_for_process_group_exit",
+        _fake_wait_for_process_group_exit,
+    )
 
     task = asyncio.create_task(manager.git_source._run_git(["fetch", "origin", "main"]))
     await asyncio.sleep(0)
@@ -1359,8 +1670,57 @@ async def test_run_git_cancellation_kills_subprocess(
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert process.kill_called is True
+    assert process.kill_called is False
     assert process.wait_called is True
+    assert signalled_groups == [(12345, signal.SIGKILL)]
+
+
+@pytest.mark.asyncio
+async def test_run_git_success_cleanup_finishes_before_cancellation_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation cannot abandon a successful Git command's group drain."""
+    manager = _git_manager(tmp_path)
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    class _SuccessfulProcess:
+        pid = 12345
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _SuccessfulProcess:
+        return _SuccessfulProcess()
+
+    async def _fake_terminate(
+        _process: _SuccessfulProcess,
+        *,
+        owned_process_group_id: int | None,
+    ) -> None:
+        assert owned_process_group_id == 12345
+        cleanup_started.set()
+        await cleanup_release.wait()
+        cleanup_finished.set()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_git_source_module, "_terminate_git_process", _fake_terminate)
+
+    task = asyncio.create_task(manager.git_source._run_git(["status"]))
+    await cleanup_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    try:
+        assert task.done() is False
+    finally:
+        cleanup_release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleanup_finished.is_set()
 
 
 @pytest.mark.asyncio
@@ -1375,6 +1735,7 @@ async def test_run_git_reports_the_git_failure_when_stderr_holds_an_unparseable_
     destroy the diagnostic exactly when something has already gone wrong.
     """
     manager = _git_manager(tmp_path)
+    monkeypatch.setenv(knowledge_git_source_module._REFRESH_SUBPROCESS_ENV, "1")
 
     class _FailingProcess:
         returncode = 128

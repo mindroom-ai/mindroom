@@ -17,10 +17,11 @@ import asyncio
 import base64
 import os
 import re
+import signal
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 from urllib.parse import urlparse
 
 from mindroom.credentials import get_runtime_shared_credentials_manager
@@ -48,6 +49,72 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = ["GitKnowledgeSource", "GitSyncResult"]
+
+_REFRESH_SUBPROCESS_ENV = "MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"
+_OwnedTaskResult = TypeVar("_OwnedTaskResult")
+
+
+def _git_process_group_is_owned_here() -> bool:
+    """Return whether this process, rather than an outer refresh, must reap Git."""
+    return os.name != "nt" and os.environ.get(_REFRESH_SUBPROCESS_ENV) != "1"
+
+
+def _process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _wait_for_process_group_exit(process_group_id: int, *, wait_seconds: float = 1.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait_seconds
+    while _process_group_exists(process_group_id) and loop.time() < deadline:  # noqa: ASYNC110
+        await asyncio.sleep(0.01)
+    if _process_group_exists(process_group_id):
+        logger.warning(
+            "Knowledge Git process group survived termination wait",
+            process_group_id=process_group_id,
+            wait_seconds=wait_seconds,
+        )
+
+
+async def _drain_owned_task(task: asyncio.Task[_OwnedTaskResult]) -> asyncio.CancelledError | None:
+    """Wait through repeated caller cancellation until owned work settles."""
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+    return cancellation
+
+
+async def _terminate_git_process(
+    process: asyncio.subprocess.Process,
+    *,
+    owned_process_group_id: int | None,
+) -> None:
+    group_signalled = False
+    if owned_process_group_id is None:
+        if process.returncode is not None:
+            return
+        with suppress(ProcessLookupError):
+            process.kill()
+    else:
+        try:
+            os.killpg(owned_process_group_id, signal.SIGKILL)
+            group_signalled = True
+        except ProcessLookupError:
+            pass
+    with suppress(ProcessLookupError):
+        await process.wait()
+    if group_signalled and owned_process_group_id is not None:
+        await _wait_for_process_group_exit(owned_process_group_id)
 
 
 def _http_credentials(
@@ -471,35 +538,65 @@ class GitKnowledgeSource:
         repo_root = cwd or self.source_path
         capability = current_inherited_file_lock()
         inherited_lock_fd = None if capability is None else capability.fileno_for(self.source_path)
-        process = await asyncio.create_subprocess_exec(
-            "git",
-            *args,
-            cwd=str(repo_root),
-            env=None if env is None else {**os.environ, **env},
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            pass_fds=(() if inherited_lock_fd is None else (inherited_lock_fd,)),
+        owns_process_group = _git_process_group_is_owned_here()
+        spawn_task = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                "git",
+                *args,
+                cwd=str(repo_root),
+                env=None if env is None else {**os.environ, **env},
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                pass_fds=(() if inherited_lock_fd is None else (inherited_lock_fd,)),
+                start_new_session=owns_process_group,
+            ),
         )
+        spawn_cancellation = await _drain_owned_task(spawn_task)
+        process = spawn_task.result()
+        owned_process_group_id = process.pid if owns_process_group else None
+        if spawn_cancellation is not None:
+            cleanup_task = asyncio.create_task(
+                _terminate_git_process(process, owned_process_group_id=owned_process_group_id),
+            )
+            await _drain_owned_task(cleanup_task)
+            cleanup_task.result()
+            raise spawn_cancellation from None
         try:
             timeout_seconds = self._sync_timeout_seconds()
             if timeout_seconds is None:
                 stdout, stderr = await process.communicate()
             else:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
-        except asyncio.CancelledError:
-            with suppress(ProcessLookupError):
-                process.kill()
-            with suppress(ProcessLookupError):
-                await process.wait()
-            raise
+        except asyncio.CancelledError as exc:
+            cleanup_task = asyncio.create_task(
+                _terminate_git_process(process, owned_process_group_id=owned_process_group_id),
+            )
+            await _drain_owned_task(cleanup_task)
+            cleanup_task.result()
+            raise exc from None
         except TimeoutError as exc:
-            with suppress(ProcessLookupError):
-                process.kill()
-            with suppress(ProcessLookupError):
-                await process.wait()
+            cleanup_task = asyncio.create_task(
+                _terminate_git_process(process, owned_process_group_id=owned_process_group_id),
+            )
+            cancellation = await _drain_owned_task(cleanup_task)
+            cleanup_task.result()
+            if cancellation is not None:
+                raise cancellation from None
             command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
             msg = f"Git command timed out after {timeout_seconds:.0f}s: {command}"
             raise RuntimeError(msg) from exc
+
+        # A completed Git leader may still leave a filter/helper behind. Direct
+        # refreshes own a private group and must drain it before releasing the
+        # inherited source lock. A refresh subprocess leaves this to its outer
+        # process-group supervisor instead.
+        cleanup_task = asyncio.create_task(
+            _terminate_git_process(process, owned_process_group_id=owned_process_group_id),
+        )
+        cancellation = await _drain_owned_task(cleanup_task)
+        cleanup_task.result()
+        if cancellation is not None:
+            raise cancellation from None
 
         if process.returncode == 0:
             return stdout.decode("utf-8", errors="replace")

@@ -217,11 +217,13 @@ async def refresh_knowledge_binding_in_subprocess(
             cleanup_task.result()
         raise
 
+    cleanup_task = asyncio.create_task(_terminate_refresh_subprocess(process))
+    cancellation = await _drain_owned_cleanup_task(cleanup_task)
+    cleanup_task.result()
+    if cancellation is not None:
+        raise cancellation from None
+
     if return_code != 0:
-        # The refresh leader can crash while one of its Git descendants keeps
-        # running in the session. Drain that process group before reconciliation
-        # tries to reacquire the source-root lock inherited by those descendants.
-        await _terminate_refresh_subprocess(process)
         msg = f"Knowledge refresh subprocess failed for {base_id!r} with exit code {return_code}"
         await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=msg)
         raise RuntimeError(msg)

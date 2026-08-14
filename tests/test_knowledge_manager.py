@@ -5735,8 +5735,12 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
         captured_stdin = process.stdin
         return process
 
+    async def _fake_terminate(_process: _Process) -> None:
+        pass
+
     monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
     monkeypatch.setattr(knowledge_refresh_runner, "_subprocess_session_kwargs", dict)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
 
     await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
         "docs",
@@ -5943,6 +5947,59 @@ async def test_process_group_exit_wait_warns_when_group_survives(
         await knowledge_refresh_runner._wait_for_process_group_exit(12345, wait_seconds=0)
 
     assert any(log.get("event") == "Knowledge refresh process group survived termination wait" for log in logs)
+
+
+@pytest.mark.asyncio
+async def test_successful_refresh_subprocess_drains_its_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful worker must not leave a lock-holding Git helper behind."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    terminated = asyncio.Event()
+
+    class _Stdin:
+        def write(self, _payload: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    class _Process:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = _Stdin()
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        return _Process()
+
+    async def _fake_terminate(_process: _Process) -> None:
+        terminated.set()
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert terminated.is_set()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="process groups require POSIX")
@@ -6522,7 +6579,11 @@ async def test_refresh_subprocess_receives_conservative_thread_env(
         captured_env.update(kwargs["env"])
         return _Process()
 
+    async def _fake_terminate(_process: _Process) -> None:
+        pass
+
     monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
 
     await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
         "docs",
@@ -8236,6 +8297,7 @@ async def test_git_failure_redacts_authorization_headers_from_raised_and_metadat
         _ = (args, kwargs)
         return _FailedGitProcess()
 
+    monkeypatch.setenv(knowledge_git_source_module._REFRESH_SUBPROCESS_ENV, "1")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fail_git_command)
 
     with pytest.raises(RuntimeError) as exc_info:
