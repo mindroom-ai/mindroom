@@ -22,7 +22,6 @@ from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
 from mindroom.credential_policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.matrix.state import MatrixState
 from mindroom.mcp.config import MCPServerConfig
@@ -150,108 +149,18 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
 
 
 class TestConsolidatedConfigManager:
-    """Test the consolidated ConfigManager tools."""
+    """Test the consolidated ConfigManager with four tools."""
 
     def test_init(self, tmp_path: Path) -> None:
         """Test ConfigManagerTools initialization."""
         cm = _config_manager(_minimal_config_path(tmp_path))
         assert cm.config_path is not None
         assert cm.name == "config_manager"
-        assert len(cm.tools) == 5
+        assert len(cm.tools) == 4
         assert any(tool.__name__ == "get_info" for tool in cm.tools)
         assert any(tool.__name__ == "manage_config" for tool in cm.tools)
         assert any(tool.__name__ == "manage_agent" for tool in cm.tools)
         assert any(tool.__name__ == "manage_team" for tool in cm.tools)
-        assert any(tool.__name__ == "reset_oauth_connection" for tool in cm.tools)
-        assert cm.async_functions["reset_oauth_connection"].requires_confirmation is True
-
-    @pytest.mark.asyncio
-    async def test_reset_oauth_connection_deletes_only_current_requester_scope(self, tmp_path: Path) -> None:
-        """An approved reset should delete the caller's scoped grant and return a bound reconnect link."""
-        config = Config(
-            agents={
-                "research": AgentConfig(
-                    display_name="Research",
-                    role="Research",
-                    tools=["config_manager", "google_drive"],
-                    worker_scope="user_agent",
-                ),
-            },
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
-        )
-        config_path = tmp_path / "config.yaml"
-        write_config_yaml(config, config_path)
-        cm = _config_manager(config_path)
-        context = _caller_context(cm, config, agent_name="research")
-        worker_target = context.resolve_worker_target()
-        credentials_manager = get_runtime_credentials_manager(cm.runtime_paths)
-        save_scoped_credentials(
-            google_drive_oauth_provider().credential_service,
-            {"refresh_token": "refresh-token"},
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-
-        with tool_runtime_context(context):
-            result = await cm.reset_oauth_connection("google_drive")
-
-        assert (
-            load_scoped_credentials(
-                google_drive_oauth_provider().credential_service,
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-            )
-            is None
-        )
-        query = parse_qs(urlparse(_connect_url_from_result(result)).query)
-        connect_target = lookup_oauth_connect_token(
-            google_drive_oauth_provider(),
-            cm.runtime_paths,
-            query["connect_token"][0],
-        )
-        assert connect_target.agent_name == "research"
-        assert connect_target.requester_id == "@alice:example.org"
-        assert connect_target.worker_scope == "user_agent"
-
-    @pytest.mark.asyncio
-    async def test_reset_oauth_connection_refuses_shared_scope(self, tmp_path: Path) -> None:
-        """An agent tool must not disconnect a credential shared with other requesters."""
-        config = Config(
-            agents={
-                "research": AgentConfig(
-                    display_name="Research",
-                    role="Research",
-                    tools=["config_manager", "google_drive"],
-                    worker_scope="shared",
-                ),
-            },
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
-        )
-        config_path = tmp_path / "config.yaml"
-        write_config_yaml(config, config_path)
-        cm = _config_manager(config_path)
-        context = _caller_context(cm, config, agent_name="research")
-        worker_target = context.resolve_worker_target()
-        credentials_manager = get_runtime_credentials_manager(cm.runtime_paths)
-        save_scoped_credentials(
-            google_drive_oauth_provider().credential_service,
-            {"refresh_token": "shared-refresh-token"},
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-
-        with tool_runtime_context(context):
-            result = await cm.reset_oauth_connection("google_drive")
-
-        assert "requester-isolated" in result
-        assert (
-            load_scoped_credentials(
-                google_drive_oauth_provider().credential_service,
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-            )
-            is not None
-        )
 
     def test_manage_config_inspects_authored_subtree_with_redaction(self, tmp_path: Path) -> None:
         """Inspection should be path-scoped, authored-only, and centrally redacted."""
@@ -1819,10 +1728,10 @@ class TestConsolidatedConfigManager:
                 assert "Error: Unknown info_type" not in result
 
     def test_reduced_tool_count(self, tmp_path: Path) -> None:
-        """Verify the toolkit remains consolidated into five functions."""
+        """Verify the toolkit remains consolidated into four functions."""
         cm = _config_manager(_minimal_config_path(tmp_path))
 
-        assert len(cm.tools) == 5
+        assert len(cm.tools) == 4
 
         # Check the specific tools
         tool_names = [tool.__name__ for tool in cm.tools]
@@ -1830,7 +1739,6 @@ class TestConsolidatedConfigManager:
         assert "manage_config" in tool_names
         assert "manage_agent" in tool_names
         assert "manage_team" in tool_names
-        assert "reset_oauth_connection" in tool_names
 
         # Old tool names should NOT be present
         old_tools = [

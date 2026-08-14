@@ -219,13 +219,14 @@ class TestGmailTools:
             mock_creds.refresh_token = "refresh_token"  # noqa: S105
             mock_creds.token = "new_access_token"  # noqa: S105
             mock_creds.expiry = None
+            refresh = mock_creds.refresh
             mock_credentials_class.return_value = mock_creds
 
             mock_request = MagicMock()
             mock_request_class.return_value = mock_request
 
             gmail_tools._auth()
-            mock_creds.refresh.assert_called_once_with(mock_request)
+            refresh.assert_called_once_with(mock_request)
             saved_creds = mock_credentials_manager.load_credentials("google_gmail_oauth")
             assert saved_creds is not None
             assert saved_creds["token"] == "new_access_token"  # noqa: S105

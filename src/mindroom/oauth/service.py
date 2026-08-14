@@ -19,6 +19,7 @@ from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import (
     OAuthClaimValidationError,
     OAuthProviderError,
+    OAuthRefreshRejectedError,
     OAuthTokenResult,
     oauth_connect_url_requires_host_browser,
 )
@@ -164,9 +165,9 @@ def invalidate_scoped_oauth_credentials_if_current(
     *,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
-    expected_refresh_token: str,
+    expected_credentials: Mapping[str, Any],
 ) -> bool:
-    """Delete one credential only while its refresh token still matches the failed grant."""
+    """Delete one credential only while its complete stored snapshot still matches."""
     lock_path = scoped_oauth_credentials_refresh_lock_path(
         service,
         credentials_manager=credentials_manager,
@@ -178,7 +179,7 @@ def invalidate_scoped_oauth_credentials_if_current(
             credentials_manager=credentials_manager,
             worker_target=worker_target,
         )
-        if _refresh_token_value(credentials) != expected_refresh_token:
+        if credentials != dict(expected_credentials):
             return False
         delete_scoped_credentials(
             service,
@@ -302,18 +303,26 @@ async def _refresh_scoped_oauth_credentials_locked(
             allowed_shared_services=allowed_shared_services,
         )
         latest_refresh_token = _refresh_token_value(latest_credentials)
+        if latest_credentials == credentials:
+            _attach_oauth_refresh_failure_context(exc, credentials)
+            delete_scoped_credentials(
+                provider.credential_service,
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+            _log_oauth_refresh_failed(
+                provider,
+                credentials,
+                exc,
+                reason="stale_retry_unavailable",
+                stale_retry_used=False,
+            )
+            raise
         if (
             latest_credentials is None
             or latest_refresh_token is None
-            or latest_refresh_token == attempted_refresh_token
             or not oauth_credentials_usable(provider, runtime_paths, latest_credentials)
         ):
-            if latest_refresh_token == attempted_refresh_token:
-                delete_scoped_credentials(
-                    provider.credential_service,
-                    credentials_manager=credentials_manager,
-                    worker_target=worker_target,
-                )
             _log_oauth_refresh_failed(
                 provider,
                 credentials,
@@ -326,6 +335,7 @@ async def _refresh_scoped_oauth_credentials_locked(
             refreshed_credentials = await provider.refresh_token_data(latest_credentials, runtime_paths)
         except OAuthProviderError as retry_exc:
             if _is_recoverable_stale_refresh_rejection(retry_exc):
+                _attach_oauth_refresh_failure_context(retry_exc, latest_credentials)
                 delete_scoped_credentials(
                     provider.credential_service,
                     credentials_manager=credentials_manager,
@@ -449,6 +459,17 @@ def _oauth_credentials_expires_at(credentials: dict[str, Any] | None) -> float |
     if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
         return None
     return float(expires_at)
+
+
+def _attach_oauth_refresh_failure_context(
+    exc: OAuthProviderError,
+    credentials: dict[str, Any],
+) -> None:
+    """Attach safe pre-invalidation diagnostics without retaining token material."""
+    if not isinstance(exc, OAuthRefreshRejectedError):
+        return
+    exc.refresh_had_token = _refresh_token_value(credentials) is not None
+    exc.refresh_expires_at = _oauth_credentials_expires_at(credentials)
 
 
 def _refresh_token_value(credentials: Mapping[str, Any] | None) -> str | None:

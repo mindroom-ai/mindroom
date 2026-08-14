@@ -27,6 +27,7 @@ CHAIN_1 = "refresh-1"
 CHAIN_2 = "refresh-2"
 INVALID_ROTATION = "invalid_refresh_token"
 FUTURE_EXPIRES_AT = 4_102_444_800.0
+RECONNECTED_ACCESS = "reconnected-access"
 
 
 class _CapturingLogger:
@@ -234,6 +235,50 @@ async def test_scoped_oauth_refresh_logs_stale_retry_recovery(
     ]
     assert logger.warning_calls == []
     _assert_no_token_values_logged(logger)
+
+
+@pytest.mark.asyncio
+async def test_scoped_oauth_refresh_preserves_reconnect_with_same_refresh_token(tmp_path: Path) -> None:
+    """A reconnect that reuses the refresh token must supersede the attempted credential snapshot."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target()
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    _save_credentials(runtime_paths, worker_target, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    seen_access_tokens: list[str] = []
+
+    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any] | None:
+        access_token = str(credentials["token"])
+        seen_access_tokens.append(access_token)
+        if access_token == ACCESS_0:
+            save_scoped_credentials(
+                "demo_oauth",
+                _credentials(RECONNECTED_ACCESS, CHAIN_0, expires_at=FUTURE_EXPIRES_AT),
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+            raise OAuthRefreshRejectedError(INVALID_ROTATION, oauth_error=INVALID_ROTATION)
+        assert access_token == RECONNECTED_ACCESS
+        return None
+
+    result = await refresh_scoped_oauth_credentials_with_result(
+        _FakeOAuthProvider(refresh),
+        runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    stored_credentials = load_scoped_credentials(
+        "demo_oauth",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    assert result.credentials is not None
+    assert result.credentials["token"] == RECONNECTED_ACCESS
+    assert result.refreshed is False
+    assert result.stale_retry_used is True
+    assert stored_credentials is not None
+    assert stored_credentials["token"] == RECONNECTED_ACCESS
+    assert seen_access_tokens == [ACCESS_0, RECONNECTED_ACCESS]
 
 
 @pytest.mark.asyncio

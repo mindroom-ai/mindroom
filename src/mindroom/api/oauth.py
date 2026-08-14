@@ -20,7 +20,7 @@ from mindroom.api.credentials_target import (
     worker_target_for_credentials_target,
 )
 from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
-from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
+from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.mcp.oauth import disconnect_mcp_oauth_request_session
@@ -41,6 +41,7 @@ from mindroom.oauth.service import (
     oauth_provider_service_account_configured,
     oauth_success_redirect_url,
     refresh_scoped_oauth_credentials,
+    reset_scoped_oauth_credentials,
     sanitized_oauth_token_result,
     scoped_oauth_credentials_refresh_lock_path,
 )
@@ -575,7 +576,7 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
         agent_name=agent_name,
     )
     worker_target = worker_target_for_credentials_target(target)
-    delete_scoped_credentials(
+    await reset_scoped_oauth_credentials(
         provider.credential_service,
         credentials_manager=target.base_manager,
         worker_target=worker_target,

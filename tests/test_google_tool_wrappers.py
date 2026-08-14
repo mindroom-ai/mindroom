@@ -6,6 +6,7 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -26,14 +27,19 @@ from mindroom.custom_tools.google_docs import GoogleDocsTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
+from mindroom.file_locks import advisory_file_lock
 from mindroom.oauth import client as oauth_client_module
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.oauth.service import scoped_oauth_credentials_refresh_lock_path
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+RECONNECTED_ACCESS = "reconnected-access"
+STALE_REFRESHED_ACCESS = "stale-refreshed-access"
 
 
 class ValidCredentials:
@@ -461,6 +467,234 @@ def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
         )
         is None
     )
+
+
+def test_google_wrapper_keeps_refresh_rejection_state_per_call(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """A successful parallel call must not consume another call's reconnect signal."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "valid-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    def fail_refresh(*_args: object, **_kwargs: object) -> None:
+        message = "refresh rejected"
+        raise RefreshError(message, {"error": "invalid_grant"})
+
+    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", fail_refresh)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    failure_recorded = threading.Event()
+    release_failure = threading.Event()
+
+    def swallowed_failure() -> str:
+        try:
+            tool.creds.refresh(object())
+        except RefreshError as exc:
+            failure_recorded.set()
+            assert release_failure.wait(timeout=5)
+            return f"Unexpected error: {exc}"
+        return "unexpected success"
+
+    tool.functions = {
+        "swallowed_failure": Function(name="swallowed_failure", entrypoint=swallowed_failure),
+        "successful_call": Function(name="successful_call", entrypoint=lambda: "success"),
+    }
+    tool._wrap_oauth_function_entrypoints()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        failed_future = executor.submit(tool.swallowed_failure)
+        assert failure_recorded.wait(timeout=5)
+        successful_result = executor.submit(tool.successful_call).result(timeout=5)
+        release_failure.set()
+        failed_result = failed_future.result(timeout=5)
+
+    assert successful_result == "success"
+    failed_payload = json.loads(failed_result)
+    assert failed_payload["oauth_connection_required"] is True
+    assert failed_payload["reason"] == "refresh_rejected"
+
+
+def test_google_wrapper_reports_second_terminal_rejection_after_first_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Terminal classification must not depend on which caller deletes the shared snapshot."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "valid-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    def fail_refresh(*_args: object, **_kwargs: object) -> None:
+        message = "refresh rejected"
+        raise RefreshError(message, {"error": "invalid_grant"})
+
+    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", fail_refresh)
+    tools = [
+        GoogleDriveTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        for _ in range(2)
+    ]
+    for tool in tools:
+
+        def swallowed_failure(*, _tool: GoogleDriveTools = tool) -> str:
+            try:
+                _tool.creds.refresh(object())
+            except RefreshError as exc:
+                return f"Unexpected error: {exc}"
+            return "unexpected success"
+
+        tool.functions = {"swallowed_failure": Function(name="swallowed_failure", entrypoint=swallowed_failure)}
+        tool._wrap_oauth_function_entrypoints()
+
+    first_payload = json.loads(tools[0].swallowed_failure())
+    second_payload = json.loads(tools[1].swallowed_failure())
+
+    assert first_payload["reason"] == "refresh_rejected"
+    assert second_payload["reason"] == "refresh_rejected"
+
+
+def test_google_wrapper_serializes_refresh_with_reconnect_write(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """A reconnect write that starts during refresh must persist after the stale refresh finishes."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target(
+        "user_agent",
+        "general",
+        execution_identity=identity,
+    )
+    provider = GoogleDriveTools._oauth_provider
+    token_data = {
+        "token": "expired-access-token",
+        "refresh_token": "shared-refresh-token",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": "client-id",
+        "expires_at": 1.0,
+        "scopes": list(provider.scopes),
+        "_source": "oauth",
+        "_oauth_provider": provider.id,
+    }
+    save_scoped_credentials(
+        provider.credential_service,
+        token_data,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    refresh_started = threading.Event()
+    writer_attempting = threading.Event()
+    release_refresh = threading.Event()
+    writer_finished = threading.Event()
+
+    def blocked_refresh(credentials: object, _request: object) -> None:
+        refresh_started.set()
+        assert release_refresh.wait(timeout=5)
+        credentials.token = STALE_REFRESHED_ACCESS
+        credentials.expiry = datetime(2100, 1, 1, tzinfo=UTC).replace(tzinfo=None)
+
+    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", blocked_refresh)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    lock_path = scoped_oauth_credentials_refresh_lock_path(
+        provider.credential_service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    def reconnect_writer() -> None:
+        assert refresh_started.wait(timeout=5)
+        writer_attempting.set()
+        with advisory_file_lock(lock_path):
+            save_scoped_credentials(
+                provider.credential_service,
+                {**token_data, "token": RECONNECTED_ACCESS, "expires_at": 4_102_444_800.0},
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+        writer_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        auth_future = executor.submit(tool._ensure_structured_auth)
+        writer_future = executor.submit(reconnect_writer)
+        assert writer_attempting.wait(timeout=5)
+        writer_finished_early = writer_finished.wait(timeout=0.1)
+        release_refresh.set()
+        assert auth_future.result(timeout=5) is None
+        writer_future.result(timeout=5)
+
+    stored = load_scoped_credentials(
+        provider.credential_service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    assert writer_finished_early is False
+    assert stored is not None
+    assert stored["token"] == RECONNECTED_ACCESS
 
 
 def test_google_wrapper_skips_stored_oauth_when_service_account_env_is_configured(

@@ -336,13 +336,19 @@ class MCPServerManager:
             if not isinstance(raw_expires_at, bool) and isinstance(raw_expires_at, int | float)
             else None
         )
+        has_refresh_token = isinstance(refresh_token, str) and bool(refresh_token)
+        if isinstance(exc, OAuthRefreshRejectedError):
+            if exc.refresh_had_token is not None:
+                has_refresh_token = exc.refresh_had_token
+            if exc.refresh_expires_at is not None:
+                expires_at = exc.refresh_expires_at
         cause = exc.__cause__
         safe_cause = isinstance(cause, AuthlibBaseError | HTTPError)
         logger.warning(
             "MCP OAuth token refresh failed",
             provider_id=provider_id,
             server_id=state.server_id,
-            has_refresh_token=isinstance(refresh_token, str) and bool(refresh_token),
+            has_refresh_token=has_refresh_token,
             expires_at=expires_at,
             error_type=type(exc).__name__,
             error=str(exc),

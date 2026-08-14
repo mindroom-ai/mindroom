@@ -73,9 +73,15 @@ class OAuthProviderError(RuntimeError):
 class OAuthRefreshRejectedError(OAuthProviderError):
     """Raised when a provider rejects a refresh-token grant."""
 
+    refresh_had_token: bool | None = None
+    refresh_expires_at: float | None = None
+
 
 class _OAuthProviderNotConfiguredError(OAuthProviderError):
     """Raised when a provider has no usable OAuth client configuration."""
+
+
+_TERMINAL_REFRESH_ERROR_CODES = frozenset({"invalid_grant", "invalid_refresh_token"})
 
 
 class OAuthClaimValidationError(OAuthProviderError):
@@ -347,7 +353,7 @@ def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError) -> OAuthProviderErro
 
     msg = "OAuth token refresh failed"
     if detail is not None:
-        if error_code == "invalid_grant":
+        if error_code in _TERMINAL_REFRESH_ERROR_CODES:
             return OAuthRefreshRejectedError(
                 f"{msg}: {detail}",
                 oauth_error=error_code,
@@ -358,7 +364,7 @@ def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError) -> OAuthProviderErro
             oauth_error=error_code,
             oauth_error_description=error_description,
         )
-    if error_code == "invalid_grant":
+    if error_code in _TERMINAL_REFRESH_ERROR_CODES:
         return OAuthRefreshRejectedError(
             f"{msg}: {error_code}",
             oauth_error=error_code,

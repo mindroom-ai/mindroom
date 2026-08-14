@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from datetime import UTC, datetime
 from enum import Enum, auto
 from functools import wraps
@@ -12,7 +13,8 @@ from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 from google.auth.exceptions import RefreshError
 from google.auth.transport import requests as google_requests
 
-from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
+from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
+from mindroom.file_locks import advisory_file_lock
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProvider, oauth_connection_required_payload
 from mindroom.oauth.service import (
     build_oauth_connect_instruction,
@@ -22,6 +24,7 @@ from mindroom.oauth.service import (
     oauth_credentials_have_required_scopes,
     oauth_credentials_match_client_id,
     oauth_credentials_satisfy_identity_policy,
+    scoped_oauth_credentials_refresh_lock_path,
 )
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
@@ -95,7 +98,7 @@ class ScopedOAuthClientMixin:
         self.functions = {}
         self._defer_to_original_auth = defer_to_original_auth
         self._original_auth_completed = False
-        self._oauth_refresh_rejected = False
+        self._oauth_call_state = threading.local()
         if provided_creds is not None:
             return provided_creds
         if defer_to_original_auth:
@@ -119,12 +122,21 @@ class ScopedOAuthClientMixin:
                 _entrypoint: Callable[..., object] = entrypoint,
                 **kwargs: object,
             ) -> object:
-                if result := self._ensure_structured_auth():
+                self._clear_oauth_refresh_rejection()
+                try:
+                    if result := self._ensure_structured_auth():
+                        return result
+                    result = _entrypoint(*args, **kwargs)
+                except RefreshError:
+                    if self._consume_oauth_refresh_rejection():
+                        return self._structured_auth_failure(self._connection_required(reason="refresh_rejected"))
+                    raise
+                else:
+                    if self._consume_oauth_refresh_rejection():
+                        return self._structured_auth_failure(self._connection_required(reason="refresh_rejected"))
                     return result
-                result = _entrypoint(*args, **kwargs)
-                if self._consume_oauth_refresh_rejection():
-                    return self._structured_auth_failure(self._connection_required(reason="refresh_rejected"))
-                return result
+                finally:
+                    self._clear_oauth_refresh_rejection()
 
             function.entrypoint = oauth_entrypoint
             setattr(self, function.name, oauth_entrypoint)
@@ -224,19 +236,20 @@ class ScopedOAuthClientMixin:
             expiry=self._token_expiry(token_data),
         )
         original_refresh = credentials.refresh
-        expected_refresh_token = token_data.get("refresh_token")
 
         def tracked_refresh(request: object) -> None:
             try:
                 original_refresh(request)
             except RefreshError as exc:
-                if isinstance(expected_refresh_token, str) and _google_refresh_was_terminally_rejected(exc):
-                    self._oauth_refresh_rejected = invalidate_scoped_oauth_credentials_if_current(
-                        self._oauth_provider.credential_service,
-                        credentials_manager=self._creds_manager,
-                        worker_target=self._worker_target,
-                        expected_refresh_token=expected_refresh_token,
-                    )
+                if _google_refresh_was_terminally_rejected(exc):
+                    self._mark_oauth_refresh_rejected()
+                    if not self._oauth_refresh_lock_is_held():
+                        invalidate_scoped_oauth_credentials_if_current(
+                            self._oauth_provider.credential_service,
+                            credentials_manager=self._creds_manager,
+                            worker_target=self._worker_target,
+                            expected_credentials=token_data,
+                        )
                     self.service = None
                 raise
 
@@ -244,12 +257,21 @@ class ScopedOAuthClientMixin:
         return credentials
 
     def _consume_oauth_refresh_rejection(self) -> bool:
-        rejected = self._oauth_refresh_rejected
-        self._oauth_refresh_rejected = False
+        rejected = bool(getattr(self._oauth_call_state, "refresh_rejected", False))
+        self._clear_oauth_refresh_rejection()
         if rejected:
             self.creds = None
             self.service = None
         return rejected
+
+    def _mark_oauth_refresh_rejected(self) -> None:
+        self._oauth_call_state.refresh_rejected = True
+
+    def _clear_oauth_refresh_rejection(self) -> None:
+        self._oauth_call_state.refresh_rejected = False
+
+    def _oauth_refresh_lock_is_held(self) -> bool:
+        return bool(getattr(self._oauth_call_state, "refresh_lock_held", False))
 
     def _load_stored_credentials(self) -> Any | None:  # noqa: ANN401
         """Load stored credentials for the current execution scope."""
@@ -310,6 +332,23 @@ class ScopedOAuthClientMixin:
 
     def _auth_with_stored_oauth(self) -> None:
         """Authenticate using MindRoom-scoped stored OAuth credentials."""
+        if not self._load_token_data():
+            raise self._connection_required()
+        lock_path = scoped_oauth_credentials_refresh_lock_path(
+            self._oauth_provider.credential_service,
+            credentials_manager=self._creds_manager,
+            worker_target=self._worker_target,
+        )
+        with advisory_file_lock(lock_path):
+            refresh_lock_was_held = self._oauth_refresh_lock_is_held()
+            self._oauth_call_state.refresh_lock_held = True
+            try:
+                self._auth_with_stored_oauth_locked()
+            finally:
+                self._oauth_call_state.refresh_lock_held = refresh_lock_was_held
+
+    def _auth_with_stored_oauth_locked(self) -> None:
+        """Authenticate while holding the scoped refresh/reconnect lock."""
         token_data = self._load_token_data()
         if (
             not token_data
@@ -332,6 +371,8 @@ class ScopedOAuthClientMixin:
                 if refreshed_expires_at is not None:
                     refreshed["expires_at"] = refreshed_expires_at
                 self._save_token_data(refreshed)
+                token_data.clear()
+                token_data.update(refreshed)
             if not self.creds.valid:
                 self._raise_connection_required()
             self._oauth_logger.info("oauth_authentication_succeeded", tool_name=self._oauth_tool_name)
@@ -339,6 +380,12 @@ class ScopedOAuthClientMixin:
             raise
         except RefreshError as exc:
             if self._consume_oauth_refresh_rejection():
+                if self._load_token_data() == token_data:
+                    delete_scoped_credentials(
+                        self._oauth_provider.credential_service,
+                        credentials_manager=self._creds_manager,
+                        worker_target=self._worker_target,
+                    )
                 raise self._connection_required(reason="refresh_rejected") from exc
             raise self._connection_required() from exc
         except Exception as exc:

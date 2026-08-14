@@ -23,7 +23,12 @@ from mindroom import constants
 from mindroom.api import auth, main
 from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials import (
+    CredentialsManager,
+    delete_scoped_credentials,
+    get_runtime_credentials_manager,
+    save_scoped_credentials,
+)
 from mindroom.file_locks import file_lock_is_held
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider
 from mindroom.oauth import registry as oauth_registry
@@ -955,9 +960,11 @@ def test_provider_refresh_token_data_skips_unexpired_access_token(
     assert "created" not in seen
 
 
+@pytest.mark.parametrize("oauth_error", ["invalid_grant", "invalid_refresh_token"])
 def test_provider_refresh_token_data_surfaces_oauth_error_body_without_tokens(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    oauth_error: str,
 ) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -980,7 +987,7 @@ def test_provider_refresh_token_data_surfaces_oauth_error_body_without_tokens(
             response = Response(
                 400,
                 json={
-                    "error": "invalid_grant",
+                    "error": oauth_error,
                     "error_description": "refresh grant rejected",
                     "access_token": "provider-leaked-access-token",
                     "refresh_token": "provider-leaked-refresh-token",
@@ -1008,8 +1015,8 @@ def test_provider_refresh_token_data_surfaces_oauth_error_body_without_tokens(
         )
 
     message = str(exc_info.value)
-    assert message == "OAuth token refresh failed: invalid_grant: refresh grant rejected"
-    assert exc_info.value.oauth_error == "invalid_grant"
+    assert message == f"OAuth token refresh failed: {oauth_error}: refresh grant rejected"
+    assert exc_info.value.oauth_error == oauth_error
     assert exc_info.value.oauth_error_description == "refresh grant rejected"
     assert "stored-access-token-secret" not in message
     assert "stored-refresh-token-secret" not in message
@@ -2413,6 +2420,69 @@ def test_callback_saves_credentials_under_refresh_lock(tmp_path: Path, monkeypat
             )
 
     assert callback_response.status_code == 307
+
+
+def test_disconnect_deletes_credentials_under_refresh_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disconnect must not race an in-flight refresh that could resurrect credentials."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider()
+    manager = get_runtime_credentials_manager(runtime_paths)
+    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
+    scoped_manager.save_credentials(
+        provider.credential_service,
+        {
+            "token": "stored-token",
+            "refresh_token": "stored-refresh-token",
+            "client_id": "client-id",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+    original_delete = delete_scoped_credentials
+    delete_was_locked = False
+
+    def delete_while_locked(
+        service: str,
+        *,
+        credentials_manager: CredentialsManager,
+        worker_target: ResolvedWorkerTarget | None,
+    ) -> None:
+        nonlocal delete_was_locked
+        lock_path = scoped_oauth_credentials_refresh_lock_path(
+            service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        assert file_lock_is_held(lock_path)
+        delete_was_locked = True
+        original_delete(
+            service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    monkeypatch.setattr("mindroom.oauth.service.delete_scoped_credentials", delete_while_locked)
+    monkeypatch.setattr(
+        "mindroom.oauth.service.load_scoped_credentials",
+        lambda *_args, **_kwargs: {"token": "stored-token"},
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            response = client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
+
+    assert response.status_code == 200
+    assert delete_was_locked is True
 
 
 def test_callback_drops_old_refresh_token_when_identity_changes(tmp_path: Path) -> None:
