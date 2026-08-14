@@ -1072,6 +1072,26 @@ class PrincipalStore:
             ),
         )
 
+    async def enqueue_unavailable_approval_notice(
+        self,
+        *,
+        approval_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+    ) -> str | None:
+        """Enqueue this membership's physical attempt for one logical notice."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.enqueue_unavailable_notice(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                payload=payload,
+            ),
+        )
+
     async def discard_unavailable_approval_continuation(
         self,
         approval_id: str,

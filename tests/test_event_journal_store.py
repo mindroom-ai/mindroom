@@ -6780,19 +6780,19 @@ class TestApprovalContinuations:
         assert await alice.is_pending("$source-2")
 
         router = journal_store.principal("router@alice")
-        await router.enqueue_matrix_delivery(
-            delivery_id=unavailable_notice_delivery_id("approval-1"),
-            stage=DeliveryStage.FINAL,
+        delivery_id = await router.enqueue_unavailable_approval_notice(
+            approval_id="approval-1",
             room_id=ROOM,
             thread_id="$thread",
             payload=text("agent removed"),
         )
+        assert delivery_id == unavailable_notice_delivery_id("approval-1", 0)
         await router.claim_matrix_delivery(
-            delivery_id=unavailable_notice_delivery_id("approval-1"),
+            delivery_id=delivery_id,
             stage=DeliveryStage.FINAL,
         )
         await router.acknowledge_matrix_delivery(
-            delivery_id=unavailable_notice_delivery_id("approval-1"),
+            delivery_id=delivery_id,
             stage=DeliveryStage.FINAL,
             event_id="$unavailable",
             delivered_projections=(),
@@ -6827,7 +6827,7 @@ class TestApprovalContinuations:
         )
 
         router = journal_store.principal("router@alice")
-        delivery_id = unavailable_notice_delivery_id("approval-1")
+        delivery_id = unavailable_notice_delivery_id("approval-1", 0)
         assert (
             await router.enqueue_matrix_delivery(
                 delivery_id=delivery_id,
@@ -6864,6 +6864,88 @@ class TestApprovalContinuations:
         assert await alice.approval_continuation("approval-1") is not None
         assert await alice.is_pending("$source-1")
         assert await alice.is_pending("$source-2")
+
+    async def test_stale_unavailable_notice_can_retry_under_current_membership(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """A stale physical attempt must not strand its live logical notice obligation."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        assert (
+            await alice.request_approval_failure(
+                "approval-1",
+                "agent removed",
+                expected_state="waiting",
+            )
+            is not None
+        )
+
+        router = journal_store.principal("router@alice")
+        stale_delivery_id = await router.enqueue_unavailable_approval_notice(
+            approval_id="approval-1",
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("agent removed"),
+        )
+        assert stale_delivery_id == unavailable_notice_delivery_id("approval-1", 0)
+        assert (
+            await router.claim_matrix_delivery(
+                delivery_id=stale_delivery_id,
+                stage=DeliveryStage.FINAL,
+            )
+            is not None
+        )
+
+        await router.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await router.note_membership_restarted(ROOM)
+        await router.acknowledge_matrix_delivery(
+            delivery_id=stale_delivery_id,
+            stage=DeliveryStage.FINAL,
+            event_id="$stale-unavailable",
+            delivered_projections=(),
+        )
+        assert (
+            await alice.discard_unavailable_approval_continuation(
+                "approval-1",
+                notice_principal_id="router@alice",
+            )
+            is False
+        )
+
+        current_delivery_id = await router.enqueue_unavailable_approval_notice(
+            approval_id="approval-1",
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("agent removed"),
+        )
+        assert current_delivery_id == unavailable_notice_delivery_id("approval-1", 1)
+        assert current_delivery_id != stale_delivery_id
+        assert (
+            await router.claim_matrix_delivery(
+                delivery_id=current_delivery_id,
+                stage=DeliveryStage.FINAL,
+            )
+            is not None
+        )
+        await router.acknowledge_matrix_delivery(
+            delivery_id=current_delivery_id,
+            stage=DeliveryStage.FINAL,
+            event_id="$current-unavailable",
+            delivered_projections=(),
+        )
+
+        assert (
+            await alice.discard_unavailable_approval_continuation(
+                "approval-1",
+                notice_principal_id="router@alice",
+            )
+            is True
+        )
+        assert await alice.approval_continuation("approval-1") is None
+        assert not await alice.is_pending("$source-1")
+        assert not await alice.is_pending("$source-2")
 
     async def test_continuation_owner_scans_are_cursor_paginated(
         self,

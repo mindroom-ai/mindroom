@@ -10,7 +10,7 @@ import nio
 
 from mindroom import approval_manager
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.event_journal import DeliveryStage, unavailable_notice_delivery_id
+from mindroom.event_journal import DeliveryStage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     can_send_to_encrypted_room,
@@ -252,6 +252,14 @@ class ApprovalMatrixTransport:
                 delivery_event_type=claimed.event_type,
             )
 
+        delivery_id = await store.enqueue_unavailable_approval_notice(
+            approval_id=continuation.approval_id,
+            room_id=continuation.room_id,
+            thread_id=continuation.thread_id,
+            payload=content,
+        )
+        if delivery_id is None:
+            return None
         try:
             delivered = await MatrixDeliveryWorker(
                 store=store,
@@ -260,13 +268,7 @@ class ApprovalMatrixTransport:
                 resend_after_reconciliation_miss=False,
                 sending_device_id=self.transport_device_id(),
                 resolve_delivered=resolve_delivered,
-            ).deliver(
-                delivery_id=unavailable_notice_delivery_id(continuation.approval_id),
-                stage=DeliveryStage.FINAL,
-                room_id=continuation.room_id,
-                thread_id=continuation.thread_id,
-                payload=content,
-            )
+            ).flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
         except ToolApprovalTransportError:
             logger.warning(
                 "approval_unavailable_notice_send_failed",

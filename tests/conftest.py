@@ -1066,6 +1066,7 @@ def _make_room_get_event_response(
     event.sender = sender
     event.body = event_id
     event.server_timestamp = 0
+    event.transaction_id = None
     event.source = {
         "type": "m.room.message",
         "content": {

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from mindroom.history.types import HistoryScope
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
-from . import journal, outbox
+from . import journal, membership_state, outbox
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
@@ -27,9 +27,42 @@ _CONTINUATION_COLUMNS = """
 """
 
 
-def unavailable_notice_delivery_id(approval_id: str) -> str:
-    """Return the durable delivery identity for an unavailable-owner notice."""
-    return f"approval-unavailable:{approval_id}"
+def unavailable_notice_delivery_id(approval_id: str, membership_epoch: int) -> str:
+    """Return one membership's delivery identity for an unavailable-owner notice."""
+    return f"approval-unavailable:{approval_id}:{membership_epoch}"
+
+
+def enqueue_unavailable_notice(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    room_id: str,
+    thread_id: str | None,
+    payload: Mapping[str, object],
+) -> str | None:
+    """Enqueue the current membership's physical attempt for one logical notice."""
+    membership_epoch = membership_state.claim_active_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+    )
+    if membership_epoch is None:
+        return None
+    delivery_id = unavailable_notice_delivery_id(approval_id, membership_epoch)
+    transaction_id = outbox.enqueue(
+        transaction,
+        principal_id,
+        delivery_id=delivery_id,
+        stage=DeliveryStage.FINAL,
+        event_type="m.room.message",
+        room_id=room_id,
+        membership_epoch=membership_epoch,
+        thread_id=thread_id,
+        payload=payload,
+        edits_event_id=None,
+    )
+    return delivery_id if transaction_id is not None else None
 
 
 class ApprovalDecision(StrEnum):
@@ -657,7 +690,14 @@ def discard_unavailable(
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None or continuation.state != "failing":
         return False
-    delivery_id = unavailable_notice_delivery_id(approval_id)
+    membership_epoch = membership_state.claim_active_membership_epoch(
+        transaction,
+        notice_principal_id,
+        room_id=continuation.room_id,
+    )
+    if membership_epoch is None:
+        return False
+    delivery_id = unavailable_notice_delivery_id(approval_id, membership_epoch)
     ownership = outbox.claim_active_delivery_ownership(
         transaction,
         notice_principal_id,

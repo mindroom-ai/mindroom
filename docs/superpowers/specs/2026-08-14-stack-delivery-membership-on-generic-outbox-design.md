@@ -46,7 +46,7 @@ If that attempt becomes stale, its row remains an identity tombstone and the sti
 
 The current membership epoch must be claimed in the same transaction that derives the delivery ID and enqueues the row, so departure cannot put a new epoch behind an old generation name.
 
-Unavailable-owner cleanup receives the exact delivery ID that completed and releases sources only when that generation is acknowledged and still belongs to the router's current membership.
+Unavailable-owner cleanup atomically derives the current membership's exact delivery ID and releases sources only when that generation is acknowledged and still belongs to that membership.
 
 ## Membership and Delivery Transitions
 

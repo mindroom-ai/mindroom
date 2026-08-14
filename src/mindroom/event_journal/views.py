@@ -385,6 +385,15 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
     @property
     def principal_id(self) -> str: ...  # noqa: D102
 
+    async def enqueue_unavailable_approval_notice(  # noqa: D102
+        self,
+        *,
+        approval_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+    ) -> str | None: ...
+
     async def reserve_approval_card_deliveries(  # noqa: D102
         self,
         *,

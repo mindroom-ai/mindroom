@@ -772,12 +772,12 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
         runtime_generation=None,
     )
     frozen_notice: dict[str, object] = {}
-    notice_turn_id = unavailable_notice_delivery_id("approval-removed")
+    notice_turn_id = unavailable_notice_delivery_id("approval-removed", 0)
     transaction_id = delivery_transaction_id("router@localhost", notice_turn_id, DeliveryStage.FINAL.value)
 
     async def enqueue_notice(**kwargs: object) -> str:
         frozen_notice.update(kwargs)
-        return transaction_id
+        return notice_turn_id
 
     async def claim_notice(**_kwargs: object) -> MatrixDelivery:
         payload = frozen_notice["payload"]
@@ -807,7 +807,7 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
     notice_store = MagicMock(
         principal_id="router@localhost",
         membership_epoch=AsyncMock(return_value=0),
-        enqueue_matrix_delivery=AsyncMock(side_effect=enqueue_notice),
+        enqueue_unavailable_approval_notice=AsyncMock(side_effect=enqueue_notice),
         claim_matrix_delivery=AsyncMock(side_effect=claim_notice),
         record_matrix_delivery_device=AsyncMock(),
         acknowledge_matrix_delivery=AsyncMock(
@@ -953,7 +953,7 @@ async def test_removed_owner_cleanup_adopts_notice_after_matrix_device_change(tm
     notice_marker = "io.mindroom.approval_unavailable_id"
     source_event_id = "$source"
     waiting_event_id = "$waiting"
-    notice_turn_id = unavailable_notice_delivery_id(approval_id)
+    notice_turn_id = unavailable_notice_delivery_id(approval_id, 0)
     await principal.admit(
         InboundEvent(
             event_id=source_event_id,
@@ -1071,6 +1071,117 @@ async def test_removed_owner_cleanup_adopts_notice_after_matrix_device_change(tm
 
 
 @pytest.mark.asyncio
+async def test_removed_owner_cleanup_retries_a_stale_notice_in_current_membership(tmp_path: Path) -> None:
+    """A stale notice attempt must not permanently strand its continuation."""
+    journal = EventJournalStore.open_sqlite(tmp_path / "approval-stale-notice.db")
+    principal = journal.principal("agent@removed")
+    notice_store = journal.principal("router@localhost")
+    approval_id = "approval-stale-notice"
+    source_event_id = "$source"
+    reason = "Requesting agent 'removed' is no longer available."
+    await principal.admit(
+        InboundEvent(
+            event_id=source_event_id,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1_000,
+            source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
+        ),
+    )
+    continuation = ApprovalContinuation(
+        approval_id=approval_id,
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="removed",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=(source_event_id,),
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="shell",
+                invoking_agent="removed",
+                expires_at_ns=9_000_000_000_000_000_000,
+            ),
+        ),
+        state="failing",
+        failure_reason=reason,
+    )
+    assert await principal.create_approval_continuation(continuation) == continuation
+    stale_delivery_id = await notice_store.enqueue_unavailable_approval_notice(
+        approval_id=approval_id,
+        room_id=continuation.room_id,
+        thread_id=continuation.thread_id,
+        payload={"msgtype": "m.notice", "body": reason},
+    )
+    assert stale_delivery_id == unavailable_notice_delivery_id(approval_id, 0)
+    assert (
+        await notice_store.claim_matrix_delivery(
+            delivery_id=stale_delivery_id,
+            stage=DeliveryStage.FINAL,
+        )
+        is not None
+    )
+    await notice_store.fence_departure(continuation.room_id, source=DepartureSource.LOCAL)
+    await notice_store.note_membership_restarted(continuation.room_id)
+    await notice_store.acknowledge_matrix_delivery(
+        delivery_id=stale_delivery_id,
+        stage=DeliveryStage.FINAL,
+        event_id="$stale-notice",
+        delivered_projections=(),
+    )
+
+    client = MagicMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.device_id = "CURRENTDEVICE"
+    client.rooms = {continuation.room_id: nio.MatrixRoom(continuation.room_id, client.user_id)}
+    client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$current-notice", room_id=continuation.room_id),
+    )
+    router = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({continuation.room_id}),
+        approval_store=notice_store,
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: router if name == "router" else None,
+        cards_provider=lambda: None,
+        journal_provider=lambda: journal,
+        entity_configured=lambda name: name != "removed",
+    )
+
+    try:
+        with patch(
+            "mindroom.approval_transport.approval_manager.get_approval_store",
+            return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
+        ):
+            assert await transport._discard_unavailable("agent@removed", continuation, reason)
+
+        current_delivery_id = unavailable_notice_delivery_id(approval_id, 1)
+        current = await notice_store.load_matrix_delivery(
+            delivery_id=current_delivery_id,
+            stage=DeliveryStage.FINAL,
+        )
+        assert current is not None
+        assert current.acknowledged_event_id == "$current-notice"
+        assert current_delivery_id != stale_delivery_id
+        assert await principal.approval_continuation(approval_id) is None
+        assert not await principal.is_pending(source_event_id)
+        client.room_send.assert_awaited_once()
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
 async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp_path: Path) -> None:
     """After a router rejoin, Matrix refusal leaves the owner and notice queued for retry."""
     journal = EventJournalStore.open_sqlite(tmp_path / "approval-notice-refusal.db")
@@ -1162,7 +1273,7 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
         assert await principal.approval_continuation(approval_id) == continuation
         assert await principal.is_pending(source_event_id)
         delivery = await notice_store.load_matrix_delivery(
-            delivery_id=unavailable_notice_delivery_id(approval_id),
+            delivery_id=unavailable_notice_delivery_id(approval_id, 1),
             stage=DeliveryStage.FINAL,
         )
         assert delivery is not None
@@ -1170,7 +1281,7 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
         assert delivery.acknowledged_event_id is None
         assert (
             await principal.load_matrix_delivery(
-                delivery_id=unavailable_notice_delivery_id(approval_id),
+                delivery_id=unavailable_notice_delivery_id(approval_id, 1),
                 stage=DeliveryStage.FINAL,
             )
             is None
