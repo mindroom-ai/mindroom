@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 import psycopg
 from psycopg.rows import dict_row
 
+from .migrations import finish_matrix_delivery_migration, prepare_matrix_delivery_migration
 from .offloading import ThreadOffload
 from .schema import POSTGRES_DIALECT, render, schema_statements
 from .schema_migrations import validate_interactive_question_columns
@@ -128,8 +129,11 @@ class PostgresBackend:
             validate_interactive_question_columns(
                 frozenset(str(row["column_name"]) for row in cursor.fetchall()),
             )
+            transaction = _PostgresTransaction(cursor)
+            migrate_approvals = prepare_matrix_delivery_migration(transaction, postgres=True)
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
+            finish_matrix_delivery_migration(transaction, migrate_approvals=migrate_approvals)
         self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:

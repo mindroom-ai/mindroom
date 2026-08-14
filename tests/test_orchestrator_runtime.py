@@ -3216,7 +3216,7 @@ class TestMultiAgentOrchestrator:
                 await orchestrator._sync_runtime_support_services(config, start_watcher=False)
 
             assert get_approval_store() is store
-            assert store._cards is router_cards
+            assert store.cards is router_cards
         finally:
             await shutdown_approval_runtime()
 

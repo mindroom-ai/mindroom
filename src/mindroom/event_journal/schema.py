@@ -223,10 +223,11 @@ _TABLES = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS response_outbox (
+    CREATE TABLE IF NOT EXISTS matrix_delivery_outbox (
         principal_id TEXT NOT NULL,
-        turn_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
         stage TEXT NOT NULL CHECK (stage IN ('initial', 'final')),
+        event_type TEXT NOT NULL,
         room_id TEXT NOT NULL,
         thread_id TEXT NOT NULL,
         transaction_id TEXT NOT NULL,
@@ -240,51 +241,18 @@ _TABLES = (
         sending_device_id TEXT,
         acknowledged_event_id TEXT,
         created_at_ns BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, turn_id, stage)
+        PRIMARY KEY (principal_id, delivery_id, stage)
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS approval_cards (
         principal_id TEXT NOT NULL,
-        room_id TEXT NOT NULL,
-        -- The card's identity, chosen by this bot before the card is sent and
-        -- reused as the Matrix transaction ID. The homeserver assigns the event
-        -- ID, so keying on that would mean no row could exist until after the
-        -- send -- which is the one ordering that can leave a clickable card
-        -- nothing accounts for.
-        transaction_id TEXT NOT NULL,
-        -- NULL until the send returns an event ID. Such a row is a card that
-        -- may or may not be in the room; presenting the frozen transaction
-        -- again is what settles which, because the homeserver collapses a
-        -- repeat onto the event it already accepted.
-        card_event_id TEXT,
-        -- Whether this card was ever offered to the homeserver. Claiming is not
-        -- offering: the row is committed first, so a process that dies in
-        -- between leaves a claim for a card that provably never left it. Only
-        -- an attempted row can have put something clickable in the room, and
-        -- only an attempted row therefore has to be reconciled against it.
-        --
-        -- No default. Every insert names it, and a row that failed to would be
-        -- a claim nothing could account for; refusing it is better than guessing.
-        attempted INTEGER NOT NULL,
-        -- The device whose transaction-ID namespace was used, written with
-        -- `attempted` and only by the path that is about to send. Only that
-        -- device's repeat is deduplicated by the homeserver; from any other it
-        -- is a second card, so a row whose device cannot be matched is
-        -- reconciled against the room instead of presented again.
-        sending_device_id TEXT,
-        card_json TEXT NOT NULL,
-        -- The decision this bot committed to before it tried to show it. A
-        -- card is answered the moment this is set, whether or not the edit
-        -- carrying it reached the room.
-        resolution_json TEXT,
-        -- The exact persisted pause and tool call this card may authorize.
+        delivery_id TEXT NOT NULL,
         continuation_id TEXT NOT NULL,
         continuation_generation BIGINT NOT NULL,
         tool_call_id TEXT NOT NULL,
         membership_epoch BIGINT NOT NULL,
-        created_at_ns BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, transaction_id)
+        PRIMARY KEY (principal_id, delivery_id)
     )
     """,
     """
@@ -420,23 +388,21 @@ _INDEXES = (
     -- an index that matches only its prefix either. The trailing columns carry
     -- the same byte-order pin as the cursor comparison, because an index in the
     -- server's own collation would not be usable for this ordering at all.
-    CREATE INDEX IF NOT EXISTS response_outbox_unacknowledged_scan
-    ON response_outbox (principal_id, created_at_ns, turn_id/*bytes*/, stage/*bytes*/)
+    CREATE INDEX IF NOT EXISTS matrix_delivery_outbox_unacknowledged_scan
+    ON matrix_delivery_outbox (
+        principal_id, event_type, created_at_ns, delivery_id/*bytes*/, stage/*bytes*/
+    )
     WHERE acknowledged_event_id IS NULL
     """,
     """
-    -- Tied on `transaction_id` rather than the event ID, which is nullable now:
-    -- the two backends disagree about where NULLs sort, so an order broken on
-    -- that column would page one room's cards differently on each.
-    CREATE INDEX IF NOT EXISTS approval_cards_room_transaction_scan
-    ON approval_cards (principal_id, room_id, created_at_ns, transaction_id/*bytes*/)
+    CREATE INDEX IF NOT EXISTS matrix_delivery_outbox_room_scan
+    ON matrix_delivery_outbox (
+        principal_id, room_id, stage, created_at_ns, delivery_id/*bytes*/
+    )
     """,
     """
-    -- One card per accepted event. The partial predicate is what lets many rows
-    -- sit unacknowledged at once, since only a recorded event ID is claimed.
-    CREATE UNIQUE INDEX IF NOT EXISTS approval_cards_event
-    ON approval_cards (principal_id, card_event_id)
-    WHERE card_event_id IS NOT NULL
+    CREATE INDEX IF NOT EXISTS approval_cards_continuation
+    ON approval_cards (continuation_id/*bytes*/, continuation_generation, tool_call_id/*bytes*/)
     """,
     """
     CREATE INDEX IF NOT EXISTS approval_continuations_owner_scan

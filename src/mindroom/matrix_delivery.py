@@ -1,14 +1,12 @@
-"""Sending what the outbox says to send.
+"""Deliver frozen Matrix events from the durable shared outbox.
 
-Ordering here is the whole design. The model result becomes durable, then the
-delivery is enqueued, then it is claimed, and only then does the network call
-happen. Every crash boundary between those steps resolves to one terminal turn
-and at most one visible message.
+Ordering here is the whole design. An event becomes durable, then it is
+claimed, and only then does the network call happen. Every crash boundary
+between those steps retains one frozen delivery owner.
 
-The first of those steps is also where the turn changes hands, and that is one
-commit rather than two. Recording the answer and settling the journal sources
-it answers happen in a single write, so no crash can find the journal and the
-outbox both owning the same turn.
+Ordinary responses additionally hand their journal sources to the outbox in
+that first commit. Other event types reserve their domain owner and delivery
+debt together before this worker runs.
 """
 
 from __future__ import annotations
@@ -25,21 +23,21 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from mindroom.event_journal import OutboxDelivery, OutboxView
+    from mindroom.event_journal import MatrixDelivery, MatrixDeliveryView
     from mindroom.event_journal.models import TerminalTurnWrite
     from mindroom.event_journal.projection import ProjectedEvent
 
 logger = get_logger(__name__)
 
-type SendDelivery = Callable[[OutboxDelivery], Awaitable[str]]
-type _ObserveDelivered = Callable[[OutboxDelivery, str], Awaitable[tuple[ProjectedEvent, ...]]]
+type SendDelivery = Callable[[MatrixDelivery], Awaitable[str]]
+type _ObserveDelivered = Callable[[MatrixDelivery, str], Awaitable[tuple[ProjectedEvent, ...]]]
 
 # Finding the Matrix event a previous attempt already produced, when the frozen
 # transaction ID can no longer prove there wasn't one. Returns the event ID if
 # the answer is already in the room, or ``None`` if it never arrived.
-type ResolveDelivered = Callable[[OutboxDelivery], Awaitable[str | None]]
+type ResolveDelivered = Callable[[MatrixDelivery], Awaitable[str | None]]
 
-# The terminal turn record one delivered answer completes, given ``(turn_id,
+# The terminal turn record one delivered answer completes, given ``(delivery_id,
 # response_event_id)``. Returns ``None`` when there is nothing to write --
 # no record for the turn, or one that already knows its response event.
 type _TerminalTurnFor = Callable[[str, str], "TerminalTurnWrite | None"]
@@ -94,12 +92,14 @@ class _FlushOutcome:
 
 
 @dataclass(frozen=True, slots=True)
-class ResponseDelivery:
+class MatrixDeliveryWorker:
     """Claim-before-send delivery against one principal's outbox."""
 
-    store: OutboxView
+    store: MatrixDeliveryView
     send: SendDelivery
     observe_delivered: _ObserveDelivered | None = None
+    event_type: str = "m.room.message"
+    resend_after_reconciliation_miss: bool = True
     # The device this process is logged in as, recorded on every claim. A
     # Matrix transaction ID is idempotent within one device and meaningless
     # across a change of one, so the row has to remember which device's
@@ -122,24 +122,24 @@ class ResponseDelivery:
     # apart leaves a delivered answer whose record cannot be edited.
     terminal_turn_for: _TerminalTurnFor | None = None
     terminal_turn_committed: _TerminalTurnCommitted | None = None
-    turn_locks: WeakValueDictionary[str, asyncio.Lock] = field(
+    delivery_locks: WeakValueDictionary[str, asyncio.Lock] = field(
         default_factory=WeakValueDictionary,
         repr=False,
         compare=False,
     )
 
-    def _turn_lock(self, turn_id: str) -> asyncio.Lock:
-        """Return the lock ordering visible delivery for one turn."""
-        lock = self.turn_locks.get(turn_id)
+    def _delivery_lock(self, delivery_id: str) -> asyncio.Lock:
+        """Return the lock ordering visible delivery for one durable identity."""
+        lock = self.delivery_locks.get(delivery_id)
         if lock is None:
             lock = asyncio.Lock()
-            self.turn_locks[turn_id] = lock
+            self.delivery_locks[delivery_id] = lock
         return lock
 
     async def deliver(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         room_id: str,
         thread_id: str | None,
@@ -172,21 +172,21 @@ class ResponseDelivery:
         commit together, so the send below is the only step a crash can leave
         half done -- and resending a frozen row is what recovery is for.
         """
-        async with self._turn_lock(turn_id):
+        async with self._delivery_lock(delivery_id):
             outcome = await self._complete_delivery_across_cancellation(
-                turn_id=turn_id,
+                delivery_id=delivery_id,
                 stage=stage,
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
                 edits_event_id=edits_event_id,
             )
-        return await self._finish_flush(turn_id, outcome)
+        return await self._finish_flush(delivery_id, outcome)
 
     async def _complete_delivery_across_cancellation(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         room_id: str,
         thread_id: str | None,
@@ -199,10 +199,11 @@ class ResponseDelivery:
         async def finish() -> _FlushOutcome:
             nonlocal completed
             handoff = self.handoff if stage is DeliveryStage.FINAL else None
-            handed_over = handoff.sources_for_turn(turn_id) if handoff is not None else ()
-            transaction_id = await self.store.enqueue_delivery(
-                turn_id=turn_id,
+            handed_over = handoff.sources_for_turn(delivery_id) if handoff is not None else ()
+            transaction_id = await self.store.enqueue_matrix_delivery(
+                delivery_id=delivery_id,
                 stage=stage,
+                event_type=self.event_type,
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
@@ -210,12 +211,12 @@ class ResponseDelivery:
                 settle_source_event_ids=handed_over,
             )
             if transaction_id is None:
-                logger.info("response_delivery_refused_for_ended_membership", turn_id=turn_id, stage=stage.value)
+                logger.info("matrix_delivery_refused_for_ended_membership", delivery_id=delivery_id, stage=stage.value)
                 completed = _FlushOutcome(event_id=None)
                 return completed
             if handoff is not None:
                 handoff.released(handed_over)
-            outcome = await self._flush(turn_id=turn_id, stage=stage)
+            outcome = await self._flush(delivery_id=delivery_id, stage=stage)
             if stage is DeliveryStage.FINAL and outcome.retry_required:
                 # A prior process may have attempted the placeholder without
                 # recording whether Matrix accepted it. FINAL is durably
@@ -223,8 +224,8 @@ class ResponseDelivery:
                 # delivery failure would run terminal cancellation hooks even
                 # though recovery later shows the answer. Resolve INITIAL,
                 # then retry FINAL before returning a lifecycle-visible result.
-                await self._flush(turn_id=turn_id, stage=DeliveryStage.INITIAL)
-                outcome = await self._flush(turn_id=turn_id, stage=DeliveryStage.FINAL)
+                await self._flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
+                outcome = await self._flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
             completed = outcome
             return completed
 
@@ -235,7 +236,7 @@ class ResponseDelivery:
                 raise
             return replace(completed, propagate_cancellation=cancellation)
 
-    def _transaction_id_still_deduplicates(self, claimed: OutboxDelivery) -> bool:
+    def _transaction_id_still_deduplicates(self, claimed: MatrixDelivery) -> bool:
         """Return whether resending this row can only collapse onto its own event.
 
         True in the ordinary case, and the reason recovery can resend without
@@ -280,7 +281,7 @@ class ResponseDelivery:
             return False
         return claimed.sending_device_id == self.sending_device_id
 
-    async def flush(self, *, turn_id: str, stage: DeliveryStage) -> str | None:
+    async def flush(self, *, delivery_id: str, stage: DeliveryStage) -> str | None:
         """Send one enqueued delivery, or resend the identical one.
 
         Nothing means the row is gone behind a membership fence, or this is an
@@ -293,25 +294,25 @@ class ResponseDelivery:
         asked directly, and an answer already there is adopted instead of sent
         again.
         """
-        async with self._turn_lock(turn_id):
-            outcome = await self._flush(turn_id=turn_id, stage=stage)
-        return await self._finish_flush(turn_id, outcome)
+        async with self._delivery_lock(delivery_id):
+            outcome = await self._flush(delivery_id=delivery_id, stage=stage)
+        return await self._finish_flush(delivery_id, outcome)
 
-    async def _flush(self, *, turn_id: str, stage: DeliveryStage) -> _FlushOutcome:
-        """Send one delivery while holding its turn's visible-delivery lock."""
-        claimed = await self.store.claim_delivery(turn_id=turn_id, stage=stage)
+    async def _flush(self, *, delivery_id: str, stage: DeliveryStage) -> _FlushOutcome:
+        """Send one delivery while holding its visible-delivery lock."""
+        claimed = await self.store.claim_matrix_delivery(delivery_id=delivery_id, stage=stage)
         if claimed is None:
             blocked_final = (
                 stage is DeliveryStage.FINAL
-                and await self.store.load_delivery(
-                    turn_id=turn_id,
+                and await self.store.load_matrix_delivery(
+                    delivery_id=delivery_id,
                     stage=stage,
                 )
                 is not None
             )
             logger.info(
-                "response_delivery_stage_blocked" if blocked_final else "response_delivery_row_withdrawn",
-                turn_id=turn_id,
+                "matrix_delivery_stage_blocked" if blocked_final else "matrix_delivery_row_withdrawn",
+                delivery_id=delivery_id,
                 stage=stage.value,
             )
             return _FlushOutcome(event_id=None, retry_required=blocked_final)
@@ -321,6 +322,8 @@ class ResponseDelivery:
             already_delivered = await self._delivered_before_device_changed(claimed)
             if already_delivered is not None:
                 return await self._acknowledge(claimed, already_delivered)
+            if not self.resend_after_reconciliation_miss and claimed.edits_event_id is None:
+                return _FlushOutcome(event_id=None, retry_required=True)
         # Only now, with a send actually about to happen. Writing this at claim
         # time instead loses the fact that a lookup is still owed: a room scan
         # that raises would leave the row unacknowledged but stamped with this
@@ -328,7 +331,7 @@ class ResponseDelivery:
         # and post the answer twice.
         return await self._complete_send_across_cancellation(claimed)
 
-    async def _complete_send_across_cancellation(self, claimed: OutboxDelivery) -> _FlushOutcome:
+    async def _complete_send_across_cancellation(self, claimed: MatrixDelivery) -> _FlushOutcome:
         """Retain a completed outcome while delaying cancellation until post-lock work."""
         completed: _FlushOutcome | None = None
 
@@ -344,17 +347,17 @@ class ResponseDelivery:
                 raise
             return replace(completed, propagate_cancellation=cancellation)
 
-    async def _send_and_acknowledge(self, claimed: OutboxDelivery) -> _FlushOutcome:
+    async def _send_and_acknowledge(self, claimed: MatrixDelivery) -> _FlushOutcome:
         """Finish an accepted Matrix attempt before propagating local cancellation."""
-        await self.store.record_sending_device(
-            turn_id=claimed.turn_id,
+        await self.store.record_matrix_delivery_device(
+            delivery_id=claimed.delivery_id,
             stage=claimed.stage,
             device_id=self.sending_device_id,
         )
         event_id = await self.send(claimed)
         return await self._acknowledge(claimed, event_id)
 
-    async def _acknowledge(self, claimed: OutboxDelivery, event_id: str) -> _FlushOutcome:
+    async def _acknowledge(self, claimed: MatrixDelivery, event_id: str) -> _FlushOutcome:
         """Bind the row and report whether its record needs publishing.
 
         The record commits inside the acknowledgement, so nothing else writes
@@ -390,13 +393,13 @@ class ResponseDelivery:
             await self.observe_delivered(claimed, event_id) if self.observe_delivered is not None else ()
         )
         terminal_response_event_id = claimed.edits_event_id or event_id
-        acknowledged = await self.store.acknowledge_delivery(
-            turn_id=claimed.turn_id,
+        acknowledged = await self.store.acknowledge_matrix_delivery(
+            delivery_id=claimed.delivery_id,
             stage=claimed.stage,
             event_id=event_id,
             delivered_projections=delivered_projections,
             terminal_turn=self._terminal_turn(
-                claimed.turn_id,
+                claimed.delivery_id,
                 claimed.stage,
                 terminal_response_event_id,
             ),
@@ -410,19 +413,19 @@ class ResponseDelivery:
             publish_committed_terminal=bound_terminal,
         )
 
-    async def _finish_flush(self, turn_id: str, outcome: _FlushOutcome) -> str | None:
+    async def _finish_flush(self, delivery_id: str, outcome: _FlushOutcome) -> str | None:
         """Run post-lock bookkeeping and return the visible event."""
         if (
             outcome.publish_committed_terminal
             and outcome.terminal_response_event_id is not None
             and self.terminal_turn_committed is not None
         ):
-            await self.terminal_turn_committed(turn_id, outcome.terminal_response_event_id)
+            await self.terminal_turn_committed(delivery_id, outcome.terminal_response_event_id)
         if outcome.propagate_cancellation is not None:
             raise outcome.propagate_cancellation
         return outcome.event_id
 
-    def _terminal_turn(self, turn_id: str, stage: DeliveryStage, event_id: str) -> TerminalTurnWrite | None:
+    def _terminal_turn(self, delivery_id: str, stage: DeliveryStage, event_id: str) -> TerminalTurnWrite | None:
         """Return the turn record this acknowledgement should also commit.
 
         Only for ``FINAL``. An ``INITIAL`` row is a placeholder, and binding a
@@ -431,9 +434,9 @@ class ResponseDelivery:
         """
         if stage is not DeliveryStage.FINAL or self.terminal_turn_for is None:
             return None
-        return self.terminal_turn_for(turn_id, event_id)
+        return self.terminal_turn_for(delivery_id, event_id)
 
-    async def _delivered_before_device_changed(self, claimed: OutboxDelivery) -> str | None:
+    async def _delivered_before_device_changed(self, claimed: MatrixDelivery) -> str | None:
         """Return the event a previous device's attempt left in the room, if any.
 
         Failing to find one is not the same as there not being one, and the
@@ -448,8 +451,8 @@ class ResponseDelivery:
         """
         if self.resolve_delivered is None:
             logger.warning(
-                "response_delivery_resend_unverified",
-                turn_id=claimed.turn_id,
+                "matrix_delivery_resend_unverified",
+                delivery_id=claimed.delivery_id,
                 stage=claimed.stage.value,
                 room_id=claimed.room_id,
                 claimed_by_device=claimed.sending_device_id,
@@ -458,8 +461,8 @@ class ResponseDelivery:
             return None
         already_delivered = await self.resolve_delivered(claimed)
         logger.info(
-            "response_delivery_device_changed",
-            turn_id=claimed.turn_id,
+            "matrix_delivery_device_changed",
+            delivery_id=claimed.delivery_id,
             stage=claimed.stage.value,
             room_id=claimed.room_id,
             claimed_by_device=claimed.sending_device_id,
@@ -493,19 +496,19 @@ class ResponseDelivery:
         # The scan therefore advances past every row it has visited.
         cursor: tuple[int, str, str] | None = None
         while True:
-            batch = await self.store.unacknowledged_deliveries(after=cursor)
+            batch = await self.store.unacknowledged_matrix_deliveries(event_type=self.event_type, after=cursor)
             if not batch:
                 return RecoveryOutcome(recovered=recovered, failed=failed)
-            cursor = (batch[-1].created_at_ns, batch[-1].turn_id, batch[-1].stage.value)
+            cursor = (batch[-1].created_at_ns, batch[-1].delivery_id, batch[-1].stage.value)
             for delivery in batch:
                 try:
-                    async with self._turn_lock(delivery.turn_id):
-                        outcome = await self._flush(turn_id=delivery.turn_id, stage=delivery.stage)
-                    sent = await self._finish_flush(delivery.turn_id, outcome)
+                    async with self._delivery_lock(delivery.delivery_id):
+                        outcome = await self._flush(delivery_id=delivery.delivery_id, stage=delivery.stage)
+                    sent = await self._finish_flush(delivery.delivery_id, outcome)
                 except Exception:
                     logger.exception(
-                        "response_delivery_recovery_failed",
-                        turn_id=delivery.turn_id,
+                        "matrix_delivery_recovery_failed",
+                        delivery_id=delivery.delivery_id,
                         stage=delivery.stage.value,
                         room_id=delivery.room_id,
                     )
@@ -526,9 +529,9 @@ class ResponseDelivery:
 
 __all__ = [
     "DeliveryStage",
+    "MatrixDeliveryWorker",
     "RecoveryOutcome",
     "ResolveDelivered",
-    "ResponseDelivery",
     "SendDelivery",
     "TurnHandoff",
 ]

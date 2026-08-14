@@ -317,10 +317,10 @@ class ConversationPage:
 
 
 @dataclass(frozen=True, slots=True)
-class OutboxDelivery:
+class MatrixDelivery:
     """One claimed, immutable Matrix delivery."""
 
-    turn_id: str
+    delivery_id: str
     stage: DeliveryStage
     room_id: str
     thread_id: str | None
@@ -331,6 +331,7 @@ class OutboxDelivery:
     # The scan key recovery pages on. Without it a pass that fails a whole page
     # re-reads the same page forever and never reaches what is behind it.
     created_at_ns: int
+    event_type: str = "m.room.message"
     # Whether this row has already been offered to the homeserver. Together
     # with the device below it answers the only question a resend needs: can
     # the frozen transaction ID still collapse onto the event a previous

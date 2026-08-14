@@ -653,17 +653,17 @@ async def test_user_stop_fences_waiting_approval_before_terminal_turn_record(tmp
 
     async def acknowledge_stop_edit(request: EditTextRequest) -> bool:
         assert request.delivery_turn_id == "$source"
-        await runner.deps.approval_store.enqueue_delivery(
-            turn_id="$source",
+        await runner.deps.approval_store.enqueue_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             room_id="!room:localhost",
             thread_id="$thread",
             payload={"body": "Stopped by user."},
             edits_event_id="$waiting",
         )
-        await runner.deps.approval_store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL)
-        await runner.deps.approval_store.acknowledge_delivery(
-            turn_id="$source",
+        await runner.deps.approval_store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+        await runner.deps.approval_store.acknowledge_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$waiting",
             delivered_projections=(),
@@ -720,22 +720,22 @@ async def test_user_stop_preserves_a_claimed_frozen_final_until_success_recovery
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
         payload={"body": "finished", "formatted_body": "finished"},
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
 
     acknowledge_final = False
 
     async def recover_final() -> None:
         if acknowledge_final:
-            await store.acknowledge_delivery(
-                turn_id="$source",
+            await store.acknowledge_matrix_delivery(
+                delivery_id="$source",
                 stage=DeliveryStage.FINAL,
                 event_id="$final",
                 delivered_projections=(),
@@ -806,15 +806,15 @@ async def test_user_stop_retry_preserves_success_completed_by_source_worker(tmp_
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
         payload={"body": "finished", "formatted_body": "finished"},
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
 
     finalize_stop = AsyncMock(return_value=True)
     lifecycle = MagicMock(finalize=AsyncMock())
@@ -830,8 +830,8 @@ async def test_user_stop_retry_preserves_success_completed_by_source_worker(tmp_
             Mock(return_value=True),
             finalize_stop,
         )
-        await store.acknowledge_delivery(
-            turn_id="$source",
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$final",
             delivered_projections=(),
@@ -896,15 +896,15 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
         payload={"body": "finished", "formatted_body": "finished"},
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
 
     lifecycle = MagicMock(finalize=AsyncMock())
     finalize_stopped_response = AsyncMock(return_value=True)
@@ -925,8 +925,8 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
                 on_current_stop_finalized,
             )
 
-        await store.acknowledge_delivery(
-            turn_id="$source",
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$final-edit",
             delivered_projections=(),
@@ -992,8 +992,8 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
         expected_runtime_generation=claimed.runtime_generation,
     )
     assert failing is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
@@ -1006,9 +1006,9 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
         },
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-    await store.acknowledge_delivery(
-        turn_id="$source",
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+    await store.acknowledge_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         event_id="$final-edit",
         delivered_projections=(),
@@ -1913,19 +1913,19 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
         payload={"body": "finished", "formatted_body": "finished"},
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
 
     async def acknowledge_frozen_final() -> None:
-        await store.acknowledge_delivery(
-            turn_id="$source",
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$final",
             delivered_projections=(),
@@ -1975,8 +1975,8 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
@@ -1995,9 +1995,9 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
         },
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-    await store.acknowledge_delivery(
-        turn_id="$source",
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+    await store.acknowledge_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         event_id="$final",
         delivered_projections=(),
@@ -2041,17 +2041,17 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
         failure_reason="Tool approval continuation failed safely.",
     )
     assert await store.create_approval_continuation(continuation) == continuation
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
         payload={"body": "Tool approval continuation failed safely."},
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-    await store.acknowledge_delivery(
-        turn_id="$source",
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+    await store.acknowledge_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         event_id="$failure-edit",
         delivered_projections=(),
@@ -2094,8 +2094,8 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
     assert claimed is not None
 
     async def acknowledge_then_cancel(*_args: object, **_kwargs: object) -> tuple[object, object]:
-        await store.enqueue_delivery(
-            turn_id="$source",
+        await store.enqueue_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             room_id="!room:localhost",
             thread_id="$thread",
@@ -2105,9 +2105,9 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
             },
             edits_event_id="$waiting",
         )
-        assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-        await store.acknowledge_delivery(
-            turn_id="$source",
+        assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$final",
             delivered_projections=(),
@@ -2157,8 +2157,8 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
     assert await store.create_approval_continuation(continuation) == continuation
 
     async def acknowledge_then_cancel(claimed: ApprovalContinuation, **_kwargs: object) -> None:
-        await store.enqueue_delivery(
-            turn_id="$source",
+        await store.enqueue_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             room_id="!room:localhost",
             thread_id="$thread",
@@ -2169,9 +2169,9 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
             edits_event_id="$waiting",
         )
         assert claimed.state == "claimed"
-        assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
-        await store.acknowledge_delivery(
-            turn_id="$source",
+        assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
             stage=DeliveryStage.FINAL,
             event_id="$final",
             delivered_projections=(),
@@ -2231,15 +2231,15 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    await store.enqueue_delivery(
-        turn_id="$source",
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
         payload={"body": "finished", "formatted_body": "finished"},
         edits_event_id="$waiting",
     )
-    assert await store.claim_delivery(turn_id="$source", stage=DeliveryStage.FINAL) is not None
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
 
     with patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock()):
         event_id = await runner._recover_claimed_approval_lifecycle(
@@ -2253,7 +2253,7 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
     assert retained.state == "claimed"
     assert retained.runtime_generation == runner.deps.approval_runtime_generation
     assert await store.is_pending("$source")
-    final = await store.load_delivery(turn_id="$source", stage=DeliveryStage.FINAL)
+    final = await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     assert final is not None
     assert final.attempted
     assert final.acknowledged_event_id is None

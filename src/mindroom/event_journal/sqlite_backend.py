@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 
+from .migrations import finish_matrix_delivery_migration, prepare_matrix_delivery_migration
 from .offloading import ThreadOffload, settled
 from .schema import SQLITE_DIALECT, render, schema_statements
 from .schema_migrations import validate_interactive_question_columns
@@ -211,8 +212,11 @@ class SqliteBackend:
             connection.close()
             raise
         connection.execute("BEGIN IMMEDIATE")
+        transaction = _SqliteTransaction(connection)
+        migrate_approvals = prepare_matrix_delivery_migration(transaction, postgres=False)
         for statement in schema_statements(SQLITE_DIALECT):
             connection.execute(statement)
+        finish_matrix_delivery_migration(transaction, migrate_approvals=migrate_approvals)
         connection.execute("COMMIT")
         return connection
 

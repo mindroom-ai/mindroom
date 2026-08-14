@@ -67,11 +67,11 @@ from mindroom.matrix.sync_loop import (
     run_matrix_sync_forever,
 )
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
+from mindroom.matrix_delivery import TurnHandoff
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
-from mindroom.response_delivery import TurnHandoff
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
@@ -1502,7 +1502,7 @@ class AgentBot:
         if room_member_join_hook_plan.emit_state:
             await self._emit_room_member_joined_sync_state_hooks(response)
 
-    async def _recover_unacknowledged_deliveries(self) -> bool:
+    async def _recover_unacknowledged_matrix_deliveries(self) -> bool:
         """Resend answers this bot could not confirm reaching Matrix.
 
         After the first sync response, not before it. A send into an encrypted
@@ -1558,7 +1558,7 @@ class AgentBot:
         try:
             while not self._sync_shutting_down:
                 self._delivery_recovery_wake.clear()
-                complete = await self._recover_unacknowledged_deliveries()
+                complete = await self._recover_unacknowledged_matrix_deliveries()
                 if complete:
                     retry_delay = _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS
                     if not self._delivery_recovery_wake.is_set():

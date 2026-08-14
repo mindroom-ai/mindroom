@@ -22,8 +22,9 @@ from mindroom.tool_approval import (
     ToolApprovalCall,
     evaluate_tool_approval,
     expire_continuation_approval_cards,
+    prepare_suspended_tool_approval,
+    publish_suspended_tool_approvals,
     resolve_tool_approval_approver,
-    send_suspended_tool_approval,
 )
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.event_journal import OutboxDelivery, PrincipalStore
+    from mindroom.event_journal import MatrixDelivery, PrincipalStore
     from mindroom.response_turn import PausedAttempt
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -111,17 +112,6 @@ class ApprovalResponseCoordinator:
             raise RuntimeError(msg)
         return created
 
-    async def activate(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
-        """Expose one generation after every human-gated card is durable."""
-        activated = await self.store.activate_approval_continuation(
-            continuation.approval_id,
-            expected_generation=continuation.generation,
-        )
-        if activated is None:
-            msg = f"Could not activate approval continuation {continuation.approval_id!r}"
-            raise RuntimeError(msg)
-        return activated
-
     async def plan_pause(
         self,
         identified: tuple[tuple[ToolExecution, str, str, str], ...],
@@ -184,10 +174,11 @@ class ApprovalResponseCoordinator:
     ) -> None:
         """Publish every human-gated card already linked by durable identity."""
         config = self.config()
+        cards = []
         for index, (tool, call) in enumerate(zip(plan.tools, plan.calls, strict=True)):
             if call.decision is not None:
                 continue
-            sent = await send_suspended_tool_approval(
+            card = await prepare_suspended_tool_approval(
                 ToolApprovalCall(
                     config=config,
                     runtime_paths=self.runtime_paths,
@@ -204,8 +195,25 @@ class ApprovalResponseCoordinator:
                 tool_call_id=call.tool_call_id,
                 expires_at_ns=call.expires_at_ns,
             )
-            if sent is None:
+            if card is None:
                 raise RuntimeError(failure_reason)
+            cards.append(card)
+        if cards:
+            if not await publish_suspended_tool_approvals(
+                continuation_principal_id=self.store.principal_id,
+                continuation_id=continuation.approval_id,
+                continuation_generation=continuation.generation,
+                cards=tuple(cards),
+            ):
+                raise RuntimeError(failure_reason)
+        elif (
+            await self.store.activate_approval_continuation(
+                continuation.approval_id,
+                expected_generation=continuation.generation,
+            )
+            is None
+        ):
+            raise RuntimeError(failure_reason)
 
     async def publish_generation(
         self,
@@ -223,7 +231,10 @@ class ApprovalResponseCoordinator:
                 target=target,
                 failure_reason=failure_reason,
             )
-            continuation = await self.activate(continuation)
+            refreshed = await self.store.approval_continuation(continuation.approval_id)
+            if refreshed is None:
+                raise RuntimeError(failure_reason)
+            continuation = refreshed
         if continuation.state == "ready":
             self.retry_sources(continuation.source_event_ids)
 
@@ -328,7 +339,7 @@ class ApprovalResponseCoordinator:
         continuation: ApprovalContinuation,
         *,
         recover: bool = False,
-    ) -> OutboxDelivery | None:
+    ) -> MatrixDelivery | None:
         """Return FINAL debt produced by a completed Agno continuation, not failure settlement."""
         delivery = await self.final_delivery(continuation, recover=recover)
         if delivery is None:
@@ -347,17 +358,17 @@ class ApprovalResponseCoordinator:
         continuation: ApprovalContinuation,
         *,
         recover: bool = False,
-    ) -> OutboxDelivery | None:
+    ) -> MatrixDelivery | None:
         """Return the continuation's frozen FINAL, optionally retrying its delivery."""
         outbox = self.delivery_gateway.deps.outbox
-        delivery = await outbox.load_delivery(
-            turn_id=continuation.source_event_ids[0],
+        delivery = await outbox.load_matrix_delivery(
+            delivery_id=continuation.source_event_ids[0],
             stage=DeliveryStage.FINAL,
         )
         if recover and delivery is not None and delivery.acknowledged_event_id is None:
             await self.delivery_gateway.recover_deliveries()
-            delivery = await outbox.load_delivery(
-                turn_id=continuation.source_event_ids[0],
+            delivery = await outbox.load_matrix_delivery(
+                delivery_id=continuation.source_event_ids[0],
                 stage=DeliveryStage.FINAL,
             )
         return delivery

@@ -16,14 +16,12 @@ from mindroom.approval_manager import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     DEFAULT_SHUTDOWN_REASON,
     ApprovalActionResult,
-    ApprovalCardLocator,
-    ApprovalRoomProvider,
     ApprovalStartupSweep,
     ContinuationReadyHandler,
-    MatrixEventEditor,
-    MatrixEventSender,
+    MatrixDeliveryResolver,
+    MatrixDeliverySender,
+    MatrixEventPreparer,
     SendingDeviceProvider,
-    SentApprovalEvent,
     ToolApprovalTransportError,
     TransportSenderProvider,
 )
@@ -39,7 +37,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
-    from mindroom.event_journal import ApprovalView
+    from mindroom.event_journal import ApprovalCardReservation, PrincipalStore
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
@@ -47,7 +45,6 @@ __all__ = [
     "ApprovalActionResult",
     "ApprovalStartupSweep",
     "MatrixApprovalAction",
-    "SentApprovalEvent",
     "ToolApprovalCall",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
@@ -56,9 +53,10 @@ __all__ = [
     "handle_matrix_approval_action",
     "initialize_approval_runtime",
     "is_process_active_approval_card",
+    "prepare_suspended_tool_approval",
+    "publish_suspended_tool_approvals",
     "recover_approval_cards_on_startup",
     "resolve_tool_approval_approver",
-    "send_suspended_tool_approval",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
 ]
@@ -223,7 +221,7 @@ async def evaluate_tool_approval(
     return result, timeout_seconds
 
 
-async def send_suspended_tool_approval(
+async def prepare_suspended_tool_approval(
     call: ToolApprovalCall,
     *,
     approval_id: str,
@@ -231,13 +229,13 @@ async def send_suspended_tool_approval(
     continuation_generation: int,
     tool_call_id: str,
     expires_at_ns: int,
-) -> SentApprovalEvent | None:
-    """Send a durable card for a paused Agno run without retaining a waiter."""
+) -> ApprovalCardReservation | None:
+    """Prepare one frozen card for an atomic continuation reservation."""
     manager = approval_manager.get_approval_store()
     approver = resolve_tool_approval_approver(call.config, call.runtime_paths, call.requester_id)
     if manager is None or call.room_id is None or call.requester_id is None or approver is None:
         return None
-    return await manager.create_detached_approval(
+    return await manager.prepare_detached_approval(
         approval_id=approval_id,
         continuation_id=continuation_id,
         continuation_generation=continuation_generation,
@@ -250,6 +248,25 @@ async def send_suspended_tool_approval(
         expires_at_ns=expires_at_ns,
         agent_name=call.agent_name,
         thread_id=call.thread_id,
+    )
+
+
+async def publish_suspended_tool_approvals(
+    *,
+    continuation_principal_id: str,
+    continuation_id: str,
+    continuation_generation: int,
+    cards: tuple[ApprovalCardReservation, ...],
+) -> bool:
+    """Atomically own one complete card generation, then flush its delivery debt."""
+    manager = approval_manager.get_approval_store()
+    if manager is None:
+        return False
+    return await manager.reserve_and_publish(
+        continuation_principal_id=continuation_principal_id,
+        continuation_id=continuation_id,
+        continuation_generation=continuation_generation,
+        cards=cards,
     )
 
 
@@ -284,25 +301,23 @@ def is_process_active_approval_card(card_event_id: str) -> bool:
 def initialize_approval_runtime(
     runtime_paths: RuntimePaths,
     *,
-    sender: MatrixEventSender,
-    editor: MatrixEventEditor,
-    cards: ApprovalView | None,
-    approval_room_ids: ApprovalRoomProvider,
+    prepare_event: MatrixEventPreparer,
+    send_delivery: MatrixDeliverySender,
+    resolve_delivery: MatrixDeliveryResolver,
+    cards: PrincipalStore | None,
     transport_sender: TransportSenderProvider,
     sending_device: SendingDeviceProvider,
-    locate_card: ApprovalCardLocator,
     continuation_ready: ContinuationReadyHandler | None = None,
 ) -> None:
     """Initialize the approval runtime behind the public approval seam."""
     approval_manager.initialize_approval_store(
         runtime_paths,
-        sender=sender,
-        editor=editor,
+        prepare_event=prepare_event,
+        send_delivery=send_delivery,
+        resolve_delivery=resolve_delivery,
         cards=cards,
-        approval_room_ids=approval_room_ids,
         transport_sender=transport_sender,
         sending_device=sending_device,
-        locate_card=locate_card,
         continuation_ready=continuation_ready,
     )
 

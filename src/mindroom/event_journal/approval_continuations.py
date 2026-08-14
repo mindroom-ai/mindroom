@@ -594,9 +594,9 @@ def request_failure(
         WHERE principal_id = ? AND approval_id = ? AND state = ? AND generation = ?
           AND runtime_generation IS NOT DISTINCT FROM ?
           AND NOT EXISTS (
-            SELECT 1 FROM response_outbox AS final
+            SELECT 1 FROM matrix_delivery_outbox AS final
             WHERE final.principal_id = approval_continuations.principal_id
-              AND final.turn_id = (
+              AND final.delivery_id = (
                 SELECT source.event_id FROM approval_continuation_sources AS source
                 WHERE source.principal_id = approval_continuations.principal_id
                   AND source.approval_id = approval_continuations.approval_id
@@ -630,8 +630,8 @@ def finish(
         return False
     delivered = transaction.fetchone(
         """
-        SELECT 1 AS present FROM response_outbox
-        WHERE principal_id = ? AND turn_id = ? AND stage = ?
+        SELECT 1 AS present FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
           AND acknowledged_event_id IS NOT NULL
         """,
         (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
@@ -659,8 +659,8 @@ def discard_unavailable(
         return False
     delivered = transaction.fetchone(
         """
-        SELECT 1 AS present FROM response_outbox
-        WHERE principal_id = ? AND turn_id = ? AND stage = ?
+        SELECT 1 AS present FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
           AND acknowledged_event_id IS NOT NULL
         """,
         (notice_principal_id, unavailable_notice_turn_id(approval_id), DeliveryStage.FINAL.value),

@@ -52,8 +52,8 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import (
         DeliveryAcknowledgement,
-        OutboxDelivery,
-        OutboxView,
+        MatrixDelivery,
+        MatrixDeliveryView,
         ProjectedEvent,
         TerminalTurnWrite,
     )
@@ -87,14 +87,15 @@ class _WatchedOutbox:
     enqueues and claims observable against the model runs between them.
     """
 
-    inner: OutboxView
+    inner: MatrixDeliveryView
     timeline: list[str]
 
-    async def enqueue_delivery(
+    async def enqueue_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
+        event_type: str = "m.room.message",
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
@@ -103,9 +104,10 @@ class _WatchedOutbox:
     ) -> str | None:
         """Record intent, noting the stage on the timeline first."""
         self.timeline.append(f"enqueue:{stage.value}")
-        return await self.inner.enqueue_delivery(
-            turn_id=turn_id,
+        return await self.inner.enqueue_matrix_delivery(
+            delivery_id=delivery_id,
             stage=stage,
+            event_type=event_type,
             room_id=room_id,
             thread_id=thread_id,
             payload=payload,
@@ -113,20 +115,20 @@ class _WatchedOutbox:
             settle_source_event_ids=settle_source_event_ids,
         )
 
-    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def claim_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Freeze one delivery, noting the claim on the timeline first."""
         self.timeline.append(f"claim:{stage.value}")
-        return await self.inner.claim_delivery(turn_id=turn_id, stage=stage)
+        return await self.inner.claim_matrix_delivery(delivery_id=delivery_id, stage=stage)
 
-    async def record_sending_device(
+    async def record_matrix_delivery_device(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         device_id: str | None,
     ) -> None:
         """Record the device namespace this delivery is about to send under."""
-        await self.inner.record_sending_device(turn_id=turn_id, stage=stage, device_id=device_id)
+        await self.inner.record_matrix_delivery_device(delivery_id=delivery_id, stage=stage, device_id=device_id)
 
     async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
         """Answer the membership check from the real store, off the timeline.
@@ -139,36 +141,37 @@ class _WatchedOutbox:
         """
         return await self.inner.turn_membership_is_current(turn_id=turn_id, room_id=room_id)
 
-    async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
-        return await self.inner.load_delivery(turn_id=turn_id, stage=stage)
+        return await self.inner.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
 
-    async def acknowledge_delivery(
+    async def acknowledge_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
         terminal_turn: TerminalTurnWrite | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, and the turn it completes."""
-        return await self.inner.acknowledge_delivery(
-            turn_id=turn_id,
+        return await self.inner.acknowledge_matrix_delivery(
+            delivery_id=delivery_id,
             stage=stage,
             event_id=event_id,
             delivered_projections=delivered_projections,
             terminal_turn=terminal_turn,
         )
 
-    async def unacknowledged_deliveries(
+    async def unacknowledged_matrix_deliveries(
         self,
         *,
+        event_type: str = "m.room.message",
         limit: int = 256,
         after: tuple[int, str, str] | None = None,
-    ) -> tuple[OutboxDelivery, ...]:
+    ) -> tuple[MatrixDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first."""
-        return await self.inner.unacknowledged_deliveries(limit=limit, after=after)
+        return await self.inner.unacknowledged_matrix_deliveries(event_type=event_type, limit=limit, after=after)
 
 
 @dataclass
@@ -211,9 +214,9 @@ class _Turn:
     homeserver: _Homeserver
     timeline: list[str]
 
-    async def final(self) -> OutboxDelivery | None:
+    async def final(self) -> MatrixDelivery | None:
         """Return the turn's durable final delivery, without claiming it."""
-        return await self.outbox.load_delivery(turn_id=_SOURCE, stage=DeliveryStage.FINAL)
+        return await self.outbox.load_matrix_delivery(delivery_id=_SOURCE, stage=DeliveryStage.FINAL)
 
     @property
     def attempts(self) -> int:
@@ -237,7 +240,7 @@ def _last_index(timeline: list[str], entry: str) -> int:
     return len(timeline) - 1 - timeline[::-1].index(entry)
 
 
-def _last_answer(delivery: OutboxDelivery | None) -> str:
+def _last_answer(delivery: MatrixDelivery | None) -> str:
     """Return the body the durable final delivery would put in the room."""
     assert delivery is not None, "the turn recorded no final delivery"
     return _visible_body(delivery.payload)

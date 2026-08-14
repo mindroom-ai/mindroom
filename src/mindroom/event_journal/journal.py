@@ -270,33 +270,23 @@ def _advance_membership_epoch(
     # can do is present the same transaction again and collapse onto the same
     # event. That converges on exactly one visible answer whether or not the
     # first attempt landed, which is the property this table exists for.
-    transaction.execute(
-        """
-        DELETE FROM response_outbox
-        WHERE principal_id = ? AND room_id = ? AND acknowledged_event_id IS NULL AND attempted = 0
-        """,
-        (principal_id, room_id),
-    )
-    # An approval card goes the other way from an attempted delivery, and the
-    # asymmetry is the same one the recovery pass already makes: a lost answer
-    # is unacceptable, so the outbox risks a duplicate; a card is a question,
-    # and asking it twice gets one answer to two prompts. Nothing here can
-    # duplicate anything either way, because the turn that would have posted a
-    # second card is settled just below rather than left to run again.
-    #
-    # So the only question is whether these rows are worth keeping, and they
-    # are not. Every read of a card is filtered to the room's current
-    # membership -- deliberately, because expiring or redelivering one would
-    # edit an event in a conversation this bot has already stopped trusting,
-    # answering a question nobody in the new membership asked. Kept, they are
-    # rows with no reader and no other remover, still answering writes keyed on
-    # the card's event rather than on the epoch. Dropped, they simply stop
-    # existing at the same moment they stopped meaning anything.
     approvals.fail_continuations_for_departed_card_owner(
         transaction,
         principal_id,
         room_id=room_id,
         reason="Approval transport left the room.",
+    )
+    transaction.execute(
+        """
+        DELETE FROM matrix_delivery_outbox AS delivery
+        WHERE principal_id = ? AND room_id = ? AND acknowledged_event_id IS NULL AND attempted = 0
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_cards AS cards
+              WHERE cards.principal_id = delivery.principal_id
+                AND cards.delivery_id = delivery.delivery_id
+          )
+        """,
+        (principal_id, room_id),
     )
     # Approval cards are authored by the router principal, while the paused
     # run belongs to the responding entity principal. Preserve the router's
@@ -306,10 +296,6 @@ def _advance_membership_epoch(
         principal_id,
         room_id=room_id,
         reason="Requesting agent left the room.",
-    )
-    transaction.execute(
-        "DELETE FROM approval_cards WHERE principal_id = ? AND room_id = ?",
-        (principal_id, room_id),
     )
     # A paused run owns exactly the source rows this fence is about to settle.
     # Delete the aggregate first so no durable continuation survives with no
@@ -1012,9 +998,9 @@ def _pending_rows(
                     continuations.runtime_generation IS NULL
                     OR continuations.runtime_generation <> ?
                     OR EXISTS (
-                      SELECT 1 FROM response_outbox AS approval_final
+                      SELECT 1 FROM matrix_delivery_outbox AS approval_final
                       WHERE approval_final.principal_id = events.principal_id
-                        AND approval_final.turn_id = events.event_id
+                        AND approval_final.delivery_id = events.event_id
                         AND approval_final.stage = 'final'
                     )
                   )

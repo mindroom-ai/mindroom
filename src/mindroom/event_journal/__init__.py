@@ -21,7 +21,7 @@ from .approval_continuations import (
     ApprovalMemoryTurn,
     unavailable_notice_turn_id,
 )
-from .approvals import RecordedApprovalDecision, StoredApprovalCard
+from .approvals import ApprovalCardReservation, RecordedApprovalDecision, StoredApprovalCard
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership import MembershipFence, MembershipView
 from .models import (
@@ -41,7 +41,7 @@ from .models import (
     HydrationPolicy,
     InboundEvent,
     JournalEvent,
-    OutboxDelivery,
+    MatrixDelivery,
     PendingPage,
     RefreshRequest,
     SemanticConsumer,
@@ -52,12 +52,11 @@ from .projection import ProjectedEvent, replacement_target, thread_root, visible
 from .store import EventJournalStore, PrincipalStore, TurnRecordStore
 from .views import (
     AdmissionView,
-    ApprovalView,
     ConversationReadView,
     DispatchView,
     HistoryRecoveryRecordView,
     HydrationView,
-    OutboxView,
+    MatrixDeliveryView,
     PendingTurnView,
     RelationView,
     ReplayView,
@@ -68,10 +67,10 @@ __all__ = [
     "AdmissionResult",
     "AdmissionView",
     "ApprovalCall",
+    "ApprovalCardReservation",
     "ApprovalContinuation",
     "ApprovalDecision",
     "ApprovalMemoryTurn",
-    "ApprovalView",
     "ConversationCursor",
     "ConversationPage",
     "ConversationReadView",
@@ -94,10 +93,10 @@ __all__ = [
     "InboundEvent",
     "InteractiveSelection",
     "JournalEvent",
+    "MatrixDelivery",
+    "MatrixDeliveryView",
     "MembershipFence",
     "MembershipView",
-    "OutboxDelivery",
-    "OutboxView",
     "PendingPage",
     "PendingTurnView",
     "PrincipalStore",

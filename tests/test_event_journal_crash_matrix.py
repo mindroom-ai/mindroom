@@ -37,12 +37,12 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal.store import _DEFAULT_UNACKNOWLEDGED_LIMIT as _UNACKNOWLEDGED_BATCH
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
+from mindroom.matrix_delivery import MatrixDeliveryWorker, TurnHandoff
 from mindroom.pending_event_worker import PendingEventWorker
-from mindroom.response_delivery import ResponseDelivery, TurnHandoff
 from tests.conftest import CrashError, DiesAfterAcknowledgement, DiesAfterNextWriteCommit, ignore_delivered_projection
 
 if TYPE_CHECKING:
-    from mindroom.event_journal import JournalEvent, OutboxDelivery, OutboxView, PrincipalStore
+    from mindroom.event_journal import JournalEvent, MatrixDelivery, MatrixDeliveryView, PrincipalStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -82,7 +82,7 @@ class FakeHomeserver:
     fail_sends_until: int = 0
     lose_acknowledgement: bool = False
 
-    async def send(self, delivery: OutboxDelivery) -> str:
+    async def send(self, delivery: MatrixDelivery) -> str:
         """Accept one delivery, collapsing a transaction ID this device reused."""
         self.sends += 1
         if self.sends <= self.fail_sends_until:
@@ -97,7 +97,7 @@ class FakeHomeserver:
         if event_id is None:
             event_id = f"$sent{len(self.room_events)}"
             self.events[key] = event_id
-            self.room_events.append((delivery.turn_id, event_id))
+            self.room_events.append((delivery.delivery_id, event_id))
             self.accepted_stages.append(delivery.stage)
         if self.lose_acknowledgement:
             self.lose_acknowledgement = False
@@ -105,7 +105,7 @@ class FakeHomeserver:
             raise CrashError(msg)
         return event_id
 
-    async def find_delivered(self, delivery: OutboxDelivery) -> str | None:
+    async def find_delivered(self, delivery: MatrixDelivery) -> str | None:
         """Return the answer this turn already has in the room, by scanning for it.
 
         Stands in for the backward room-history scan the gateway runs, and
@@ -113,9 +113,9 @@ class FakeHomeserver:
         for one.
         """
         self.room_scans += 1
-        found = [event_id for turn_id, event_id in self.room_events if turn_id == delivery.turn_id]
+        found = [event_id for turn_id, event_id in self.room_events if turn_id == delivery.delivery_id]
         if len(found) > 1:
-            msg = f"turn {delivery.turn_id!r} already has {len(found)} visible answers"
+            msg = f"turn {delivery.delivery_id!r} already has {len(found)} visible answers"
             raise AssertionError(msg)
         return next(iter(found), None)
 
@@ -142,14 +142,14 @@ class TurnRuntime:
     crash_after_acknowledgement: bool = False
 
     @property
-    def delivery(self) -> ResponseDelivery:
+    def delivery(self) -> MatrixDeliveryWorker:
         """Return a fresh delivery view, as a restart would.
 
         The device is read from the homeserver each time rather than held, so
         a test that re-logs in gets a delivery bound to the new device exactly
         as a restarted process would.
         """
-        return ResponseDelivery(
+        return MatrixDeliveryWorker(
             store=self.store,
             send=self.homeserver.send,
             observe_delivered=ignore_delivered_projection,
@@ -157,7 +157,7 @@ class TurnRuntime:
             resolve_delivered=self.homeserver.find_delivered,
         )
 
-    def _outbox(self) -> OutboxView:
+    def _outbox(self) -> MatrixDeliveryView:
         """Return the outbox this attempt writes through, crashes and all.
 
         The enqueue crash sits at the backend's commit, not at the store call
@@ -169,7 +169,7 @@ class TurnRuntime:
         principal = EventJournalStore(backend=cast("Any", self.crashing_backend)).principal(PRINCIPAL)
         if not self.crash_after_acknowledgement:
             return principal
-        return cast("OutboxView", DiesAfterAcknowledgement(principal))
+        return cast("MatrixDeliveryView", DiesAfterAcknowledgement(principal))
 
     async def handle(self, event: JournalEvent) -> bool:
         """Run one turn: model, the durable handoff, then claim and send.
@@ -184,7 +184,7 @@ class TurnRuntime:
             msg = "crashed after the model finished"
             raise CrashError(msg)
 
-        await ResponseDelivery(
+        await MatrixDeliveryWorker(
             store=self._outbox(),
             send=self.homeserver.send,
             observe_delivered=ignore_delivered_projection,
@@ -192,7 +192,7 @@ class TurnRuntime:
             resolve_delivered=self.homeserver.find_delivered,
             handoff=_SETTLE_THE_SOURCE,
         ).deliver(
-            turn_id=event.event_id,
+            delivery_id=event.event_id,
             stage=DeliveryStage.FINAL,
             room_id=event.room_id,
             thread_id=event.thread_id,
@@ -249,7 +249,7 @@ async def _forget_the_sending_device(runtime: TurnRuntime) -> None:
     """
     await runtime.crashing_backend.inner.write(
         lambda transaction: transaction.execute(
-            "UPDATE response_outbox SET sending_device_id = NULL WHERE principal_id = ?",
+            "UPDATE matrix_delivery_outbox SET sending_device_id = NULL WHERE principal_id = ?",
             (PRINCIPAL,),
         ),
     )
@@ -330,7 +330,7 @@ class TestCrashMatrix:
         runtime.crash_after_model = True
         await runtime.worker().drain_once()
 
-        assert await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL) is None
+        assert await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL) is None
 
         runtime.crash_after_model = False
         await runtime.worker().drain_once()
@@ -352,7 +352,7 @@ class TestCrashMatrix:
         runtime.crash_after_enqueue = True
         await runtime.worker().drain_once()
 
-        stored = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        stored = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.acknowledged_event_id is None
         assert runtime.homeserver.sends == 0
@@ -371,21 +371,21 @@ class TestCrashMatrix:
     ) -> None:
         """The claim is committed, so recovery resends the identical payload."""
         await admit(runtime.store)
-        await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
             payload={"msgtype": "m.text", "body": "claimed"},
         )
-        claimed = await runtime.store.claim_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        claimed = await runtime.store.claim_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert claimed is not None
 
         recovered = (await runtime.delivery.recover()).recovered
 
         assert recovered == 1
         assert runtime.homeserver.visible_messages == 1
-        stored = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        stored = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.payload["body"] == "claimed"
 
@@ -448,8 +448,8 @@ class TestRecoveryIsComplete:
         """A bound that stops at one page leaves answers permanently unsent."""
         count = _UNACKNOWLEDGED_BATCH + 1
         for index in range(count):
-            await runtime.store.enqueue_delivery(
-                turn_id=f"turn-{index:04d}",
+            await runtime.store.enqueue_matrix_delivery(
+                delivery_id=f"turn-{index:04d}",
                 stage=DeliveryStage.FINAL,
                 room_id=ROOM,
                 thread_id=None,
@@ -460,7 +460,7 @@ class TestRecoveryIsComplete:
 
         assert recovered == count
         assert runtime.homeserver.visible_messages == count
-        assert await runtime.store.unacknowledged_deliveries() == ()
+        assert await runtime.store.unacknowledged_matrix_deliveries() == ()
 
     async def test_a_whole_failing_page_does_not_starve_what_is_behind_it(
         self,
@@ -474,8 +474,8 @@ class TestRecoveryIsComplete:
         """
         count = _UNACKNOWLEDGED_BATCH + 1
         for index in range(count):
-            await runtime.store.enqueue_delivery(
-                turn_id=f"turn-{index:04d}",
+            await runtime.store.enqueue_matrix_delivery(
+                delivery_id=f"turn-{index:04d}",
                 stage=DeliveryStage.FINAL,
                 room_id=ROOM,
                 thread_id=None,
@@ -498,8 +498,8 @@ class TestRecoveryIsComplete:
         first failure makes every later answer unreachable.
         """
         for index in range(2):
-            await runtime.store.enqueue_delivery(
-                turn_id=f"turn-{index}",
+            await runtime.store.enqueue_matrix_delivery(
+                delivery_id=f"turn-{index}",
                 stage=DeliveryStage.FINAL,
                 room_id=ROOM,
                 thread_id=None,
@@ -528,19 +528,19 @@ class TestModelIsNotRerun:
         claimed payload wins and stays visible.
         """
         await admit(runtime.store)
-        await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
             payload={"msgtype": "m.text", "body": "first answer"},
         )
-        claimed = await runtime.store.claim_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        claimed = await runtime.store.claim_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert claimed is not None
         await runtime.homeserver.send(claimed)
 
-        await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
@@ -548,7 +548,7 @@ class TestModelIsNotRerun:
         )
         await runtime.delivery.recover()
 
-        stored = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        stored = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.payload["body"] == "first answer"
         assert runtime.homeserver.visible_messages == 1
@@ -650,7 +650,7 @@ class TestModelIsNotRerun:
         await runtime.worker().drain_once()
         assert await runtime.store.pending() == ()
         assert runtime.homeserver.visible_messages == 0
-        assert await runtime.store.unacknowledged_deliveries() != ()
+        assert await runtime.store.unacknowledged_matrix_deliveries() != ()
 
         assert (await runtime.delivery.recover()).recovered == 1
 
@@ -689,8 +689,8 @@ class TestTheHandoffIsOneTransaction:
             ),
             pytest.raises(CrashError),
         ):
-            await runtime.store.enqueue_delivery(
-                turn_id=SOURCE,
+            await runtime.store.enqueue_matrix_delivery(
+                delivery_id=SOURCE,
                 stage=DeliveryStage.FINAL,
                 room_id=ROOM,
                 thread_id=None,
@@ -698,7 +698,7 @@ class TestTheHandoffIsOneTransaction:
                 settle_source_event_ids=(SOURCE,),
             )
 
-        assert await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL) is None
+        assert await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL) is None
         assert [event.event_id for event in await runtime.store.pending()] == [SOURCE]
 
     async def test_a_refused_enqueue_hands_nothing_over(self, runtime: TurnRuntime) -> None:
@@ -719,8 +719,8 @@ class TestTheHandoffIsOneTransaction:
         await runtime.store.fence_departure(ROOM, source=DepartureSource.LOCAL)
         assert await runtime.store.pending() == (), "the fence left unanswerable work offered"
 
-        transaction_id = await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        transaction_id = await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
@@ -729,7 +729,7 @@ class TestTheHandoffIsOneTransaction:
         )
 
         assert transaction_id is None
-        assert await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL) is None
+        assert await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL) is None
         settled = await runtime.store.load_event(SOURCE)
         assert settled is not None, "the journal row is still the proof this event had its turn"
 
@@ -742,15 +742,15 @@ class TestInitialAndFinalStages:
         runtime: TurnRuntime,
     ) -> None:
         """The stages do not share a transaction."""
-        initial = await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        initial = await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.INITIAL,
             room_id=ROOM,
             thread_id=None,
             payload={"msgtype": "m.text", "body": "thinking"},
         )
-        final = await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        final = await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
@@ -767,8 +767,8 @@ class TestInitialAndFinalStages:
         to the reply it was standing in for, and nothing ever edits it away.
         """
         for stage, body in ((DeliveryStage.INITIAL, "thinking"), (DeliveryStage.FINAL, "answer")):
-            await runtime.store.enqueue_delivery(
-                turn_id=SOURCE,
+            await runtime.store.enqueue_matrix_delivery(
+                delivery_id=SOURCE,
                 stage=stage,
                 room_id=ROOM,
                 thread_id=None,
@@ -784,7 +784,7 @@ class TestInitialAndFinalStages:
         assert (await runtime.delivery.recover()).recovered == 0
         assert runtime.homeserver.sends == sends_after_recovery
         assert runtime.homeserver.visible_messages == 1
-        assert await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.INITIAL) is None
+        assert await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.INITIAL) is None
 
     async def test_live_final_cannot_overtake_initial_recovery_before_matrix_acceptance(
         self,
@@ -798,8 +798,8 @@ class TestInitialAndFinalStages:
         distinct transaction ID. Letting that request finish first makes the
         later placeholder newly visible after the answer.
         """
-        await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.INITIAL,
             room_id=ROOM,
             thread_id=None,
@@ -808,7 +808,7 @@ class TestInitialAndFinalStages:
         initial_reached_matrix = asyncio.Event()
         accept_initial = asyncio.Event()
 
-        async def paused_before_initial_acceptance(delivery: OutboxDelivery) -> str:
+        async def paused_before_initial_acceptance(delivery: MatrixDelivery) -> str:
             if delivery.stage is DeliveryStage.INITIAL:
                 initial_reached_matrix.set()
                 await accept_initial.wait()
@@ -821,7 +821,7 @@ class TestInitialAndFinalStages:
         await initial_reached_matrix.wait()
         final = asyncio.create_task(
             live_delivery.deliver(
-                turn_id=SOURCE,
+                delivery_id=SOURCE,
                 stage=DeliveryStage.FINAL,
                 room_id=ROOM,
                 thread_id=None,
@@ -842,8 +842,8 @@ class TestInitialAndFinalStages:
 
     async def test_failed_initial_without_a_final_remains_recoverable(self, runtime: TurnRuntime) -> None:
         """An INITIAL that Matrix never accepted remains owed until a later pass sends it."""
-        await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.INITIAL,
             room_id=ROOM,
             thread_id=None,
@@ -869,17 +869,17 @@ class TestInitialAndFinalStages:
         event even when it returns after FINAL, so it cannot append a late
         placeholder to the room.
         """
-        await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.INITIAL,
             room_id=ROOM,
             thread_id=None,
             payload={"msgtype": "m.text", "body": "thinking"},
         )
-        claimed = await runtime.store.claim_delivery(turn_id=SOURCE, stage=DeliveryStage.INITIAL)
+        claimed = await runtime.store.claim_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.INITIAL)
         assert claimed is not None
-        await runtime.store.record_sending_device(
-            turn_id=SOURCE,
+        await runtime.store.record_matrix_delivery_device(
+            delivery_id=SOURCE,
             stage=DeliveryStage.INITIAL,
             device_id=runtime.homeserver.device_id,
         )
@@ -894,7 +894,7 @@ class TestInitialAndFinalStages:
         remote_initial = asyncio.create_task(abandoned_matrix_request())
         await remote_started.wait()
         final_event_id = await runtime.delivery.deliver(
-            turn_id=SOURCE,
+            delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
@@ -915,7 +915,7 @@ class TestInitialAndFinalStages:
         final_reached_matrix = asyncio.Event()
         accept_final = asyncio.Event()
 
-        async def paused_before_final_acceptance(delivery: OutboxDelivery) -> str:
+        async def paused_before_final_acceptance(delivery: MatrixDelivery) -> str:
             if delivery.stage is DeliveryStage.FINAL:
                 final_reached_matrix.set()
                 await accept_final.wait()
@@ -926,7 +926,7 @@ class TestInitialAndFinalStages:
         initial_delivery = replace(delivery_state, send=paused_before_final_acceptance)
         final = asyncio.create_task(
             final_delivery.deliver(
-                turn_id=SOURCE,
+                delivery_id=SOURCE,
                 stage=DeliveryStage.FINAL,
                 room_id=ROOM,
                 thread_id=None,
@@ -936,7 +936,7 @@ class TestInitialAndFinalStages:
         await final_reached_matrix.wait()
         initial = asyncio.create_task(
             initial_delivery.deliver(
-                turn_id=SOURCE,
+                delivery_id=SOURCE,
                 stage=DeliveryStage.INITIAL,
                 room_id=ROOM,
                 thread_id=None,
@@ -976,14 +976,14 @@ class TestARelogInCannotDuplicateTheAnswer:
         duplicate those tests prevent would not be reachable in the first
         place.
         """
-        await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
             payload={"msgtype": "m.text", "body": "answer"},
         )
-        claimed = await runtime.store.claim_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        claimed = await runtime.store.claim_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert claimed is not None
 
         first = await runtime.homeserver.send(claimed)
@@ -1013,7 +1013,7 @@ class TestARelogInCannotDuplicateTheAnswer:
         runtime.homeserver.lose_acknowledgement = True
         await runtime.worker().drain_once()
 
-        stored = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        stored = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.acknowledged_event_id is None
         assert stored.sending_device_id == "DEVICE1"
@@ -1027,7 +1027,7 @@ class TestARelogInCannotDuplicateTheAnswer:
         assert outcome.failed == 0
         assert runtime.homeserver.visible_messages == 1, "the answer was posted twice"
         assert runtime.homeserver.sends == sends_before, "recovery sent again instead of adopting"
-        settled = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        settled = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert settled is not None
         assert settled.acknowledged_event_id == delivered_event_id
 
@@ -1098,7 +1098,7 @@ class TestARelogInCannotDuplicateTheAnswer:
         await runtime.worker().drain_once()
 
         await _forget_the_sending_device(runtime)
-        stored = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        stored = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.attempted
         assert stored.sending_device_id is None
@@ -1111,7 +1111,7 @@ class TestARelogInCannotDuplicateTheAnswer:
         assert outcome.failed == 0
         assert runtime.homeserver.visible_messages == 1, "the answer was posted twice"
         assert runtime.homeserver.room_scans == 1, "an unprovable device has to read the room"
-        settled = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        settled = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert settled is not None
         assert settled.acknowledged_event_id == delivered_event_id
 
@@ -1166,18 +1166,18 @@ class TestARelogInCannotDuplicateTheAnswer:
         event, but not one anybody can see, and a room scan to avoid it would
         buy nothing.
         """
-        await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
             payload={"msgtype": "m.text", "body": "answer"},
             edits_event_id="$placeholder",
         )
-        claimed = await runtime.store.claim_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        claimed = await runtime.store.claim_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert claimed is not None
-        await runtime.store.record_sending_device(
-            turn_id=SOURCE,
+        await runtime.store.record_matrix_delivery_device(
+            delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
             device_id="DEVICE1",
         )
@@ -1204,34 +1204,34 @@ class TestARelogInCannotDuplicateTheAnswer:
         before knowing erases the evidence that the read is still owed, and the
         next pass then sees its own device and sends blind.
         """
-        await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
             payload={"msgtype": "m.text", "body": "answer"},
         )
-        before = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        before = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert before is not None
         assert not before.attempted
         assert before.sending_device_id is None
 
-        claimed = await runtime.store.claim_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        claimed = await runtime.store.claim_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert claimed is not None
         assert not claimed.attempted, "a claim reports the state it took over, not the one it wrote"
         assert claimed.sending_device_id is None
 
-        after_claim = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        after_claim = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert after_claim is not None
         assert after_claim.attempted, "the claim froze the payload"
         assert after_claim.sending_device_id is None, "the claim stamped a device it had not committed to"
 
-        await runtime.store.record_sending_device(
-            turn_id=SOURCE,
+        await runtime.store.record_matrix_delivery_device(
+            delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
             device_id="DEVICE1",
         )
-        before_send = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        before_send = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert before_send is not None
         assert before_send.sending_device_id == "DEVICE1"
 
@@ -1259,7 +1259,7 @@ class TestARelogInCannotDuplicateTheAnswer:
 
         scans = 0
 
-        async def unreachable(_delivery: OutboxDelivery) -> str | None:
+        async def unreachable(_delivery: MatrixDelivery) -> str | None:
             nonlocal scans
             scans += 1
             msg = "the homeserver could not be reached"
@@ -1269,7 +1269,7 @@ class TestARelogInCannotDuplicateTheAnswer:
         recovery = replace(runtime.delivery, resolve_delivered=unreachable)
 
         assert (await recovery.recover()).failed == 1
-        stranded = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        stranded = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert stranded is not None
         assert stranded.sending_device_id == "DEVICE1", "a failed lookup took ownership of the row"
 
@@ -1332,26 +1332,26 @@ class TestOneTurnStageIsOneMessage:
         runtime: TurnRuntime,
     ) -> None:
         """The freeze rule wins, and reports success while it does."""
-        await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
             payload={"msgtype": "m.text", "body": "the answer"},
         )
-        first = await runtime.delivery.flush(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        first = await runtime.delivery.flush(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
 
-        transaction_id = await runtime.store.enqueue_delivery(
-            turn_id=SOURCE,
+        transaction_id = await runtime.store.enqueue_matrix_delivery(
+            delivery_id=SOURCE,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
             payload={"msgtype": "m.text", "body": "a different answer"},
         )
-        second = await runtime.delivery.flush(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        second = await runtime.delivery.flush(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
 
         assert transaction_id is not None, "the enqueue reports success rather than refusing"
-        stored = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        stored = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.payload["body"] == "the answer", "the second text overwrote a frozen row"
         assert second == first, "the caller was handed a new event for text that never went out"
@@ -1368,18 +1368,18 @@ class TestOneTurnStageIsOneMessage:
         answers.
         """
         for stage, body in ((DeliveryStage.INITIAL, "thinking"), (DeliveryStage.FINAL, "the answer")):
-            await runtime.store.enqueue_delivery(
-                turn_id=SOURCE,
+            await runtime.store.enqueue_matrix_delivery(
+                delivery_id=SOURCE,
                 stage=stage,
                 room_id=ROOM,
                 thread_id=None,
                 payload={"msgtype": "m.text", "body": body},
             )
-            await runtime.delivery.flush(turn_id=SOURCE, stage=stage)
+            await runtime.delivery.flush(delivery_id=SOURCE, stage=stage)
 
         assert runtime.homeserver.visible_messages == 2
-        placeholder = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.INITIAL)
-        answer = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        placeholder = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.INITIAL)
+        answer = await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL)
         assert placeholder is not None
         assert answer is not None
         assert placeholder.payload["body"] == "thinking"

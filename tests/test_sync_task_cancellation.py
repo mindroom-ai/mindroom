@@ -50,6 +50,7 @@ from mindroom.matrix.sync_loop import (
 )
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.matrix_delivery import RecoveryOutcome
 from mindroom.membership_models import ReportedDeparture
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
@@ -69,7 +70,6 @@ from mindroom.orchestration.runtime import (
     sync_forever_with_restart,
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.response_delivery import RecoveryOutcome
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
