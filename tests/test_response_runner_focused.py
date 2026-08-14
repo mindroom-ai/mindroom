@@ -3380,32 +3380,51 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "delivery_outcome",
+    ("delivery_outcome", "hands_off"),
     [
-        _completed_outcome(),
-        FinalDeliveryOutcome(
-            terminal_status="cancelled",
-            event_id="$response",
-            is_visible_response=True,
-            failure_reason="cancelled_by_user",
+        (_completed_outcome(), False),
+        (
+            FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                event_id="$response",
+                is_visible_response=True,
+                failure_reason="cancelled_by_user",
+            ),
+            False,
         ),
-        FinalDeliveryOutcome(
-            terminal_status="error",
-            event_id="$response",
-            is_visible_response=True,
-            failure_reason="delivery_failed",
+        (
+            FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id="$response",
+                is_visible_response=True,
+                failure_reason="delivery_failed",
+            ),
+            False,
+        ),
+        (
+            FinalDeliveryOutcome(
+                terminal_status="suspended",
+                event_id="$response",
+                is_visible_response=True,
+            ),
+            True,
         ),
     ],
-    ids=["completed", "cancelled", "error"],
+    ids=["completed", "cancelled", "error", "suspended"],
 )
-async def test_terminal_settlement_finalizes_and_runs_post_effects_once(
+async def test_response_settlement_finalizes_and_transfers_ownership_once(
     tmp_path: Path,
     delivery_outcome: FinalDeliveryOutcome,
+    hands_off: bool,
 ) -> None:
-    """Every canonical terminal status should cross finalization and post-effects exactly once."""
+    """Each outcome finalizes once and only a durable pause transfers source ownership."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    request = _plain_request(_target())
+    handoffs: list[str] = []
+    request = replace(
+        _plain_request(_target()),
+        on_durable_source_handoff=lambda: handoffs.append("handed_off"),
+    )
     progress = response_runner._DeliveryProgress()
     post_effects = AsyncMock()
     build_post_outcome = MagicMock(return_value=ResponseOutcome())
@@ -3444,11 +3463,15 @@ async def test_terminal_settlement_finalizes_and_runs_post_effects_once(
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
-    assert result == "$response"
+    assert result == (None if hands_off else "$response")
     assert progress.delivery_outcome is delivery_outcome
     build_post_outcome.assert_called_once_with(delivery_outcome)
     finalize.assert_awaited_once()
-    post_effects.assert_awaited_once()
+    if hands_off:
+        post_effects.assert_not_awaited()
+    else:
+        post_effects.assert_awaited_once()
+    assert handoffs == (["handed_off"] if hands_off else [])
 
 
 @pytest.mark.asyncio
