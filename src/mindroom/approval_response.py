@@ -12,6 +12,7 @@ from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
 )
 from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation
@@ -48,7 +49,7 @@ class _ApprovalPausePlan:
 
     tools: tuple[ToolExecution, ...]
     calls: tuple[ApprovalCall, ...]
-    waiting_text: str
+    waiting_text: str | None
 
 
 def identify_approval_tools(
@@ -168,10 +169,15 @@ class ApprovalResponseCoordinator:
             )
             for _tool, tool_call_id, tool_name, invoking_agent in identified
         )
+        gated_calls = tuple(call for call in calls if call.decision is None)
         return _ApprovalPausePlan(
             tools=tuple(tool for tool, _tool_call_id, _tool_name, _invoking_agent in identified),
             calls=calls,
-            waiting_text="Waiting for approval: " + ", ".join(f"`{call.tool_name}`" for call in calls),
+            waiting_text=(
+                "Waiting for approval: " + ", ".join(f"`{call.tool_name}`" for call in gated_calls)
+                if gated_calls
+                else None
+            ),
         )
 
     async def _publish_cards(
@@ -234,16 +240,19 @@ class ApprovalResponseCoordinator:
         *,
         target: MessageTarget,
         tool_trace: list[ToolTraceEntry],
-    ) -> str:
+        pending_text: str,
+    ) -> str | None:
         """Replace one claim with Agno's next exact pause generation."""
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await self.plan_pause(identified, requester_id=current.requester_id)
+        visible_text = plan.waiting_text or pending_text
+        stream_status = STREAM_STATUS_APPROVAL_PENDING if plan.waiting_text is not None else STREAM_STATUS_PENDING
         if not await self.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
                 event_id=current.response_event_id,
-                new_text=plan.waiting_text,
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
+                new_text=visible_text,
+                extra_content={STREAM_STATUS_KEY: stream_status},
                 tool_trace=tool_trace or None,
             ),
         ):
