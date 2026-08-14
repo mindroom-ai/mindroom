@@ -54,6 +54,7 @@ if TYPE_CHECKING:
         DeliveryAcknowledgement,
         OutboxDelivery,
         OutboxView,
+        ProjectedEvent,
         TerminalTurnWrite,
     )
     from mindroom.response_runner import ResponseRunner
@@ -148,6 +149,7 @@ class _WatchedOutbox:
         turn_id: str,
         stage: DeliveryStage,
         event_id: str,
+        delivered_projections: tuple[ProjectedEvent, ...],
         terminal_turn: TerminalTurnWrite | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, and the turn it completes."""
@@ -155,6 +157,7 @@ class _WatchedOutbox:
             turn_id=turn_id,
             stage=stage,
             event_id=event_id,
+            delivered_projections=delivered_projections,
             terminal_turn=terminal_turn,
         )
 

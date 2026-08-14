@@ -391,6 +391,7 @@ async def test_removed_owner_cleanup_recovers_frozen_success_through_original_ow
             turn_id=source_event_id,
             stage=DeliveryStage.FINAL,
             event_id="$final-edit",
+            delivered_projections=(),
         )
         return await principal.finish_approval_continuation(observed.approval_id)
 

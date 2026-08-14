@@ -61,6 +61,7 @@ from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
+from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
@@ -90,6 +91,7 @@ from tests.conftest import (
     install_runtime_journal_support,
     make_conversation_reader_mock,
     make_matrix_client_mock,
+    make_membership_stub,
     make_pending_event,
     make_turn_context,
     message_origin,
@@ -673,7 +675,7 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
             suppressed=True,
         ),
         ResponseOutcome(
-            interactive_target=MessageTarget.resolve(
+            response_target=MessageTarget.resolve(
                 room_id="!room:localhost",
                 thread_id="$thread",
                 reply_to_event_id="$event",
@@ -755,9 +757,9 @@ async def test_post_response_effects_skip_memory_persistence_for_failed_run() ->
 
 
 @pytest.mark.asyncio
-async def test_post_response_effects_register_interactive_follow_up_for_preserved_stream_failure() -> None:
-    """Preserved visible streamed replies should still register interactive follow-up."""
-    register_interactive = AsyncMock()
+async def test_post_response_effects_add_buttons_for_preserved_stream_success() -> None:
+    """Preserved visible streamed replies should still receive reaction buttons."""
+    add_interactive_buttons = AsyncMock()
     target = MessageTarget.resolve(
         room_id="!room:localhost",
         thread_id="$thread",
@@ -779,25 +781,24 @@ async def test_post_response_effects_register_interactive_follow_up_for_preserve
             interactive_metadata=interactive_metadata,
         ),
         ResponseOutcome(
-            interactive_target=target,
+            response_target=target,
         ),
         PostResponseEffectsDeps(
             logger=MagicMock(),
-            register_interactive=register_interactive,
+            add_interactive_buttons=add_interactive_buttons,
         ),
     )
 
-    register_interactive.assert_awaited_once_with(
+    add_interactive_buttons.assert_awaited_once_with(
         "$stream",
-        target,
         interactive_metadata,
     )
 
 
 @pytest.mark.asyncio
-async def test_post_response_effects_skip_interactive_follow_up_for_preserved_stream_error() -> None:
-    """Failed preserved stream outcomes must not register interactive follow-up on a failed reply."""
-    register_interactive = AsyncMock()
+async def test_post_response_effects_skip_buttons_for_preserved_stream_error() -> None:
+    """Failed preserved stream outcomes must not add buttons to a failed reply."""
+    add_interactive_buttons = AsyncMock()
     target = MessageTarget.resolve(
         room_id="!room:localhost",
         thread_id="$thread",
@@ -818,15 +819,74 @@ async def test_post_response_effects_skip_interactive_follow_up_for_preserved_st
             interactive_metadata=interactive_metadata,
         ),
         ResponseOutcome(
-            interactive_target=target,
+            response_target=target,
         ),
         PostResponseEffectsDeps(
             logger=MagicMock(),
-            register_interactive=register_interactive,
+            add_interactive_buttons=add_interactive_buttons,
         ),
     )
 
-    register_interactive.assert_not_awaited()
+    add_interactive_buttons.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(tmp_path: Path) -> None:
+    """A response prompt rejected during transport must not expose dead buttons."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    client = make_matrix_client_mock()
+    runtime = BotRuntimeState(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        enable_streaming=False,
+        orchestrator=None,
+    )
+    membership = make_membership_stub()
+    membership.interactive_prompt_is_current.return_value = False
+    support = PostResponseEffectsSupport(
+        runtime=runtime,
+        logger=MagicMock(),
+        runtime_paths=runtime_paths,
+        conversation_reader=make_conversation_reader_mock(),
+        membership=membership,
+        agent_name="agent",
+    )
+    interactive_metadata = InteractiveMetadata._from_parts(
+        {"1": "yes"},
+        ({"emoji": "1", "label": "Yes", "value": "yes"},),
+    )
+    assert interactive_metadata is not None
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="Choose",
+            delivery_kind="sent",
+            interactive_metadata=interactive_metadata,
+        ),
+        ResponseOutcome(),
+        support.build_deps(
+            room_id="!room:localhost",
+            membership_turn_id="$turn",
+        ),
+    )
+
+    membership.interactive_prompt_is_current.assert_awaited_once_with(
+        room_id="!room:localhost",
+        question_event_id="$response",
+        expected=InteractivePrompt(
+            creator_agent="agent",
+            question_text="",
+            options={"1": "yes"},
+            option_labels={},
+            source_event_id="$turn",
+        ),
+    )
+    client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -847,14 +907,13 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
-        delivery_gateway=MagicMock(),
         conversation_reader=conversation_reader,
-        membership=MagicMock(),
+        membership=make_membership_stub(),
+        agent_name="agent",
     )
     deps = support.build_deps(
         room_id="!room:localhost",
-        interactive_agent_name="general",
-        membership_turn_id="$source",
+        membership_turn_id="$turn",
     )
     thread_history = [
         ResolvedVisibleMessage.synthetic(
@@ -953,14 +1012,13 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
-        delivery_gateway=MagicMock(),
         conversation_reader=conversation_reader,
-        membership=MagicMock(),
+        membership=make_membership_stub(),
+        agent_name="agent",
     )
     deps = support.build_deps(
         room_id="!adhoc:localhost",
-        interactive_agent_name="general",
-        membership_turn_id="$source",
+        membership_turn_id="$turn",
     )
     thread_history = [
         ResolvedVisibleMessage.synthetic(

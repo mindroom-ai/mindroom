@@ -27,10 +27,12 @@ if TYPE_CHECKING:
 
     from mindroom.event_journal import OutboxDelivery, OutboxView
     from mindroom.event_journal.models import TerminalTurnWrite
+    from mindroom.event_journal.projection import ProjectedEvent
 
 logger = get_logger(__name__)
 
 type SendDelivery = Callable[[OutboxDelivery], Awaitable[str]]
+type _ObserveDelivered = Callable[[OutboxDelivery, str], Awaitable[tuple[ProjectedEvent, ...]]]
 
 # Finding the Matrix event a previous attempt already produced, when the frozen
 # transaction ID can no longer prove there wasn't one. Returns the event ID if
@@ -97,6 +99,7 @@ class ResponseDelivery:
 
     store: OutboxView
     send: SendDelivery
+    observe_delivered: _ObserveDelivered | None = None
     # The device this process is logged in as, recorded on every claim. A
     # Matrix transaction ID is idempotent within one device and meaningless
     # across a change of one, so the row has to remember which device's
@@ -383,11 +386,15 @@ class ResponseDelivery:
         record end up naming different events even though the acknowledgement
         itself was guarded.
         """
+        delivered_projections = (
+            await self.observe_delivered(claimed, event_id) if self.observe_delivered is not None else ()
+        )
         terminal_response_event_id = claimed.edits_event_id or event_id
         acknowledged = await self.store.acknowledge_delivery(
             turn_id=claimed.turn_id,
             stage=claimed.stage,
             event_id=event_id,
+            delivered_projections=delivered_projections,
             terminal_turn=self._terminal_turn(
                 claimed.turn_id,
                 claimed.stage,

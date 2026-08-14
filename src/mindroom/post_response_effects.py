@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom import interactive
 from mindroom.background_tasks import create_background_task
-from mindroom.interactive_models import InteractiveQuestion
+from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_summary import maybe_generate_thread_summary
@@ -22,8 +22,7 @@ if TYPE_CHECKING:
     from agno.db.base import SessionType
 
     from mindroom.constants import RuntimePaths
-    from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.event_journal import PrincipalStore
+    from mindroom.event_journal.store import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_reads import ConversationReader
@@ -40,7 +39,7 @@ class ResponseOutcome:
     session_type: SessionType | None = None
     execution_identity: ToolExecutionIdentity | None = None
     run_succeeded: bool = True
-    interactive_target: MessageTarget | None = None
+    response_target: MessageTarget | None = None
     thread_summary_room_id: str | None = None
     thread_summary_thread_id: str | None = None
     thread_summary_message_count_hint: int | None = None
@@ -54,13 +53,7 @@ class PostResponseEffectsDeps:
     """Narrow side-effect surface needed to finalize one response."""
 
     logger: structlog.stdlib.BoundLogger
-    register_interactive: (
-        Callable[
-            [str, MessageTarget, interactive.InteractiveMetadata],
-            Awaitable[None],
-        ]
-        | None
-    ) = None
+    add_interactive_buttons: Callable[[str, interactive.InteractiveMetadata], Awaitable[None]] | None = None
     queue_memory_persistence: Callable[[], None] | None = None
     persist_response_event_id: Callable[[str, str], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
@@ -74,9 +67,9 @@ class PostResponseEffectsSupport:
     runtime: SupportsClientConfig
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
-    delivery_gateway: DeliveryGateway
     conversation_reader: ConversationReader
     membership: PrincipalStore
+    agent_name: str
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client for interactive follow-up effects."""
@@ -110,38 +103,6 @@ class PostResponseEffectsSupport:
         """Run thread-summary generation with duration logging."""
         await summary_coro
 
-    async def _register_interactive_delivery(
-        self,
-        *,
-        event_id: str,
-        room_id: str,
-        target: MessageTarget,
-        interactive_metadata: interactive.InteractiveMetadata,
-        agent_name: str,
-        membership_turn_id: str,
-    ) -> None:
-        """Persist one interactive response and add its reaction buttons."""
-        registered = await self.membership.register_interactive_question_for_turn(
-            membership_turn_id,
-            InteractiveQuestion(
-                question_event_id=event_id,
-                room_id=room_id,
-                thread_id=target.resolved_thread_id,
-                creator_agent=agent_name,
-                question_text=interactive_metadata.question_text,
-                options=interactive_metadata.option_map,
-                option_labels=interactive_metadata.option_labels,
-            ),
-        )
-        if not registered:
-            return
-        await interactive.add_reaction_buttons(
-            self._client(),
-            room_id,
-            event_id,
-            interactive_metadata.options_as_list(),
-        )
-
     def _queue_thread_summary(
         self,
         room_id: str,
@@ -172,30 +133,39 @@ class PostResponseEffectsSupport:
         self,
         *,
         room_id: str,
-        interactive_agent_name: str,
         membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], None] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
 
-        async def register_interactive(
+        async def add_interactive_buttons(
             event_id: str,
-            target: MessageTarget,
             interactive_metadata: interactive.InteractiveMetadata,
         ) -> None:
-            await self._register_interactive_delivery(
-                event_id=event_id,
+            expected = InteractivePrompt(
+                creator_agent=self.agent_name,
+                question_text=interactive_metadata.question_text,
+                options=interactive_metadata.option_map,
+                option_labels=interactive_metadata.option_labels,
+                source_event_id=membership_turn_id,
+            )
+            if not await self.membership.interactive_prompt_is_current(
                 room_id=room_id,
-                target=target,
-                interactive_metadata=interactive_metadata,
-                agent_name=interactive_agent_name,
-                membership_turn_id=membership_turn_id,
+                question_event_id=event_id,
+                expected=expected,
+            ):
+                return
+            await interactive.add_reaction_buttons(
+                self._client(),
+                room_id,
+                event_id,
+                interactive_metadata.options_as_list(),
             )
 
         return PostResponseEffectsDeps(
             logger=self.logger,
-            register_interactive=register_interactive,
+            add_interactive_buttons=add_interactive_buttons,
             queue_memory_persistence=queue_memory_persistence,
             persist_response_event_id=persist_response_event_id,
             should_queue_thread_summary=self._should_queue_thread_summary,
@@ -212,16 +182,14 @@ async def apply_post_response_effects(
     response_event_id = final_delivery_outcome.final_visible_event_id
     if (
         response_event_id is not None
-        and deps.register_interactive is not None
+        and deps.add_interactive_buttons is not None
         and final_delivery_outcome.terminal_status == "completed"
         and final_delivery_outcome.final_visible_body is not None
         and not final_delivery_outcome.suppressed
         and final_delivery_outcome.interactive_metadata is not None
-        and outcome.interactive_target is not None
     ):
-        await deps.register_interactive(
+        await deps.add_interactive_buttons(
             response_event_id,
-            outcome.interactive_target,
             final_delivery_outcome.interactive_metadata,
         )
     else:  # noqa: PLR5501, RUF100
@@ -230,15 +198,14 @@ async def apply_post_response_effects(
             or final_delivery_outcome.interactive_metadata is not None
         ):
             deps.logger.warning(
-                "Interactive question registration skipped",
+                "Interactive question buttons skipped",
                 response_event_id=response_event_id,
-                register_interactive_is_none=deps.register_interactive is None,
+                add_interactive_buttons_is_none=deps.add_interactive_buttons is None,
                 terminal_status=final_delivery_outcome.terminal_status,
                 final_visible_body_is_none=final_delivery_outcome.final_visible_body is None,
                 suppressed=final_delivery_outcome.suppressed,
                 option_map_empty=not bool(final_delivery_outcome.interactive_metadata),
                 options_list_empty=not bool(final_delivery_outcome.interactive_metadata),
-                interactive_target_is_none=outcome.interactive_target is None,
             )
 
     if (
@@ -263,10 +230,8 @@ async def apply_post_response_effects(
             deps.logger.exception(
                 "Failed to queue memory persistence after response",
                 session_id=outcome.session_id,
-                room_id=outcome.interactive_target.room_id if outcome.interactive_target is not None else None,
-                thread_id=(
-                    outcome.interactive_target.resolved_thread_id if outcome.interactive_target is not None else None
-                ),
+                room_id=outcome.response_target.room_id if outcome.response_target is not None else None,
+                thread_id=(outcome.response_target.resolved_thread_id if outcome.response_target is not None else None),
             )
 
     if (

@@ -39,7 +39,7 @@ from mindroom.event_journal.store import _DEFAULT_UNACKNOWLEDGED_LIMIT as _UNACK
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 from mindroom.pending_event_worker import PendingEventWorker
 from mindroom.response_delivery import ResponseDelivery, TurnHandoff
-from tests.conftest import CrashError, DiesAfterAcknowledgement, DiesAfterNextWriteCommit
+from tests.conftest import CrashError, DiesAfterAcknowledgement, DiesAfterNextWriteCommit, ignore_delivered_projection
 
 if TYPE_CHECKING:
     from mindroom.event_journal import JournalEvent, OutboxDelivery, OutboxView, PrincipalStore
@@ -152,6 +152,7 @@ class TurnRuntime:
         return ResponseDelivery(
             store=self.store,
             send=self.homeserver.send,
+            observe_delivered=ignore_delivered_projection,
             sending_device_id=self.homeserver.device_id,
             resolve_delivered=self.homeserver.find_delivered,
         )
@@ -186,6 +187,7 @@ class TurnRuntime:
         await ResponseDelivery(
             store=self._outbox(),
             send=self.homeserver.send,
+            observe_delivered=ignore_delivered_projection,
             sending_device_id=self.homeserver.device_id,
             resolve_delivered=self.homeserver.find_delivered,
             handoff=_SETTLE_THE_SOURCE,

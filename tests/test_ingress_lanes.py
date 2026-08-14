@@ -1030,9 +1030,10 @@ async def test_edit_and_reaction_slots_settle_before_their_execution_finishes(tm
         edit_started.set()
         await release_handlers.wait()
 
-    async def blocked_selection(*_args: object, **_kwargs: object) -> None:
+    async def blocked_selection(*_args: object, **_kwargs: object) -> bool:
         selection_started.set()
         await release_handlers.wait()
+        return False
 
     edit_event = cast(
         "nio.RoomMessageText",

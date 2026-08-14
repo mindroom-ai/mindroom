@@ -678,6 +678,7 @@ class AgentBot:
             ),
             room_for_id=self._room_for_journal_event,
             on_persist_failure=self._record_dispatch_persist_failure,
+            on_delivery_recovery_needed=self._schedule_delivery_recovery,
             room_lifecycle_admission_enabled=lambda: (
                 self.agent_name == ROUTER_AGENT_NAME and self._first_sync_done and self._room_member_join_hooks_armed
             ),
@@ -688,9 +689,9 @@ class AgentBot:
             runtime=self._runtime_view,
             logger=self.logger,
             runtime_paths=self.runtime_paths,
-            delivery_gateway=self._delivery_gateway,
             conversation_reader=self._conversation_reader,
             membership=self._journal_store.principal(self._journal_principal_id),
+            agent_name=self.agent_name,
         )
         self._ingress_hook_runner = IngressHookRunner(
             hook_context=self._hook_context_support,

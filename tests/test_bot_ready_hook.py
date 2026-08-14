@@ -17,7 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import SOURCE_KIND_KEY
-from mindroom.event_journal import EventClass, EventKind, InteractiveQuestion
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -37,6 +37,7 @@ from tests.conftest import (
     install_call_manager_mock,
     install_runtime_journal_support,
     make_matrix_client_mock,
+    membership_epoch_is_active,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -672,18 +673,7 @@ async def test_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(
 
     principal = bot._journal_principal()
     assert await principal.membership_epoch(room_id) == 1
-    assert await principal.register_interactive_question_for_epoch(
-        1,
-        InteractiveQuestion(
-            question_event_id="$membership-probe",
-            room_id=room_id,
-            thread_id=None,
-            creator_agent=bot.agent_name,
-            question_text="Probe",
-            options={"1": "one"},
-            option_labels={"1": "One"},
-        ),
-    )
+    assert await membership_epoch_is_active(principal, room_id, 1)
 
 
 @pytest.mark.asyncio

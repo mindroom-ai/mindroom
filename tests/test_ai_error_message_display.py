@@ -34,6 +34,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_journal_support,
+    make_matrix_client_mock,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
     request_envelope,
@@ -72,7 +73,7 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     )
     bot.logger = MagicMock()
     bot.stop_manager.remove_stop_button = AsyncMock()
-    bot.client = AsyncMock()
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.user_id = "@mindroom_test_agent:localhost"
     bot.hook_registry = HookRegistry.empty()
     bot.enable_streaming = True

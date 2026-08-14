@@ -3,19 +3,76 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+INTERACTIVE_PROMPT_KEY = "io.mindroom.interactive"
 
 
 @dataclass(frozen=True, slots=True)
-class InteractiveQuestion:
-    """One delivered question that can still accept a selection."""
+class InteractivePrompt:
+    """One prompt revision carried by its Matrix event content."""
 
-    question_event_id: str
-    room_id: str
-    thread_id: str | None
     creator_agent: str
     question_text: str
     options: dict[str, str]
     option_labels: dict[str, str]
+    source_event_id: str
+
+
+def interactive_prompt_content(prompt: InteractivePrompt) -> dict[str, object]:
+    """Encode one prompt into namespaced Matrix message content."""
+    payload: dict[str, object] = {
+        "creator_agent": prompt.creator_agent,
+        "option_labels": dict(prompt.option_labels),
+        "options": dict(prompt.options),
+        "question_text": prompt.question_text,
+        "source_event_id": prompt.source_event_id,
+    }
+    return {INTERACTIVE_PROMPT_KEY: payload}
+
+
+def _string_mapping(value: object) -> dict[str, str] | None:
+    """Return a copied string mapping, or reject malformed Matrix metadata."""
+    if not isinstance(value, dict):
+        return None
+    mapping = cast("dict[object, object]", value)
+    if not mapping or any(not isinstance(key, str) or not isinstance(item, str) for key, item in mapping.items()):
+        return None
+    return cast("dict[str, str]", dict(mapping))
+
+
+def interactive_prompt_from_content(content: Mapping[str, object]) -> InteractivePrompt | None:
+    """Decode one complete prompt from Matrix message content."""
+    raw = content.get(INTERACTIVE_PROMPT_KEY)
+    if not isinstance(raw, dict):
+        return None
+    payload = cast("dict[str, object]", raw)
+    creator_agent = payload.get("creator_agent")
+    question_text = payload.get("question_text")
+    source_event_id = payload.get("source_event_id")
+    options = _string_mapping(payload.get("options"))
+    option_labels = _string_mapping(payload.get("option_labels"))
+    if (
+        not isinstance(creator_agent, str)
+        or not creator_agent
+        or not isinstance(question_text, str)
+        or not question_text
+        or options is None
+        or option_labels is None
+        or not isinstance(source_event_id, str)
+        or not source_event_id
+    ):
+        return None
+    return InteractivePrompt(
+        creator_agent=creator_agent,
+        question_text=question_text,
+        options=options,
+        option_labels=option_labels,
+        source_event_id=source_event_id,
+    )
 
 
 @dataclass(frozen=True, slots=True)

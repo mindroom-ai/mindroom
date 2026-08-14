@@ -26,7 +26,6 @@ from mindroom.constants import (
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-from mindroom.event_journal import InteractiveQuestion
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client import DeliveredMatrixEvent, RoomThreadsPageError
 from mindroom.matrix.client_delivery import build_edit_event_content
@@ -112,9 +111,7 @@ def _make_context(
     if membership is None:
         membership = MagicMock()
         membership.membership_epoch = AsyncMock(return_value=0)
-        membership.register_interactive_question_for_turn = AsyncMock(return_value=True)
-        membership.register_interactive_question_for_epoch = AsyncMock(return_value=True)
-        membership.forget_interactive_question = AsyncMock()
+        membership.interactive_prompt_is_current = AsyncMock(return_value=True)
     return ToolRuntimeContext(
         agent_name="general",
         target=MessageTarget(
@@ -562,8 +559,8 @@ async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_send_interactive_block_registers_question_and_adds_reactions() -> None:
-    """Interactive sends should format the question and add reaction buttons."""
+async def test_matrix_message_send_rejects_interactive_prompts() -> None:
+    """Direct tool sends have no durable identity for recoverable prompts."""
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id="$ctx-thread:localhost")
     interactive_message = """Please choose.
@@ -577,146 +574,23 @@ async def test_matrix_message_send_interactive_block_registers_question_and_adds
   ]
 }
 ```"""
-    formatted_text = parse_and_format_interactive(interactive_message, extract_mapping=False).formatted_text
-
     with (
         patch(
             "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
         ) as mock_send,
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
-            new_callable=AsyncMock,
-        ) as mock_add_reactions,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="send", message=interactive_message))
 
-    assert payload["status"] == "ok"
-    assert payload["event_id"] == "$evt"
-    sent_content = mock_send.await_args.args[2]
-    assert sent_content["body"] == formatted_text
-    ctx.membership.register_interactive_question_for_epoch.assert_awaited_once_with(
-        0,
-        InteractiveQuestion(
-            question_event_id="$evt",
-            room_id=ctx.room_id,
-            thread_id=None,
-            creator_agent=ctx.agent_name,
-            question_text="Which option?",
-            options={
-                "✅": "approve",
-                "1": "approve",
-                "❌": "reject",
-                "2": "reject",
-            },
-            option_labels={
-                "✅": "Approve",
-                "1": "Approve",
-                "❌": "Reject",
-                "2": "Reject",
-            },
-        ),
-    )
-    mock_add_reactions.assert_awaited_once_with(
-        ctx.client,
-        ctx.room_id,
-        "$evt",
-        [
-            {"emoji": "✅", "label": "Approve", "value": "approve"},
-            {"emoji": "❌", "label": "Reject", "value": "reject"},
-        ],
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["send", "edit"])
-@pytest.mark.parametrize("guard", ["source turn", "target epoch"])
-async def test_matrix_message_does_not_register_interactive_state_after_membership_changes(
-    action: str,
-    guard: str,
-) -> None:
-    """Direct sends and edits retain the membership that authorized transport."""
-    tool = MatrixMessageTools()
-    operation_order: list[str] = []
-
-    async def membership_epoch(_room_id: str) -> int:
-        operation_order.append("epoch")
-        return 7
-
-    async def reject_turn_registration(*_args: object, **_kwargs: object) -> bool:
-        operation_order.append("turn guard")
-        return False
-
-    async def reject_epoch_registration(*_args: object, **_kwargs: object) -> bool:
-        operation_order.append("epoch guard")
-        return False
-
-    delivered = delivered_matrix_side_effect("$delivered")
-
-    async def transport(*args: object, **kwargs: object) -> DeliveredMatrixEvent:
-        operation_order.append("transport")
-        return await delivered(*args, **kwargs)
-
-    membership = MagicMock()
-    membership.membership_epoch = AsyncMock(side_effect=membership_epoch)
-    membership.register_interactive_question_for_turn = AsyncMock(side_effect=reject_turn_registration)
-    membership.register_interactive_question_for_epoch = AsyncMock(side_effect=reject_epoch_registration)
-    membership.forget_interactive_question = AsyncMock()
-    ctx = _make_context(
-        thread_id="$ctx-thread:localhost",
-        membership=membership,
-        membership_turn_id="$source" if guard == "source turn" else None,
-    )
-    serve_conversation_reader(
-        ctx.conversation_reader,
-        [make_visible_message(event_id="$latest", timestamp=1, sender="@alice:localhost", body="latest")],
-    )
-    interactive_message = """Please choose.
-
-```interactive
-{"question":"Pick","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
-```"""
-
-    with (
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
-            new=AsyncMock(side_effect=transport),
-        ),
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
-            new=AsyncMock(side_effect=transport),
-        ),
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
-            new_callable=AsyncMock,
-        ) as add_reactions,
-        tool_runtime_context(ctx),
-    ):
-        payload = json.loads(
-            await tool.matrix_message(
-                action=action,
-                message=interactive_message,
-                target="$target" if action == "edit" else None,
-            ),
-        )
-
-    assert payload["status"] == "ok"
-    add_reactions.assert_not_awaited()
-    if guard == "source turn":
-        membership.membership_epoch.assert_awaited_once_with(ctx.room_id)
-        membership.register_interactive_question_for_turn.assert_awaited_once_with(
-            "$source",
-            ANY,
-            fallback_membership_epoch=7,
-        )
-        membership.register_interactive_question_for_epoch.assert_not_awaited()
-        assert operation_order == ["epoch", "transport", "turn guard"]
-    else:
-        membership.membership_epoch.assert_awaited_once_with(ctx.room_id)
-        membership.register_interactive_question_for_turn.assert_not_awaited()
-        membership.register_interactive_question_for_epoch.assert_awaited_once_with(7, ANY)
-        assert operation_order == ["epoch", "transport", "epoch guard"]
+    assert payload == {
+        "status": "error",
+        "tool": "matrix_message",
+        "action": "send",
+        "room_id": ctx.room_id,
+        "message": "Interactive prompts are only supported in normal agent responses.",
+    }
+    mock_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -734,24 +608,12 @@ async def test_matrix_message_send_plain_text_skips_interactive_registration_and
             "mindroom.custom_tools.matrix_conversation_operations.parse_and_format_interactive",
             wraps=parse_and_format_interactive,
         ) as mock_parse,
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.should_create_interactive_question",
-            return_value=False,
-        ) as mock_should_create,
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
-            new_callable=AsyncMock,
-        ) as mock_add_reactions,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="send", message="hello"))
 
     assert payload["status"] == "ok"
-    mock_parse.assert_called_once_with("hello", extract_mapping=False)
-    assert mock_should_create.call_args_list == [call("hello"), call("hello")]
-    ctx.membership.register_interactive_question_for_turn.assert_not_awaited()
-    ctx.membership.register_interactive_question_for_epoch.assert_not_awaited()
-    mock_add_reactions.assert_not_awaited()
+    mock_parse.assert_called_once_with("hello", extract_mapping=True)
 
 
 @pytest.mark.asyncio
@@ -1461,29 +1323,19 @@ async def test_matrix_message_react_skips_interactive_processing() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_conversation_operations.should_create_interactive_question",
-        ) as mock_should_create,
-        patch("mindroom.custom_tools.matrix_conversation_operations.parse_and_format_interactive") as mock_parse,
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
-            new_callable=AsyncMock,
-        ) as mock_add_reactions,
+            "mindroom.custom_tools.matrix_conversation_operations.parse_and_format_interactive",
+        ) as mock_parse,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="react", message="🔥", target="$target"))
 
     assert payload["status"] == "ok"
-    mock_should_create.assert_not_called()
     mock_parse.assert_not_called()
-    ctx.membership.register_interactive_question_for_turn.assert_not_awaited()
-    ctx.membership.register_interactive_question_for_epoch.assert_not_awaited()
-    ctx.membership.forget_interactive_question.assert_not_awaited()
-    mock_add_reactions.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_edit_processes_interactive_blocks() -> None:
-    """Edit action should format interactive content and register reactions on the target event."""
+async def test_matrix_message_edit_rejects_interactive_prompts() -> None:
+    """Direct tool edits cannot durably own a prompt revision."""
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id="$ctx-thread:localhost")
     thread_messages = [
@@ -1500,7 +1352,6 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
   ]
 }
 ```"""
-    formatted_text = parse_and_format_interactive(interactive_message, extract_mapping=False).formatted_text
     serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with (
@@ -1508,50 +1359,18 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
             "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
         ) as mock_edit,
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.add_reaction_buttons",
-            new_callable=AsyncMock,
-        ) as mock_add_reactions,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="edit", message=interactive_message, target="$target"))
 
-    assert payload["status"] == "ok"
-    assert payload["event_id"] == "$edit_evt"
-    assert mock_edit.await_args.args[4] == formatted_text
-    assert mock_edit.await_args.args[3]["body"] == formatted_text
-    ctx.membership.forget_interactive_question.assert_awaited_once_with("$target")
-    ctx.membership.register_interactive_question_for_epoch.assert_awaited_once_with(
-        0,
-        InteractiveQuestion(
-            question_event_id="$target",
-            room_id=ctx.room_id,
-            thread_id=ctx.thread_id,
-            creator_agent=ctx.agent_name,
-            question_text="Which option?",
-            options={
-                "✅": "approve",
-                "1": "approve",
-                "❌": "reject",
-                "2": "reject",
-            },
-            option_labels={
-                "✅": "Approve",
-                "1": "Approve",
-                "❌": "Reject",
-                "2": "Reject",
-            },
-        ),
-    )
-    mock_add_reactions.assert_awaited_once_with(
-        ctx.client,
-        ctx.room_id,
-        "$target",
-        [
-            {"emoji": "✅", "label": "Approve", "value": "approve"},
-            {"emoji": "❌", "label": "Reject", "value": "reject"},
-        ],
-    )
+    assert payload == {
+        "status": "error",
+        "tool": "matrix_message",
+        "action": "edit",
+        "room_id": ctx.room_id,
+        "message": "Interactive prompts are only supported in normal agent responses.",
+    }
+    mock_edit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1637,8 +1456,8 @@ async def test_matrix_message_edit_rejects_invalid_message_extras() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_edit_plain_text_clears_existing_interactive_question() -> None:
-    """Editing away an interactive block should clear the tracked question."""
+async def test_matrix_message_edit_plain_text_carries_no_interactive_prompt() -> None:
+    """Editing away an interactive block should leave prompt metadata off the wire."""
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id="$ctx-thread:localhost")
     thread_messages = [
@@ -1649,13 +1468,13 @@ async def test_matrix_message_edit_plain_text_clears_existing_interactive_questi
         patch(
             "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
-        ),
+        ) as edit_result,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="edit", message="updated text", target="$target"))
 
     assert payload["status"] == "ok"
-    ctx.membership.forget_interactive_question.assert_awaited_once_with("$target")
+    assert "io.mindroom.interactive" not in edit_result.await_args.args[3]
 
 
 def test_resolved_visible_message_to_dict_includes_msgtype() -> None:

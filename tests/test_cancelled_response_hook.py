@@ -659,8 +659,7 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
 
     parsed = MagicMock()
     parsed.formatted_text = "visible response"
-    parsed.option_map = None
-    parsed.options_list = None
+    parsed.interactive_metadata = None
 
     with (
         patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
