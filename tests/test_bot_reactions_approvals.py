@@ -1173,15 +1173,20 @@ class TestAgentBot(AgentBotTestBase):
                 await bot._response_runner.wait_for_source_owned_inbox_responses()
                 assert "$source" not in bot._journal_dispatcher._worker._deferred
 
-    @pytest.mark.parametrize("requires_human", [False, True], ids=["automatic", "human"])
+    @pytest.mark.parametrize(
+        ("requires_human", "redact_while_waiting"),
+        [(False, False), (True, False), (True, True)],
+        ids=["automatic", "human", "human-redacted"],
+    )
     @pytest.mark.asyncio
     async def test_persisted_pause_resumes_once_in_fresh_bot_runtime(  # noqa: PLR0915 - full restart boundary
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         requires_human: bool,
+        redact_while_waiting: bool,
     ) -> None:
-        """A fresh bot must execute the exact persisted tool once after policy or human approval."""
+        """A fresh bot must execute the persisted tool once after policy or card consent."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         session_db = tmp_path / "persisted-approval-agent.db"
@@ -1293,6 +1298,37 @@ class TestAgentBot(AgentBotTestBase):
             await shutdown_approval_runtime()
         assert persisted is not None
         assert persisted.state == ("waiting" if requires_human else "ready")
+        if redact_while_waiting:
+            # The durable approval card remains the explicit consent surface even
+            # when the requester removes the original room message.
+            redaction = InboundEvent(
+                event_id="$redaction",
+                room_id="!test:localhost",
+                thread_id=None,
+                kind=EventKind.REDACTION,
+                event_class=EventClass.CONTEXT_ONLY,
+                sender="@user:localhost",
+                origin_server_ts=2,
+                source={"event_id": "$redaction", "redacts": "$source", "content": {}},
+            )
+            projected_redaction = ProjectedEvent(
+                event_id="$redaction",
+                room_id="!test:localhost",
+                thread_id=None,
+                sender="@user:localhost",
+                origin_server_ts=2,
+                content={},
+                replaces_event_id=None,
+                redacts_event_id="$source",
+            )
+            assert await first.approval_store.admit(redaction, projected_redaction)
+            conversation = await first.approval_store.read_conversation(
+                room_id="!test:localhost",
+                thread_id=None,
+                limit=10,
+            )
+            assert conversation.messages == ()
+            assert await first.approval_store.approval_continuation_for_source("$source") == persisted
         if first_agent.db is not None:
             first_agent.db.close()
 
