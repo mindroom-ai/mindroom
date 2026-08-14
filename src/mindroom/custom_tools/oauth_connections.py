@@ -36,6 +36,7 @@ class OAuthConnectionTools(Toolkit):
             name="oauth_connections",
             tools=[self.reset_oauth_connection],
             requires_confirmation_tools=["reset_oauth_connection"],
+            stop_after_tool_call_tools=["reset_oauth_connection"],
         )
 
     async def reset_oauth_connection(self, provider_id: str) -> str:  # noqa: PLR0911

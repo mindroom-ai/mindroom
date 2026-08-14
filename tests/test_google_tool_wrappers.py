@@ -27,11 +27,14 @@ from mindroom.custom_tools.google_docs import GoogleDocsTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
-from mindroom.file_locks import advisory_file_lock
+from mindroom.file_locks import advisory_file_lock, file_lock_is_held
 from mindroom.oauth import client as oauth_client_module
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.oauth.service import scoped_oauth_credentials_refresh_lock_path
+from mindroom.oauth.service import (
+    scoped_oauth_credentials_refresh_lock_path,
+    scoped_oauth_credentials_singleflight_lock_path,
+)
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
@@ -738,6 +741,11 @@ def test_google_wrapper_serializes_refresh_with_reconnect_write(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
+    singleflight_lock_path = scoped_oauth_credentials_singleflight_lock_path(
+        provider.credential_service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
 
     def reconnect_writer() -> None:
         assert refresh_started.wait(timeout=5)
@@ -755,6 +763,7 @@ def test_google_wrapper_serializes_refresh_with_reconnect_write(
         auth_future = executor.submit(tool._ensure_structured_auth)
         writer_future = executor.submit(reconnect_writer)
         assert writer_attempting.wait(timeout=5)
+        assert file_lock_is_held(singleflight_lock_path) is True
         writer_finished_early = writer_finished.wait(timeout=0.1)
         release_refresh.set()
         assert auth_future.result(timeout=5) is None

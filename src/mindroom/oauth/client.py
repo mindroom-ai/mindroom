@@ -30,6 +30,7 @@ from mindroom.oauth.service import (
     oauth_credentials_match_client_id,
     oauth_credentials_satisfy_identity_policy,
     scoped_oauth_credentials_refresh_lock_path,
+    scoped_oauth_credentials_singleflight_lock_path,
 )
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
@@ -344,7 +345,12 @@ class ScopedOAuthClientMixin:
             credentials_manager=self._creds_manager,
             worker_target=self._worker_target,
         )
-        with advisory_file_lock(lock_path):
+        singleflight_lock_path = scoped_oauth_credentials_singleflight_lock_path(
+            self._oauth_provider.credential_service,
+            credentials_manager=self._creds_manager,
+            worker_target=self._worker_target,
+        )
+        with advisory_file_lock(singleflight_lock_path), advisory_file_lock(lock_path):
             refresh_lock_was_held = self._oauth_refresh_lock_is_held()
             self._oauth_call_state.refresh_lock_held = True
             try:

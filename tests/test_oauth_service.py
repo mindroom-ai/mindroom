@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,11 +18,12 @@ from mindroom.oauth.providers import OAuthClientConfig, OAuthProviderError, OAut
 from mindroom.oauth.service import (
     refresh_scoped_oauth_credentials_with_result,
     scoped_oauth_credentials_refresh_lock_path,
+    scoped_oauth_credentials_singleflight_lock_path,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Iterator, Mapping
     from pathlib import Path
     from typing import Any
 
@@ -141,13 +144,13 @@ async def test_scoped_oauth_refresh_releases_file_lock_during_provider_io(tmp_pa
     worker_target = _worker_target()
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     _save_credentials(runtime_paths, worker_target, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
-    refresh_started = asyncio.Event()
-    release_refresh = asyncio.Event()
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
 
     async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
         assert credentials["refresh_token"] == CHAIN_0
         refresh_started.set()
-        await release_refresh.wait()
+        assert release_refresh.wait(timeout=5)
         return _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
 
     refresh_task = asyncio.create_task(
@@ -158,7 +161,7 @@ async def test_scoped_oauth_refresh_releases_file_lock_during_provider_io(tmp_pa
             worker_target=worker_target,
         ),
     )
-    await refresh_started.wait()
+    assert await asyncio.to_thread(refresh_started.wait, 5)
 
     lock_path = scoped_oauth_credentials_refresh_lock_path(
         "demo_oauth",
@@ -179,13 +182,13 @@ async def test_scoped_oauth_refresh_preserves_reconnect_during_successful_provid
     worker_target = _worker_target()
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     _save_credentials(runtime_paths, worker_target, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
-    refresh_started = asyncio.Event()
-    release_refresh = asyncio.Event()
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
 
     async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
         assert credentials["refresh_token"] == CHAIN_0
         refresh_started.set()
-        await release_refresh.wait()
+        assert release_refresh.wait(timeout=5)
         return _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
 
     refresh_task = asyncio.create_task(
@@ -196,7 +199,7 @@ async def test_scoped_oauth_refresh_preserves_reconnect_during_successful_provid
             worker_target=worker_target,
         ),
     )
-    await refresh_started.wait()
+    assert await asyncio.to_thread(refresh_started.wait, 5)
     reconnected_credentials = _credentials(RECONNECTED_ACCESS, CHAIN_0, expires_at=FUTURE_EXPIRES_AT)
     lock_path = scoped_oauth_credentials_refresh_lock_path(
         "demo_oauth",
@@ -225,6 +228,92 @@ async def test_scoped_oauth_refresh_preserves_reconnect_during_successful_provid
             worker_target=worker_target,
         )
         == reconnected_credentials
+    )
+
+
+@pytest.mark.asyncio
+async def test_scoped_oauth_refresh_singleflights_error_behind_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A rejected concurrent refresh must observe a successful rotation instead of deleting its input."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target()
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    _save_credentials(runtime_paths, worker_target, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    singleflight_path = scoped_oauth_credentials_singleflight_lock_path(
+        "demo_oauth",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    first_refresh_started = threading.Event()
+    second_lock_attempted = threading.Event()
+    release_first_refresh = threading.Event()
+    refresh_tokens: list[str] = []
+    lock_attempts = 0
+    lock_attempts_guard = threading.Lock()
+    original_advisory_file_lock = oauth_service_module.advisory_file_lock
+
+    @contextmanager
+    def observed_advisory_file_lock(lock_path: Path) -> Iterator[None]:
+        nonlocal lock_attempts
+        if lock_path == singleflight_path:
+            with lock_attempts_guard:
+                lock_attempts += 1
+                if lock_attempts == 2:
+                    second_lock_attempted.set()
+        with original_advisory_file_lock(lock_path):
+            yield
+
+    monkeypatch.setattr(oauth_service_module, "advisory_file_lock", observed_advisory_file_lock)
+
+    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any] | None:
+        refresh_token = str(credentials["refresh_token"])
+        refresh_tokens.append(refresh_token)
+        if refresh_token == CHAIN_0:
+            if not first_refresh_started.is_set():
+                first_refresh_started.set()
+                assert release_first_refresh.wait(timeout=5)
+                return _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
+            raise OAuthRefreshRejectedError(INVALID_ROTATION, oauth_error=INVALID_ROTATION)
+        assert refresh_token == CHAIN_1
+        return None
+
+    provider = _FakeOAuthProvider(refresh)
+    first_task = asyncio.create_task(
+        refresh_scoped_oauth_credentials_with_result(
+            provider,
+            runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        ),
+    )
+    assert await asyncio.to_thread(first_refresh_started.wait, 5)
+    second_task = asyncio.create_task(
+        refresh_scoped_oauth_credentials_with_result(
+            provider,
+            runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        ),
+    )
+    assert await asyncio.to_thread(second_lock_attempted.wait, 5)
+    assert refresh_tokens == [CHAIN_0]
+
+    release_first_refresh.set()
+    first_result, second_result = await asyncio.gather(first_task, second_task)
+
+    assert first_result.credentials is not None
+    assert first_result.credentials["refresh_token"] == CHAIN_1
+    assert second_result.credentials == first_result.credentials
+    assert refresh_tokens == [CHAIN_0, CHAIN_1]
+    assert (
+        load_scoped_credentials(
+            "demo_oauth",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        == first_result.credentials
     )
 
 

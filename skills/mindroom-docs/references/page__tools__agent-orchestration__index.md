@@ -46,6 +46,7 @@ The provider must back one of the current agent's configured tools through that 
 The call deletes the matching local scoped credential under the same lock used by token refresh, disconnects the matching requester-scoped MCP OAuth session when applicable, and returns a requester-bound reconnect link.
 The reset does not revoke the grant at the external provider.
 Calling it when no local credential exists is safe and still returns a fresh reconnect link.
+The reset ends the current agent run after returning its reconnect receipt, so already-materialized provider clients cannot reuse the removed credential.
 
 ### Configuration
 

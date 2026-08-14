@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import time
 from dataclasses import dataclass
@@ -99,6 +100,7 @@ __all__ = [
     "reset_scoped_oauth_credentials",
     "sanitized_oauth_token_result",
     "scoped_oauth_credentials_refresh_lock_path",
+    "scoped_oauth_credentials_singleflight_lock_path",
 ]
 
 
@@ -152,12 +154,42 @@ def scoped_oauth_credentials_refresh_lock_path(
     worker_target: ResolvedWorkerTarget | None,
 ) -> Path:
     """Return the per-scope lock file for one OAuth credential refresh."""
+    return _scoped_oauth_credentials_lock_path(
+        service,
+        suffix="oauth-refresh.lock",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+
+def scoped_oauth_credentials_singleflight_lock_path(
+    service: str,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+) -> Path:
+    """Return the per-scope lock serializing provider refresh requests across processes."""
+    return _scoped_oauth_credentials_lock_path(
+        service,
+        suffix="oauth-refresh-singleflight.lock",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+
+def _scoped_oauth_credentials_lock_path(
+    service: str,
+    *,
+    suffix: str,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+) -> Path:
     credentials_path = scoped_credentials_path(
         service,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
-    return credentials_path.with_name(f"{credentials_path.name}.oauth-refresh.lock")
+    return credentials_path.with_name(f"{credentials_path.name}.{suffix}")
 
 
 def invalidate_scoped_oauth_credentials_if_current(
@@ -245,7 +277,54 @@ async def refresh_scoped_oauth_credentials_with_result(
     worker_target: ResolvedWorkerTarget | None,
     allowed_shared_services: frozenset[str] | None = None,
 ) -> OAuthCredentialsRefreshResult:
-    """Refresh one credential snapshot and save it only if that snapshot remains current."""
+    """Single-flight one provider refresh without holding a write lock across its I/O."""
+    singleflight_lock_path = scoped_oauth_credentials_singleflight_lock_path(
+        provider.credential_service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    return await asyncio.to_thread(
+        _run_scoped_oauth_credentials_refresh_singleflight,
+        provider,
+        runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+        allowed_shared_services=allowed_shared_services,
+        singleflight_lock_path=singleflight_lock_path,
+    )
+
+
+def _run_scoped_oauth_credentials_refresh_singleflight(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+    allowed_shared_services: frozenset[str] | None,
+    singleflight_lock_path: Path,
+) -> OAuthCredentialsRefreshResult:
+    """Run one refresh in a worker thread so blocking lock wait cannot deadlock the caller loop."""
+    with advisory_file_lock(singleflight_lock_path):
+        return asyncio.run(
+            _refresh_scoped_oauth_credentials_with_result_unserialized(
+                provider,
+                runtime_paths,
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+                allowed_shared_services=allowed_shared_services,
+            ),
+        )
+
+
+async def _refresh_scoped_oauth_credentials_with_result_unserialized(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+    allowed_shared_services: frozenset[str] | None,
+) -> OAuthCredentialsRefreshResult:
+    """Refresh one credential snapshot and publish it only while that snapshot remains current."""
     lock_path = scoped_oauth_credentials_refresh_lock_path(
         provider.credential_service,
         credentials_manager=credentials_manager,

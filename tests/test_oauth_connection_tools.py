@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
@@ -39,6 +40,8 @@ def _tool_and_context(
     *,
     worker_scope: WorkerScope,
     context_agent_name: str = "research",
+    requester_id: str = "@alice:example.org",
+    aliases: dict[str, list[str]] | None = None,
 ) -> tuple[OAuthConnectionTools, ToolRuntimeContext, ResolvedWorkerTarget]:
     config = Config(
         agents={
@@ -56,6 +59,10 @@ def _tool_and_context(
                 agents=["research"],
             ),
         },
+        authorization=AuthorizationConfig(
+            aliases=aliases or {},
+            agent_reply_permissions={"research": ["@alice:example.org"]},
+        ),
         models={"default": {"provider": "openai", "id": "gpt-5.6"}},
     )
     config_path = tmp_path / "config.yaml"
@@ -68,7 +75,7 @@ def _tool_and_context(
             thread_id="$thread",
             reply_to_event_id="$request",
         ),
-        requester_id="@alice:example.org",
+        requester_id=requester_id,
         client=MagicMock(),
         config=config,
         runtime_paths=runtime_paths,
@@ -116,6 +123,7 @@ def test_oauth_connections_exposes_only_approval_gated_reset(tmp_path: Path) -> 
     assert list(tool.async_functions) == ["reset_oauth_connection"]
     assert tool.functions == {}
     assert tool.async_functions["reset_oauth_connection"].requires_confirmation is True
+    assert tool.async_functions["reset_oauth_connection"].stop_after_tool_call is True
 
 
 @pytest.mark.asyncio
@@ -189,6 +197,48 @@ async def test_reset_oauth_connection_uses_team_member_ownership(tmp_path: Path)
         query["connect_token"][0],
     )
     assert connect_target.agent_name == "research"
+    assert connect_target.requester_id == "@alice:example.org"
+
+
+@pytest.mark.asyncio
+async def test_reset_oauth_connection_canonicalizes_bridge_alias_scope(tmp_path: Path) -> None:
+    """An authorized bridge alias must reset and reconnect the canonical requester's credential scope."""
+    alias = "@telegram_alice:example.org"
+    tool, context, worker_target = _tool_and_context(
+        tmp_path,
+        worker_scope="user_agent",
+        requester_id=alias,
+        aliases={"@alice:example.org": [alias]},
+    )
+    assert worker_target.execution_identity is not None
+    assert worker_target.execution_identity.requester_id == "@alice:example.org"
+    credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
+    provider = google_drive_oauth_provider()
+    save_scoped_credentials(
+        provider.credential_service,
+        {"refresh_token": "canonical-refresh-token"},
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    with tool_runtime_context(context):
+        result = await tool.reset_oauth_connection(provider.id)
+
+    assert "Error:" not in result
+    assert (
+        load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        is None
+    )
+    query = parse_qs(urlparse(_connect_url_from_result(result)).query)
+    connect_target = lookup_oauth_connect_token(
+        provider,
+        context.runtime_paths,
+        query["connect_token"][0],
+    )
     assert connect_target.requester_id == "@alice:example.org"
 
 
