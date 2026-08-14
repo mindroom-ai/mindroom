@@ -7,11 +7,12 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
-from github import BadCredentialsException
+from github import BadCredentialsException, Github
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
@@ -25,6 +26,7 @@ from mindroom.oauth.providers import OAuthRefreshRejectedError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
@@ -49,6 +51,90 @@ class _FakeUser:
 class _FakeGithub:
     def get_user(self) -> _FakeUser:
         return _FakeUser()
+
+
+class _FakeIssueSearchResults:
+    totalCount = 0  # noqa: N815
+
+    def get_page(self, page: int) -> list[object]:
+        assert page == 0
+        return []
+
+
+class _SearchGithub:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    def search_issues(self, query: str, *, sort: str, order: str) -> _FakeIssueSearchResults:
+        assert sort == "created"
+        assert order == "desc"
+        self.queries.append(query)
+        return _FakeIssueSearchResults()
+
+
+class _FakePaginatedItems:
+    totalCount = 0  # noqa: N815
+
+    def __iter__(self) -> Iterator[object]:
+        return iter(())
+
+
+@dataclass(frozen=True)
+class _FakeRepoOwner:
+    login: str
+
+
+class _FakeRepositoryStats:
+    id = 1
+    name = "project"
+    full_name = "example/project"
+    owner = _FakeRepoOwner("example")
+    description = "Example repository"
+    html_url = "https://github.example.test/example/project"
+    homepage = None
+    language = "Python"
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    updated_at = datetime(2026, 1, 2, tzinfo=UTC)
+    pushed_at = datetime(2026, 1, 3, tzinfo=UTC)
+    size = 123
+    stargazers_count = 4
+    watchers_count = 5
+    forks_count = 6
+    open_issues_count = 7
+    default_branch = "main"
+    license = None
+    private = False
+    archived = False
+
+    def get_topics(self) -> list[str]:
+        return ["example"]
+
+    def get_languages(self) -> dict[str, int]:
+        return {"Python": 123}
+
+    def get_issues(self, *, state: str) -> list[object]:
+        assert state == "open"
+        return []
+
+    def get_pulls(
+        self,
+        *,
+        state: str,
+        sort: str | None = None,
+        direction: str | None = None,
+    ) -> _FakePaginatedItems:
+        assert state in {"all", "open"}
+        assert (sort, direction) in {(None, None), ("created", "desc")}
+        return _FakePaginatedItems()
+
+    def get_contributors(self) -> list[object]:
+        return []
+
+
+class _StatsGithub:
+    def get_repo(self, repo_name: str) -> _FakeRepositoryStats:
+        assert repo_name == "example/project"
+        return _FakeRepositoryStats()
 
 
 class _RevokedTokenGithub:
@@ -346,6 +432,62 @@ def test_base_url_is_forwarded_to_pygithub(tmp_path: Path) -> None:
 
     assert json.loads(tool.list_repositories()) == ["example/project"]
     assert captured["base_url"] == "https://github.example.test/api/v3"
+
+
+def test_pygithub_language_payload_remains_numeric_for_agno_stats() -> None:
+    client = Github(lazy=True)
+    try:
+        repo = client.get_repo("example/project", lazy=True)
+        with patch.object(
+            repo._requester,
+            "requestJson",
+            return_value=(200, {}, '{"Python": 123}'),
+        ):
+            assert repo.get_languages() == {"Python": 123}
+    finally:
+        client.close()
+
+
+def test_repository_stats_consumes_numeric_language_payload(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    tool.g = _StatsGithub()
+
+    result = json.loads(tool.get_repository_with_stats("example/project"))
+
+    assert result["languages"] == {"Python": 123}
+    assert result["stargazers_count"] == 4
+    assert result["open_pr_count"] == 0
+    assert result["pr_metrics"] == {
+        "total_prs": 0,
+        "merged_prs": 0,
+        "acceptance_rate": 0,
+        "avg_time_to_merge": None,
+    }
+
+
+def test_issue_search_decodes_html_escaped_comparison_operators(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    github = _SearchGithub()
+    tool.g = github
+
+    result = json.loads(tool.search_issues_and_prs("created:&gt;=2026-08-07"))
+
+    assert github.queries == ["created:>=2026-08-07"]
+    assert result["query"] == "created:>=2026-08-07"
 
 
 def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) -> None:
