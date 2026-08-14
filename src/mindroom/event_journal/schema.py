@@ -257,11 +257,10 @@ _TABLES = (
         -- card is answered the moment this is set, whether or not the edit
         -- carrying it reached the room.
         resolution_json TEXT,
-        -- Present only for native persisted-run approvals. Legacy rows keep
-        -- these NULL and can never authorize continuation execution.
-        continuation_id TEXT,
-        continuation_generation BIGINT,
-        tool_call_id TEXT,
+        -- The exact persisted pause and tool call this card may authorize.
+        continuation_id TEXT NOT NULL,
+        continuation_generation BIGINT NOT NULL,
+        tool_call_id TEXT NOT NULL,
         membership_epoch BIGINT NOT NULL,
         created_at_ns BIGINT NOT NULL,
         PRIMARY KEY (principal_id, transaction_id)
@@ -427,13 +426,6 @@ _INDEXES = (
     """,
 )
 
-_APPROVAL_CARD_CONTINUATION_COLUMNS = (
-    ("continuation_id", "TEXT"),
-    ("continuation_generation", "BIGINT"),
-    ("tool_call_id", "TEXT"),
-)
-
-
 def _expand_byte_order(sql: str, dialect: _Dialect) -> str:
     """Spell the byte-order pin for one backend."""
     return sql.replace(_BYTE_ORDER_MARKER, dialect.order_by_bytes)
@@ -455,24 +447,6 @@ def schema_statements(dialect: _Dialect) -> tuple[str, ...]:
             ordered_text=dialect.ordered_text,
         )
         for statement in (*_TABLES, *_INDEXES)
-    )
-
-
-def approval_card_upgrade_statements(
-    dialect: _Dialect,
-    *,
-    existing_columns: frozenset[str] = frozenset(),
-) -> tuple[str, ...]:
-    """Add native-continuation identity to the approval-card table shipped by main."""
-    if dialect == SQLITE_DIALECT:
-        return tuple(
-            f"ALTER TABLE approval_cards ADD COLUMN {name} {column_type}"
-            for name, column_type in _APPROVAL_CARD_CONTINUATION_COLUMNS
-            if name not in existing_columns
-        )
-    return tuple(
-        f"ALTER TABLE approval_cards ADD COLUMN IF NOT EXISTS {name} {column_type}"
-        for name, column_type in _APPROVAL_CARD_CONTINUATION_COLUMNS
     )
 
 

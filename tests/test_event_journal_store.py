@@ -3523,7 +3523,13 @@ class TestApprovalCards:
             "event_id": event_id,
             "sender": sender,
             "type": "io.mindroom.tool_approval",
-            "content": {"approval_id": event_id.lstrip("$"), "status": "pending"},
+            "content": {
+                "approval_id": event_id.lstrip("$"),
+                "continuation_id": f"continuation-{event_id.lstrip('$')}",
+                "continuation_generation": 0,
+                "tool_call_id": event_id.lstrip("$"),
+                "status": "pending",
+            },
         }
 
     @classmethod
@@ -3556,6 +3562,15 @@ class TestApprovalCards:
         await alice.claim_approval_card(room_id=ROOM, transaction_id="txn-room", card=self.card("$room"))
 
         assert await alice.pending_approval_room_ids() == tuple(sorted((OTHER_ROOM, ROOM)))
+
+    async def test_approval_card_requires_native_identity(self, alice: PrincipalStore) -> None:
+        """A stored card must name the exact paused call it can authorize."""
+        card = self.card("$card")
+        content = cast("dict[str, object]", card["content"])
+        content.pop("tool_call_id")
+
+        with pytest.raises(ValueError, match="native continuation identity"):
+            await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=card)
 
     async def test_a_remembered_card_reads_back_whole(self, alice: PrincipalStore) -> None:
         """A remembered card reads back whole, and unanswered."""
@@ -3741,7 +3756,10 @@ class TestApprovalCards:
             transaction_id="txn",
             card=self.card("$card"),
         )
-        sent = {**self.card("$card"), "content": {"approval_id": "card", "status": "pending", "approvable": False}}
+        sent = {
+            **self.card("$card"),
+            "content": {**cast("dict[str, object]", self.card("$card")["content"]), "approvable": False},
+        }
         await alice.acknowledge_approval_card(transaction_id="txn", card_event_id="$card", card=sent)
 
         stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
@@ -5016,119 +5034,6 @@ class TestConnectionSecretsStayOutOfLogs:
         assert "hunter2" not in rendered
         assert "someone" not in rendered
         assert "db.example" not in rendered
-
-
-class TestSchemaUpgrades:
-    """Opening the journal upgrades additive columns without losing old rows."""
-
-    async def test_opening_main_schema_adds_native_continuation_card_identity(self, tmp_path: Path) -> None:
-        """A card written by main remains readable after native continuation columns are added."""
-        database_path = tmp_path / "main-schema.db"
-        with sqlite3.connect(database_path) as database:
-            database.execute(
-                """
-                CREATE TABLE approval_cards (
-                    principal_id TEXT NOT NULL,
-                    room_id TEXT NOT NULL,
-                    transaction_id TEXT NOT NULL,
-                    card_event_id TEXT,
-                    attempted INTEGER NOT NULL,
-                    sending_device_id TEXT,
-                    card_json TEXT NOT NULL,
-                    resolution_json TEXT,
-                    membership_epoch BIGINT NOT NULL,
-                    created_at_ns BIGINT NOT NULL,
-                    PRIMARY KEY (principal_id, transaction_id)
-                )
-                """,
-            )
-            database.execute(
-                """
-                INSERT INTO approval_cards (
-                    principal_id, room_id, transaction_id, card_event_id, attempted,
-                    sending_device_id, card_json, resolution_json, membership_epoch, created_at_ns
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                ("agent@alice", ROOM, "legacy", "$legacy", 1, DEVICE, '{"body":"old"}', None, 1, 1),
-            )
-
-        backend = SqliteBackend.open(database_path)
-        try:
-            row = await backend.read(
-                lambda transaction: transaction.fetchone(
-                    """
-                    SELECT card_event_id, continuation_id, continuation_generation, tool_call_id
-                    FROM approval_cards WHERE principal_id = ? AND transaction_id = ?
-                    """,
-                    ("agent@alice", "legacy"),
-                ),
-            )
-        finally:
-            await backend.close()
-
-        assert row is not None
-        assert row["card_event_id"] == "$legacy"
-        assert row["continuation_id"] is None
-        assert row["continuation_generation"] is None
-        assert row["tool_call_id"] is None
-
-    async def test_postgres_opening_main_schema_adds_native_continuation_card_identity(
-        self,
-        postgres_journal_url: str,
-    ) -> None:
-        """PostgreSQL upgrades the same shipped card row without a destructive migration."""
-        import psycopg  # noqa: PLC0415 - optional backend exercised only by this test
-
-        from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415
-
-        database_url = postgres_journal_schema_url(postgres_journal_url)
-        with psycopg.connect(database_url) as database:
-            database.execute(
-                """
-                CREATE TABLE approval_cards (
-                    principal_id TEXT NOT NULL,
-                    room_id TEXT NOT NULL,
-                    transaction_id TEXT NOT NULL,
-                    card_event_id TEXT,
-                    attempted INTEGER NOT NULL,
-                    sending_device_id TEXT,
-                    card_json TEXT NOT NULL,
-                    resolution_json TEXT,
-                    membership_epoch BIGINT NOT NULL,
-                    created_at_ns BIGINT NOT NULL,
-                    PRIMARY KEY (principal_id, transaction_id)
-                )
-                """,
-            )
-            database.execute(
-                """
-                INSERT INTO approval_cards (
-                    principal_id, room_id, transaction_id, card_event_id, attempted,
-                    sending_device_id, card_json, resolution_json, membership_epoch, created_at_ns
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                ("agent@alice", ROOM, "legacy", "$legacy", 1, DEVICE, '{"body":"old"}', None, 1, 1),
-            )
-
-        backend = PostgresBackend.open(database_url)
-        try:
-            row = await backend.read(
-                lambda transaction: transaction.fetchone(
-                    """
-                    SELECT card_event_id, continuation_id, continuation_generation, tool_call_id
-                    FROM approval_cards WHERE principal_id = ? AND transaction_id = ?
-                    """,
-                    ("agent@alice", "legacy"),
-                ),
-            )
-        finally:
-            await backend.close()
-
-        assert row is not None
-        assert row["card_event_id"] == "$legacy"
-        assert row["continuation_id"] is None
-        assert row["continuation_generation"] is None
-        assert row["tool_call_id"] is None
 
 
 class TestHotQueriesAreIndexCovered:

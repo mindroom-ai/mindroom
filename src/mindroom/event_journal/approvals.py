@@ -94,9 +94,9 @@ class StoredApprovalCard:
     # When the row was claimed. Half of the room scan's ordering, and therefore
     # half of the cursor a caller resumes that scan from.
     created_at_ns: int
-    continuation_id: str | None = None
-    continuation_generation: int | None = None
-    tool_call_id: str | None = None
+    continuation_id: str
+    continuation_generation: int
+    tool_call_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,21 +116,25 @@ class RecordedApprovalDecision:
     source_event_ids: tuple[str, ...] = ()
 
 
-def _native_identity(card: Mapping[str, Any]) -> tuple[str | None, int | None, str | None]:
+def _native_identity(card: Mapping[str, Any]) -> tuple[str, int, str]:
     """Extract strict native-continuation identity from one Matrix card body."""
     content = card.get("content")
     if not isinstance(content, dict):
-        return None, None, None
+        msg = "Approval card is missing native continuation identity."
+        raise ValueError(msg)
     continuation_id = content.get("continuation_id")
     generation = content.get("continuation_generation")
     tool_call_id = content.get("tool_call_id")
     if (
         not isinstance(continuation_id, str)
+        or not continuation_id
         or not isinstance(generation, int)
         or isinstance(generation, bool)
         or not isinstance(tool_call_id, str)
+        or not tool_call_id
     ):
-        return None, None, None
+        msg = "Approval card is missing native continuation identity."
+        raise ValueError(msg)
     return continuation_id, generation, tool_call_id
 
 
@@ -199,13 +203,11 @@ def resolve_continuation(
     if card is None:
         return RecordedApprovalDecision(resolution=None, recorded=False)
     existing = _resolution(cast("str | None", card["resolution_json"]))
-    continuation_id = cast("str | None", card["continuation_id"])
+    continuation_id = cast("str", card["continuation_id"])
     generation_value = card["continuation_generation"]
-    tool_call_id = cast("str | None", card["tool_call_id"])
+    tool_call_id = cast("str", card["tool_call_id"])
     if existing is not None:
         return RecordedApprovalDecision(resolution=existing, recorded=False)
-    if continuation_id is None or generation_value is None or tool_call_id is None:
-        return RecordedApprovalDecision(resolution=None, recorded=False)
     generation = int(generation_value)
     continuation = transaction.fetchone(
         """
@@ -732,7 +734,7 @@ def pending_cards(
 
 
 def _card(row: Row) -> StoredApprovalCard | None:
-    """Decode one durable card, skipping corrupt legacy rows fail-closed."""
+    """Decode one durable native card, skipping corrupt rows fail-closed."""
     try:
         card = json.loads(row["card_json"])
     except (json.JSONDecodeError, TypeError):
@@ -742,6 +744,13 @@ def _card(row: Row) -> StoredApprovalCard | None:
         _log_unreadable_card(row)
         return None
     try:
+        stored_identity = (
+            cast("str", row["continuation_id"]),
+            int(row["continuation_generation"]),
+            cast("str", row["tool_call_id"]),
+        )
+        if _native_identity(card) != stored_identity:
+            raise ValueError
         return StoredApprovalCard(
             card=card,
             resolution=_resolution(row["resolution_json"]),
@@ -750,11 +759,9 @@ def _card(row: Row) -> StoredApprovalCard | None:
             attempted=bool(row["attempted"]),
             sending_device_id=row["sending_device_id"],
             created_at_ns=int(row["created_at_ns"]),
-            continuation_id=cast("str | None", row["continuation_id"]),
-            continuation_generation=(
-                int(row["continuation_generation"]) if row["continuation_generation"] is not None else None
-            ),
-            tool_call_id=cast("str | None", row["tool_call_id"]),
+            continuation_id=stored_identity[0],
+            continuation_generation=stored_identity[1],
+            tool_call_id=stored_identity[2],
         )
     except (json.JSONDecodeError, TypeError, ValueError):
         _log_unreadable_card(row)
