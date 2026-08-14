@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from mindroom.history.types import HistoryScope
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
-from . import journal
+from . import journal, membership_state, outbox
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
@@ -27,9 +27,42 @@ _CONTINUATION_COLUMNS = """
 """
 
 
-def unavailable_notice_delivery_id(approval_id: str) -> str:
-    """Return the durable delivery identity for an unavailable-owner notice."""
-    return f"approval-unavailable:{approval_id}"
+def _unavailable_notice_delivery_id(approval_id: str, membership_epoch: int) -> str:
+    """Return one membership's delivery identity for an unavailable-owner notice."""
+    return f"approval-unavailable:{approval_id}:{membership_epoch}"
+
+
+def enqueue_unavailable_notice(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    room_id: str,
+    thread_id: str | None,
+    payload: Mapping[str, object],
+) -> str | None:
+    """Enqueue the current membership's physical attempt for one logical notice."""
+    membership_epoch = membership_state.claim_active_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+    )
+    if membership_epoch is None:
+        return None
+    delivery_id = _unavailable_notice_delivery_id(approval_id, membership_epoch)
+    transaction_id = outbox.enqueue(
+        transaction,
+        principal_id,
+        delivery_id=delivery_id,
+        stage=DeliveryStage.FINAL,
+        event_type="m.room.message",
+        room_id=room_id,
+        membership_epoch=membership_epoch,
+        thread_id=thread_id,
+        payload=payload,
+        edits_event_id=None,
+    )
+    return delivery_id if transaction_id is not None else None
 
 
 class ApprovalDecision(StrEnum):
@@ -654,8 +687,32 @@ def discard_unavailable(
     notice_principal_id: str,
 ) -> bool:
     """Release a permanently unavailable owner's sources after visible card cleanup."""
+    observed = get(transaction, principal_id, approval_id=approval_id)
+    if observed is None or observed.state != "failing":
+        return False
+    membership_epoch = membership_state.claim_active_membership_epoch(
+        transaction,
+        notice_principal_id,
+        room_id=observed.room_id,
+    )
+    if membership_epoch is None:
+        return False
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
-    if continuation is None or continuation.state != "failing":
+    if continuation is None or continuation.state != "failing" or continuation.room_id != observed.room_id:
+        return False
+    delivery_id = _unavailable_notice_delivery_id(approval_id, membership_epoch)
+    # The membership row is already held before the cross-principal
+    # continuation lock. The helper's membership claim is therefore reentrant;
+    # its new lock is only the outbox row, preserving membership ->
+    # continuation -> delivery order against router departure.
+    ownership = outbox.claim_active_delivery_ownership(
+        transaction,
+        notice_principal_id,
+        delivery_id=delivery_id,
+        stage=DeliveryStage.FINAL,
+        expected_room_id=continuation.room_id,
+    )
+    if ownership is None:
         return False
     delivered = transaction.fetchone(
         """
@@ -663,7 +720,7 @@ def discard_unavailable(
         WHERE principal_id = ? AND delivery_id = ? AND stage = ?
           AND acknowledged_event_id IS NOT NULL
         """,
-        (notice_principal_id, unavailable_notice_delivery_id(approval_id), DeliveryStage.FINAL.value),
+        (notice_principal_id, delivery_id, DeliveryStage.FINAL.value),
     )
     if delivered is None:
         return False

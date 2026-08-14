@@ -90,6 +90,15 @@ class _WatchedOutbox:
     inner: MatrixDeliveryView
     timeline: list[str]
 
+    @property
+    def principal_id(self) -> str:
+        """Return the wrapped delivery principal."""
+        return self.inner.principal_id
+
+    async def membership_epoch(self, room_id: str) -> int:
+        """Return the current room membership without timeline noise."""
+        return await self.inner.membership_epoch(room_id)
+
     async def enqueue_matrix_delivery(
         self,
         *,
@@ -154,6 +163,22 @@ class _WatchedOutbox:
     async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
         return await self.inner.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
+
+    async def retire_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        membership_epoch: int,
+    ) -> str | None:
+        """Retain an obsolete delivery as an identity tombstone."""
+        return await self.inner.retire_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=stage,
+            room_id=room_id,
+            membership_epoch=membership_epoch,
+        )
 
     async def acknowledge_matrix_delivery(
         self,

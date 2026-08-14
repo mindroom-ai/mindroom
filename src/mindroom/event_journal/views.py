@@ -271,6 +271,8 @@ class HydrationView(Protocol):
         *,
         revision_event_id: str,
         revision_ts: int,
+        revision_sender: str,
+        revision_transaction_id: str | None = None,
         content: Mapping[str, object],
     ) -> bool:
         """Install a point-refetched revision if its refresh token still holds."""
@@ -290,6 +292,10 @@ class MatrixDeliveryView(Protocol):
     Nothing here can read the journal, replay it, or settle a source that no
     delivery accounts for.
     """
+
+    async def membership_epoch(self, room_id: str) -> int:
+        """Return the current membership epoch for one room."""
+        ...
 
     async def enqueue_matrix_delivery(
         self,
@@ -334,6 +340,17 @@ class MatrixDeliveryView(Protocol):
         """Return one delivery without claiming it."""
         ...
 
+    async def retire_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        membership_epoch: int,
+    ) -> str | None:
+        """Retain an obsolete send as an identity tombstone, or return its ACK."""
+        ...
+
     async def acknowledge_matrix_delivery(
         self,
         *,
@@ -362,6 +379,15 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
 
     @property
     def principal_id(self) -> str: ...  # noqa: D102
+
+    async def enqueue_unavailable_approval_notice(  # noqa: D102
+        self,
+        *,
+        approval_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+    ) -> str | None: ...
 
     async def reserve_approval_card_deliveries(  # noqa: D102
         self,

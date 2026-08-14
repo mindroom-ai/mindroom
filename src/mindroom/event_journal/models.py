@@ -12,6 +12,9 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
+DURABLE_DELIVERY_ID_KEY = "io.mindroom.delivery_id"
+
+
 class EventClass(StrEnum):
     """Whether an admitted event may start semantic work.
 
@@ -147,9 +150,9 @@ class JournalEvent:
     Carries neither the class that decided whether it was actionable nor the
     membership it was admitted under. Both are settled at admission and read
     from the row by the journal itself -- the class becomes the ``pending``
-    state, and the epoch is asked for by ``admitted_membership_epoch`` when a
-    delivery is fenced. Replaying them beside the event would offer a consumer
-    a second, staler way to ask the same questions.
+    state, and delivery ownership is derived from the admitted row when intent
+    is recorded. Replaying them beside the event would offer a consumer a
+    second, staler way to ask the same questions.
     """
 
     event_id: str
@@ -323,6 +326,7 @@ class MatrixDelivery:
     delivery_id: str
     stage: DeliveryStage
     room_id: str
+    membership_epoch: int
     thread_id: str | None
     transaction_id: str
     payload: Mapping[str, object]
@@ -337,6 +341,9 @@ class MatrixDelivery:
     # the frozen transaction ID still collapse onto the event a previous
     # attempt produced?
     attempted: bool = False
+    # An obsolete delivery stays as an identity tombstone so late work cannot
+    # cross into a newer membership, but recovery never sends it again.
+    retired: bool = False
     # The device that offered it, or None when none is recorded. A Matrix
     # transaction ID deduplicates within one device, so a row attempted by a
     # device this process is no longer logged in as carries an ID the
@@ -374,7 +381,7 @@ class DeliveryAcknowledgement:
 
     # The event the row names now: this call's if it bound the row, the
     # winner's if it did not, and ``None`` when there is no row left to name
-    # one -- a membership fence deleted it between the send and this write.
+    # one. Membership fences retain rows as retired identity tombstones.
     settled_event_id: str | None
     # Whether this call's conditional update is the one that bound the row.
     # The only thing that licenses writing anything beside the row.

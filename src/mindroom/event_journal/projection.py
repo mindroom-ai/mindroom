@@ -20,6 +20,8 @@ from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 
 from .identity import encode_thread_id
 from .interactive_questions import record_projected_prompt
+from .membership_state import claim_membership_epoch
+from .outbox import event_belongs_to_membership
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -45,6 +47,7 @@ class ProjectedEvent:
     content: Mapping[str, object]
     replaces_event_id: str | None
     redacts_event_id: str | None
+    transaction_id: str | None = None
 
 
 def _relation(content: Mapping[str, object]) -> Mapping[str, object]:
@@ -179,6 +182,17 @@ def project(
     A newly admitted event with a preexisting tombstone returns its own ID.
     Every other projection returns ``None``.
     """
+    if not event_belongs_to_membership(
+        transaction,
+        principal_id,
+        room_id=event.room_id,
+        event_id=event.event_id,
+        membership_epoch=membership_epoch,
+        sender=event.sender,
+        transaction_id=event.transaction_id,
+        content=event.content,
+    ):
+        return None
     if event.redacts_event_id is not None:
         _project_redaction(
             transaction,
@@ -442,6 +456,48 @@ def _hold_unresolved_edit(
     )
 
 
+def discard_delivery_event(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    event_id: str,
+) -> None:
+    """Remove a delivery event that raced into projection before stale ACK."""
+    transaction.execute(
+        """
+        DELETE FROM unresolved_edits
+        WHERE principal_id = ? AND (target_event_id = ? OR edit_event_id = ?)
+        """,
+        (principal_id, event_id, event_id),
+    )
+    removed = transaction.fetchone(
+        """
+        SELECT room_id, thread_id FROM visible_messages
+        WHERE principal_id = ? AND (logical_event_id = ? OR revision_event_id = ?)
+        """,
+        (principal_id, event_id, event_id),
+    )
+    # Deleting a current edit's logical row is conservative and convergent:
+    # hydration reconstructs the target while the acknowledged outbox row
+    # prevents this stale physical revision from being applied again. Revoke
+    # the matching coverage proof too, or the missing row is trusted forever.
+    transaction.execute(
+        """
+        DELETE FROM visible_messages
+        WHERE principal_id = ? AND (logical_event_id = ? OR revision_event_id = ?)
+        """,
+        (principal_id, event_id, event_id),
+    )
+    if removed is not None:
+        transaction.execute(
+            """
+            DELETE FROM conversation_hydration
+            WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+            """,
+            (principal_id, removed["room_id"], removed["thread_id"]),
+        )
+
+
 def _install_revision(
     transaction: Transaction,
     principal_id: str,
@@ -558,6 +614,8 @@ def install_refetched_revision(
     logical_event_id: str,
     revision_event_id: str,
     revision_ts: int,
+    revision_sender: str,
+    revision_transaction_id: str | None,
     content: Mapping[str, object],
     expected_revision_event_id: str,
     expected_refresh_token: int,
@@ -586,6 +644,31 @@ def install_refetched_revision(
     summary and export of that room from then on. Every other install path
     already asks the tombstone table; this was the one that did not.
     """
+    membership_is_current = claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    )
+    if not membership_is_current or not event_belongs_to_membership(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        event_id=revision_event_id,
+        membership_epoch=expected_membership_epoch,
+        sender=revision_sender,
+        transaction_id=revision_transaction_id,
+        content=content,
+    ):
+        return drop_refetched_message(
+            transaction,
+            principal_id,
+            room_id=room_id,
+            logical_event_id=logical_event_id,
+            expected_revision_event_id=expected_revision_event_id,
+            expected_refresh_token=expected_refresh_token,
+            expected_membership_epoch=expected_membership_epoch,
+        )
     if holds_unresolved_sidecar(content):
         return False
     if _is_tombstoned(transaction, principal_id, room_id, revision_event_id):
@@ -635,13 +718,13 @@ def drop_refetched_message(
     expected_refresh_token: int,
     expected_membership_epoch: int,
 ) -> bool:
-    """Remove a logical message the server no longer has any revision of."""
+    """Remove a logical message and revoke the coverage that included it."""
     row = transaction.fetchone(
         """
         DELETE FROM visible_messages
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
           AND revision_event_id = ? AND refresh_token = ? AND membership_epoch = ?
-        RETURNING logical_event_id
+        RETURNING thread_id
         """,
         (
             principal_id,
@@ -652,7 +735,16 @@ def drop_refetched_message(
             expected_membership_epoch,
         ),
     )
-    return row is not None
+    if row is None:
+        return False
+    transaction.execute(
+        """
+        DELETE FROM conversation_hydration
+        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+        """,
+        (principal_id, room_id, row["thread_id"]),
+    )
+    return True
 
 
 def decode_content(content_json: str) -> Mapping[str, object]:

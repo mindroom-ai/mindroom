@@ -82,6 +82,9 @@ from mindroom.event_journal import (
     VisibleMessage,
 )
 from mindroom.event_journal import reads as journal_reads
+from mindroom.event_journal.outbox import (
+    _delivery_payload,
+)
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.history.runtime import (
@@ -1066,6 +1069,7 @@ def _make_room_get_event_response(
     event.sender = sender
     event.body = event_id
     event.server_timestamp = 0
+    event.transaction_id = None
     event.source = {
         "type": "m.room.message",
         "content": {
@@ -1278,6 +1282,16 @@ class FakeOutbox:
         self.ended_membership_turn_ids: set[str] = set()
         # The journal sources each FINAL enqueue handed over, in order.
         self.handed_over: list[tuple[str, ...]] = []
+        self.room_membership_epochs: dict[str, int] = {}
+
+    @property
+    def principal_id(self) -> str:
+        """Return the principal this in-memory delivery store represents."""
+        return "agent@alice"
+
+    async def membership_epoch(self, room_id: str) -> int:
+        """Return the fake room's current membership epoch."""
+        return self.room_membership_epochs.get(room_id, 0)
 
     async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
         """Return whether a turn still speaks for the room's current membership."""
@@ -1317,6 +1331,21 @@ class FakeOutbox:
         """
         if settle_source_event_ids:
             self.handed_over.append(settle_source_event_ids)
+        membership_epoch = await self.membership_epoch(room_id)
+        existing_owner = next(
+            (
+                delivery
+                for (existing_delivery_id, _stage), delivery in self.rows.items()
+                if existing_delivery_id == delivery_id
+            ),
+            None,
+        )
+        if existing_owner is not None and (
+            existing_owner.retired
+            or existing_owner.room_id != room_id
+            or existing_owner.membership_epoch != membership_epoch
+        ):
+            return None
         key = (delivery_id, stage.value)
         existing = self.rows.get(key)
         if existing is not None:
@@ -1326,7 +1355,7 @@ class FakeOutbox:
                 existing,
                 room_id=room_id,
                 thread_id=thread_id,
-                payload=dict(payload),
+                payload=_delivery_payload(self.principal_id, delivery_id, stage, payload),
                 event_type=event_type,
                 edits_event_id=edits_event_id,
             )
@@ -1339,9 +1368,10 @@ class FakeOutbox:
             stage=stage,
             event_type=event_type,
             room_id=room_id,
+            membership_epoch=membership_epoch,
             thread_id=thread_id,
             transaction_id=transaction_id,
-            payload=dict(payload),
+            payload=_delivery_payload(self.principal_id, delivery_id, stage, payload),
             edits_event_id=edits_event_id,
             acknowledged_event_id=None,
             created_at_ns=len(self.rows),
@@ -1362,7 +1392,7 @@ class FakeOutbox:
         """
         key = (delivery_id, stage.value)
         row = self.rows.get(key)
-        if row is None:
+        if row is None or row.retired:
             return None
         if (
             stage is DeliveryStage.INITIAL
@@ -1403,6 +1433,25 @@ class FakeOutbox:
     async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
         return self.rows.get((delivery_id, stage.value))
+
+    async def retire_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        membership_epoch: int,
+    ) -> str | None:
+        """Retain one obsolete row as an in-memory identity tombstone."""
+        key = (delivery_id, stage.value)
+        row = self.rows.get(key)
+        if row is None:
+            return None
+        assert (row.room_id, row.membership_epoch) == (room_id, membership_epoch)
+        if row.acknowledged_event_id is not None:
+            return row.acknowledged_event_id
+        self.rows[key] = replace(row, retired=True)
+        return None
 
     async def acknowledge_matrix_delivery(
         self,
@@ -1446,7 +1495,11 @@ class FakeOutbox:
         page, or the scan never ends.
         """
         pending = sorted(
-            (row for row in self.rows.values() if row.event_type == event_type and row.acknowledged_event_id is None),
+            (
+                row
+                for row in self.rows.values()
+                if row.event_type == event_type and row.acknowledged_event_id is None and not row.retired
+            ),
             key=lambda row: (row.created_at_ns, row.delivery_id, row.stage.value),
         )
         if after is not None:
@@ -1510,6 +1563,15 @@ class DiesAfterAcknowledgement:
 
     inner: MatrixDeliveryView
 
+    @property
+    def principal_id(self) -> str:
+        """Return the wrapped delivery principal."""
+        return self.inner.principal_id
+
+    async def membership_epoch(self, room_id: str) -> int:
+        """Return the wrapped room membership epoch."""
+        return await self.inner.membership_epoch(room_id)
+
     async def enqueue_matrix_delivery(
         self,
         *,
@@ -1569,6 +1631,22 @@ class DiesAfterAcknowledgement:
     async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
         return await self.inner.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
+
+    async def retire_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        membership_epoch: int,
+    ) -> str | None:
+        """Retain an obsolete delivery as an identity tombstone."""
+        return await self.inner.retire_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=stage,
+            room_id=room_id,
+            membership_epoch=membership_epoch,
+        )
 
     async def acknowledge_matrix_delivery(
         self,

@@ -11,6 +11,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.event_journal import replacement_target
+from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.matrix.room_history_reads import (
     _MAX_EXACT_DELIVERY_SCAN_PAGES,
     OpaqueEncryptedThreadHistoryError,
@@ -312,6 +313,150 @@ async def test_exact_outbox_scan_adopts_a_match_when_its_source_exceeds_the_boun
     )
 
     assert found == "$notice:localhost"
+    assert client.room_messages.await_count == _MAX_EXACT_DELIVERY_SCAN_PAGES
+
+
+@pytest.mark.asyncio
+async def test_exact_delivery_scan_refuses_to_guess_after_its_recent_history_bound() -> None:
+    """An absent delivery is unproven once recent history still has older pages."""
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response(
+                [_message_event(f"$unrelated-{page}:localhost", "unrelated", timestamp=page)],
+                end=f"page-{page + 1}",
+            )
+            for page in range(_MAX_EXACT_DELIVERY_SCAN_PAGES)
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match=r"exact delivery room scan.*absence is unproven"):
+        await find_response_event_ids_via_room_messages(
+            client,
+            _ROOM_ID,
+            response_sender="@bot:localhost",
+            source_event_ids=(),
+            response_content={
+                "msgtype": "m.text",
+                "body": "scheduled",
+                DURABLE_DELIVERY_ID_KEY: {
+                    "principal": "agent@@bot:localhost",
+                    "delivery_id": "scheduled-turn",
+                    "stage": "final",
+                },
+            },
+        )
+
+    assert client.room_messages.await_count == _MAX_EXACT_DELIVERY_SCAN_PAGES
+
+
+@pytest.mark.asyncio
+async def test_exact_delivery_scan_continues_after_an_empty_page_with_a_cursor() -> None:
+    """A filtered empty page is not proof that older Matrix history is exhausted."""
+    marker = {
+        "principal": "agent@@bot:localhost",
+        "delivery_id": "scheduled-turn",
+        "stage": "final",
+    }
+    response_content = {
+        "msgtype": "m.text",
+        "body": "scheduled",
+        DURABLE_DELIVERY_ID_KEY: marker,
+    }
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response([], end="next-page"),
+            _messages_response(
+                [
+                    _message_event(
+                        "$scheduled:localhost",
+                        "scheduled",
+                        timestamp=1,
+                        sender="@bot:localhost",
+                        extra_content={DURABLE_DELIVERY_ID_KEY: marker},
+                    ),
+                ],
+                end=None,
+            ),
+        ],
+    )
+
+    response_event_ids = await find_response_event_ids_via_room_messages(
+        client,
+        _ROOM_ID,
+        response_sender="@bot:localhost",
+        source_event_ids=(),
+        response_content=response_content,
+    )
+
+    assert response_event_ids == frozenset({"$scheduled:localhost"})
+    assert client.room_messages.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_exact_delivery_scan_cannot_prove_absence_past_opaque_bot_ciphertext() -> None:
+    """An undecryptable event from the delivery sender could be the frozen payload."""
+    opaque = _opaque_reply_event("$opaque:localhost", replies_to="$unrelated:localhost", timestamp=2000)
+    opaque.source["sender"] = "@bot:localhost"
+    client = AsyncMock()
+    client.room_messages = AsyncMock(return_value=_messages_response([opaque], end=None))
+
+    with pytest.raises(OpaqueEncryptedThreadHistoryError, match="exact delivery"):
+        await find_response_event_ids_via_room_messages(
+            client,
+            _ROOM_ID,
+            response_sender="@bot:localhost",
+            source_event_ids=(),
+            response_content={
+                "msgtype": "m.text",
+                "body": "scheduled",
+                DURABLE_DELIVERY_ID_KEY: {
+                    "principal": "agent@@bot:localhost",
+                    "delivery_id": "scheduled-turn",
+                    "stage": "final",
+                },
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_exact_delivery_bound_does_not_override_a_completed_source_scan() -> None:
+    """Reaching every source proves the delivery absent even on the final bounded page."""
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            *[
+                _messages_response(
+                    [_message_event(f"$unrelated-{page}:localhost", "unrelated", timestamp=page)],
+                    end=f"page-{page + 1}",
+                )
+                for page in range(_MAX_EXACT_DELIVERY_SCAN_PAGES - 1)
+            ],
+            _messages_response(
+                [_message_event("$source:localhost", "source", timestamp=1)],
+                end="older-history",
+            ),
+        ],
+    )
+
+    response_event_ids = await find_response_event_ids_via_room_messages(
+        client,
+        _ROOM_ID,
+        response_sender="@bot:localhost",
+        source_event_ids=("$source:localhost",),
+        response_content={
+            "msgtype": "m.text",
+            "body": "answer",
+            DURABLE_DELIVERY_ID_KEY: {
+                "principal": "agent@@bot:localhost",
+                "delivery_id": "$source:localhost",
+                "stage": "final",
+            },
+        },
+    )
+
+    assert response_event_ids == frozenset()
     assert client.room_messages.await_count == _MAX_EXACT_DELIVERY_SCAN_PAGES
 
 
@@ -1022,9 +1167,9 @@ async def test_approval_card_scan_ignores_the_edit_that_replaces_the_card() -> N
 async def test_approval_card_scan_refuses_to_call_a_bounded_walk_an_absence() -> None:
     """Running out of pages establishes nothing, and must not read as "no card".
 
-    An unproven absence retires the row, and the card it belongs to then stays
-    clickable with nothing behind it forever. So the bound raises, the row is
-    kept, and the sweep comes back.
+    An unproven absence must not discard the retry debt, because the card it
+    belongs to would stay clickable with nothing behind it forever. So the
+    bound raises, the row is kept, and the sweep comes back.
     """
     client = AsyncMock()
     client.room_messages = AsyncMock(

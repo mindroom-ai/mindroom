@@ -220,6 +220,7 @@ def projected_event(
         content=content,
         replaces_event_id=None,
         redacts_event_id=redacts,
+        transaction_id=event.transaction_id,
     )
     if is_transport_progress_revision(projected, self_sender=self_sender):
         return None

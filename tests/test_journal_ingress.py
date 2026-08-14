@@ -369,6 +369,25 @@ class TestAdmissionAdapter:
         inbound = inbound_event(ROOM, text_event("$m"), EventKind.MESSAGE, EventClass.ACTIONABLE)
         assert inbound.thread_id is None
 
+    async def test_a_delivery_echo_keeps_its_matrix_transaction_id(self) -> None:
+        """Projection can identify an owned echo before outbox acknowledgement."""
+        event = nio.Event.parse_event(
+            {
+                "event_id": "$echo",
+                "sender": BOT,
+                "origin_server_ts": 1,
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": "answer"},
+                "unsigned": {"transaction_id": "tx-final"},
+            },
+        )
+        assert isinstance(event, nio.Event)
+
+        projected = projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT)
+
+        assert projected is not None
+        assert projected.transaction_id == "tx-final"
+
     async def test_a_reaction_does_not_touch_the_projection(self) -> None:
         """A reaction does not touch the projection."""
         event = nio.Event.parse_event(
