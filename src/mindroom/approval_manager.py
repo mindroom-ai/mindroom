@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import PrincipalStore
+    from mindroom.event_journal import ApprovalDeliveryView
 
 _ApprovalStatus = Literal["approved", "denied", "expired"]
 _ResolutionStatus = Literal["approved", "denied"]
@@ -187,7 +187,7 @@ class _ApprovalManager:
     prepare_event: MatrixEventPreparer | None = None
     send_delivery: MatrixDeliverySender | None = None
     resolve_delivery: MatrixDeliveryResolver | None = None
-    cards: PrincipalStore | None = None
+    cards: ApprovalDeliveryView | None = None
     transport_sender: TransportSenderProvider | None = None
     sending_device: SendingDeviceProvider | None = None
     continuation_ready: ContinuationReadyHandler | None = None
@@ -202,7 +202,7 @@ class _ApprovalManager:
         prepare_event: MatrixEventPreparer | None = None,
         send_delivery: MatrixDeliverySender | None = None,
         resolve_delivery: MatrixDeliveryResolver | None = None,
-        cards: PrincipalStore | None = None,
+        cards: ApprovalDeliveryView | None = None,
         transport_sender: TransportSenderProvider | None = None,
         sending_device: SendingDeviceProvider | None = None,
         continuation_ready: ContinuationReadyHandler | None = None,
@@ -322,7 +322,7 @@ class _ApprovalManager:
             resolve_delivered=self.resolve_delivery,
         )
 
-    async def handle_card_response(
+    async def handle_card_response(  # noqa: C901 - transport recovery and domain terminal states meet here
         self,
         *,
         room_id: str,
@@ -367,6 +367,11 @@ class _ApprovalManager:
                 if await cards.legacy_approval_delivery_pending():
                     raise RuntimeError(DELIVERY_MIGRATION_PENDING_REASON)
                 return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
+        if stored.resolution is not None:
+            if before_consume is not None:
+                await before_consume()
+            self._ensure_deadline_sweep()
+            return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
         transport_sender = None if self.transport_sender is None else self.transport_sender()
         pending = (
             None
@@ -726,7 +731,7 @@ def initialize_approval_store(
     prepare_event: MatrixEventPreparer | None = None,
     send_delivery: MatrixDeliverySender | None = None,
     resolve_delivery: MatrixDeliveryResolver | None = None,
-    cards: PrincipalStore | None = None,
+    cards: ApprovalDeliveryView | None = None,
     transport_sender: TransportSenderProvider | None = None,
     sending_device: SendingDeviceProvider | None = None,
     continuation_ready: ContinuationReadyHandler | None = None,

@@ -300,7 +300,11 @@ class MatrixDeliveryWorker:
 
     async def _flush(self, *, delivery_id: str, stage: DeliveryStage) -> _FlushOutcome:
         """Send one delivery while holding its visible-delivery lock."""
-        claimed = await self.store.claim_matrix_delivery(delivery_id=delivery_id, stage=stage)
+        claimed = await self.store.claim_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=stage,
+            sending_device_id=self.sending_device_id,
+        )
         if claimed is None:
             blocked_final = (
                 stage is DeliveryStage.FINAL

@@ -611,7 +611,13 @@ class PrincipalStore:
             ),
         )
 
-    async def claim_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
+    async def claim_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        sending_device_id: str | None = None,
+    ) -> MatrixDelivery | None:
         """Freeze one delivery before network I/O and return the row as it stood."""
         return await self._backend.write(
             lambda transaction: outbox.claim(
@@ -619,6 +625,7 @@ class PrincipalStore:
                 self._principal_id,
                 delivery_id=delivery_id,
                 stage=stage,
+                sending_device_id=sending_device_id,
             ),
         )
 

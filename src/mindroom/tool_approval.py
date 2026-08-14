@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
-    from mindroom.event_journal import ApprovalCardReservation, PrincipalStore
+    from mindroom.event_journal import ApprovalCardReservation, ApprovalDeliveryView
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
@@ -313,7 +313,7 @@ def initialize_approval_runtime(
     prepare_event: MatrixEventPreparer,
     send_delivery: MatrixDeliverySender,
     resolve_delivery: MatrixDeliveryResolver,
-    cards: PrincipalStore | None,
+    cards: ApprovalDeliveryView | None,
     transport_sender: TransportSenderProvider,
     sending_device: SendingDeviceProvider,
     continuation_ready: ContinuationReadyHandler | None = None,

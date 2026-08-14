@@ -115,10 +115,20 @@ class _WatchedOutbox:
             settle_source_event_ids=settle_source_event_ids,
         )
 
-    async def claim_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
+    async def claim_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        sending_device_id: str | None = None,
+    ) -> MatrixDelivery | None:
         """Freeze one delivery, noting the claim on the timeline first."""
         self.timeline.append(f"claim:{stage.value}")
-        return await self.inner.claim_matrix_delivery(delivery_id=delivery_id, stage=stage)
+        return await self.inner.claim_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=stage,
+            sending_device_id=sending_device_id,
+        )
 
     async def record_matrix_delivery_device(
         self,

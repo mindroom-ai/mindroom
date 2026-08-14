@@ -134,46 +134,14 @@ def claim(
     *,
     delivery_id: str,
     stage: DeliveryStage,
+    sending_device_id: str | None,
 ) -> MatrixDelivery | None:
-    """Freeze one delivery's content and return the row as it stood.
+    """Freeze one delivery and atomically record its first device intent.
 
-    Committed before any network I/O, so a delivery that may have reached the
-    homeserver can only ever be retried with the identical payload and
-    transaction ID.
-
-    What comes back describes the row as it stood *before* this call, which is
-    what the caller needs to see the state it is taking over from: whether
-    anyone has sent this before, and from which device. Reporting this attempt
-    back to itself would make every resend look like a first one, and a first
-    one skips the room lookup that stops a changed device posting a second
-    answer.
-
-    Reading the row and then marking it is the obvious way to get that view and
-    it is wrong, for the same reason it was wrong in ``acknowledge``: two
-    processes against one PostgreSQL database can both read ``attempted = 0``,
-    and both then believe they are the first sender and send. Reproduced with
-    two stores on one database -- both claims came back unattempted, both would
-    have gone straight to the wire. SQLite never showed it, because
-    ``BEGIN IMMEDIATE`` holds a write lock across the whole transaction, so a
-    read followed by a write there is already atomic. A rule that holds on only
-    one backend is not one this codebase has.
-
-    So the marking statement reports the pre-claim state itself. No portable
-    SQL hands back pre-update values -- ``RETURNING`` is post-update on both
-    backends, and PostgreSQL's self-join trick for the old row is rejected by
-    SQLite -- but none is needed, because ``attempted`` is the only column this
-    write touches and a conditional update tells you exactly what it was: the
-    row was unattempted if and only if this statement is the one that flipped
-    it. Everything else is read afterwards unchanged.
-
-    The sending device is deliberately *not* written here. Claiming freezes the
-    payload; it does not mean this device is going to send. When the recorded
-    device differs from this process's, delivery has to read the room before it
-    can send at all, and that lookup can fail. Advancing the marker first would
-    erase the only evidence that the lookup is still owed: the next pass would
-    see its own device, skip the lookup, and post the answer a second time.
-    ``record_matrix_delivery_device`` is called once the send is actually about to
-    happen.
+    The conditional update is the PostgreSQL-safe claim winner: only its caller
+    sees ``attempted=False``. It also records that winner's device before a
+    process can die between this commit and the send. Later claims preserve the
+    original marker so a changed device still owes history reconciliation.
 
     INITIAL and FINAL are also one durable ordering decision. An unattempted
     INITIAL is withdrawn once FINAL exists. An attempted, unacknowledged
@@ -243,11 +211,11 @@ def claim(
             return None
     marked = transaction.fetchone(
         """
-        UPDATE matrix_delivery_outbox SET attempted = 1
+        UPDATE matrix_delivery_outbox SET attempted = 1, sending_device_id = ?
         WHERE principal_id = ? AND delivery_id = ? AND stage = ? AND attempted = 0
         RETURNING delivery_id
         """,
-        (principal_id, delivery_id, stage.value),
+        (sending_device_id, principal_id, delivery_id, stage.value),
     )
     row = transaction.fetchone(
         f"""

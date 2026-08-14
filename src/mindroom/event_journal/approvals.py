@@ -188,7 +188,7 @@ def promote_legacy_delivery(
     principal_id: str,
     *,
     delivery_id: str,
-    payload: Mapping[str, object],
+    payload: Mapping[str, object] | None,
     acknowledged_event_id: str | None,
     claim: LegacyApprovalDelivery | None = None,
 ) -> bool:
@@ -211,7 +211,11 @@ def promote_legacy_delivery(
     event_type = card.get("type")
     if not isinstance(event_type, str) or not event_type:
         event_type = "io.mindroom.tool_approval"
-    normalized_payload = dict(payload)
+    stored_payload = card.get("content") if payload is None else payload
+    if payload is None and not isinstance(stored_payload, dict):
+        msg = "Legacy approval card content is not an object"
+        raise TypeError(msg)
+    normalized_payload = dict(cast("Mapping[str, object]", stored_payload))
     normalized_identity = _native_identity({"content": normalized_payload})
     stored_identity = (
         str(row["continuation_id"]),

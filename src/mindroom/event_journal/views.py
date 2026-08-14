@@ -20,12 +20,19 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from typing import Any, Literal
 
     from mindroom.history_recovery import (
         HistoryRecoveryOutcome,
         RoomHistoryRecovery,
     )
 
+    from .approvals import (
+        ApprovalCardReservation,
+        LegacyApprovalDelivery,
+        RecordedApprovalDecision,
+        StoredApprovalCard,
+    )
     from .interactive_questions import InteractiveSelection
     from .models import (
         AdmissionResult,
@@ -302,7 +309,13 @@ class MatrixDeliveryView(Protocol):
         """Return whether a turn still speaks for the room's current membership."""
         ...
 
-    async def claim_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
+    async def claim_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        sending_device_id: str | None = None,
+    ) -> MatrixDelivery | None:
         """Freeze one delivery before network I/O and return the row as it stood."""
         ...
 
@@ -343,8 +356,68 @@ class MatrixDeliveryView(Protocol):
         ...
 
 
+class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
+    """Approval-domain state plus the generic delivery operations it uses."""
+
+    @property
+    def principal_id(self) -> str: ...  # noqa: D102
+
+    async def reserve_approval_card_deliveries(  # noqa: D102
+        self,
+        *,
+        continuation_principal_id: str,
+        continuation_id: str,
+        expected_generation: int,
+        cards: tuple[ApprovalCardReservation, ...],
+    ) -> bool: ...
+
+    async def resolve_continuation_approval_card(  # noqa: D102
+        self,
+        *,
+        card_event_id: str,
+        requested_status: Literal["approved", "denied", "expired"],
+        reason: str | None,
+        resolution: Mapping[str, Any],
+    ) -> RecordedApprovalDecision: ...
+
+    async def retire_approval_card(self, *, delivery_id: str, card_event_id: str) -> bool: ...  # noqa: D102
+    async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool: ...  # noqa: D102
+    async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> StoredApprovalCard | None: ...  # noqa: D102
+
+    async def pending_approval_room_ids(self) -> tuple[str, ...]: ...  # noqa: D102
+    async def pending_approval_cards(  # noqa: D102
+        self,
+        *,
+        room_id: str,
+        limit: int = ...,
+        after: tuple[int, str] | None = None,
+    ) -> tuple[StoredApprovalCard, ...]: ...
+
+    async def legacy_approval_delivery_pending(self, continuation_id: str | None = None) -> bool: ...  # noqa: D102
+
+    async def claim_legacy_approval_delivery(  # noqa: D102
+        self,
+        *,
+        owner: str,
+        now_ns: int,
+        lease_until_ns: int,
+    ) -> LegacyApprovalDelivery | None: ...
+
+    async def release_legacy_approval_delivery(self, claim: LegacyApprovalDelivery) -> None: ...  # noqa: D102
+
+    async def promote_legacy_approval_delivery(  # noqa: D102
+        self,
+        *,
+        delivery_id: str,
+        payload: Mapping[str, object],
+        acknowledged_event_id: str | None,
+        claim: LegacyApprovalDelivery,
+    ) -> bool: ...
+
+
 __all__ = [
     "AdmissionView",
+    "ApprovalDeliveryView",
     "ConversationReadView",
     "DispatchView",
     "HistoryRecoveryRecordView",

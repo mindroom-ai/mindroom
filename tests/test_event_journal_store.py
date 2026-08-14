@@ -4744,18 +4744,25 @@ class TestOutbox:
             thread_id=None,
             payload=text("sent"),
         )
-        first = await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
-        await alice.record_matrix_delivery_device(delivery_id="turn-1", stage=DeliveryStage.FINAL, device_id="DEVICE1")
-        second = await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        first = await alice.claim_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            sending_device_id="DEVICE1",
+        )
+        second = await alice.claim_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            sending_device_id="DEVICE2",
+        )
         assert first is not None
         assert second is not None
 
-        assert replace(first, attempted=True, sending_device_id="DEVICE1") == second
+        assert replace(first, attempted=True) == second
         assert first.payload == second.payload
         assert first.transaction_id == second.transaction_id
 
         assert not first.attempted
-        assert first.sending_device_id is None
+        assert first.sending_device_id == "DEVICE1"
         assert second.attempted
         assert second.sending_device_id == "DEVICE1"
 

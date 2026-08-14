@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from . import approvals
 
 if TYPE_CHECKING:
     from .backend import Transaction
 
-_MESSAGE_EVENT_TYPE = "m.room.message"
-_APPROVAL_EVENT_TYPE = "io.mindroom.tool_approval"
 _LEGACY_UNAVAILABLE_NOTICE_PREFIX = "approval-unavailable:"
 
 
@@ -23,31 +21,12 @@ def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: boo
     same schema transaction, so no process can observe a half-migrated owner.
     """
     if _table_exists(transaction, "response_outbox", postgres=postgres):
-        if _table_exists(transaction, "matrix_delivery_outbox", postgres=postgres):
-            transaction.execute(
-                """
-                INSERT INTO matrix_delivery_outbox (
-                    principal_id, delivery_id, stage, event_type, room_id, thread_id,
-                    transaction_id, payload_json, edits_event_id, attempted,
-                    sending_device_id, acknowledged_event_id, created_at_ns
-                )
-                SELECT principal_id, turn_id, stage, ?, room_id, thread_id,
-                       transaction_id, payload_json, edits_event_id, attempted,
-                       sending_device_id, acknowledged_event_id, created_at_ns
-                FROM response_outbox
-                WHERE true
-                ON CONFLICT (principal_id, delivery_id, stage) DO NOTHING
-                """,
-                (_MESSAGE_EVENT_TYPE,),
-            )
-            transaction.execute("DROP TABLE response_outbox")
-        else:
-            transaction.execute("ALTER TABLE response_outbox RENAME TO matrix_delivery_outbox")
-            transaction.execute("ALTER TABLE matrix_delivery_outbox RENAME COLUMN turn_id TO delivery_id")
-            transaction.execute("DROP INDEX IF EXISTS response_outbox_unacknowledged_scan")
-            transaction.execute(
-                "ALTER TABLE matrix_delivery_outbox ADD COLUMN event_type TEXT NOT NULL DEFAULT 'm.room.message'",
-            )
+        transaction.execute("ALTER TABLE response_outbox RENAME TO matrix_delivery_outbox")
+        transaction.execute("ALTER TABLE matrix_delivery_outbox RENAME COLUMN turn_id TO delivery_id")
+        transaction.execute("DROP INDEX IF EXISTS response_outbox_unacknowledged_scan")
+        transaction.execute(
+            "ALTER TABLE matrix_delivery_outbox ADD COLUMN event_type TEXT NOT NULL DEFAULT 'm.room.message'",
+        )
     if _table_exists(transaction, "matrix_delivery_outbox", postgres=postgres) and not _column_exists(
         transaction,
         "matrix_delivery_outbox",
@@ -105,7 +84,10 @@ def _migrate_unavailable_notice_delivery_ids(transaction: Transaction) -> None:
         )
         if continuation is None:
             continue
-        context = _object_json(continuation["context_json"], description="approval continuation context")
+        context = json.loads(str(continuation["context_json"]))
+        if not isinstance(context, dict):
+            msg = "Stored approval continuation context is not an object"
+            raise TypeError(msg)
         response_event_id = context.get("response_event_id")
         if not isinstance(response_event_id, str) or not response_event_id:
             msg = f"Legacy approval continuation {approval_id!r} has no response event ID"
@@ -137,16 +119,11 @@ def finish_matrix_delivery_migration(transaction: Transaction, *, migrate_approv
     for row in rows:
         if row["card_event_id"] is None:
             continue
-        card = _object_json(row["card_json"], description="approval card")
-        content = card.get("content")
-        if not isinstance(content, dict):
-            msg = "Legacy approval card content is not an object"
-            raise TypeError(msg)
         approvals.promote_legacy_delivery(
             transaction,
             str(row["principal_id"]),
             delivery_id=str(row["transaction_id"]),
-            payload=content,
+            payload=None,
             acknowledged_event_id=str(row["card_event_id"]),
         )
 
@@ -175,15 +152,3 @@ def _column_exists(transaction: Transaction, table: str, column: str, *, postgre
             is not None
         )
     return any(str(row["name"]) == column for row in transaction.fetchall(f"PRAGMA table_info({table})"))
-
-
-def _object_json(value: object, *, description: str) -> dict[str, Any]:
-    decoded = json.loads(str(value))
-    if not isinstance(decoded, dict):
-        msg = f"Stored {description} is not an object"
-        raise TypeError(msg)
-    return decoded
-
-
-def _encoded(value: dict[str, Any]) -> str:
-    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)

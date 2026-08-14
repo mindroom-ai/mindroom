@@ -1796,6 +1796,42 @@ class TestARacedAcknowledgementSpeaksForTheRow:
 class TestGenericDeliveryDeviceChangePolicy:
     """Non-idempotent custom events retain debt when history cannot prove absence."""
 
+    async def test_first_claim_crash_replays_a_card_from_the_same_device(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Claim and device intent commit together before any process can die."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+            event_type="io.mindroom.tool_approval",
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"status": "pending"},
+        )
+        await alice.claim_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+            sending_device_id="DEVICE1",
+        )
+        sent: list[MatrixDelivery] = []
+
+        async def send(delivery: MatrixDelivery) -> str:
+            sent.append(delivery)
+            return "$approval"
+
+        worker = MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            event_type="io.mindroom.tool_approval",
+            resend_after_reconciliation_miss=False,
+            sending_device_id="DEVICE1",
+            resolve_delivered=AsyncMock(return_value=None),
+        )
+
+        assert await worker.flush(delivery_id="approval-card-1", stage=DeliveryStage.INITIAL) == "$approval"
+        assert len(sent) == 1
+
     async def test_reconciliation_miss_never_resends_a_clickable_event_from_a_new_device(
         self,
         alice: PrincipalStore,
@@ -2062,10 +2098,19 @@ class TestTurnDeliverySerialization:
         original_claim = outbox.claim_matrix_delivery
         sent: list[DeliveryStage] = []
 
-        async def claim_then_wait(*, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
+        async def claim_then_wait(
+            *,
+            delivery_id: str,
+            stage: DeliveryStage,
+            sending_device_id: str | None = None,
+        ) -> MatrixDelivery | None:
             claim_started.set()
             await finish_claim.wait()
-            return await original_claim(delivery_id=delivery_id, stage=stage)
+            return await original_claim(
+                delivery_id=delivery_id,
+                stage=stage,
+                sending_device_id=sending_device_id,
+            )
 
         async def send(delivery: MatrixDelivery) -> str:
             sent.append(delivery.stage)

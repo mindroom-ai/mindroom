@@ -1345,14 +1345,17 @@ class FakeOutbox:
         )
         return transaction_id
 
-    async def claim_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
+    async def claim_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        sending_device_id: str | None = None,
+    ) -> MatrixDelivery | None:
         """Freeze one delivery before any network call, returning its prior state.
 
-        The pre-claim row is what comes back, exactly as the real outbox does:
-        a caller has to be able to see whether *someone else* attempted this
-        and from which device, and reading after the mark would report this
-        attempt back to itself. The device is not written here -- claiming does
-        not mean this device is going to send.
+        The prior attempted state comes back while the first device intent is
+        committed atomically, exactly as the real outbox does.
         """
         key = (delivery_id, stage.value)
         row = self.rows.get(key)
@@ -1374,8 +1377,13 @@ class FakeOutbox:
         ):
             return None
         self.attempted.add(key)
-        self.rows[key] = replace(row, attempted=True)
-        return row
+        claimed = replace(
+            row,
+            attempted=True,
+            sending_device_id=sending_device_id if not row.attempted else row.sending_device_id,
+        )
+        self.rows[key] = claimed
+        return replace(claimed, attempted=row.attempted)
 
     async def record_matrix_delivery_device(
         self,
@@ -1527,9 +1535,19 @@ class DiesAfterAcknowledgement:
         """Return whether a turn still speaks for the room's current membership."""
         return await self.inner.turn_membership_is_current(turn_id=turn_id, room_id=room_id)
 
-    async def claim_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
+    async def claim_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        sending_device_id: str | None = None,
+    ) -> MatrixDelivery | None:
         """Freeze one delivery before network I/O and return what to send."""
-        return await self.inner.claim_matrix_delivery(delivery_id=delivery_id, stage=stage)
+        return await self.inner.claim_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=stage,
+            sending_device_id=sending_device_id,
+        )
 
     async def record_matrix_delivery_device(
         self,

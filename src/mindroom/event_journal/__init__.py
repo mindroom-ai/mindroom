@@ -55,6 +55,7 @@ from .projection import ProjectedEvent, replacement_target, thread_root, visible
 from .store import EventJournalStore, PrincipalStore, TurnRecordStore
 from .views import (
     AdmissionView,
+    ApprovalDeliveryView,
     ConversationReadView,
     DispatchView,
     HistoryRecoveryRecordView,
@@ -73,6 +74,7 @@ __all__ = [
     "ApprovalCardReservation",
     "ApprovalContinuation",
     "ApprovalDecision",
+    "ApprovalDeliveryView",
     "ApprovalMemoryTurn",
     "ConversationCursor",
     "ConversationPage",

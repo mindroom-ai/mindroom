@@ -126,7 +126,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.event_journal import ApprovalContinuation, PrincipalStore
+    from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
 
     from .constants import RuntimePaths
@@ -429,7 +429,7 @@ class _MultiAgentOrchestrator:
         """Share the orchestrator-owned response admission gate with one managed bot."""
         bot.admission_gate = self._response_admission_gate
 
-    def _approval_cards(self) -> PrincipalStore | None:
+    def _approval_cards(self) -> ApprovalDeliveryView | None:
         """Return the router principal's approval-card store, once it exists.
 
         Bound before the router bot is built as well as after, because the

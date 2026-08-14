@@ -160,7 +160,7 @@ async def test_legacy_attempted_card_on_changed_device_keeps_staging_after_histo
             "mindroom.approval_transport.find_approval_card_via_room_messages",
             new=AsyncMock(return_value=None),
         ),
-        patch.object(transport, "_send_legacy_approval_delivery", new=AsyncMock()) as send,
+        patch("mindroom.approval_transport.send_room_event_result", new=AsyncMock()) as send,
     ):
         assert not await transport._upgrade_legacy_approval_deliveries()
 
@@ -192,7 +192,7 @@ async def test_legacy_attempted_card_adopts_actual_matrix_content_before_promoti
             "mindroom.approval_transport.find_approval_card_via_room_messages",
             new=AsyncMock(return_value=actual),
         ),
-        patch.object(transport, "_send_legacy_approval_delivery", new=AsyncMock()) as send,
+        patch("mindroom.approval_transport.send_room_event_result", new=AsyncMock()) as send,
     ):
         assert await transport._upgrade_legacy_approval_deliveries()
 
@@ -220,6 +220,17 @@ async def test_legacy_same_device_retry_fetches_the_transaction_winner_before_pr
     cards.legacy_approval_delivery_pending = AsyncMock(return_value=False)
     cards.promote_legacy_approval_delivery = AsyncMock(return_value=True)
     transport = _legacy_transport(tmp_path, cards)
+    bot = transport.transport_bot(claim.room_id)
+    assert bot is not None
+    assert bot.client is not None
+    event = MagicMock(
+        event_id=actual.event_id,
+        sender="@router:localhost",
+        source={"type": "io.mindroom.tool_approval", "content": actual.content},
+    )
+    fetched = nio.RoomGetEventResponse()
+    fetched.event = event
+    bot.client.room_get_event = AsyncMock(return_value=fetched)
 
     with (
         patch(
@@ -227,16 +238,22 @@ async def test_legacy_same_device_retry_fetches_the_transaction_winner_before_pr
             new=AsyncMock(return_value=None),
         ),
         patch.object(transport, "prepare_approval_event", new=AsyncMock(return_value=prepared)),
-        patch.object(
-            transport,
-            "_send_legacy_approval_delivery",
-            new=AsyncMock(return_value="$approval"),
+        patch(
+            "mindroom.approval_transport.send_room_event_result",
+            new=AsyncMock(return_value=nio.RoomSendResponse(event_id="$approval", room_id=claim.room_id)),
         ) as send,
-        patch.object(transport, "_fetch_approval_card_event", new=AsyncMock(return_value=actual)),
     ):
         assert await transport._upgrade_legacy_approval_deliveries()
 
-    send.assert_awaited_once_with(claim, prepared)
+    send.assert_awaited_once_with(
+        bot.client,
+        claim.room_id,
+        "io.mindroom.tool_approval",
+        prepared,
+        transaction_id=claim.delivery_id,
+        operation="migrate_legacy_approval_delivery",
+    )
+    bot.client.room_get_event.assert_awaited_once_with(claim.room_id, "$approval")
     cards.promote_legacy_approval_delivery.assert_awaited_once_with(
         delivery_id="legacy-transaction",
         payload=actual.content,
@@ -297,6 +314,37 @@ async def test_terminal_approval_action_is_not_blocked_by_unrelated_legacy_deliv
 
     assert result.consumed is True
     before_consume.assert_awaited_once_with()
+    cards.legacy_approval_delivery_pending.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_decided_card_action_is_consumed_before_transport_or_approver_validation(tmp_path: Path) -> None:
+    """A duplicate click cannot escape while its deterministic terminal edit is still owed."""
+    cards = MagicMock()
+    cards.pending_approval_card = AsyncMock(return_value=MagicMock(resolution={"status": "approved"}))
+    cards.is_terminal_approval_card = AsyncMock()
+    cards.legacy_approval_delivery_pending = AsyncMock(return_value=True)
+    manager = initialize_approval_store(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
+    before_consume = AsyncMock()
+
+    try:
+        result = await handle_matrix_approval_action(
+            MatrixApprovalAction(
+                room_id="!room:localhost",
+                sender_id="@different-user:localhost",
+                card_event_id="$approval",
+                status="denied",
+                reason=None,
+            ),
+            before_consume=before_consume,
+        )
+    finally:
+        await manager.shutdown(reason="test complete")
+
+    assert result.consumed is True
+    assert result.resolved is False
+    before_consume.assert_awaited_once_with()
+    cards.is_terminal_approval_card.assert_not_awaited()
     cards.legacy_approval_delivery_pending.assert_not_awaited()
 
 
@@ -569,7 +617,7 @@ async def test_startup_unavailable_owner_cleanup_walks_cursor_pages(tmp_path: Pa
         patch.object(approval_transport, "_UNAVAILABLE_OWNER_SCAN_LIMIT", 2),
         patch.object(transport, "_discard_unavailable", new=AsyncMock(return_value=True)) as discard,
     ):
-        assert await transport._reconcile_startup_unavailable()
+        assert await transport._reconcile_unavailable_owner_pages(None)
 
     assert journal.approval_continuations.await_args_list == [
         call(limit=2, after=None),
@@ -602,14 +650,14 @@ async def test_startup_unavailable_cleanup_scans_owners_while_legacy_upgrade_rem
         ),
         patch.object(
             transport,
-            "_reconcile_startup_unavailable",
+            "_reconcile_unavailable_owner_pages",
             new=AsyncMock(return_value=True),
         ) as reconcile,
         patch.object(transport, "_schedule_startup_cleanup_retry") as schedule_retry,
     ):
         await transport._run_startup_cleanup_if_ready()
 
-    reconcile.assert_awaited_once_with()
+    reconcile.assert_awaited_once_with(None)
     schedule_retry.assert_called_once_with()
     assert transport._startup_cleanup_done is False
 
