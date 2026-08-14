@@ -222,6 +222,32 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outbox.acknowledged_projections == [()]
         gateway.deps.runtime.client.room_get_event.assert_not_awaited()
 
+    async def test_fake_outbox_stages_share_one_membership(self) -> None:
+        """The delivery double must reject a FINAL owned by a later membership."""
+        outbox = FakeOutbox()
+        assert (
+            await outbox.enqueue_matrix_delivery(
+                delivery_id="$cause",
+                stage=DeliveryStage.INITIAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "Thinking..."},
+            )
+            is not None
+        )
+        outbox.room_membership_epochs[_ROOM_ID] = 1
+
+        final = await outbox.enqueue_matrix_delivery(
+            delivery_id="$cause",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "answer"},
+        )
+
+        assert final is None
+        assert ("$cause", DeliveryStage.FINAL.value) not in outbox.rows
+
     async def test_interactive_prompt_is_frozen_in_the_terminal_matrix_payload(self, tmp_path: Path) -> None:
         """Projection ownership requires prompt metadata to cross Matrix with the answer."""
         outbox = FakeOutbox()

@@ -1328,15 +1328,24 @@ class FakeOutbox:
         """
         if settle_source_event_ids:
             self.handed_over.append(settle_source_event_ids)
+        membership_epoch = await self.membership_epoch(room_id)
+        existing_owner = next(
+            (
+                delivery
+                for (existing_delivery_id, _stage), delivery in self.rows.items()
+                if existing_delivery_id == delivery_id
+            ),
+            None,
+        )
+        if existing_owner is not None and (
+            existing_owner.retired
+            or existing_owner.room_id != room_id
+            or existing_owner.membership_epoch != membership_epoch
+        ):
+            return None
         key = (delivery_id, stage.value)
         existing = self.rows.get(key)
         if existing is not None:
-            if (
-                existing.retired
-                or existing.room_id != room_id
-                or existing.membership_epoch != await self.membership_epoch(room_id)
-            ):
-                return None
             if key in self.attempted:
                 return existing.transaction_id
             self.rows[key] = replace(
@@ -1356,7 +1365,7 @@ class FakeOutbox:
             stage=stage,
             event_type=event_type,
             room_id=room_id,
-            membership_epoch=await self.membership_epoch(room_id),
+            membership_epoch=membership_epoch,
             thread_id=thread_id,
             transaction_id=transaction_id,
             payload=_delivery_payload(self.principal_id, delivery_id, stage, payload),
