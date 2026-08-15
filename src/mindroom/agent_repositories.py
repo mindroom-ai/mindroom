@@ -35,7 +35,6 @@ if TYPE_CHECKING:
 _BINDING_VERSION = 1
 _BINDING_DIRECTORY = "repository_bindings"
 _GITHUB_REPOSITORY_NAME_MAX_LENGTH = 100
-_LONG_NAME_DIGEST_LENGTH = 12
 _SAFE_SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
 _GITHUB_REPOSITORY_COMPONENT_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 _EXPECTED_BINDING_FIELDS = frozenset(
@@ -283,15 +282,17 @@ def _matrix_requester_localpart(requester_id: str | None) -> str:
     if not localpart or not server_name:
         msg = "Private agent repository naming requires a non-empty Matrix requester localpart and server"
         raise RepositoryBindingError(msg)
+    if _GITHUB_REPOSITORY_COMPONENT_PATTERN.fullmatch(localpart) is None:
+        msg = "Matrix requester localpart cannot be represented exactly in a GitHub repository name"
+        raise RepositoryBindingError(msg)
     return localpart
 
 
-def _bounded_repository_name(name: str) -> str:
-    if len(name) <= _GITHUB_REPOSITORY_NAME_MAX_LENGTH:
-        return name
-    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:_LONG_NAME_DIGEST_LENGTH]
-    prefix_length = _GITHUB_REPOSITORY_NAME_MAX_LENGTH - len(digest) - 1
-    return f"{name[:prefix_length].rstrip('-')}-{digest}"
+def _validated_repository_name(name: str) -> str:
+    if len(name) > _GITHUB_REPOSITORY_NAME_MAX_LENGTH:
+        msg = "Agent repository name exceeds GitHub's limit"
+        raise RepositoryBindingError(msg)
+    return name
 
 
 def derive_repository_name(*, prefix: str, worker_target: ResolvedWorkerTarget) -> str:
@@ -310,7 +311,7 @@ def derive_repository_name(*, prefix: str, worker_target: ResolvedWorkerTarget) 
         if not worker_target.worker_key:
             msg = "Shared agent repository naming requires a worker identity"
             raise RepositoryBindingError(msg)
-        return _bounded_repository_name(f"{prefix}-{agent_slug}")
+        return _validated_repository_name(f"{prefix}-{agent_slug}")
 
     private_names = worker_target.private_agent_names or frozenset()
     if worker_target.worker_scope != "user_agent" or agent_name not in private_names:
@@ -318,14 +319,11 @@ def derive_repository_name(*, prefix: str, worker_target: ResolvedWorkerTarget) 
         raise RepositoryBindingError(msg)
     identity = worker_target.execution_identity
     requester_id = identity.requester_id if identity is not None else None
-    username_slug = _repository_slug(
-        _matrix_requester_localpart(requester_id),
-        label="requester",
-    )
+    username = _matrix_requester_localpart(requester_id)
     if not worker_target.worker_key:
         msg = "Private agent repository naming requires a worker identity"
         raise RepositoryBindingError(msg)
-    return _bounded_repository_name(f"{prefix}-{agent_slug}-{username_slug}")
+    return _validated_repository_name(f"{prefix}-{agent_slug}-{username}")
 
 
 def _is_canonical_repository_id(value: object) -> bool:
