@@ -24,7 +24,8 @@ Run the bridge manager from `local/instances/deploy/`:
 Provide Telegram credentials with `--api-id`, `--api-hash`, and `--bot-token`, export the matching `TELEGRAM_*` variables, or create `local/instances/deploy/.env.telegram` before running the command.
 When a credential is still missing, the command prompts for it and writes the resulting values into the generated bridge configuration and bridge registry.
 
-For Synapse, `bridge.py register` installs the generated registration automatically.
+For Synapse, `bridge.py register` updates `homeserver.yaml`, but the local Compose layout does not mount the generated bridge registration into the Synapse container.
+Manually expose the generated file at the configured `app_service_config_files` path, then restart Synapse.
 For Tuwunel, it generates the registration file and prints the manual admin-room steps; alternatively, run `./bridge.py register-with-matrix telegram --instance <instance>` after generation.
 
 ## Configure MindRoom
@@ -73,7 +74,8 @@ Accounts with two-factor authentication receive an additional password prompt.
 2. Invite the Matrix bridge bot into the MindRoom-managed Matrix room.
 3. Follow the bridge bot's current `help` output to create or link the portal.
 
-Exact portal commands depend on the pinned `mautrix-telegram` image, so use the running bridge's `help` output rather than commands copied from another version.
+Exact portal commands depend on the running `mautrix-telegram` version.
+The manager currently deploys the unpinned `latest` image, so use the running bridge's `help` output rather than commands copied from another version.
 
 ## Operations
 

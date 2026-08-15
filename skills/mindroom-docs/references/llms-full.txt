@@ -57,7 +57,7 @@ See [Getting Started](https://docs.mindroom.chat/getting-started/) for the full 
 ### Preferred alternative: NixOS LXC container (agent-controlled machine)
 
 Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-A standalone NixOS flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, Element, Caddy) plus Docker and secrets wiring, so the agent can rebuild and manage the persistent virtual machine it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
+A standalone NixOS flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, and Caddy) plus Docker and secrets wiring, so the agent can rebuild and manage the persistent virtual machine it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
 It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
 See [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) for the full setup.
 
@@ -354,7 +354,7 @@ For a detailed architecture and credential model, see:
 ## Preferred alternative: NixOS LXC container (agent-controlled machine)
 
 Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, Element, Caddy) plus Docker and `ragenix`-based secrets wiring.
+The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, and Caddy) plus Docker and `ragenix`-based secrets wiring.
 Because the whole virtual machine is declared in the flake, the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
 It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
 It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/).
@@ -3512,7 +3512,7 @@ MindRoom marks `file` as worker-routed by default, so it usually executes in the
 | `max_file_length` | `number` | `no` | `10000000` | Maximum character count for `read_file()`. |
 | `max_file_lines` | `number` | `no` | `100000` | Maximum line count for `read_file()`. |
 | `line_separator` | `text` | `no` | `"\n"` | Separator used by the chunk helpers. |
-| `exclude_patterns` | `string[]` | `no` | `null` | Fnmatch-style path-component patterns excluded from content and file searches; `null` uses Agno defaults and `[]` disables exclusions. |
+| `exclude_patterns` | `string[]` | `no` | `null` | Fnmatch-style path-component patterns excluded from content searches; `null` uses Agno defaults and `[]` disables exclusions. |
 | `all` | `boolean` | `no` | `false` | Enable every upstream `file` function at once. |
 
 ### Example
@@ -6137,7 +6137,8 @@ search_wikipedia("Matrix protocol")
 
 ### What It Does
 
-`pubmed` exposes `search_pubmed(query, max_results=10)`.
+`pubmed` exposes `search_pubmed(query, max_results=None)`.
+When the call omits `max_results`, the configured toolkit value is used; an explicit call value overrides it.
 It first looks up PubMed IDs through `esearch`, then fetches article XML through `efetch`, and finally returns a JSON list of formatted result strings.
 Default output includes title, publication year, and summary text.
 When `results_expanded` is enabled, each result also includes first author, journal, publication type, DOI, PubMed URL, full-text URL when available, keywords, and MeSH terms.
@@ -10434,8 +10435,8 @@ The bundled default instructions describe a code-write, execute, and show-result
 | `sandbox_os` | `text` | `no` | `null` | Declared sandbox OS field. The current creation path stores this value but does not pass it into `CreateSandboxFromSnapshotParams`. |
 | `auto_stop_interval` | `number` | `no` | `60` | Auto-stop interval in minutes for created sandboxes. |
 | `sandbox_os_user` | `text` | `no` | `null` | OS user for the sandbox. |
-| `sandbox_env_vars` | `text` | `no` | `null` | Advanced raw environment-variable mapping for the sandbox. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
-| `sandbox_labels` | `text` | `no` | `{}` | Advanced raw label mapping for the sandbox. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
+| `sandbox_env_vars` | `text` | `no` | `null` | JSON object of string environment-variable names and values; MindRoom validates and converts it to the upstream mapping. |
+| `sandbox_labels` | `text` | `no` | `{}` | JSON object of string label names and values; MindRoom validates and converts it to the upstream mapping. |
 | `organization_id` | `text` | `no` | `null` | Daytona organization ID. |
 | `timeout` | `number` | `no` | `300` | Timeout in seconds for sandbox operations. |
 | `auto_create_sandbox` | `boolean` | `no` | `true` | Permit fallback creation after a sandbox-management error; initial no-match creation still occurs when false. |
@@ -17120,12 +17121,13 @@ The normal workflow is:
 
 1. Add the bridge with `bridge.py add <type> --instance <name>`.
 2. Generate its appservice registration with `bridge.py register <type> --instance <name>`.
-3. For Synapse, the manager installs that registration automatically; for Tuwunel, complete the printed admin-room steps or run `bridge.py register-with-matrix <type> --instance <name>`.
+3. For Synapse, manually expose the generated registration file to the Synapse container, set the matching `app_service_config_files` path, and restart Synapse; for Tuwunel, complete the printed admin-room steps or run `bridge.py register-with-matrix <type> --instance <name>`.
 4. Start it with `bridge.py start <type> --instance <name>`.
 5. Inspect it with `bridge.py status` and `bridge.py logs`.
 
 Generated bridge data lives beneath the selected instance data directory.
-Synapse registration is wired automatically by the manager, while Tuwunel registration requires the separate admin-room flow.
+The manager currently updates Synapse's `homeserver.yaml`, but the local Compose layout does not mount the generated bridge registration into the Synapse container, so the file path still requires manual wiring.
+Tuwunel registration requires the separate admin-room flow.
 
 Adding a new bridge type requires a template under `local/instances/deploy/templates/bridges/` plus corresponding manager support.
 
@@ -17155,7 +17157,8 @@ Run the bridge manager from `local/instances/deploy/`:
 Provide Telegram credentials with `--api-id`, `--api-hash`, and `--bot-token`, export the matching `TELEGRAM_*` variables, or create `local/instances/deploy/.env.telegram` before running the command.
 When a credential is still missing, the command prompts for it and writes the resulting values into the generated bridge configuration and bridge registry.
 
-For Synapse, `bridge.py register` installs the generated registration automatically.
+For Synapse, `bridge.py register` updates `homeserver.yaml`, but the local Compose layout does not mount the generated bridge registration into the Synapse container.
+Manually expose the generated file at the configured `app_service_config_files` path, then restart Synapse.
 For Tuwunel, it generates the registration file and prints the manual admin-room steps; alternatively, run `./bridge.py register-with-matrix telegram --instance <instance>` after generation.
 
 ## Configure MindRoom
@@ -17204,7 +17207,8 @@ Accounts with two-factor authentication receive an additional password prompt.
 2. Invite the Matrix bridge bot into the MindRoom-managed Matrix room.
 3. Follow the bridge bot's current `help` output to create or link the portal.
 
-Exact portal commands depend on the pinned `mautrix-telegram` image, so use the running bridge's `help` output rather than commands copied from another version.
+Exact portal commands depend on the running `mautrix-telegram` version.
+The manager currently deploys the unpinned `latest` image, so use the running bridge's `help` output rather than commands copied from another version.
 
 ## Operations
 

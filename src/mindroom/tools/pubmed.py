@@ -69,6 +69,10 @@ def pubmed_tools() -> type[PubmedTools]:
         """PubMed toolkit whose configured result limit is the call default."""
 
         def search_pubmed(self, query: str, max_results: int | None = None) -> str:
-            return super().search_pubmed(query, max_results=max_results or self.max_results)
+            """Search PubMed, using the configured max_results when the call omits it."""
+            if max_results == 0:
+                return "[]"
+            resolved_max_results = self.max_results if max_results is None else max_results
+            return super().search_pubmed(query, max_results=resolved_max_results)
 
     return MindRoomPubmedTools

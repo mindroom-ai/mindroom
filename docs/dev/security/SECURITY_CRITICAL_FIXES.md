@@ -2,7 +2,7 @@
 
 **Created:** 2025-01-16
 **Updated:** 2026-03-18 (Post-doc audit)
-**Status:** P0 🟢 (follow-up pending) | P1.1 🟢 | P1.2 ⚠️ (secrets lifecycle verification outstanding)
+**Status:** P0 ⚠️ partial | P1.1 ⚠️ partial | P1.2 ⚠️ partial (secrets lifecycle verification outstanding)
 
 > **Audit note (2026-03-18):** The risk score reduction (6.8→5.8) cited in the summary has no scoring methodology or evidence linking specific fixes to numeric changes.
 > P2 items (internal TLS, token cache) show no evidence of progress since September 2025.

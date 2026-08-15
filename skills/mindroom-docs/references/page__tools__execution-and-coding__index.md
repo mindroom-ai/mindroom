@@ -107,7 +107,7 @@ MindRoom marks `file` as worker-routed by default, so it usually executes in the
 | `max_file_length` | `number` | `no` | `10000000` | Maximum character count for `read_file()`. |
 | `max_file_lines` | `number` | `no` | `100000` | Maximum line count for `read_file()`. |
 | `line_separator` | `text` | `no` | `"\n"` | Separator used by the chunk helpers. |
-| `exclude_patterns` | `string[]` | `no` | `null` | Fnmatch-style path-component patterns excluded from content and file searches; `null` uses Agno defaults and `[]` disables exclusions. |
+| `exclude_patterns` | `string[]` | `no` | `null` | Fnmatch-style path-component patterns excluded from content searches; `null` uses Agno defaults and `[]` disables exclusions. |
 | `all` | `boolean` | `no` | `false` | Enable every upstream `file` function at once. |
 
 ### Example

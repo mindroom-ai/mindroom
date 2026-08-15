@@ -235,8 +235,8 @@ The bundled default instructions describe a code-write, execute, and show-result
 | `sandbox_os` | `text` | `no` | `null` | Declared sandbox OS field. The current creation path stores this value but does not pass it into `CreateSandboxFromSnapshotParams`. |
 | `auto_stop_interval` | `number` | `no` | `60` | Auto-stop interval in minutes for created sandboxes. |
 | `sandbox_os_user` | `text` | `no` | `null` | OS user for the sandbox. |
-| `sandbox_env_vars` | `text` | `no` | `null` | Advanced raw environment-variable mapping for the sandbox. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
-| `sandbox_labels` | `text` | `no` | `{}` | Advanced raw label mapping for the sandbox. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
+| `sandbox_env_vars` | `text` | `no` | `null` | JSON object of string environment-variable names and values; MindRoom validates and converts it to the upstream mapping. |
+| `sandbox_labels` | `text` | `no` | `{}` | JSON object of string label names and values; MindRoom validates and converts it to the upstream mapping. |
 | `organization_id` | `text` | `no` | `null` | Daytona organization ID. |
 | `timeout` | `number` | `no` | `300` | Timeout in seconds for sandbox operations. |
 | `auto_create_sandbox` | `boolean` | `no` | `true` | Permit fallback creation after a sandbox-management error; initial no-match creation still occurs when false. |

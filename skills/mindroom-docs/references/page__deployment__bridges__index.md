@@ -31,11 +31,12 @@ The normal workflow is:
 
 1. Add the bridge with `bridge.py add <type> --instance <name>`.
 2. Generate its appservice registration with `bridge.py register <type> --instance <name>`.
-3. For Synapse, the manager installs that registration automatically; for Tuwunel, complete the printed admin-room steps or run `bridge.py register-with-matrix <type> --instance <name>`.
+3. For Synapse, manually expose the generated registration file to the Synapse container, set the matching `app_service_config_files` path, and restart Synapse; for Tuwunel, complete the printed admin-room steps or run `bridge.py register-with-matrix <type> --instance <name>`.
 4. Start it with `bridge.py start <type> --instance <name>`.
 5. Inspect it with `bridge.py status` and `bridge.py logs`.
 
 Generated bridge data lives beneath the selected instance data directory.
-Synapse registration is wired automatically by the manager, while Tuwunel registration requires the separate admin-room flow.
+The manager currently updates Synapse's `homeserver.yaml`, but the local Compose layout does not mount the generated bridge registration into the Synapse container, so the file path still requires manual wiring.
+Tuwunel registration requires the separate admin-room flow.
 
 Adding a new bridge type requires a template under `local/instances/deploy/templates/bridges/` plus corresponding manager support.

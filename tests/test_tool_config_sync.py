@@ -79,6 +79,16 @@ def test_arxiv_blank_download_directory_preserves_upstream_default() -> None:
     assert blank_tool.download_dir == default_tool.download_dir
 
 
+def test_arxiv_string_union_config_type_is_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path-or-string authored fields must not escape config type validation."""
+    tool_class = cast("Any", TOOL_REGISTRY["arxiv"]())
+    download_field = next(field for field in TOOL_METADATA["arxiv"].config_fields or [] if field.name == "download_dir")
+    monkeypatch.setattr(download_field, "type", "number")
+
+    with pytest.raises(pytest.fail.Exception, match="download_dir: expected type 'text'"):
+        verify_tool_configfields("arxiv", tool_class, inspect.signature(tool_class.__init__))
+
+
 def test_pubmed_configured_max_results_applies_when_call_omits_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """Configured PubMed result limits should be the default for model calls."""
     tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())
@@ -96,6 +106,73 @@ def test_pubmed_configured_max_results_applies_when_call_omits_limit(monkeypatch
     tool.search_pubmed("durable agents")
 
     assert captured == {"max_results": 5}
+
+
+def test_pubmed_explicit_zero_max_results_is_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit PubMed result limit must not fall back to the configured default."""
+    tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())
+    tool = tool_class(max_results=5)
+    captured: dict[str, int] = {}
+
+    def fetch_pubmed_ids(_query: str, max_results: int, _email: str) -> list[str]:
+        captured["max_results"] = max_results
+        return []
+
+    monkeypatch.setattr(tool, "fetch_pubmed_ids", fetch_pubmed_ids)
+    monkeypatch.setattr(tool, "fetch_details", lambda _ids: object())
+    monkeypatch.setattr(tool, "parse_details", lambda _root: [])
+
+    result = tool.search_pubmed("durable agents", max_results=0)
+
+    assert result == "[]"
+    assert captured == {}
+
+
+def test_pubmed_model_description_explains_configured_default() -> None:
+    """The model-facing PubMed method description should explain omitted limits."""
+    tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())
+
+    assert "configured max_results" in inspect.getdoc(tool_class.search_pubmed)
+
+
+def test_modelslabs_converts_authored_file_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dashboard-authored media types should reach Agno as FileType values."""
+    from agno.tools.models_labs import ModelsLabTools  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    def capture_init(_self: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(ModelsLabTools, "__init__", capture_init)
+    tool_class = cast("Any", TOOL_REGISTRY["modelslabs"]())
+
+    tool_class(file_type="gif")
+
+    assert getattr(captured["file_type"], "value", None) == "gif"
+
+
+def test_daytona_converts_authored_sandbox_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dashboard-authored Daytona values should reach Agno with its declared types."""
+    from agno.tools.daytona import DaytonaTools  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    def capture_init(_self: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
+    tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
+
+    tool_class(
+        sandbox_language="PYTHON",
+        sandbox_env_vars='{"TOKEN": "value"}',
+        sandbox_labels='{"team": "agents"}',
+    )
+
+    assert getattr(captured["sandbox_language"], "value", None) == "python"
+    assert captured["sandbox_env_vars"] == {"TOKEN": "value"}
+    assert captured["sandbox_labels"] == {"team": "agents"}
 
 
 def test_zep_metadata_lists_only_model_callable_functions() -> None:
@@ -224,10 +301,11 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
         actual_type = param_type
         origin = get_origin(param_type)
         if origin in {Union, UnionType}:
-            args = get_args(param_type)
-            if type(None) in args:
-                # It's Optional, get the actual type
-                actual_type = next(arg for arg in args if arg is not type(None))
+            concrete_types = tuple(arg for arg in get_args(param_type) if arg is not type(None))
+            if str in concrete_types:
+                actual_type = str
+            elif len(concrete_types) == 1:
+                actual_type = concrete_types[0]
 
         if actual_type is bool:
             expected_type = "boolean"

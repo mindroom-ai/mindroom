@@ -67,9 +67,8 @@ Open or unverified work includes injection and input validation, secrets lifecyc
 
 ## Risk Assessment
 
-- Previous risk: ~6.8/10 (HIGH)
-- **Current risk: ~5.8/10 (MEDIUM-HIGH)** - Reduced by CSP, rate limiting, and backup fixes
-- Target risk: ≤3/10 (LOW)
+- The historical numeric risk estimates are omitted because this review set does not define a reproducible scoring methodology.
+- Current production risk is not quantified; the full current review set must be revalidated before a production-readiness decision.
 - Effort estimate: requires fresh scoping after revalidation; the 2025 estimate is not current evidence.
 
 ---

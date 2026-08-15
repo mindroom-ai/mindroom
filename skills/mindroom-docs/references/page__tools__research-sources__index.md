@@ -143,7 +143,8 @@ search_wikipedia("Matrix protocol")
 
 ### What It Does
 
-`pubmed` exposes `search_pubmed(query, max_results=10)`.
+`pubmed` exposes `search_pubmed(query, max_results=None)`.
+When the call omits `max_results`, the configured toolkit value is used; an explicit call value overrides it.
 It first looks up PubMed IDs through `esearch`, then fetches article XML through `efetch`, and finally returns a JSON list of formatted result strings.
 Default output includes title, publication year, and summary text.
 When `results_expanded` is enabled, each result also includes first author, journal, publication type, DOI, PubMed URL, full-text URL when available, keywords, and MeSH terms.
