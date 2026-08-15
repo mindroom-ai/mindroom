@@ -91,6 +91,10 @@ Startup builds the authoritative membership snapshot after managed rooms and rou
 
 Every live actionable `m.room.member` event already admitted through the router's durable room-lifecycle stream updates the active snapshot, regardless of whether the transition is a join, invite, self-leave, kick, or ban.
 
+Ordinary user transitions take effect in accepted durable LIVE-event order rather than being preapplied from an unaccepted raw sync response.
+
+The runtime does not promise total ordering between the router membership stream and independently syncing agent-room streams.
+
 The existing `room:member_left` hook remains unchanged because it intentionally represents human self-leaves rather than the full authorization transition stream.
 
 Starting a replacement router receive loop invalidates membership readiness until an authoritative refresh succeeds.
@@ -98,7 +102,7 @@ Starting a replacement router receive loop invalidates membership readiness unti
 The first successful router sync after a receive-loop start refreshes the configured grant rooms.
 
 A limited timeline, unrecovered room, rejected checkpoint, or other uncertain router sync condition invalidates and refreshes affected membership state authoritatively.
-Visible limited-timeline state invalidates grants before nio admits any timeline event from that response.
+Accepted and ordered limited-timeline state invalidates grants before nio admits any timeline event from that response.
 
 Configuration reload runs behind the existing response-admission gate.
 Authorization-sensitive turn planning retains an admission slot through response-runner handoff so a reload cannot commit between an allow decision and its response.

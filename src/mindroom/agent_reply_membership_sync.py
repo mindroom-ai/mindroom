@@ -12,7 +12,6 @@ from mindroom.matrix.sync_loop import (
     OwnRoomMembership,
     own_membership_from_sliding_sync,
     own_membership_from_sync,
-    room_member_events_from_sync,
 )
 
 if TYPE_CHECKING:
@@ -24,8 +23,6 @@ if TYPE_CHECKING:
 
 _REFRESH_BACKOFF_INITIAL_SECONDS = 5.0
 _REFRESH_BACKOFF_MAX_SECONDS = 300.0
-
-type _MembershipEventIdentity = tuple[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,9 +42,6 @@ class AgentReplyMembershipSync:
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
         self._preserve_on_next_sync_start = False
-        self._prepared_response: nio.SyncResponse | nio.SlidingSyncResponse | None = None
-        self._preapplied_event_ids: frozenset[_MembershipEventIdentity] = frozenset()
-        self._suppressed_join_event_ids: frozenset[_MembershipEventIdentity] = frozenset()
 
     @property
     def memberships(self) -> AgentReplyMembershipIndex:
@@ -67,11 +61,8 @@ class AgentReplyMembershipSync:
         return not preserve
 
     def reset_receive_generation(self) -> None:
-        """Forget one stopped receive generation's preservation and batch state."""
+        """Forget one stopped receive generation's preservation state."""
         self._preserve_on_next_sync_start = False
-        self._prepared_response = None
-        self._preapplied_event_ids = frozenset()
-        self._suppressed_join_event_ids = frozenset()
 
     def _request_refresh(self) -> None:
         """Request an authoritative rebuild without resetting active backoff."""
@@ -109,7 +100,7 @@ class AgentReplyMembershipSync:
         )
         self._refresh_retry_at = time.monotonic() + backoff_seconds
 
-    def prepare_response(
+    def pre_admit_response(
         self,
         config: Config,
         runtime_paths: RuntimePaths,
@@ -117,13 +108,7 @@ class AgentReplyMembershipSync:
         *,
         control_user_id: str,
     ) -> ReplyMembershipPreAdmission:
-        """Fence a response's known revocations before nio fans out its timeline."""
-        self._prepared_response = response
-        member_events = room_member_events_from_sync(response)
-        self._preapplied_event_ids = frozenset(
-            (room_id, event.event_id) for room_id, event in member_events if event.membership != "join"
-        )
-        self._suppressed_join_event_ids = _joins_superseded_by_negative(member_events)
+        """Fence uncertain state and control-client departures before nio fanout."""
         if _sync_response_has_uncertain_membership(response):
             return ReplyMembershipPreAdmission(invalidate_reason="uncertain_sync_response")
 
@@ -132,47 +117,10 @@ class AgentReplyMembershipSync:
             if isinstance(response, nio.SyncResponse)
             else own_membership_from_sliding_sync(response, self_user_id=control_user_id)
         )
-        authorization_changed = self.apply_own_membership(config, runtime_paths, membership)
-        for room_id, event in member_events:
-            if event.membership == "join":
-                continue
-            changed = self._memberships.apply_member_event(
-                config,
-                runtime_paths,
-                room_id,
-                event,
-                control_user_id=control_user_id,
-            )
-            authorization_changed = changed or authorization_changed
+        authorization_changed = self._apply_control_membership(config, runtime_paths, membership)
         return ReplyMembershipPreAdmission(authorization_changed=authorization_changed)
 
-    def ensure_response_prepared(
-        self,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        response: nio.SyncResponse | nio.SlidingSyncResponse,
-        *,
-        control_user_id: str,
-    ) -> ReplyMembershipPreAdmission:
-        """Prepare a response only when the client pre-admission hook did not."""
-        if self._prepared_response is response:
-            return ReplyMembershipPreAdmission()
-        return self.prepare_response(
-            config,
-            runtime_paths,
-            response,
-            control_user_id=control_user_id,
-        )
-
-    def finish_response(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
-        """Release sync-batch fences after every live transition was delivered."""
-        if self._prepared_response is not response:
-            return
-        self._prepared_response = None
-        self._preapplied_event_ids = frozenset()
-        self._suppressed_join_event_ids = frozenset()
-
-    def apply_own_membership(
+    def _apply_control_membership(
         self,
         config: Config,
         runtime_paths: RuntimePaths,
@@ -201,10 +149,7 @@ class AgentReplyMembershipSync:
         *,
         control_user_id: str,
     ) -> bool:
-        """Apply one durable live transition unless its sync batch already fenced it."""
-        identity = (room_id, event.event_id)
-        if identity in self._preapplied_event_ids or identity in self._suppressed_join_event_ids:
-            return False
+        """Apply one accepted durable LIVE membership transition."""
         return self._memberships.apply_member_event(
             config,
             runtime_paths,
@@ -223,19 +168,3 @@ def _sync_response_has_uncertain_membership(
     if isinstance(response, nio.SyncResponse):
         return any(join_info.timeline.limited for join_info in response.rooms.join.values())
     return any(room.limited for room in response.rooms.values())
-
-
-def _joins_superseded_by_negative(
-    member_events: tuple[tuple[str, nio.RoomMemberEvent], ...],
-) -> frozenset[_MembershipEventIdentity]:
-    """Return positive events whose batch already proves a later revocation."""
-    later_negative_memberships: set[tuple[str, str]] = set()
-    superseded: set[_MembershipEventIdentity] = set()
-    for room_id, event in reversed(member_events):
-        member = (room_id, event.state_key)
-        if event.membership == "join":
-            if member in later_negative_memberships:
-                superseded.add((room_id, event.event_id))
-        else:
-            later_negative_memberships.add(member)
-    return frozenset(superseded)

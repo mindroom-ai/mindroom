@@ -1834,7 +1834,7 @@ class AgentBot:
         """Fail closed on a sync gap or router departure before timeline admission."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
-        effects = self._router_reply_membership_sync.prepare_response(
+        effects = self._router_reply_membership_sync.pre_admit_response(
             self.config,
             self.runtime_paths,
             response,
@@ -1859,16 +1859,6 @@ class AgentBot:
 
         if self._sync_shutting_down:
             return
-
-        if self.agent_name == ROUTER_AGENT_NAME:
-            effects = self._router_reply_membership_sync.ensure_response_prepared(
-                self.config,
-                self.runtime_paths,
-                _response,
-                control_user_id=self.agent_user.user_id,
-            )
-            self._router_reply_membership_sync.finish_response(_response)
-            self._apply_reply_membership_pre_admission(effects)
 
         if isinstance(_response, nio.SyncResponse):
             (
@@ -2014,13 +2004,6 @@ class AgentBot:
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
         departed_room_ids = membership.departed_room_ids
-        reply_grant_continuity_lost = False
-        if self.agent_name == ROUTER_AGENT_NAME:
-            reply_grant_continuity_lost = self._router_reply_membership_sync.apply_own_membership(
-                self.config,
-                self.runtime_paths,
-                membership,
-            )
         await self._membership_fence.fence_reported_departures(membership.departures)
         for room_id in departed_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
@@ -2034,8 +2017,6 @@ class AgentBot:
                 joined_room_ids=current_joined_room_ids,
                 left_room_ids=membership.left_room_ids,
             )
-        if reply_grant_continuity_lost:
-            await self._revoke_reply_authorized_calls_runtimewide()
 
     def _invited_call_rooms_by_agent(self) -> dict[str, frozenset[str]]:
         """Return live accepted-invite state for the configured call agents."""

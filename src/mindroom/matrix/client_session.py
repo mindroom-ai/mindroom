@@ -100,12 +100,12 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         """Register synchronous control-plane work that must precede timeline admission."""
         self._before_sync_response_callback = callback
 
-    async def _receive_sync_family(self, envelope: Any) -> None:  # noqa: ANN401
-        """Run MindRoom's pre-admission callback before nio handles timeline events."""
+    async def _handle_to_device(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
+        """Run control-plane fencing on nio's accepted response before event fanout."""
         callback = self._before_sync_response_callback
         if callback is not None:
-            callback(envelope.response)
-        await super()._receive_sync_family(envelope)
+            callback(response)
+        await super()._handle_to_device(response)
 
     async def send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         """Prepare dynamic request headers before every transport attempt."""
