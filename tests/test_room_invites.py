@@ -633,7 +633,7 @@ async def test_router_cleanup_preserves_room_created_after_lifecycle_loaded(
         Config(router=RouterConfig(model="default", accept_invites=True)),
         test_runtime_paths(tmp_path),
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=_router_user(),
         storage_path=tmp_path,
         config=config,
@@ -697,7 +697,7 @@ async def test_router_cleanup_loads_invited_rooms_off_event_loop(
         Config(router=RouterConfig(model="default", accept_invites=True)),
         test_runtime_paths(tmp_path),
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=_router_user(),
         storage_path=tmp_path,
         config=config,
@@ -990,7 +990,7 @@ async def test_cleanup_does_not_resurrect_room_pending_durable_forget(
     invited_path = _invited_rooms_path(config, ROUTER_AGENT_NAME)
     invited_path.parent.mkdir(parents=True, exist_ok=True)
     invited_path.write_text('[\n  "!departed:localhost"\n]\n', encoding="utf-8")
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=_router_user(),
         storage_path=tmp_path,
         config=config,
