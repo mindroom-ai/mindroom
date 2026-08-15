@@ -586,6 +586,60 @@ async def test_scoped_oauth_refresh_accepts_access_token_only_reconnect_after_st
 
 
 @pytest.mark.asyncio
+async def test_scoped_oauth_refresh_accepts_reconnect_during_stale_retry(tmp_path: Path) -> None:
+    """A usable reconnect committed during the retry must supersede its stale rejection."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target()
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    _save_credentials(runtime_paths, worker_target, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    reconnected_credentials = _credentials(RECONNECTED_ACCESS, CHAIN_2, expires_at=FUTURE_EXPIRES_AT)
+    del reconnected_credentials["refresh_token"]
+    seen_refresh_tokens: list[str] = []
+
+    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
+        refresh_token = str(credentials["refresh_token"])
+        seen_refresh_tokens.append(refresh_token)
+        if refresh_token == CHAIN_0:
+            save_scoped_credentials(
+                "demo_oauth",
+                _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT),
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+        else:
+            assert refresh_token == CHAIN_1
+            save_scoped_credentials(
+                "demo_oauth",
+                reconnected_credentials,
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+        raise OAuthRefreshRejectedError(INVALID_ROTATION, oauth_error=INVALID_ROTATION)
+
+    result = await refresh_scoped_oauth_credentials_with_result(
+        _FakeOAuthProvider(refresh),
+        runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    assert result == oauth_service_module.OAuthCredentialsRefreshResult(
+        credentials=reconnected_credentials,
+        refreshed=False,
+        stale_retry_used=True,
+    )
+    assert seen_refresh_tokens == [CHAIN_0, CHAIN_1]
+    assert (
+        load_scoped_credentials(
+            "demo_oauth",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        == reconnected_credentials
+    )
+
+
+@pytest.mark.asyncio
 async def test_scoped_oauth_refresh_logs_terminal_failure_without_tokens(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -423,21 +423,28 @@ async def _refresh_scoped_oauth_credentials_snapshot(
         try:
             refreshed_credentials = await provider.refresh_token_data(latest_credentials, runtime_paths)
         except OAuthProviderError as retry_exc:
-            if _is_recoverable_stale_refresh_rejection(retry_exc):
-                async with async_exclusive_file_lock(lock_path):
-                    current_credentials = load_scoped_credentials(
-                        provider.credential_service,
-                        credentials_manager=credentials_manager,
-                        worker_target=worker_target,
-                        allowed_shared_services=allowed_shared_services,
-                    )
-                    if current_credentials == latest_credentials:
-                        _attach_oauth_refresh_failure_context(retry_exc, latest_credentials)
-                        delete_scoped_credentials(
-                            provider.credential_service,
-                            credentials_manager=credentials_manager,
-                            worker_target=worker_target,
-                        )
+            superseding_credentials = await _reconcile_stale_retry_rejection(
+                provider,
+                runtime_paths,
+                latest_credentials=latest_credentials,
+                retry_exc=retry_exc,
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+                allowed_shared_services=allowed_shared_services,
+                lock_path=lock_path,
+            )
+            if superseding_credentials is not None:
+                _log_oauth_refresh_skipped(
+                    provider,
+                    superseding_credentials,
+                    reason="superseded",
+                    stale_retry_used=True,
+                )
+                return OAuthCredentialsRefreshResult(
+                    credentials=superseding_credentials,
+                    refreshed=False,
+                    stale_retry_used=True,
+                )
             _log_oauth_refresh_failed(
                 provider,
                 latest_credentials,
@@ -467,6 +474,44 @@ async def _refresh_scoped_oauth_credentials_snapshot(
         lock_path=lock_path,
         stale_retry_used=False,
     )
+
+
+async def _reconcile_stale_retry_rejection(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    latest_credentials: dict[str, Any],
+    retry_exc: OAuthProviderError,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+    allowed_shared_services: frozenset[str] | None,
+    lock_path: Path,
+) -> dict[str, Any] | None:
+    """Invalidate a rejected retry or return a newer usable credential snapshot."""
+    if not _is_recoverable_stale_refresh_rejection(retry_exc):
+        return None
+    async with async_exclusive_file_lock(lock_path):
+        current_credentials = load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
+        )
+        if current_credentials == latest_credentials:
+            _attach_oauth_refresh_failure_context(retry_exc, latest_credentials)
+            delete_scoped_credentials(
+                provider.credential_service,
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+            return None
+        if current_credentials is None or not oauth_credentials_usable(
+            provider,
+            runtime_paths,
+            current_credentials,
+        ):
+            return None
+        return current_credentials
 
 
 async def _publish_oauth_refresh_result(

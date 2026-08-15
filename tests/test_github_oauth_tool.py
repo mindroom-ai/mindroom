@@ -829,6 +829,8 @@ def test_terminal_refresh_failure_returns_safe_connection_payload(tmp_path: Path
     payload = json.loads(result)
     assert payload["oauth_connection_required"] is True
     assert payload["provider"] == "github"
+    assert payload["reason"] == "refresh_rejected"
+    assert "session for this agent expired or is no longer valid" in payload["error"]
     assert leaked_secret not in result
     assert leaked_secret not in repr(logger.warning_calls)
 

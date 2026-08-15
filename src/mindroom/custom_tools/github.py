@@ -16,9 +16,15 @@ from github import Auth, Github, GithubException
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.oauth.github import github_oauth_provider
-from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, oauth_connection_required_payload
+from mindroom.oauth.providers import (
+    OAuthConnectionRequired,
+    OAuthProviderError,
+    OAuthRefreshRejectedError,
+    oauth_connection_required_payload,
+)
 from mindroom.oauth.service import (
     build_oauth_connect_instruction,
+    build_oauth_reconnect_instruction,
     oauth_connect_url,
     oauth_credentials_usable,
     oauth_credentials_worker_target,
@@ -117,16 +123,22 @@ class GithubTools(AgnoGithubTools):
             execution_identity=execution_identity,
         )
 
-    def _connection_required(self) -> OAuthConnectionRequired:
+    def _connection_required(self, *, reason: str | None = None) -> OAuthConnectionRequired:
         connect_url = oauth_connect_url(
             self._oauth_provider,
             self._runtime_paths,
             worker_target=self._oauth_credentials_worker_target(),
         )
+        instruction = (
+            build_oauth_reconnect_instruction(self._oauth_provider, connect_url)
+            if reason == "refresh_rejected"
+            else build_oauth_connect_instruction(self._oauth_provider, connect_url)
+        )
         return OAuthConnectionRequired(
-            build_oauth_connect_instruction(self._oauth_provider, connect_url),
+            instruction,
             provider_id=self._oauth_provider.id,
             connect_url=connect_url,
+            reason=reason,
         )
 
     def _refresh_oauth_credentials(self) -> dict[str, object] | None:
@@ -173,7 +185,8 @@ class GithubTools(AgnoGithubTools):
                 provider_id=self._oauth_provider.id,
                 error_type=type(exc).__name__,
             )
-            raise self._connection_required() from exc
+            reason = "refresh_rejected" if isinstance(exc, OAuthRefreshRejectedError) else None
+            raise self._connection_required(reason=reason) from exc
         if not oauth_credentials_usable(self._oauth_provider, self._runtime_paths, credentials):
             raise self._connection_required()
         token = _normalized_access_token(
