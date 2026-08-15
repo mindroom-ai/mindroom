@@ -433,7 +433,7 @@ def oauth_credential_generation(context: OAuthCredentialContext) -> str:
 
 
 def oauth_connection_generation(context: OAuthCredentialContext) -> str:
-    """Return the connection lineage used to fence callbacks and approved resets."""
+    """Return the connection lineage used to fence callbacks and browser-confirmed resets."""
     return load_oauth_credentials_snapshot_sync(context).connection_generation
 
 

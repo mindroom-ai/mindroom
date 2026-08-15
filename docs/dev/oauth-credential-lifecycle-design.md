@@ -105,7 +105,7 @@ The POST revalidates authorization, calls `src/mindroom/oauth/reset_execution.py
 
 `src/mindroom/oauth/reset_execution.py` returns completed stable operations before transport work, otherwise enters MCP retirement and asks the lifecycle owner to commit the reset.
 If teardown is cancelled or fails, deletion does not occur.
-The opaque reset token is consumed only after reset completion and provider authorization preparation, so a safe retry can reuse the same stable operation after an interruption.
+The opaque reset token remains available only for its short TTL, so retries reuse the same stable operation and prepare a fresh provider authorization redirect.
 
 ## Data Flow
 
@@ -139,7 +139,7 @@ The callback cannot preserve a refresh token that another operation rotated conc
 
 ### Reset and disconnect
 
-1. The agent tool resolves the exact credential context and issues a one-time requester-bound browser URL without mutation.
+1. The agent tool resolves the exact credential context and issues a time-limited requester-bound browser URL without mutation.
 2. The authenticated browser GET revalidates requester identity, current credential-management authorization, provider availability, agent, scope, and worker key, then renders confirmation.
 3. The browser POST repeats those checks and returns a completed stable operation before entering MCP retirement.
 4. Fence the requester-session key, then load its authoritative credential revision and connection generation.
@@ -151,7 +151,7 @@ The callback cannot preserve a refresh token that another operation rotated conc
 10. Recheck the confirmed connection generation and write the stable reset operation as pending together with new durable lease and connection generations.
 11. Durably delete the exact scoped credential file without first decoding it.
 12. Mark the replayable browser operation completed with its original file-existed result and retain that tombstone permanently.
-13. Prepare the normal provider authorization redirect, consume the reset token, and redirect the browser.
+13. Prepare the normal provider authorization redirect and redirect the browser.
 14. Release the in-memory MCP retirement fence and return the redirect even if cancellation arrived after full durable commit.
 
 All credential transactions finish any pending delete before using or publishing the scope.

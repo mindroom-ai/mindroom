@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from agno.models.response import ToolExecution
-from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
 from agno.run.team import TeamRunOutput
@@ -271,100 +270,6 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
     assert paused.tools == (tool,)
     assert paused.requirements == (requirement,)
     assert paused.requirements[0].member_agent_name == "researcher"
-
-
-def test_paused_attempt_preserves_non_confirmation_siblings_for_sensitive_binding() -> None:
-    """Approval admission must retain ordinary sibling calls that Agno already executed."""
-    ordinary_tool = ToolExecution(
-        tool_call_id="ordinary-call",
-        tool_name="ordinary_side_effect",
-        tool_args={"value": 1},
-    )
-    reset_tool = ToolExecution(
-        tool_call_id="reset-call",
-        tool_name="reset_oauth_connection",
-        tool_args={"provider_id": "google"},
-        requires_confirmation=True,
-    )
-    response = RunOutput(
-        status=RunStatus.paused,
-        session_id="session-1",
-        run_id="run-1",
-        tools=[ordinary_tool, reset_tool],
-        requirements=[RunRequirement(reset_tool)],
-    )
-
-    paused = response_turn_module.paused_attempt_from_response(
-        response,
-        fallback_session_id=None,
-        fallback_run_id=None,
-    )
-
-    assert paused is not None
-    assert paused.tools == (reset_tool,)
-    assert paused.observed_tools == (ordinary_tool, reset_tool)
-
-
-def test_paused_attempt_rejects_conflicting_observed_tools_with_same_call_id() -> None:
-    """A call-ID collision must fail before approval admission can discard either descriptor."""
-    ordinary_tool = ToolExecution(
-        tool_call_id="collision-call",
-        tool_name="ordinary_side_effect",
-        tool_args={"value": 1},
-    )
-    reset_tool = ToolExecution(
-        tool_call_id="collision-call",
-        tool_name="reset_oauth_connection",
-        tool_args={"provider_id": "google"},
-        requires_confirmation=True,
-    )
-    response = RunOutput(
-        status=RunStatus.paused,
-        session_id="session-1",
-        run_id="run-1",
-        tools=[ordinary_tool, reset_tool],
-        requirements=[RunRequirement(reset_tool)],
-    )
-
-    with pytest.raises(RuntimeError, match="conflicting duplicate"):
-        response_turn_module.paused_attempt_from_response(
-            response,
-            fallback_session_id=None,
-            fallback_run_id=None,
-        )
-
-
-def test_paused_team_attempt_merges_recursive_tool_history() -> None:
-    """Nested team side effects must remain visible beside a requirement-only reset."""
-    ordinary_tool = ToolExecution(
-        tool_call_id="ordinary-call",
-        tool_name="ordinary_side_effect",
-        tool_args={"value": 1},
-    )
-    reset_tool = ToolExecution(
-        tool_call_id="reset-call",
-        tool_name="reset_oauth_connection",
-        tool_args={"provider_id": "google"},
-        requires_confirmation=True,
-    )
-    response = TeamRunOutput(
-        status=RunStatus.paused,
-        session_id="session-1",
-        run_id="run-1",
-        tools=[],
-        requirements=[RunRequirement(reset_tool)],
-    )
-
-    paused = response_turn_module.paused_attempt_from_response(
-        response,
-        fallback_session_id=None,
-        fallback_run_id=None,
-        additional_observed_tools=(ordinary_tool,),
-    )
-
-    assert paused is not None
-    assert paused.tools == (reset_tool,)
-    assert paused.observed_tools == (ordinary_tool, reset_tool)
 
 
 def test_paused_attempt_rejects_confirmation_entries_without_call_ids() -> None:

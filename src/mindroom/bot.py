@@ -1279,7 +1279,7 @@ class AgentBot:
         )
         await set_presence_status(self.client, status_msg)
 
-    async def mark_sync_loop_started(self) -> None:
+    def mark_sync_loop_started(self) -> None:
         """Record that a sync loop iteration is starting.
 
         Does NOT arm the monotonic watchdog clock — that only starts when the
@@ -1290,7 +1290,7 @@ class AgentBot:
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
         if self.agent_name == ROUTER_AGENT_NAME and self._router_reply_membership_sync.sync_loop_started():
-            await self._invalidate_agent_reply_memberships(reason="sync_loop_started")
+            self._invalidate_agent_reply_memberships(reason="sync_loop_started")
         mark_matrix_sync_loop_started(self.agent_name)
 
     def preserve_reply_memberships_on_next_sync_start(self) -> None:
@@ -1305,19 +1305,19 @@ class AgentBot:
         assert self._reply_membership_sync is not None, "router membership sync coordinator is required"
         return self._reply_membership_sync
 
-    async def _invalidate_agent_reply_memberships(self, *, reason: str) -> None:
+    def _invalidate_agent_reply_memberships(self, *, reason: str) -> None:
         """Fail closed when the router's view of Matrix membership is uncertain."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
         orchestrator = self.orchestrator
         if orchestrator is None:
-            await self._router_reply_membership_sync.invalidate(self.config, reason=reason)
+            self._router_reply_membership_sync.invalidate(self.config, reason=reason)
         else:
-            await orchestrator.invalidate_agent_reply_memberships(reason=reason)
+            orchestrator.invalidate_agent_reply_memberships(reason=reason)
 
-    async def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
+    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
         """Expose fail-closed router membership invalidation to the sync supervisor."""
-        await self._invalidate_agent_reply_memberships(reason=reason)
+        self._invalidate_agent_reply_memberships(reason=reason)
 
     async def reconcile_reply_authorized_calls(self) -> None:
         """Recheck this bot's active calls against the shared reply policy."""
@@ -1469,7 +1469,7 @@ class AgentBot:
                 self._classic_sync_rebuild_pending = True
                 self._classic_sync_rebuild_attempt += 1
                 self._room_member_join_hooks_armed = False
-                await self._invalidate_agent_reply_memberships(reason="classic_sync_reset")
+                self._invalidate_agent_reply_memberships(reason="classic_sync_reset")
         return True, retry_token is not None
 
     async def _reconcile_classic_sync_cursor_after_loop_exit(self) -> None:
@@ -1830,22 +1830,22 @@ class AgentBot:
             # did not read is stale the moment the response is done.
             self._journal_dispatcher.timeline_member_provenance.clear()
 
-    async def _before_sync_response_admission(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
+    def _before_sync_response_admission(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Fail closed on a sync gap or router departure before timeline admission."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
-        effects = await self._router_reply_membership_sync.pre_admit_response(
+        effects = self._router_reply_membership_sync.pre_admit_response(
             self.config,
             self.runtime_paths,
             response,
             control_user_id=self.agent_user.user_id,
         )
-        await self._apply_reply_membership_pre_admission(effects)
+        self._apply_reply_membership_pre_admission(effects)
 
-    async def _apply_reply_membership_pre_admission(self, effects: ReplyMembershipPreAdmission) -> None:
+    def _apply_reply_membership_pre_admission(self, effects: ReplyMembershipPreAdmission) -> None:
         """Publish one router sync batch's fail-closed effects."""
         if effects.invalidate_reason is not None:
-            await self._invalidate_agent_reply_memberships(reason=effects.invalidate_reason)
+            self._invalidate_agent_reply_memberships(reason=effects.invalidate_reason)
         if effects.authorization_changed:
             self._schedule_reply_authorized_call_revocation()
 
@@ -1872,7 +1872,7 @@ class AgentBot:
         elif isinstance(_response, nio.SlidingSyncResponse):
             await self._handle_sliding_sync_response(_response)
         if rejected_response:
-            await self._invalidate_agent_reply_memberships(reason="rejected_sync_response")
+            self._invalidate_agent_reply_memberships(reason="rejected_sync_response")
             return
         if isinstance(_response, nio.SyncResponse):
             self._classic_sync_rebuild_pending = False
@@ -1903,13 +1903,13 @@ class AgentBot:
             # sync checkpoint, so classic token rejection must not run here.
             self._warn_if_sliding_sync_never_succeeded(_response)
             if _response.status_code == "M_UNKNOWN_POS":
-                await self._invalidate_agent_reply_memberships(reason="sliding_sync_position_reset")
+                self._invalidate_agent_reply_memberships(reason="sliding_sync_position_reset")
             return
         if _response.status_code == "M_UNKNOWN_POS":
             decision = await self._sync_checkpoint_trust.reject_unknown_pos()
             await self._apply_client_rewind_decision(decision)
             self._room_member_join_hooks_armed = False
-            await self._invalidate_agent_reply_memberships(reason="classic_sync_position_reset")
+            self._invalidate_agent_reply_memberships(reason="classic_sync_position_reset")
             self.logger.warning(
                 "matrix_sync_token_rejected",
                 status_code=_response.status_code,
@@ -2622,7 +2622,7 @@ class AgentBot:
         """Update reply grants from one durably admitted live Matrix transition."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
-        changed = await self._router_reply_membership_sync.apply_live_transition(
+        changed = self._router_reply_membership_sync.apply_live_transition(
             self.config,
             self.runtime_paths,
             room_id,

@@ -72,9 +72,9 @@ class AgentReplyMembershipSync:
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
 
-    async def invalidate(self, config: Config, *, reason: str) -> None:
+    def invalidate(self, config: Config, *, reason: str) -> None:
         """Fail every room grant closed and request an authoritative rebuild."""
-        await self._memberships.invalidate_serialized(config, reason=reason)
+        self._memberships.invalidate(config, reason=reason)
         self._request_refresh()
 
     async def refresh_if_needed(
@@ -100,7 +100,7 @@ class AgentReplyMembershipSync:
         )
         self._refresh_retry_at = time.monotonic() + backoff_seconds
 
-    async def pre_admit_response(
+    def pre_admit_response(
         self,
         config: Config,
         runtime_paths: RuntimePaths,
@@ -117,10 +117,10 @@ class AgentReplyMembershipSync:
             if isinstance(response, nio.SyncResponse)
             else own_membership_from_sliding_sync(response, self_user_id=control_user_id)
         )
-        authorization_changed = await self._apply_control_membership(config, runtime_paths, membership)
+        authorization_changed = self._apply_control_membership(config, runtime_paths, membership)
         return ReplyMembershipPreAdmission(authorization_changed=authorization_changed)
 
-    async def _apply_control_membership(
+    def _apply_control_membership(
         self,
         config: Config,
         runtime_paths: RuntimePaths,
@@ -129,7 +129,7 @@ class AgentReplyMembershipSync:
         """Fail grant rooms closed when the router loses membership continuity."""
         authorization_changed = False
         for room_id in membership.continuity_lost_room_ids:
-            changed = await self._memberships.mark_control_room_unready_serialized(
+            changed = self._memberships.mark_control_room_unready(
                 config,
                 runtime_paths,
                 room_id,
@@ -140,7 +140,7 @@ class AgentReplyMembershipSync:
             self._request_refresh()
         return authorization_changed
 
-    async def apply_live_transition(
+    def apply_live_transition(
         self,
         config: Config,
         runtime_paths: RuntimePaths,
@@ -150,7 +150,7 @@ class AgentReplyMembershipSync:
         control_user_id: str,
     ) -> bool:
         """Apply one accepted durable LIVE membership transition."""
-        return await self._memberships.apply_member_event_serialized(
+        return self._memberships.apply_member_event(
             config,
             runtime_paths,
             room_id,

@@ -899,8 +899,8 @@ class DeliveryGateway:
         # delivered answer look lost and invite a duplicate.
         return await self._acknowledged_delivery(request.delivery_turn_id, request.delivery_stage, event_id, content)
 
-    async def _send_text_outcome(self, request: SendTextRequest) -> DeliveredMatrixEvent | None:
-        """Send one response message and preserve the exact content accepted by Matrix."""
+    async def send_text(self, request: SendTextRequest) -> str | None:
+        """Send one response message to a room."""
         config = self.deps.runtime.config
         resolved_target = request.target
         effective_thread_id = resolved_target.resolved_thread_id
@@ -946,18 +946,13 @@ class DeliveryGateway:
                 failure_reason = _matrix_delivery_failure_reason(outcome)
         if delivered is not None:
             self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
-            return delivered
+            return delivered.event_id
         self.deps.logger.error(
             "Failed to send response to room",
             error=failure_reason,
             **resolved_target.log_context,
         )
         return None
-
-    async def send_text(self, request: SendTextRequest) -> str | None:
-        """Send one response message to a room."""
-        delivered = await self._send_text_outcome(request)
-        return delivered.event_id if delivered is not None else None
 
     async def _edit_content(
         self,
@@ -1060,8 +1055,8 @@ class DeliveryGateway:
         # earlier run, so nothing was sent and the callback never ran.
         return await self._acknowledged_delivery(request.delivery_turn_id, DeliveryStage.FINAL, event_id, envelope)
 
-    async def _edit_text_outcome(self, request: EditTextRequest) -> DeliveredMatrixEvent | None:
-        """Edit one response and preserve the exact content accepted by Matrix."""
+    async def edit_text(self, request: EditTextRequest) -> bool:
+        """Edit one existing response message."""
         config = self.deps.runtime.config
         target = request.target
         # The edit envelope discards any pre-existing relation before adding m.replace.
@@ -1085,18 +1080,14 @@ class DeliveryGateway:
                 failure_reason = _matrix_delivery_failure_reason(outcome)
         if delivered is not None:
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
-            return delivered
+            return True
         self.deps.logger.error(
             "Failed to edit message",
             event_id=request.event_id,
             error=failure_reason,
             **target.log_context,
         )
-        return None
-
-    async def edit_text(self, request: EditTextRequest) -> bool:
-        """Edit one existing response message."""
-        return await self._edit_text_outcome(request) is not None
+        return False
 
     async def deliver_final(  # noqa: C901, PLR0911, PLR0912
         self,

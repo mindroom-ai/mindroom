@@ -790,7 +790,7 @@ async def test_membership_authorized_trigger_waits_for_reload_snapshot(
     _create_record(runtime_paths, config, _public_key_b64(private_key))
     gate = ResponseAdmissionGate()
     assert gate.close_if_idle()
-    await memberships.invalidate_serialized(config, reason="config_reload")
+    memberships.invalidate(config, reason="config_reload")
     wait_started = asyncio.Event()
 
     async def wait_for_admission() -> bool:

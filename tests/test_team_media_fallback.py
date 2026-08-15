@@ -42,7 +42,7 @@ from mindroom.ai_runtime import (
     install_queued_message_notice_hook,
     queued_message_signal_context,
 )
-from mindroom.approval_bindings import approval_tool_descriptor
+from mindroom.approval_bindings import build_approval_tool_bindings
 from mindroom.approval_receipt import approval_receipt_context
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
@@ -71,7 +71,7 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -428,13 +428,9 @@ async def test_team_continuation_executes_real_agno_confirmation(
     assert requirement.tool_execution is not None
     tool_call_id = requirement.tool_execution.tool_call_id
     assert tool_call_id is not None
-    tool_bindings = {
-        tool_call_id: {
-            "tool_name": requirement.tool_execution.tool_name,
-            "arguments_json": approval_tool_descriptor(requirement.tool_execution)[1],
-            "invoking_agent": "research",
-        },
-    }
+    tool_bindings = build_approval_tool_bindings(
+        [(requirement.tool_execution, tool_call_id, requirement.tool_execution.tool_name, "research")],
+    )
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     members = ResolvedExactTeamMembers(
@@ -504,107 +500,6 @@ async def test_team_continuation_executes_real_agno_confirmation(
         session_type=SessionType.TEAM,
         entity_name="research",
     )
-
-
-@pytest.mark.asyncio
-async def test_chained_team_pause_preserves_recursive_tool_history() -> None:
-    """A continued pause must retain nested tools observed before the first approval."""
-    prior_side_effect = ToolExecution(
-        tool_call_id="side-effect",
-        tool_name="ordinary_side_effect",
-        tool_args={"value": 1},
-        result="done",
-    )
-    first_confirmation = ToolExecution(
-        tool_call_id="confirm-first",
-        tool_name="confirm_first",
-        tool_args={},
-        requires_confirmation=True,
-    )
-    reset_tool = ToolExecution(
-        tool_call_id="reset-second",
-        tool_name="reset_oauth_connection",
-        tool_args={"provider_id": "google"},
-        requires_confirmation=True,
-    )
-    persisted = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.paused,
-        requirements=[RunRequirement(first_confirmation)],
-        member_responses=[
-            RunOutput(
-                status=RunStatus.completed,
-                agent_name="GeneralAgent",
-                tools=[prior_side_effect],
-            ),
-        ],
-    )
-    continued = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.paused,
-        requirements=[RunRequirement(reset_tool)],
-        tools=[reset_tool],
-    )
-    team = MagicMock()
-    team.db = None
-    team.aget_session = AsyncMock(return_value=SimpleNamespace(get_run=lambda _run_id: persisted))
-    team.acontinue_run = AsyncMock(return_value=continued)
-    members = ResolvedExactTeamMembers(
-        requested_agent_names=[],
-        agents=[],
-        display_names=[],
-        materialized_agent_names=set(),
-        failed_agent_names=[],
-    )
-    config = _build_test_config()
-    runtime_paths = runtime_paths_for(config)
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="research",
-        requester_id="@user:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-
-    with (
-        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
-        patch(
-            "mindroom.teams.open_bound_scope_session_context",
-            return_value=nullcontext(SimpleNamespace(storage=None, storage_factory=None)),
-        ),
-        patch("mindroom.teams.build_materialized_team_instance", return_value=team),
-        patch("mindroom.teams.close_team_runtime_state_dbs"),
-    ):
-        result = await continue_paused_team_run(
-            member_names=(),
-            mode=TeamMode.COORDINATE,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=identity,
-            session_id="session-1",
-            run_id="run-1",
-            user_id="@user:localhost",
-            configured_team_name="research",
-            model_name="default",
-            decisions={"confirm-first": True},
-            denial_reasons={"confirm-first": None},
-            tool_bindings={
-                "confirm-first": {
-                    "tool_name": "confirm_first",
-                    "arguments_json": "{}",
-                    "invoking_agent": "research",
-                },
-            },
-            refresh_scheduler=None,
-        )
-
-    assert isinstance(result, PausedAttempt)
-    assert result.tools == (reset_tool,)
-    assert result.observed_tools == (prior_side_effect, first_confirmation, reset_tool)
 
 
 @pytest.mark.parametrize(
@@ -2348,65 +2243,6 @@ async def test_team_response_passes_run_id_to_team_arun() -> None:
 
 
 @pytest.mark.asyncio
-async def test_team_response_pause_preserves_recursive_observed_tool_history() -> None:
-    """A blocking team pause must retain nested completed siblings for reset isolation."""
-    config = _build_test_config()
-    orchestrator = MagicMock()
-    orchestrator.config = config
-    orchestrator.runtime_paths = runtime_paths_for(config)
-    orchestrator.knowledge_managers = {}
-    orchestrator.agent_bots = {"general": MagicMock()}
-    ordinary_tool = ToolExecution(
-        tool_call_id="ordinary-call",
-        tool_name="ordinary_side_effect",
-        tool_args={"value": 1},
-        result="done",
-    )
-    reset_tool = ToolExecution(
-        tool_call_id="reset-call",
-        tool_name="reset_oauth_connection",
-        tool_args={"provider_id": "google"},
-        requires_confirmation=True,
-    )
-    mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(
-        return_value=TeamRunOutput(
-            status=RunStatus.paused,
-            run_id="run-123",
-            session_id="session-team",
-            requirements=[RunRequirement(reset_tool)],
-            member_responses=[
-                RunOutput(
-                    status=RunStatus.completed,
-                    agent_name="GeneralAgent",
-                    tools=[ordinary_tool],
-                ),
-            ],
-        ),
-    )
-    fake_agent = _make_test_agent("GeneralAgent")
-
-    with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        pytest.raises(ResponsePausedForApproval) as raised,
-    ):
-        await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Analyze this.",
-            turn_recorder=_team_turn_recorder("Analyze this."),
-            orchestrator=orchestrator,
-            execution_identity=None,
-            ctx=make_turn_context(run_id="run-123", session_id="session-team"),
-        )
-
-    assert raised.value.paused.tools == (reset_tool,)
-    assert raised.value.paused.observed_tools == (ordinary_tool, reset_tool)
-
-
-@pytest.mark.asyncio
 async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None:
     """Gracefully cancelled team runs should surface as CancelledError."""
     config = _build_test_config()
@@ -2950,20 +2786,13 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
         tool_args={"value": 1},
         requires_confirmation=True,
     )
-    ordinary_tool = ToolExecution(
-        tool_call_id="call-team-stream-ordinary",
-        tool_name="ordinary_side_effect",
-        tool_args={"value": 1},
-        result="done",
-    )
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-        yield TeamToolCallCompletedEvent(tool=ordinary_tool)
         yield TeamRunPausedEvent(
             run_id="run-paused",
             session_id="session-team",
             content="Approval required",
-            tools=[],
+            tools=[tool],
             requirements=[RunRequirement(tool)],
         )
 
@@ -2998,7 +2827,6 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
     assert raised.value.paused.run_id == "run-paused"
     assert raised.value.paused.tools == (tool,)
     assert raised.value.paused.team_member_model_names == (("general", "large"),)
-    assert raised.value.paused.observed_tools == (ordinary_tool, tool)
 
 
 @pytest.mark.asyncio

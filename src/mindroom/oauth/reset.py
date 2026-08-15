@@ -15,7 +15,7 @@ from mindroom.oauth.credential_lifecycle import (
 )
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_credential_target_payload, oauth_public_base_url
-from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
+from mindroom.oauth.state import issue_opaque_oauth_state, read_opaque_oauth_state
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 
@@ -186,7 +186,7 @@ def _browser_oauth_reset_intent_from_payload(
 
 
 async def issue_browser_oauth_reset_url(target: _ResolvedOAuthResetTarget) -> str:
-    """Issue a one-time browser URL without mutating the credential."""
+    """Issue a time-limited browser URL without mutating the credential."""
     worker_target = target.worker_target
     execution_identity = worker_target.execution_identity
     if execution_identity is None or not execution_identity.requester_id:
@@ -229,21 +229,3 @@ def lookup_browser_oauth_reset_intent(
         token=token,
     )
     return _browser_oauth_reset_intent_from_payload(provider, payload)
-
-
-def consume_browser_oauth_reset_intent(
-    provider: OAuthProvider,
-    runtime_paths: RuntimePaths,
-    token: str,
-    *,
-    expected: BrowserOAuthResetIntent,
-) -> None:
-    """Consume one successfully completed browser reset intent exactly once."""
-    payload = consume_opaque_oauth_state(
-        runtime_paths,
-        kind=_BROWSER_OAUTH_RESET_KIND,
-        token=token,
-    )
-    if _browser_oauth_reset_intent_from_payload(provider, payload) != expected:
-        msg = "OAuth reset link target changed"
-        raise OAuthResetTargetError(msg)

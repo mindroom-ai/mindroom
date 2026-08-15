@@ -43,8 +43,8 @@ from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.reset import (
     BrowserOAuthResetIntent,
     OAuthResetTargetError,
-    consume_browser_oauth_reset_intent,
     lookup_browser_oauth_reset_intent,
+    resolve_oauth_reset_target,
 )
 from mindroom.oauth.reset_execution import OAuthResetPreparationError, retire_and_reset_oauth_credentials
 from mindroom.oauth.service import (
@@ -60,7 +60,7 @@ from mindroom.oauth.service import (
 if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.worker_routing import WorkerScope
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
 logger = get_logger(__name__)
@@ -215,7 +215,11 @@ async def _issue_authorization_url(
             provider,
             agent_name=agent_name,
         )
-        _verify_connect_target_binding(provider, connect_target, target)
+        _verify_connect_target_binding(
+            provider,
+            connect_target,
+            worker_target_for_credentials_target(target),
+        )
         code_verifier = provider.issue_pkce_code_verifier()
         state = issue_pending_oauth_state(
             request,
@@ -313,9 +317,9 @@ def _verify_connect_target_query(
 def _verify_connect_target_binding(
     provider: OAuthProvider,
     connect_target: OAuthConnectTarget,
-    target: RequestCredentialsTarget,
+    worker_target: ResolvedWorkerTarget | None,
 ) -> None:
-    expected = oauth_credential_target_payload(provider, worker_target_for_credentials_target(target))
+    expected = oauth_credential_target_payload(provider, worker_target)
     if (
         connect_target.agent_name != (expected["agent_name"] or None)
         or connect_target.worker_scope != expected["worker_scope"]
@@ -332,7 +336,7 @@ def _verify_browser_reset_intent(
     *,
     agent_name: str | None,
     execution_scope: str | None,
-) -> RequestCredentialsTarget:
+) -> OAuthCredentialContext:
     """Reauthorize and resolve the exact browser reset target."""
     connect_target = OAuthConnectTarget(
         provider_id=intent.provider_id,
@@ -344,8 +348,6 @@ def _verify_browser_reset_intent(
     )
     _verify_connect_target_authorized(request, connect_target, runtime_paths)
     _verify_connect_target_query(connect_target, agent_name, execution_scope)
-    target = _resolve_oauth_credentials_target(request, provider, agent_name=agent_name)
-    _verify_connect_target_binding(provider, connect_target, target)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
     if config is None:
@@ -354,7 +356,18 @@ def _verify_browser_reset_intent(
     requester_id = config.authorization.resolve_alias(identity.requester_id) if identity.requester_id else ""
     if not agent_name or not is_sender_allowed_for_agent_credential_management(requester_id, agent_name, config):
         raise HTTPException(status_code=403, detail="The current requester cannot manage this agent's credentials")
-    return target
+    try:
+        target = resolve_oauth_reset_target(
+            provider.id,
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+        )
+    except OAuthResetTargetError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _verify_connect_target_binding(provider, connect_target, target.worker_target)
+    return target.credential_context
 
 
 async def _verify_pending_target_binding(
@@ -496,7 +509,7 @@ async def reset_and_authorize(
     await _require_oauth_api_user(request)
     provider, runtime_paths = _load_provider(request, provider_id)
     intent = _browser_reset_intent(provider, runtime_paths, reset_token)
-    target = _verify_browser_reset_intent(
+    context = _verify_browser_reset_intent(
         request,
         provider,
         intent,
@@ -504,7 +517,6 @@ async def reset_and_authorize(
         agent_name=agent_name,
         execution_scope=execution_scope,
     )
-    context = _credential_context(provider, runtime_paths, target)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
     if config is None:
@@ -521,12 +533,6 @@ async def reset_and_authorize(
             provider,
             runtime_paths,
             agent_name=agent_name,
-        )
-        consume_browser_oauth_reset_intent(
-            provider,
-            runtime_paths,
-            reset_token,
-            expected=intent,
         )
     except OAuthCredentialConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

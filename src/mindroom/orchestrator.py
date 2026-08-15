@@ -986,7 +986,7 @@ class _MultiAgentOrchestrator:
         )
         self.config = new_config
         if reply_membership_policy_changed:
-            await self.invalidate_agent_reply_memberships(reason="config_reload")
+            self.invalidate_agent_reply_memberships(reason="config_reload")
         new_hook_registry = apply_prepared_plugin_reload(
             prepared_plugin_reload,
             cancel_existing_tasks=True,
@@ -1075,7 +1075,7 @@ class _MultiAgentOrchestrator:
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
         self.config = config
-        await self.agent_reply_memberships.invalidate_serialized(config, reason="initial_config")
+        self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)
@@ -1279,17 +1279,17 @@ class _MultiAgentOrchestrator:
         await self._approval_transport.handle_bot_ready(bot)
         self._schedule_ready_turn_dispatch_recovery()
 
-    async def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
-        """Revoke every room-backed reply grant at the authorization boundary."""
+    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
+        """Synchronously revoke every room-backed reply grant."""
         if self.config is not None:
-            await self.agent_reply_membership_sync.invalidate(self.config, reason=reason)
+            self.agent_reply_membership_sync.invalidate(self.config, reason=reason)
             for bot in self.agent_bots.values():
                 bot.schedule_reply_authorized_call_reconciliation()
 
-    async def _invalidate_reply_memberships_before_control_stop(self, entity_names: set[str]) -> None:
+    def _invalidate_reply_memberships_before_control_stop(self, entity_names: set[str]) -> None:
         """Fence room-backed grants before stopping their sole control client."""
         if ROUTER_AGENT_NAME in entity_names:
-            await self.invalidate_agent_reply_memberships(reason="router_replacement")
+            self.invalidate_agent_reply_memberships(reason="router_replacement")
 
     async def _stop_runtime_entities(
         self,
@@ -1298,7 +1298,7 @@ class _MultiAgentOrchestrator:
         restart_entities: set[str],
     ) -> None:
         """Stop entities after fencing control-plane state they exclusively own."""
-        await self._invalidate_reply_memberships_before_control_stop(entity_names)
+        self._invalidate_reply_memberships_before_control_stop(entity_names)
         await stop_entities(
             entity_names,
             self.agent_bots,
@@ -1319,7 +1319,7 @@ class _MultiAgentOrchestrator:
         config = self._require_config()
         router_bot = self._router_bot()
         if router_bot is None or router_bot.client is None:
-            await self.invalidate_agent_reply_memberships(reason="router_unavailable")
+            self.invalidate_agent_reply_memberships(reason="router_unavailable")
             return
         await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_bot.client)
         await self.revoke_reply_authorized_calls()
@@ -1466,7 +1466,7 @@ class _MultiAgentOrchestrator:
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
         await self._prepare_entity_accounts(new_config, entity_names)
         self.config = new_config
-        await self.agent_reply_memberships.invalidate_serialized(new_config, reason="initial_config_reload")
+        self.agent_reply_memberships.invalidate(new_config, reason="initial_config_reload")
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(new_config)
         await self._sync_runtime_support_services(new_config, start_watcher=self.running)
@@ -1777,7 +1777,7 @@ class _MultiAgentOrchestrator:
                 # Only apply the new config after validation and account checks succeed.
                 self.config = new_config
                 if reply_membership_policy_changed:
-                    await self.invalidate_agent_reply_memberships(reason="config_reload")
+                    self.invalidate_agent_reply_memberships(reason="config_reload")
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
                 clear_worker_validation_snapshot_cache()
@@ -2135,7 +2135,7 @@ class _MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
-        await self.invalidate_agent_reply_memberships(reason="shutdown")
+        self.invalidate_agent_reply_memberships(reason="shutdown")
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()

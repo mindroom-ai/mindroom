@@ -515,7 +515,7 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
             },
         )
         assert isinstance(leave, nio.RoomMemberEvent)
-        await memberships.apply_member_event_serialized(
+        memberships.apply_member_event(
             config,
             runner.deps.runtime_paths,
             grant_room_id,

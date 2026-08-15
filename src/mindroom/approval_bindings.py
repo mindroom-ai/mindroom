@@ -26,15 +26,6 @@ def _canonical_tool_arguments(arguments: object) -> str:
         raise RuntimeError(msg) from exc
 
 
-def approval_tool_descriptor(tool: ToolExecution) -> tuple[str | None, str, bool]:
-    """Return the security-relevant identity of one observed approval tool call."""
-    return (
-        tool.tool_name,
-        _canonical_tool_arguments(tool.tool_args),
-        bool(tool.requires_confirmation),
-    )
-
-
 def build_approval_tool_bindings(
     identified_tools: Sequence[tuple[ToolExecution, str, str, str]],
 ) -> dict[str, dict[str, object]]:

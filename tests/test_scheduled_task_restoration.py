@@ -345,7 +345,7 @@ class TestScheduledTaskRestoration:
             assert router_bot._deferred_overdue_task_drain_task is None
             mock_drain.assert_not_awaited()
 
-            await router_bot.mark_sync_loop_started()
+            router_bot.mark_sync_loop_started()
             await router_bot._on_sync_response(MagicMock())
 
             assert router_bot._deferred_overdue_task_drain_task is not None

@@ -283,7 +283,7 @@ Return the dashboard disconnect receipt only after successful cleanup and deleti
 
 Resolve provider-specific requester credential identity once.
 Construct the context with the primary runtime credential manager.
-Issue an opaque one-time browser URL that freezes provider ID, credential service, worker scope, worker key, routing agent, canonical requester, connection generation, and random stable operation ID.
+Issue an opaque time-limited browser URL that freezes provider ID, credential service, worker scope, worker key, routing agent, canonical requester, connection generation, and random stable operation ID.
 Keep the agent tool non-destructive and outside generic Agno approval continuation handling.
 Make GET revalidate and display the exact target without changing credentials.
 
@@ -293,7 +293,7 @@ Authenticate the browser requester and revalidate the complete frozen target bef
 Return completed stable operations before retirement, fence the requester-session key, and skip retirement only when authoritative storage proves the connection generation changed after confirmation.
 Otherwise retire every cached same-key session regardless of lease-revision mismatch, then invoke the lifecycle reset transaction.
 If teardown is cancelled, propagate cancellation while credentials remain intact.
-After reset completion, prepare the normal provider authorization redirect and consume the opaque reset token.
+After reset completion, prepare the normal provider authorization redirect while retaining the opaque reset token only until its short TTL expires.
 Keep the token reusable when teardown, deletion, or authorization preparation fails safely.
 
 ### Task 4: Consolidate materialized client ownership

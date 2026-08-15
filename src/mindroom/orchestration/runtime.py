@@ -338,9 +338,9 @@ class _SyncIteration:
             raise _MatrixSyncStalledError(msg)
 
     @classmethod
-    async def start(cls, bot: AgentBot | TeamBot) -> _SyncIteration:
+    def start(cls, bot: AgentBot | TeamBot) -> _SyncIteration:
         """Create the sync task and its watchdog for one loop iteration."""
-        await bot.mark_sync_loop_started()
+        bot.mark_sync_loop_started()
         # Reset the monotonic watchdog clock so a fresh iteration gets the full
         # startup timeout instead of inheriting a stale timestamp from a previous
         # stall/restart cycle.
@@ -425,7 +425,7 @@ async def _run_sync_iteration(bot: AgentBot | TeamBot, *, attempt: int) -> _Sync
     outcome = _SyncIterationOutcome()
     try:
         logger.info("starting_sync_loop", agent=bot.agent_name)
-        iteration = await _SyncIteration.start(bot)
+        iteration = _SyncIteration.start(bot)
         await iteration.wait()
         if bot.running:
             logger.warning("sync_loop_returned_while_bot_running", agent=bot.agent_name, retry_count=attempt)
@@ -660,7 +660,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
         outcome = await _run_sync_iteration(bot, attempt=retry_count + 1)
         if outcome.restart_reason_category is None or not bot.running:
             break
-        await bot.invalidate_agent_reply_memberships(reason=outcome.restart_reason_category)
+        bot.invalidate_agent_reply_memberships(reason=outcome.restart_reason_category)
         retry_count += 1
         will_retry = max_retries < 0 or retry_count < max_retries
         resulting_action: RuntimeLifecycleAction = "restart_receive_loop" if will_retry else "preserve_response_runtime"

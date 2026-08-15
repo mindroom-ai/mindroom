@@ -433,7 +433,7 @@ async def test_completed_reset_operation_cannot_delete_later_callback_credential
 
     context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
     _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
-    operation_id = "approval-1:0:reset-call"
+    operation_id = "browser:reset-operation-1"
 
     assert await credential_lifecycle.reset_oauth_credentials(context, operation_id=operation_id) is True
     replacement = await exchange_and_store_oauth_credentials(
@@ -498,7 +498,7 @@ async def test_completed_reset_replay_does_not_finish_unrelated_pending_delete(t
 
     context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
     _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
-    completed_operation_id = "approval-1:0:reset-call"
+    completed_operation_id = "browser:reset-operation-1"
     assert await credential_lifecycle.reset_oauth_credentials(
         context,
         operation_id=completed_operation_id,
@@ -517,7 +517,7 @@ async def test_completed_reset_replay_does_not_finish_unrelated_pending_delete(t
             connection_generation=state.connection_generation,
             reset_operations={
                 **state.reset_operations,
-                "approval-2:0:reset-call": credential_lifecycle._OAuthResetOperation(
+                "browser:reset-operation-2": credential_lifecycle._OAuthResetOperation(
                     status="pending",
                     credential_existed=True,
                     replayable=True,
@@ -534,7 +534,7 @@ async def test_completed_reset_replay_does_not_finish_unrelated_pending_delete(t
     assert persisted is not None
     assert credential_lifecycle._credentials_without_publication(persisted) == replacement
     assert (
-        credential_lifecycle._load_oauth_credential_state(context).reset_operations["approval-2:0:reset-call"].status
+        credential_lifecycle._load_oauth_credential_state(context).reset_operations["browser:reset-operation-2"].status
         == "pending"
     )
 
@@ -561,13 +561,13 @@ async def test_pending_reset_operation_hides_old_credentials_and_reconnect_finis
     with pytest.raises(OSError, match="simulated host interruption"):
         await credential_lifecycle.reset_oauth_credentials(
             context,
-            operation_id="approval-1:0:reset-call",
+            operation_id="browser:reset-operation-1",
         )
 
     assert credential_lifecycle.load_oauth_credentials(context) is None
     pending_operation = credential_lifecycle._oauth_reset_operation_snapshot(
         context,
-        "approval-1:0:reset-call",
+        "browser:reset-operation-1",
     )
     assert pending_operation is not None
     assert pending_operation.status == "pending"
@@ -583,7 +583,7 @@ async def test_pending_reset_operation_hides_old_credentials_and_reconnect_finis
     assert (
         credential_lifecycle.oauth_reset_operation_result(
             context,
-            "approval-1:0:reset-call",
+            "browser:reset-operation-1",
         )
         is True
     )
@@ -594,14 +594,14 @@ async def test_reset_retries_completed_state_publication_after_durable_delete(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A failed completion write must retain a replayable reset debt and original receipt result."""
+    """A failed completion write must retain a replayable reset debt and original stored result."""
 
     async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
         return None
 
     context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
     _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
-    operation_id = "approval-1:0:reset-call"
+    operation_id = "browser:reset-operation-1"
     real_write_state = credential_lifecycle._write_oauth_credential_state
 
     def fail_completed_publication(
@@ -634,7 +634,7 @@ async def test_reset_retries_completed_state_publication_after_durable_delete(
 
 @pytest.mark.asyncio
 async def test_stale_approved_reset_cannot_delete_reconnected_credentials(tmp_path: Path) -> None:
-    """A reset approval is valid only for the credential generation shown to its approver."""
+    """A browser reset intent is valid only for the credential generation shown at confirmation."""
 
     async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
         return None
@@ -652,12 +652,12 @@ async def test_stale_approved_reset_cannot_delete_reconnected_credentials(tmp_pa
     with pytest.raises(OAuthProviderError, match="credential changed"):
         await credential_lifecycle.reset_oauth_credentials(
             context,
-            operation_id="approval-1:0:reset-call",
+            operation_id="browser:reset-operation-1",
             expected_connection_generation=approved_generation,
         )
 
     assert _load(context) == replacement
-    assert credential_lifecycle.oauth_reset_operation_result(context, "approval-1:0:reset-call") is None
+    assert credential_lifecycle.oauth_reset_operation_result(context, "browser:reset-operation-1") is None
 
 
 @pytest.mark.asyncio
@@ -1005,7 +1005,7 @@ async def test_reset_cancellation_after_delete_returns_committed_result(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A committed destructive reset must still return its receipt result when cancelled."""
+    """A committed destructive reset must still return its stored result when cancelled."""
     credential_deleted = threading.Event()
     release_delete = threading.Event()
 
