@@ -161,6 +161,23 @@ class DepartureOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class RoomMembershipPosition:
+    """The journal-authoritative prior state for one local membership command."""
+
+    membership: str
+    membership_epoch: int
+
+    def __post_init__(self) -> None:
+        """Reject noncanonical membership positions at the typed boundary."""
+        if type(self.membership) is not str or self.membership not in {"join", "leave"}:
+            msg = "membership must be exactly 'join' or 'leave'"
+            raise ValueError(msg)
+        if type(self.membership_epoch) is not int or self.membership_epoch < 0:
+            msg = "membership_epoch must be a nonnegative int"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
 class InboundEvent:
     """One Matrix event offered to durable admission.
 

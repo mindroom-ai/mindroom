@@ -1833,6 +1833,22 @@ class TestByteOrderPinning:
 class TestMembershipEpoch:
     """Leaving and rejoining invalidates what the previous membership saw."""
 
+    async def test_membership_position_is_the_durable_local_command_authority(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Absent, joined, and departed rows expose one exact prior position."""
+        absent = await alice.membership_position(ROOM)
+        assert (absent.membership, absent.membership_epoch) == ("leave", 0)
+
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        departed = await alice.membership_position(ROOM)
+        assert (departed.membership, departed.membership_epoch) == ("leave", 1)
+
+        await alice.note_membership_restarted(ROOM)
+        joined = await alice.membership_position(ROOM)
+        assert (joined.membership, joined.membership_epoch) == ("join", 1)
+
     async def test_hydration_is_recorded_per_membership(self, alice: PrincipalStore) -> None:
         """Hydration is recorded per membership."""
         epoch = await alice.membership_epoch(ROOM)

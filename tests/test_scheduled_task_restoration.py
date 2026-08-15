@@ -88,7 +88,7 @@ class TestScheduledTaskRestoration:
         with (
             patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
             patch(
-                "mindroom.bot_room_lifecycle.join_room",
+                "mindroom.matrix.client_room_admin.join_room",
                 new_callable=AsyncMock,
                 return_value=RoomJoinOutcome.JOINED,
             ) as mock_join,
@@ -153,7 +153,7 @@ class TestScheduledTaskRestoration:
         with (
             patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
             patch(
-                "mindroom.bot_room_lifecycle.join_room",
+                "mindroom.matrix.client_room_admin.join_room",
                 new_callable=AsyncMock,
                 return_value=RoomJoinOutcome.JOINED,
             ) as mock_join,
@@ -189,7 +189,7 @@ class TestScheduledTaskRestoration:
 
         with (
             patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=["lobby"]),
-            patch("mindroom.bot_room_lifecycle.join_room", new_callable=AsyncMock) as mock_join,
+            patch("mindroom.matrix.client_room_admin.join_room", new_callable=AsyncMock) as mock_join,
             patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
             patch(
                 "mindroom.bot.config_confirmation.restore_pending_changes",
@@ -448,7 +448,7 @@ class TestScheduledTaskRestoration:
             with (
                 patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
                 patch(
-                    "mindroom.bot_room_lifecycle.join_room",
+                    "mindroom.matrix.client_room_admin.join_room",
                     new_callable=AsyncMock,
                     return_value=RoomJoinOutcome.JOINED,
                 ),

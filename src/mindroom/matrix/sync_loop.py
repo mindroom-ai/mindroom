@@ -192,28 +192,3 @@ def _own_departures_in(events: Iterable[object], self_user_id: str) -> int:
             and event.membership in _DEPARTED_MEMBERSHIPS
         },
     )
-
-
-async def run_matrix_sync_forever(
-    client: nio.AsyncClient,
-    *,
-    config: Config,
-    agent_name: str,
-    room_ids: list[str],
-    timeout_ms: int,
-    sync_filter: dict[str, object],
-    first_sync_done: bool,
-) -> None:
-    """Run the configured Matrix sync loop for one bot account."""
-    if config.matrix_sync.mode == "classic":
-        await client.sync_forever(timeout=timeout_ms, sync_filter=sync_filter, full_state=not first_sync_done)
-        return
-
-    timeline_limit = config.matrix_sync.sliding_timeline_limit
-    await client.sliding_sync_forever(
-        timeout=timeout_ms,
-        conn_id=f"mindroom-{agent_name}",
-        lists=_sliding_sync_lists(timeline_limit),
-        room_subscriptions=_sliding_sync_room_subscriptions(room_ids, timeline_limit),
-        extensions=_sliding_sync_extensions(),
-    )

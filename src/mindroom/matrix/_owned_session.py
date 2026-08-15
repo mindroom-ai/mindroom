@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol
 from uuid import UUID
 
@@ -17,7 +16,6 @@ from nio.store.sync_journal import (
     _open_fresh_ingestion_store,
 )
 
-from mindroom.constants import RuntimePaths
 from mindroom.event_journal.models import IngestionConsumer
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_session import (
@@ -31,9 +29,12 @@ from mindroom.matrix.client_session import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
+    from pathlib import Path
 
     from nio.ingest.config import IngestionConfig
     from nio.ingest.coordinator import _FrameCompletion, _OwnedIngestionSession
+
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 

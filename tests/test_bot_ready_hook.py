@@ -17,7 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import SOURCE_KIND_KEY
-from mindroom.event_journal import EventClass, EventKind
+from mindroom.event_journal import DepartureSource, EventClass, EventKind
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -506,7 +506,10 @@ async def test_a_kick_after_a_rejoin_is_not_absorbed_by_the_earlier_leaves_repor
     bot = _agent_bot(tmp_path)
     room_id = "!departed:localhost"
     user_id = bot.agent_user.user_id
-    await bot._membership_fence.fence_local_departure(room_id)
+    await bot._membership_fence.store.fence_departure(
+        room_id,
+        source=DepartureSource.LOCAL,
+    )
     await bot._membership_fence.note_membership_restarted(room_id)
     epoch_after_rejoin = await bot._journal_principal().membership_epoch(room_id)
     response = nio.SyncResponse.from_dict(

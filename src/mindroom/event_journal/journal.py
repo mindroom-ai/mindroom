@@ -44,6 +44,7 @@ from .models import (
     IngestionRecordDisposition,
     JournalEvent,
     PendingPage,
+    RoomMembershipPosition,
     SemanticConsumer,
 )
 from .projection import ProjectedEvent, project
@@ -276,6 +277,8 @@ def _apply_ingestion_disposition(
         source = cast("DepartureSource", admission.source)
         if admission.previous_membership == "join":
             state = _claim_membership_state(transaction, principal_id, room_id)
+            if source is DepartureSource.LOCAL and admission.previous_membership_epoch != state.membership_epoch:
+                raise IngestionBatchIntegrityError
             _fence_departure_from_state(
                 transaction,
                 principal_id,
@@ -284,8 +287,14 @@ def _apply_ingestion_disposition(
                 state=state,
             )
             return False
-        if admission.membership == "join" and source is DepartureSource.LOCAL:
-            _claim_membership_state(transaction, principal_id, room_id)
+        if admission.membership == "join":
+            state = _claim_membership_state(transaction, principal_id, room_id)
+            membership_epoch = cast("int", admission.membership_epoch)
+            if source is DepartureSource.REPORTED and membership_epoch < state.membership_epoch:
+                # A delayed source echo cannot undo a newer durable local departure.
+                return False
+            if membership_epoch != state.membership_epoch:
+                raise IngestionBatchIntegrityError
             note_membership_restarted(transaction, principal_id, room_id)
         return False
 
@@ -519,6 +528,33 @@ def current_membership_epoch(
         (principal_id, room_id),
     )
     return 0 if row is None else int(row["membership_epoch"])
+
+
+def membership_position(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+) -> RoomMembershipPosition:
+    """Return the exact durable prior position for a local join or leave."""
+    row = transaction.fetchone(
+        "SELECT membership_epoch, departure_fenced FROM room_membership WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
+    if row is None:
+        return RoomMembershipPosition("leave", 0)
+    membership_epoch = row["membership_epoch"]
+    departure_fenced = row["departure_fenced"]
+    if (
+        type(membership_epoch) is not int
+        or membership_epoch < 0
+        or type(departure_fenced) is not int
+        or departure_fenced not in (0, 1)
+    ):
+        raise IngestionBatchIntegrityError
+    return RoomMembershipPosition(
+        "leave" if departure_fenced else "join",
+        membership_epoch,
+    )
 
 
 def _advance_membership_epoch(

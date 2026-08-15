@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass, replace
 from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4, uuid5
 
 import nio
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
@@ -39,6 +40,7 @@ from mindroom.hooks import (
     send_hook_message,
 )
 from mindroom.matrix.decrypt_failure import handle_decrypt_failure
+from mindroom.matrix.durable_ingestion import run_ingestion_pump
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 from mindroom.matrix.health import (
     SyncCacheWriteProgress,
@@ -64,7 +66,6 @@ from mindroom.matrix.sync_loop import (
     bot_ingestion_config,
     own_membership_from_sliding_sync,
     own_membership_from_sync,
-    run_matrix_sync_forever,
 )
 from mindroom.matrix.users import AgentMatrixUser, login_agent_owned_session
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
@@ -112,6 +113,7 @@ from .event_journal import (
     EventKind,
     MembershipFence,
     PrincipalStore,
+    RoomMembershipPosition,
     SemanticConsumer,
 )
 from .event_journal_open import OpenEventJournal, bind_event_journal, open_event_journal
@@ -185,10 +187,11 @@ __all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 
 # Constants
 _SYNC_TIMEOUT_MS = 30000
-_CLASSIC_SYNC_REBUILD_BACKOFF_INITIAL_SECONDS = 1.0
-_CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS = 30.0
 _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
 _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
+_LOCAL_MEMBERSHIP_OPERATION_NAMESPACE = UUID(
+    "0bd4e975-c3e9-5b10-8d46-68fdda1adc07",
+)
 # Raise the per-room timeline limit above the homeserver default (~10) so a
 # room has to flood much harder before the server truncates its timeline and
 # forces a limited-sync gap backfill. This only widens the timeline window; it
@@ -196,18 +199,6 @@ _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
 # out.
 _SYNC_TIMELINE_LIMIT = 50
 _SYNC_FILTER: dict[str, object] = {"room": {"timeline": {"limit": _SYNC_TIMELINE_LIMIT}}}
-
-
-def _classic_sync_rebuild_backoff_seconds(attempt: int) -> float:
-    """Return zero for the first reentry, then capped exponential backoff."""
-    if attempt <= 1:
-        return 0.0
-    delay = _CLASSIC_SYNC_REBUILD_BACKOFF_INITIAL_SECONDS
-    for _ in range(attempt - 2):
-        delay *= 2
-        if delay >= _CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS:
-            return _CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS
-    return delay
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,7 +338,6 @@ class AgentBot:
     _last_sync_monotonic: float | None
     _first_sync_done: bool
     _classic_sync_rebuild_pending: bool
-    _classic_sync_rebuild_attempt: int
     _sync_shutting_down: bool
     _delivery_recovery_wake: asyncio.Event
     _delivery_recovery_task: asyncio.Task[None] | None
@@ -380,6 +370,7 @@ class AgentBot:
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
+    _local_membership_lock: asyncio.Lock
     _sync_continuity_store: SyncContinuityStore
     _sync_checkpoint_trust: SyncCheckpointTrust
 
@@ -420,7 +411,6 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._classic_sync_rebuild_pending = False
-        self._classic_sync_rebuild_attempt = 0
         self._orchestrator_ready_handled = False
         # The Matrix device this bot sends as, captured at login rather than
         # read off the client per send. A transaction ID only deduplicates
@@ -457,6 +447,7 @@ class AgentBot:
         self._call_manager: CallManager | None = None
         self._calls_reconcile_pending = False
         self._local_departures_awaiting_sync = set()
+        self._local_membership_lock = asyncio.Lock()
 
         async def send_room_lifecycle_response(
             *,
@@ -482,6 +473,7 @@ class AgentBot:
                 get_logger=lambda: self.logger,
                 get_configured_rooms=lambda: self.rooms,
                 send_response=send_room_lifecycle_response,
+                change_membership=self._change_local_membership,
                 on_room_joined=self._on_room_joined,
                 on_configured_room_joined=self._post_join_room_setup,
                 on_room_left=self._fence_left_room,
@@ -1162,7 +1154,54 @@ class AgentBot:
     async def _on_room_joined(self, room_id: str) -> None:
         """Stop treating a room as departed once the homeserver confirms the join."""
         self._local_departures_awaiting_sync.discard(room_id)
-        await self._membership_fence.note_membership_restarted(room_id)
+
+    async def _change_local_membership(
+        self,
+        room_id: str,
+        target_membership: str,
+    ) -> bool:
+        """Execute one journal-authoritative durable local join or leave."""
+        if type(room_id) is not str or not room_id:
+            message = "room_id must be a nonempty str"
+            raise TypeError(message)
+        if type(target_membership) is not str or target_membership not in {
+            "join",
+            "leave",
+        }:
+            message = "target_membership must be exactly 'join' or 'leave'"
+            raise TypeError(message)
+        session = self._ingestion_session
+        if session is None:
+            message = "owned Matrix ingestion session is missing"
+            raise PermanentMatrixStartupError(message)
+        async with self._local_membership_lock:
+            await session._wait_for_local_membership_idle()
+            position = await self._journal_principal().membership_position(room_id)
+            if type(position) is not RoomMembershipPosition:
+                message = "journal returned an invalid membership position"
+                raise RuntimeError(message)
+            if position.membership == target_membership:
+                return True
+            operation_name = json.dumps(
+                [
+                    self.agent_user.user_id,
+                    room_id,
+                    position.membership_epoch,
+                    target_membership,
+                ],
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+            return await session._run_local_membership_transition(
+                operation_id=uuid5(
+                    _LOCAL_MEMBERSHIP_OPERATION_NAMESPACE,
+                    operation_name,
+                ),
+                room_id=room_id,
+                previous_membership=position.membership,
+                previous_epoch=position.membership_epoch,
+                current_membership=target_membership,
+            )
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
@@ -1230,7 +1269,6 @@ class AgentBot:
         if classic:
             client.clear_persisted_sync_recovery()
             self._classic_sync_rebuild_pending = True
-            self._classic_sync_rebuild_attempt = 0
         client.next_batch = sync_token or ""
 
     async def _apply_sync_response_decision(
@@ -1304,7 +1342,6 @@ class AgentBot:
             if reset_completed or not client.has_uncommitted_classic_sync_state:
                 client.next_batch = retry_token or ""
                 self._classic_sync_rebuild_pending = True
-                self._classic_sync_rebuild_attempt += 1
                 self._room_member_join_hooks_armed = False
         return True, retry_token is not None
 
@@ -1691,7 +1728,6 @@ class AgentBot:
             return
         if isinstance(_response, nio.SyncResponse):
             self._classic_sync_rebuild_pending = False
-            self._classic_sync_rebuild_attempt = 0
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
 
@@ -1863,8 +1899,29 @@ class AgentBot:
             await call_manager.on_room_membership_event(room, event)
 
     async def _on_ingestion_frame_completion(self, completion: _FrameCompletion) -> None:
-        """Reserve the Task 5D frame-completion callback before source activation."""
+        """Publish one fully settled source frame to the bot runtime."""
         del completion
+        first_sync_response = not self._first_sync_done
+        self._mark_sync_progress()
+        try:
+            if self._sync_shutting_down:
+                return
+            self._first_sync_done = True
+            self._classic_sync_rebuild_pending = False
+            await self._run_sync_response_side_effects(
+                first_sync_response=first_sync_response,
+            )
+            if self._calls_reconcile_pending:
+                self._calls_reconcile_pending = False
+                call_manager = self._call_manager
+                if call_manager is not None:
+                    create_background_task(
+                        call_manager.reconcile_joined_rooms(),
+                        name=f"matrix_rtc_reconcile_{self.agent_name}",
+                        owner=self._runtime_view,
+                    )
+        finally:
+            self._journal_dispatcher.timeline_member_provenance.clear()
 
     async def _open_owned_matrix_client(self) -> nio.AsyncClient:
         """Acquire and retain the bot's exclusive ingestion/client ownership."""
@@ -2018,6 +2075,10 @@ class AgentBot:
                     self.client,
                     joined_rooms,
                     on_room_left=self._fence_left_room,
+                    leave_room_action=lambda room_id: self._change_local_membership(
+                        room_id,
+                        "leave",
+                    ),
                 )
         except Exception:
             self.logger.exception("Error leaving rooms during cleanup")
@@ -2026,9 +2087,8 @@ class AgentBot:
         await self.stop(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
 
     async def _fence_left_room(self, room_id: str) -> None:
-        """Fence one room immediately after this bot leaves it."""
+        """Remember one local leave while its source echo is still outstanding."""
         self._local_departures_awaiting_sync.add(room_id)
-        await self._membership_fence.fence_local_departure(room_id)
 
     async def stop(
         self,
@@ -2041,7 +2101,6 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._classic_sync_rebuild_pending = False
-        self._classic_sync_rebuild_attempt = 0
         self._orchestrator_ready_handled = False
         self._room_member_join_hooks_armed = False
         self._room_member_callback_registered = False
@@ -2218,31 +2277,50 @@ class AgentBot:
             )
 
     async def sync_forever(self) -> None:
-        """Run the sync loop for this agent."""
-        assert self.client is not None
-        while True:
-            try:
-                await run_matrix_sync_forever(
-                    self.client,
-                    config=self.config,
-                    agent_name=self.agent_name,
-                    room_ids=self.rooms,
-                    timeout_ms=_SYNC_TIMEOUT_MS,
-                    sync_filter=_SYNC_FILTER,
-                    first_sync_done=self._first_sync_done and not self._classic_sync_rebuild_pending,
-                )
-            finally:
-                await self._reconcile_classic_sync_cursor_after_loop_exit()
-            if not (self.config.matrix_sync.mode == "classic" and self._classic_sync_rebuild_pending and self.running):
-                return
-            retry_delay = _classic_sync_rebuild_backoff_seconds(self._classic_sync_rebuild_attempt)
-            if retry_delay > 0:
-                self.logger.warning(
-                    "matrix_sync_rebuild_retry_backoff",
-                    attempt=self._classic_sync_rebuild_attempt,
-                    retry_in_seconds=retry_delay,
-                )
-                await asyncio.sleep(retry_delay)
+        """Run the owned durable source and one-record admission pump together."""
+        client = self.client
+        session = self._ingestion_session
+        assert client is not None
+        if session is None:
+            message = "owned Matrix ingestion session is missing"
+            raise PermanentMatrixStartupError(message)
+        device_id = client.device_id
+        if type(device_id) is not str or not device_id:
+            message = "owned Matrix device ID is missing"
+            raise PermanentMatrixStartupError(message)
+
+        runner = asyncio.create_task(
+            session.run(),
+            name=f"matrix_ingestion_runner_{self.agent_name}",
+        )
+        pump = asyncio.create_task(
+            run_ingestion_pump(
+                session,
+                self._journal_principal(),
+                account_id=self.matrix_id.full_id,
+                device_id=device_id,
+                wait_for_work=session._wait_for_work,
+                wake_semantic_dispatch=self._journal_dispatcher.wake,
+            ),
+            name=f"matrix_ingestion_pump_{self.agent_name}",
+        )
+        tasks = (runner, pump)
+        try:
+            done, pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in tasks:
+                if task in done:
+                    task.result()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         await self._room_lifecycle.on_invite(room, event)

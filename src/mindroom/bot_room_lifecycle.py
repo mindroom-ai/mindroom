@@ -12,7 +12,7 @@ import nio
 from mindroom.authorization import is_authorized_sender
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms, join_room
+from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     load_invited_rooms,
@@ -50,6 +50,14 @@ class _SendRoomResponse(Protocol):
         ...
 
 
+class _ChangeRoomMembership(Protocol):
+    """Execute one durable local membership action."""
+
+    def __call__(self, room_id: str, target_membership: str) -> Awaitable[bool]:
+        """Join or leave through the owned ingestion gateway."""
+        ...
+
+
 @dataclass(frozen=True)
 class BotRoomLifecycleDeps:
     """Dependencies required for room membership and invite handling."""
@@ -62,6 +70,7 @@ class BotRoomLifecycleDeps:
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     get_configured_rooms: Callable[[], Sequence[str]]
     send_response: _SendRoomResponse
+    change_membership: _ChangeRoomMembership
     on_room_joined: Callable[[str], Awaitable[None]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
     on_room_left: Callable[[str], Awaitable[None]]
@@ -180,7 +189,9 @@ class BotRoomLifecycle:
                 add=(room_id,),
             ),
         )
-        join_outcome = await join_room(client, room_id)
+        del client
+        joined = await self.deps.change_membership(room_id, "join")
+        join_outcome = RoomJoinOutcome.JOINED if joined else RoomJoinOutcome.TERMINAL_FAILURE
         if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
             self.apply_continuity_record(
                 await asyncio.to_thread(
@@ -258,7 +269,13 @@ class BotRoomLifecycle:
         for room_id in desired_rooms:
             if room_id in current_rooms:
                 self._logger().debug("Already joined room", room_id=room_id)
-                await self._on_configured_room_joined(room_id)
+                if await self.deps.change_membership(room_id, "join"):
+                    await self._on_configured_room_joined(room_id)
+                else:
+                    self._logger().warning(
+                        "Failed to reconcile joined room",
+                        room_id=room_id,
+                    )
                 continue
 
             if await self._join_room_with_decrypt_notice_fence(client, room_id) is RoomJoinOutcome.JOINED:
@@ -275,6 +292,10 @@ class BotRoomLifecycle:
             client,
             room_ids if room_ids is not None else await self._rooms_to_leave(),
             on_room_left=self.deps.on_room_left,
+            leave_room_action=lambda room_id: self.deps.change_membership(
+                room_id,
+                "leave",
+            ),
         )
 
     async def _rooms_to_leave(self) -> list[str]:
@@ -377,8 +398,17 @@ class BotRoomLifecycle:
             return
 
         async with self._lock_for_room(self._invite_join_locks, room.room_id):
-            if room.room_id in self._handled_invite_room_ids or self._client_has_joined_room(room.room_id):
+            if room.room_id in self._handled_invite_room_ids:
                 self._logger().debug("Invite already handled", room_id=room.room_id, sender=event.sender)
+                await self.deps.on_room_joined(room.room_id)
+                self._remember_invited_room(room.room_id)
+                await self._send_invite_welcome(room.room_id, event.sender)
+                return
+            if self._client_has_joined_room(room.room_id):
+                self._logger().debug("Invite already handled", room_id=room.room_id, sender=event.sender)
+                if not await self.deps.change_membership(room.room_id, "join"):
+                    msg = f"Failed to reconcile joined invited room {room.room_id}"
+                    raise RuntimeError(msg)
                 await self.deps.on_room_joined(room.room_id)
                 self._remember_invited_room(room.room_id)
                 await self._send_invite_welcome(room.room_id, event.sender)

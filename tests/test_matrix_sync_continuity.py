@@ -280,7 +280,7 @@ async def test_warm_join_decrypt_notice_waits_for_trusted_sync_containing_room(
     with (
         capture_logs(),
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
-        patch("mindroom.bot_room_lifecycle.join_room", new=join_while_sync_is_live),
+        patch("mindroom.matrix.client_room_admin.join_room", new=join_while_sync_is_live),
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch("mindroom.matrix.decrypt_failure._send_decrypt_failure_notice", new=notice),
     ):
@@ -507,7 +507,7 @@ async def test_sliding_trusted_sync_clears_joined_room_decrypt_notice_fence(
 
     with (
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
-        patch("mindroom.bot_room_lifecycle.join_room", AsyncMock(return_value=True)),
+        patch("mindroom.matrix.client_room_admin.join_room", AsyncMock(return_value=True)),
     ):
         await bot.join_configured_rooms()
 
@@ -579,7 +579,7 @@ async def test_restart_loads_only_exact_unfinished_join_decrypt_fence(
 
     with (
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
-        patch("mindroom.bot_room_lifecycle.join_room", AsyncMock(return_value=True)),
+        patch("mindroom.matrix.client_room_admin.join_room", AsyncMock(return_value=True)),
     ):
         await first_bot.join_configured_rooms()
 
@@ -625,7 +625,7 @@ async def test_join_cancellation_after_server_side_effect_retains_decrypt_notice
 
     with (
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
-        patch("mindroom.bot_room_lifecycle.join_room", new=join_then_cancel),
+        patch("mindroom.matrix.client_room_admin.join_room", new=join_then_cancel),
         pytest.raises(asyncio.CancelledError),
     ):
         await bot.join_configured_rooms()
@@ -988,7 +988,7 @@ async def test_bot_start_keeps_fences_when_joined_rooms_query_is_unavailable(
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     with (
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
-        patch("mindroom.bot_room_lifecycle.join_room", AsyncMock(return_value=True)),
+        patch("mindroom.matrix.client_room_admin.join_room", AsyncMock(return_value=True)),
     ):
         await bot.join_configured_rooms()
     assert bot._room_lifecycle.decrypt_notice_is_fenced("!room:localhost")
@@ -1547,69 +1547,6 @@ async def test_membership_cancellation_resets_uncertified_classic_state(tmp_path
 
     assert bot.client.next_batch == "s_before_membership"
     bot.client.reset_classic_sync_state.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_classic_receive_loop_exit_rewinds_response_not_dispatched_to_callback(
-    tmp_path: Path,
-) -> None:
-    """Loop cancellation after nio applies a response must restore certified continuity."""
-    bot = _agent_bot(tmp_path)
-    client = nio.AsyncClient(
-        "https://example.org",
-        bot.matrix_id.full_id,
-        config=nio.AsyncClientConfig(
-            encryption_enabled=False,
-            backfill_limited_timelines=True,
-        ),
-    )
-    client.restore_login(
-        user_id=bot.matrix_id.full_id,
-        device_id="TESTDEVICE",
-        access_token="test-access-token",  # noqa: S106 - Test-only Matrix session.
-    )
-    bot.client = client
-    bot._first_sync_done = True
-    bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_response")
-    client.next_batch = "s_before_response"
-    response = nio.SyncResponse.from_dict(
-        {
-            "next_batch": "s_after_response",
-            "device_one_time_keys_count": {},
-            "device_lists": {"changed": [], "left": []},
-            "rooms": {"invite": {}, "leave": {}, "join": {}},
-            "to_device": {"events": []},
-            "presence": {"events": []},
-            "account_data": {"events": []},
-        },
-    )
-    assert isinstance(response, nio.SyncResponse)
-    response_applied = asyncio.Event()
-    callback_started = asyncio.Event()
-    hold_before_callback = asyncio.Event()
-
-    async def receive_then_hold(*_args: object, **_kwargs: object) -> nio.SyncResponse:
-        await client.receive_response(response)
-        response_applied.set()
-        await hold_before_callback.wait()
-        return response
-
-    async def observe_callback(_response: nio.SyncResponse) -> None:
-        callback_started.set()
-
-    client.sync = receive_then_hold  # type: ignore[method-assign]
-    client.add_response_callback(observe_callback, nio.SyncResponse)
-    sync_task = asyncio.create_task(bot.sync_forever())
-    await response_applied.wait()
-    assert client.next_batch == "s_after_response"
-
-    sync_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await sync_task
-
-    assert not callback_started.is_set()
-    assert client.next_batch == "s_before_response"
 
 
 @pytest.mark.asyncio

@@ -718,9 +718,10 @@ async def _leave_room_and_cleanup(
     room_id: str,
     *,
     on_room_left: Callable[[str], Awaitable[None]],
+    leave_room_action: Callable[[str], Awaitable[bool]] | None,
 ) -> None:
     """Finish one leave outcome and its confirmed cleanup as one operation."""
-    success = await leave_room(client, room_id)
+    success = await leave_room(client, room_id) if leave_room_action is None else await leave_room_action(room_id)
     if success:
         logger.info("room_left", room_id=room_id)
         await on_room_left(room_id)
@@ -748,6 +749,7 @@ async def leave_non_dm_rooms(
     room_ids: list[str],
     *,
     on_room_left: Callable[[str], Awaitable[None]],
+    leave_room_action: Callable[[str], Awaitable[bool]] | None = None,
 ) -> None:
     """Leave non-DM rooms and clean each confirmed departure before continuing."""
     for room_id in room_ids:
@@ -759,6 +761,7 @@ async def leave_non_dm_rooms(
                 client,
                 room_id,
                 on_room_left=on_room_left,
+                leave_room_action=leave_room_action,
             ),
             name="matrix_leave_room_and_cleanup",
         )

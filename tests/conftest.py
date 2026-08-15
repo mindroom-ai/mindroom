@@ -44,6 +44,8 @@ from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 import mindroom.approval_manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.handled_turns as handled_turns_module
+import mindroom.matrix.client_room_admin as client_room_admin_module
+import mindroom.matrix.rooms as matrix_rooms_module
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
@@ -89,6 +91,7 @@ from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
+from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.relation_lookup import RelationLookup
@@ -1547,13 +1550,43 @@ def make_conversation_reader_mock() -> ConversationReader:
 
 
 def install_runtime_journal_support(bot: RuntimeBot) -> RuntimeBot:
-    """Pin the journal identity a test bot certifies its sync checkpoints against.
+    """Install the durable-runtime stand-ins used by lightweight bot tests.
 
     The real generation is a fresh UUID per database, so a test that saves a
     checkpoint and restarts would exercise the first-open mint rejecting it
     rather than the token logic it means to test.
+
+    These tests deliberately do not open an owned ingestion session. Route
+    their membership work through the mocked Matrix transports while keeping
+    production's durable gateway fail-closed when no session is attached.
     """
+
+    async def change_membership(room_id: str, target_membership: str) -> bool:
+        client = bot.client
+        if client is None:
+            msg = "Matrix client is not ready for test room membership work"
+            raise RuntimeError(msg)
+        if target_membership == "join":
+            rooms = client.rooms
+            if (
+                isinstance(rooms, Mapping)
+                and any(joined_room_id == room_id for joined_room_id in rooms)
+                and room_id not in bot._local_departures_awaiting_sync
+            ):
+                return True
+            outcome = await client_room_admin_module.join_room(client, room_id)
+            return outcome is RoomJoinOutcome.JOINED or outcome is True
+        if target_membership == "leave":
+            return await matrix_rooms_module.leave_room(client, room_id)
+        msg = f"Unsupported test room membership target: {target_membership}"
+        raise ValueError(msg)
+
     bot._sync_checkpoint_trust.store_generation = "test-store-generation"
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        change_membership=change_membership,
+    )
+    bot._change_local_membership = change_membership  # type: ignore[method-assign]
     sync_bot_runtime_state(bot)
     return bot
 

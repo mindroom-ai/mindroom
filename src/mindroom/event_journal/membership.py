@@ -90,12 +90,6 @@ class MembershipFence:
     _report_deadlines: dict[str, int] = field(default_factory=dict)
     _recovered_owed_reports: bool = False
 
-    async def fence_local_departure(self, room_id: str) -> None:
-        """Fence a room this bot has just left, ahead of the sync that reports it."""
-        outcome = await self.store.fence_departure(room_id, source=DepartureSource.LOCAL)
-        self._log(room_id, outcome)
-        self._track(room_id, outcome)
-
     async def fence_reported_departures(self, room_ids: Iterable[str]) -> None:
         """Fence departures a sync reported, absorbing the report local ones are owed.
 

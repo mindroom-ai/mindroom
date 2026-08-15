@@ -49,6 +49,7 @@ from mindroom.event_journal import (
     IngestionConsumerBindingError,
     IngestionRecordDisposition,
     ProjectedEvent,
+    RoomMembershipPosition,
     validate_ingestion_batch_admission,
 )
 from mindroom.matrix import durable_ingestion as durable_ingestion_module
@@ -1728,6 +1729,10 @@ async def test_lifecycle_admission_is_receipt_only_without_a_semantic_event(
     )
 
     assert facts == RECEIPT_ONLY_FACTS
+    assert await principal.membership_position(ROOM_ID) == RoomMembershipPosition(
+        "join",
+        0,
+    )
     assert (
         await store.backend.read(
             lambda tx: tx.fetchall(
@@ -1767,8 +1772,16 @@ async def test_lifecycle_disposition_matrix_and_rearmed_work(
         )
 
     steps = (
-        (lifecycle(0, DepartureSource.REPORTED, "leave", "join", 0), RECEIPT_ONLY_FACTS, ()),
-        (lifecycle(1, DepartureSource.REPORTED, "invite", "knock", 0), RECEIPT_ONLY_FACTS, ()),
+        (
+            lifecycle(0, DepartureSource.REPORTED, "leave", "join", 0),
+            RECEIPT_ONLY_FACTS,
+            ((ACCOUNT_ID, ROOM_ID, 0, 0, 0),),
+        ),
+        (
+            lifecycle(1, DepartureSource.REPORTED, "invite", "knock", 0),
+            RECEIPT_ONLY_FACTS,
+            ((ACCOUNT_ID, ROOM_ID, 0, 0, 0),),
+        ),
         (
             lifecycle(2, DepartureSource.LOCAL, "leave", "join", 0),
             RECEIPT_ONLY_FACTS,
@@ -1787,7 +1800,7 @@ async def test_lifecycle_disposition_matrix_and_rearmed_work(
         (
             lifecycle(5, DepartureSource.REPORTED, "leave", "join", 1),
             RECEIPT_ONLY_FACTS,
-            ((ACCOUNT_ID, ROOM_ID, 1, 1, 0),),
+            ((ACCOUNT_ID, ROOM_ID, 1, 0, 0),),
         ),
         (
             lifecycle(6, DepartureSource.LOCAL, "leave", "join", 1),
@@ -1805,7 +1818,7 @@ async def test_lifecycle_disposition_matrix_and_rearmed_work(
             ((ACCOUNT_ID, ROOM_ID, 2, 1, 1),),
         ),
         (
-            lifecycle(9, DepartureSource.LOCAL, "leave", "join", 1),
+            lifecycle(9, DepartureSource.LOCAL, "leave", "join", 2),
             RECEIPT_ONLY_FACTS,
             ((ACCOUNT_ID, ROOM_ID, 2, 0, 1),),
         ),
@@ -1845,6 +1858,152 @@ async def test_lifecycle_disposition_matrix_and_rearmed_work(
     assert graph["membership"] == ((ACCOUNT_ID, ROOM_ID, 2, 0, 0),)
     assert recovery is not None
     assert recovery["state"] == "repairable"
+
+
+@pytest.mark.asyncio
+async def test_reported_join_ahead_of_membership_authority_rolls_back(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    store = journal_database()
+    principal = await _bound_principal(store)
+    initial = _lifecycle_admission(
+        source=DepartureSource.REPORTED,
+        previous_membership="leave",
+        membership="join",
+        previous_membership_epoch=0,
+        membership_epoch=0,
+    )
+    assert await principal.admit_ingestion_batch(initial) == RECEIPT_ONLY_FACTS
+    before = await _graph(store)
+    ahead = _receipt_variant(
+        _lifecycle_admission(
+            source=DepartureSource.REPORTED,
+            previous_membership="leave",
+            membership="join",
+            previous_membership_epoch=1,
+            membership_epoch=1,
+        ),
+        sequence=1,
+        record_id="reported-join-ahead",
+        sha256=b"a" * 32,
+    )
+
+    with pytest.raises(IngestionBatchIntegrityError):
+        await principal.admit_ingestion_batch(ahead)
+
+    assert await _graph(store) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart_epoch", (0, 2), ids=("behind", "ahead"))
+async def test_local_join_must_match_membership_authority_exactly(
+    journal_database: Callable[[], EventJournalStore],
+    restart_epoch: int,
+) -> None:
+    store = journal_database()
+    principal = await _bound_principal(store)
+    initial = _lifecycle_admission(
+        source=DepartureSource.REPORTED,
+        previous_membership="leave",
+        membership="join",
+        previous_membership_epoch=0,
+        membership_epoch=0,
+    )
+    departure = _receipt_variant(
+        _lifecycle_admission(
+            source=DepartureSource.LOCAL,
+            previous_membership="join",
+            membership="leave",
+            previous_membership_epoch=0,
+            membership_epoch=1,
+        ),
+        sequence=1,
+        record_id="local-departure",
+        sha256=b"d" * 32,
+    )
+    assert await principal.admit_ingestion_batch(initial) == RECEIPT_ONLY_FACTS
+    assert await principal.admit_ingestion_batch(departure) == RECEIPT_ONLY_FACTS
+    before = await _graph(store)
+    mismatched_restart = _receipt_variant(
+        _lifecycle_admission(
+            source=DepartureSource.LOCAL,
+            previous_membership="leave",
+            membership="join",
+            previous_membership_epoch=restart_epoch,
+            membership_epoch=restart_epoch,
+        ),
+        sequence=2,
+        record_id=f"local-restart-{restart_epoch}",
+        sha256=bytes([restart_epoch + 1]) * 32,
+    )
+
+    with pytest.raises(IngestionBatchIntegrityError):
+        await principal.admit_ingestion_batch(mismatched_restart)
+
+    assert await _graph(store) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("departure_epoch", (0, 2), ids=("behind", "ahead"))
+async def test_local_departure_must_match_membership_authority_exactly(
+    journal_database: Callable[[], EventJournalStore],
+    departure_epoch: int,
+) -> None:
+    store = journal_database()
+    principal = await _bound_principal(store)
+    transitions = (
+        _lifecycle_admission(
+            source=DepartureSource.REPORTED,
+            previous_membership="leave",
+            membership="join",
+            previous_membership_epoch=0,
+            membership_epoch=0,
+        ),
+        _receipt_variant(
+            _lifecycle_admission(
+                source=DepartureSource.REPORTED,
+                previous_membership="join",
+                membership="leave",
+                previous_membership_epoch=0,
+                membership_epoch=1,
+            ),
+            sequence=1,
+            record_id="reported-departure",
+            sha256=b"d" * 32,
+        ),
+        _receipt_variant(
+            _lifecycle_admission(
+                source=DepartureSource.REPORTED,
+                previous_membership="leave",
+                membership="join",
+                previous_membership_epoch=1,
+                membership_epoch=1,
+            ),
+            sequence=2,
+            record_id="reported-restart",
+            sha256=b"r" * 32,
+        ),
+    )
+    for transition in transitions:
+        assert await principal.admit_ingestion_batch(transition) == RECEIPT_ONLY_FACTS
+    before = await _graph(store)
+    mismatched_departure = _receipt_variant(
+        _lifecycle_admission(
+            source=DepartureSource.LOCAL,
+            previous_membership="join",
+            membership="leave",
+            previous_membership_epoch=departure_epoch,
+            membership_epoch=departure_epoch + 1,
+        ),
+        sequence=3,
+        record_id=f"local-departure-{departure_epoch}",
+        sha256=bytes([departure_epoch + 1]) * 32,
+    )
+
+    with pytest.raises(IngestionBatchIntegrityError):
+        await principal.admit_ingestion_batch(mismatched_departure)
+
+    assert await _graph(store) == before
 
 
 @pytest.mark.asyncio

@@ -92,7 +92,7 @@ class TestTeamRoomMembership:
             joined_rooms.append(room_id)
             return RoomJoinOutcome.JOINED
 
-        monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+        monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
         monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
 
         # Mock restore_scheduled_tasks
@@ -213,7 +213,7 @@ class TestTeamRoomMembership:
 
         join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
         monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
-        monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+        monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
 
         room = MagicMock(room_id="!team-room:localhost")
         room.canonical_alias = None

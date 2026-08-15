@@ -47,6 +47,7 @@ if TYPE_CHECKING:
         OutboxDelivery,
         PendingPage,
         RefreshRequest,
+        RoomMembershipPosition,
         SemanticConsumer,
         TerminalTurnWrite,
     )
@@ -237,6 +238,16 @@ class PrincipalStore:
         """Return the current membership epoch for one room."""
         return await self._backend.read(
             lambda transaction: journal.current_membership_epoch(transaction, self._principal_id, room_id),
+        )
+
+    async def membership_position(self, room_id: str) -> RoomMembershipPosition:
+        """Return the journal-authoritative prior position for a local command."""
+        return await self._backend.read(
+            lambda transaction: journal.membership_position(
+                transaction,
+                self._principal_id,
+                room_id,
+            ),
         )
 
     async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:

@@ -340,8 +340,10 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
         _client: AsyncMock,
         room_ids: list[str],
         *,
+        leave_room_action: Callable[[str], Awaitable[bool]],
         on_room_left: Callable[[str], Awaitable[None]],
     ) -> list[str]:
+        assert callable(leave_room_action)
         left_room_ids.extend(room_ids)
         for room_id in room_ids:
             await on_room_left(room_id)
