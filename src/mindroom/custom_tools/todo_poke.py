@@ -43,7 +43,7 @@ __all__ = [
 ]
 
 type _TodoScheduleQuery = Callable[[str, tuple[str, ...]], Awaitable[frozenset[str | None] | None]]
-type _TodoPokeSender = Callable[[str, str, str, str | None], Awaitable[str | None]]
+type _TodoPokeSender = Callable[[tuple[str, ...], str, str, str | None], Awaitable[str | None]]
 type _StateWarningKey = tuple[str, str]
 
 _VALID_STATUSES = {"open", *TERMINAL_STATUSES}
@@ -536,14 +536,11 @@ def _period_elapsed(now_timestamp: float, previous_timestamp: float, period_seco
 async def _pending_schedules_by_room(
     scopes: list[_TodoPokeScope],
     schedule_query: _TodoScheduleQuery,
-) -> dict[str, frozenset[str | None]] | None:
+) -> dict[str, frozenset[str | None]]:
     pending_by_room: dict[str, frozenset[str | None]] = {}
-    query_agents_by_room: dict[str, set[str]] = {}
-    for scope in scopes:
-        query_agents_by_room.setdefault(scope.room_id, set()).add(scope.assigned_agent)
-    for room_id, agent_names in sorted(query_agents_by_room.items()):
+    for room_id, agent_names in sorted(_agent_names_by_room(scopes).items()):
         try:
-            pending_threads = await schedule_query(room_id, tuple(sorted(agent_names)))
+            pending_threads = await schedule_query(room_id, agent_names)
         except Exception as exc:
             logger.warning(
                 "todo_poke_schedule_query_failed",
@@ -554,9 +551,16 @@ async def _pending_schedules_by_room(
             pending_threads = frozenset()
         if pending_threads is None:
             logger.debug("todo_poke_scan_skipped_runtime_unavailable", room_id=room_id)
-            return None
+            continue
         pending_by_room[room_id] = pending_threads
     return pending_by_room
+
+
+def _agent_names_by_room(scopes: list[_TodoPokeScope]) -> dict[str, tuple[str, ...]]:
+    names_by_room: dict[str, set[str]] = {}
+    for scope in scopes:
+        names_by_room.setdefault(scope.room_id, set()).add(scope.assigned_agent)
+    return {room_id: tuple(sorted(agent_names)) for room_id, agent_names in names_by_room.items()}
 
 
 def _dedup_allows_poke(
@@ -619,19 +623,21 @@ async def _deliver_pokes(
     delivered = 0
     attempts = 0
     poked_agents: set[str] = set()
+    agent_names_by_room = _agent_names_by_room(scopes)
     for scope in scopes:
         if attempts >= policy.max_pokes_per_scan:
             break
         if scope.assigned_agent in poked_agents:
             continue
-        if scope.thread_id in pending_by_room[scope.room_id]:
+        pending_threads = pending_by_room.get(scope.room_id)
+        if pending_threads is None or scope.thread_id in pending_threads:
             continue
 
         attempts += 1
         scope_key = _scope_key(scope)
         previous = session_poke_records.get(scope_key) or _poke_record(poke_state, scope)
         event_id = await deps.sender(
-            scope.assigned_agent,
+            agent_names_by_room[scope.room_id],
             scope.room_id,
             _format_poke_message(scope),
             scope.thread_id,
@@ -686,8 +692,6 @@ async def scan_todo_pokes(
         return 0
 
     pending_by_room = await _pending_schedules_by_room(scopes, deps.schedule_query)
-    if pending_by_room is None:
-        return 0
 
     return await _deliver_pokes(
         scopes,

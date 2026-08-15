@@ -100,7 +100,12 @@ def _deps(
             raise schedule_error
         return schedule_result
 
-    async def sender(_agent_name: str, room_id: str, body: str, thread_id: str | None) -> str | None:
+    async def sender(
+        _agent_names: tuple[str, ...],
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+    ) -> str | None:
         sent.append((room_id, body, thread_id))
         if remaining_results:
             return remaining_results.pop(0)
@@ -159,7 +164,7 @@ async def test_scan_skips_malformed_unassigned_and_unconfigured_items(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_scan_routes_schedule_reads_and_delivery_through_assigned_agent(tmp_path: Path) -> None:
+async def test_scan_routes_room_io_through_assigned_candidates(tmp_path: Path) -> None:
     """One room query gets every assignee candidate while each poke keeps its owner."""
     todo_root = tmp_path / "todo"
     _write_thread(
@@ -171,19 +176,19 @@ async def test_scan_routes_schedule_reads_and_delivery_through_assigned_agent(tm
         ],
     )
     schedule_calls: list[tuple[str, tuple[str, ...]]] = []
-    send_calls: list[tuple[str, str, str, str | None]] = []
+    send_calls: list[tuple[tuple[str, ...], str, str, str | None]] = []
 
     async def schedule_query(room_id: str, agent_names: tuple[str, ...]) -> frozenset[str | None]:
         schedule_calls.append((room_id, agent_names))
         return frozenset()
 
     async def sender(
-        agent_name: str,
+        agent_names: tuple[str, ...],
         room_id: str,
         body: str,
         thread_id: str | None,
     ) -> str:
-        send_calls.append((agent_name, room_id, body, thread_id))
+        send_calls.append((agent_names, room_id, body, thread_id))
         return "$event"
 
     deps = TodoPokeDeps(
@@ -196,10 +201,54 @@ async def test_scan_routes_schedule_reads_and_delivery_through_assigned_agent(tm
 
     assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 2
     assert schedule_calls == [("!room:localhost", ("code", "reviewer"))]
-    assert [(agent, room, thread) for agent, room, _body, thread in send_calls] == [
-        ("code", "!room:localhost", "$thread"),
-        ("reviewer", "!room:localhost", "$thread"),
+    assert [(agents, room, thread) for agents, room, _body, thread in send_calls] == [
+        (("code", "reviewer"), "!room:localhost", "$thread"),
+        (("code", "reviewer"), "!room:localhost", "$thread"),
     ]
+    assert "@code Todo work is ready" in send_calls[0][2]
+    assert "@reviewer Todo work is ready" in send_calls[1][2]
+
+
+@pytest.mark.asyncio
+async def test_scan_skips_only_room_without_joined_candidate(tmp_path: Path) -> None:
+    """Room-local I/O unavailability must not suppress another deliverable room."""
+    todo_root = tmp_path / "todo"
+    _write_thread(
+        todo_root,
+        "a-unavailable",
+        room_id="!unavailable:localhost",
+        items=[_item("unavailable", assigned_agent="code")],
+    )
+    _write_thread(
+        todo_root,
+        "b-ready",
+        room_id="!ready:localhost",
+        items=[_item("ready", assigned_agent="reviewer")],
+    )
+    send_calls: list[tuple[tuple[str, ...], str]] = []
+
+    async def schedule_query(room_id: str, _agent_names: tuple[str, ...]) -> frozenset[str | None] | None:
+        return None if room_id == "!unavailable:localhost" else frozenset()
+
+    async def sender(
+        agent_names: tuple[str, ...],
+        room_id: str,
+        _body: str,
+        _thread_id: str | None,
+    ) -> str:
+        send_calls.append((agent_names, room_id))
+        return "$event"
+
+    deps = TodoPokeDeps(
+        state_root=todo_root,
+        schedule_query=schedule_query,
+        idle_check=lambda _agent_name: True,
+        sender=sender,
+        clock=lambda: _NOW,
+    )
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
+    assert send_calls == [(("reviewer",), "!ready:localhost")]
 
 
 @pytest.mark.asyncio
@@ -506,13 +555,13 @@ async def test_delivery_outcome_time_owns_cooldown_and_backstop_windows(tmp_path
         return await base_deps.schedule_query(room_id, agent_names)
 
     async def delayed_sender(
-        agent_name: str,
+        agent_names: tuple[str, ...],
         room_id: str,
         body: str,
         thread_id: str | None,
     ) -> str | None:
         current_time[0] += timedelta(minutes=20)
-        return await base_deps.sender(agent_name, room_id, body, thread_id)
+        return await base_deps.sender(agent_names, room_id, body, thread_id)
 
     deps = replace(
         base_deps,

@@ -112,7 +112,7 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
     ):
         pending = await coordinator._schedule_query("!room:localhost", ("code",))
         event_id = await coordinator._send_poke(
-            "code",
+            ("code",),
             "!room:localhost",
             "@code Todo work is ready.",
             "$thread",
@@ -162,6 +162,39 @@ async def test_schedule_query_uses_joined_candidate_for_shared_room(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_send_uses_joined_candidate_for_unjoined_todo_owner(tmp_path: Path) -> None:
+    """A joined same-room assignee transports a poke that targets an unjoined owner."""
+    unjoined_client = MagicMock()
+    unjoined_client.rooms = {}
+    joined_client = MagicMock()
+    joined_client.rooms = {"!room:localhost": MagicMock()}
+    unjoined_bot = _bot(client=unjoined_client)
+    unjoined_bot._hook_send_message = AsyncMock(return_value="$wrong")
+    joined_bot = _bot(client=joined_client)
+    joined_bot._hook_send_message = AsyncMock(return_value="$event")
+    coordinator = _coordinator(
+        test_runtime_paths(tmp_path),
+        _config(tmp_path),
+        {"code": unjoined_bot, "reviewer": joined_bot},
+    )
+
+    with patch(
+        "mindroom.orchestration.todo_poke_runtime.mindroom_user_id",
+        return_value="@mindroom_user:localhost",
+    ):
+        event_id = await coordinator._send_poke(
+            ("code", "reviewer"),
+            "!room:localhost",
+            "@code Todo work is ready.",
+            "$thread",
+        )
+
+    assert event_id == "$event"
+    unjoined_bot._hook_send_message.assert_not_awaited()
+    joined_bot._hook_send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_adapters_skip_when_runtime_is_unavailable(tmp_path: Path) -> None:
     """Unavailable idle, schedule, and sender adapters conservatively skip the tick."""
     coordinator = _coordinator(test_runtime_paths(tmp_path), _config(tmp_path), {})
@@ -170,7 +203,7 @@ async def test_adapters_skip_when_runtime_is_unavailable(tmp_path: Path) -> None
     assert await coordinator._schedule_query("!room:localhost", ("code",)) is None
     assert (
         await coordinator._send_poke(
-            "code",
+            ("code",),
             "!room:localhost",
             "@code Todo work is ready.",
             "$thread",
