@@ -567,7 +567,7 @@ Expected outcome: Base CRUD, upload, delete, status, file listing, and reindex f
 - [ ] `UI-015` Use the Credentials tab for create, edit, save, delete, test, and copy flows.
 Expected outcome: Service validation, masked values, raw JSON editing, and credential-status loading all match backend behavior.
 
-- [ ] `UI-016` Use the Voice tab to edit STT and command-intelligence settings.
+- [ ] `UI-016` Use the Voice tab to edit STT and transcript-normalization settings.
 Expected outcome: Enablement, router echo, host normalization, API key fields, and model settings all persist and display the effective current state.
 
 - [ ] `UI-017` Use the Tools or Integrations tab with agents across different execution scopes.

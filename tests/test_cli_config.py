@@ -3711,13 +3711,14 @@ class TestConnect:
         """Printed exports must remain one literal shell value."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        client_secret = f"[red]{'x' * 120};$(id)[/red]"
         monkeypatch.setattr(
             "mindroom.cli.main._httpx_post",
             lambda *_a, **_kw: httpx.Response(
                 200,
                 json={
                     "client_id": "client value",
-                    "client_secret": "[red]secret;$(id)[/red]",
+                    "client_secret": client_secret,
                     "namespace": "a1b2c3d4",
                     "owner_user_id": "@alice:mindroom.chat",
                 },
@@ -3739,7 +3740,7 @@ class TestConnect:
         assert result.exit_code == 0
         assert "export MINDROOM_PROVISIONING_URL='https://x.test/a b'" in result.output
         assert "export MINDROOM_LOCAL_CLIENT_ID='client value'" in result.output
-        assert "export MINDROOM_LOCAL_CLIENT_SECRET='[red]secret;$(id)[/red]'" in result.output
+        assert f"  export MINDROOM_LOCAL_CLIENT_SECRET='{client_secret}'" in result.output.splitlines()
         assert "export MINDROOM_NAMESPACE=a1b2c3d4" in result.output
 
     def test_connect_uses_runtime_env_default_provisioning_url(

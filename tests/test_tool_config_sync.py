@@ -167,6 +167,28 @@ def test_modelslabs_converts_authored_file_type(monkeypatch: pytest.MonkeyPatch)
     assert getattr(captured["file_type"], "value", None) == "gif"
 
 
+@pytest.mark.parametrize("authored_file_type", [None, "", "   "])
+def test_modelslabs_blank_file_type_uses_mp4_default(
+    authored_file_type: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleared optional file types should preserve the ModelsLab MP4 default."""
+    from agno.tools.models_labs import ModelsLabTools  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    def capture_init(_self: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(ModelsLabTools, "__init__", capture_init)
+    overrides = validate_authored_tool_entry_overrides("modelslabs", {"file_type": authored_file_type})
+    tool_class = cast("Any", TOOL_REGISTRY["modelslabs"]())
+
+    tool_class(**overrides)
+
+    assert getattr(captured["file_type"], "value", None) == "mp4"
+
+
 def test_daytona_converts_authored_sandbox_values(monkeypatch: pytest.MonkeyPatch) -> None:
     """Dashboard-authored Daytona values should reach Agno with its declared types."""
     from agno.tools.daytona import DaytonaTools  # noqa: PLC0415

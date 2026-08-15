@@ -115,13 +115,17 @@ def modelslabs_tools() -> type[ModelsLabTools]:
             wait_for_completion: bool = False,
             add_to_eta: int = 15,
             max_wait_time: int = 60,
-            file_type: FileType | str = FileType.MP4,
+            file_type: FileType | str | None = FileType.MP4,
             model_id: str | None = None,
             width: int = 512,
             height: int = 512,
             **kwargs: object,
         ) -> None:
-            resolved_file_type = FileType(file_type.lower()) if isinstance(file_type, str) else file_type
+            if isinstance(file_type, str):
+                normalized_file_type = file_type.strip().lower()
+                resolved_file_type = FileType(normalized_file_type) if normalized_file_type else FileType.MP4
+            else:
+                resolved_file_type = file_type or FileType.MP4
             super().__init__(
                 api_key=api_key,
                 wait_for_completion=wait_for_completion,
@@ -134,5 +138,5 @@ def modelslabs_tools() -> type[ModelsLabTools]:
                 **kwargs,
             )
 
-    MindRoomModelsLabTools.__init__.__annotations__["file_type"] = FileType | str
+    MindRoomModelsLabTools.__init__.__annotations__["file_type"] = FileType | str | None
     return MindRoomModelsLabTools
