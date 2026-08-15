@@ -408,8 +408,14 @@ class ApprovalMatrixTransport:
 
     async def resolve_approval_action_delivery(self, room_id: str, card_event_id: str) -> str | None:
         """Return the generic delivery ID carried by one exact visible card."""
-        bot = self.transport_bot(room_id)
-        if bot is None or bot.client is None:
+        bot = self.bot_provider(ROUTER_AGENT_NAME)
+        if bot is None:
+            msg = f"Router approval transport cannot read {room_id} to verify a card action"
+            raise approval_manager.UnverifiableApprovalCardError(msg)
+        if not bot.running or bot.client is None:
+            msg = f"Router approval transport is not ready to verify a card action in {room_id}"
+            raise ToolApprovalTransportError(msg)
+        if room_id not in bot.approval_room_ids:
             msg = f"Router approval transport cannot read {room_id} to verify a card action"
             raise approval_manager.UnverifiableApprovalCardError(msg)
         response = await bot.client.room_get_event(room_id, card_event_id)

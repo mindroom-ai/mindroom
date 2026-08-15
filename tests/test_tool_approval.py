@@ -383,6 +383,54 @@ async def test_legacy_action_without_router_transport_is_ignored(tmp_path: Path)
     }
 
 
+@pytest.mark.asyncio
+async def test_legacy_action_retries_while_router_transport_is_starting(tmp_path: Path) -> None:
+    """An existing router without a live client is not a terminal verification result."""
+    cards = MagicMock()
+    cards.pending_approval_card = AsyncMock(return_value=None)
+    cards.is_terminal_approval_card = AsyncMock(return_value=False)
+    cards.resolve_continuation_approval_card = AsyncMock()
+    cards.acknowledge_matrix_delivery = AsyncMock()
+    router = MagicMock(
+        agent_name="router",
+        running=False,
+        client=None,
+        approval_room_ids=frozenset({"!room:localhost"}),
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: router if name == "router" else None,
+        cards_provider=lambda: cards,
+    )
+    manager = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        resolve_action_delivery=transport.resolve_approval_action_delivery,
+    )
+    before_consume = AsyncMock()
+
+    try:
+        with (
+            patch("mindroom.approval_manager.logger.warning") as warning,
+            pytest.raises(ToolApprovalTransportError, match="not ready"),
+        ):
+            await manager.handle_card_response(
+                room_id="!room:localhost",
+                sender_id="@approver:localhost",
+                card_event_id="$approval",
+                status="approved",
+                reason=None,
+                before_consume=before_consume,
+            )
+    finally:
+        await manager.shutdown()
+
+    before_consume.assert_not_awaited()
+    cards.resolve_continuation_approval_card.assert_not_awaited()
+    cards.acknowledge_matrix_delivery.assert_not_awaited()
+    warning.assert_not_called()
+
+
 @pytest.mark.parametrize("error_code", ["M_FORBIDDEN", "M_NOT_FOUND"])
 @pytest.mark.asyncio
 async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path, error_code: str) -> None:
