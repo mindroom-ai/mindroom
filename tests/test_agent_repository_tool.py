@@ -1035,6 +1035,7 @@ async def test_symlinked_workspace_parent_fails_without_mutating_target(tmp_path
     "origin",
     [
         "https://github.com/other/repository.git",
+        "https://[bad",
         "git@github.com:other/repository.git",
     ],
 )
