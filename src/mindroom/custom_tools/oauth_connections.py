@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management
-from mindroom.oauth.reset import OAuthResetTargetError
-from mindroom.oauth.reset_execution import OAuthResetPreparationError, execute_oauth_connection_reset
+from mindroom.oauth.reset import OAuthResetTargetError, issue_browser_oauth_reset_url, resolve_oauth_reset_target
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -25,23 +24,21 @@ class OAuthConnectionTools(Toolkit):
         super().__init__(
             name="oauth_connections",
             tools=[self.reset_oauth_connection],
-            requires_confirmation_tools=["reset_oauth_connection"],
-            stop_after_tool_call_tools=["reset_oauth_connection"],
         )
 
     async def reset_oauth_connection(self, provider_id: str) -> str:
-        """Reset this agent's requester-scoped OAuth connection and return a fresh connect link.
+        """Return a browser link to reset and reconnect this requester's OAuth connection.
 
         Use this only when an OAuth connection is stuck or revoked. The operation
-        deletes the current requester's local credential in its resolved scope;
+        opens an authenticated browser confirmation before changing credentials;
         user scope can affect this requester across agents. It does not revoke
-        the grant at the provider. Human approval is always required.
+        the grant at the provider.
 
         Args:
             provider_id: OAuth provider ID backing one of this agent's configured tools.
 
         Returns:
-            An idempotent reset receipt with a requester-bound reconnect link.
+            A requester-bound browser reset link.
 
         """
         runtime_context = get_tool_runtime_context()
@@ -57,23 +54,20 @@ class OAuthConnectionTools(Toolkit):
             config=config,
         ):
             return "Error: The current requester is not authorized to manage this agent's credentials."
-        approval_operation = runtime_context.approval_operation
-        if approval_operation is None:
-            return "Error: OAuth reset requires an approved operation."
-
         try:
-            result = await execute_oauth_connection_reset(
+            target = resolve_oauth_reset_target(
                 provider_id,
                 agent_name=agent_name,
                 config=config,
                 runtime_paths=self.runtime_paths,
                 execution_identity=build_execution_identity_from_runtime_context(runtime_context),
                 worker_target=self.worker_target,
-                operation_id=approval_operation.operation_id,
-                expected_connection_generation=approval_operation.connection_generation,
             )
+            reset_url = await issue_browser_oauth_reset_url(target)
         except OAuthResetTargetError as exc:
-            result = f"Error: {exc}"
-        except OAuthResetPreparationError:
-            result = "Error: OAuth connection reset did not complete; verify connection status, then retry."
-        return result
+            return f"Error: {exc}"
+        return (
+            f"Open this requester-bound browser link to confirm resetting provider `{provider_id}`. "
+            f"No credentials change until you confirm in the browser. `reset_url`: {reset_url}; "
+            "the link is valid for 10 minutes."
+        )

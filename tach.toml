@@ -675,10 +675,9 @@ visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.approval_bindings"
-depends_on = ["mindroom.oauth.reset"]
+depends_on = []
 visibility = [
     "mindroom.approval_response",
-    "mindroom.response_runner",
     "mindroom.response_turn",
 ]
 
@@ -739,7 +738,6 @@ visibility = [
     "mindroom.oauth.reset",
     "mindroom.oauth.reset_execution",
     "mindroom.oauth.service",
-    "mindroom.response_runner",
 ]
 
 [[modules]]
@@ -748,30 +746,23 @@ depends_on = [
     "mindroom.credentials",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.oauth.registry",
+    "mindroom.oauth.service",
+    "mindroom.oauth.state",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
-    "mindroom.approval_bindings",
+    "mindroom.api.oauth",
     "mindroom.custom_tools.oauth_connections",
-    "mindroom.oauth.reset_execution",
-    "mindroom.response_runner",
 ]
 
 [[modules]]
 path = "mindroom.oauth.reset_execution"
 depends_on = [
-    "mindroom.logging_config",
     "mindroom.mcp.oauth",
     "mindroom.oauth.credential_lifecycle",
-    "mindroom.oauth.reset",
-    "mindroom.oauth.service",
 ]
-visibility = [
-    "mindroom.api.oauth",
-    "mindroom.custom_tools.oauth_connections",
-    "mindroom.response_runner",
-]
+visibility = ["mindroom.api.oauth"]
 
 [[modules]]
 path = "mindroom.runtime_resolution"
@@ -997,9 +988,11 @@ depends_on = [
     "mindroom.api.credentials_oauth_flows",
     "mindroom.api.credentials_target",
     "mindroom.api.dashboard_credential_scope",
+    "mindroom.authorization",
     "mindroom.credentials",
     "mindroom.oauth",
     "mindroom.oauth.credential_lifecycle",
+    "mindroom.oauth.reset",
     "mindroom.oauth.reset_execution",
     "mindroom.oauth.service",
     "mindroom.tool_system.worker_routing",
@@ -1699,7 +1692,6 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.approval_execution",
-    "mindroom.approval_bindings",
     "mindroom.approval_receipt",
     "mindroom.approval_response",
     "mindroom.constants",
@@ -1716,9 +1708,6 @@ depends_on = [
     "mindroom.message_target",
     "mindroom.memory",
     "mindroom.orchestration.runtime",
-    "mindroom.oauth.credential_lifecycle",
-    "mindroom.oauth.reset",
-    "mindroom.oauth.reset_execution",
     "mindroom.post_response_effects",
     "mindroom.response_admission",
     "mindroom.response_attempt",
@@ -4535,7 +4524,6 @@ from = ["mindroom.tool_system.dependencies"]
 
 [[interfaces]]
 expose = [
-    "ApprovalToolOperation",
     "LiveToolDispatchContext",
     "ToolDispatchContext",
     "WorkerProgressEvent",

@@ -33,6 +33,7 @@ from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider
 from mindroom.oauth import registry as oauth_registry
+from mindroom.oauth import reset as oauth_reset
 from mindroom.oauth import reset_execution as oauth_reset_execution
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.credential_lifecycle import OAuthCredentialConflictError
@@ -1885,6 +1886,73 @@ def test_callback_uses_stored_oauth_client_config(tmp_path: Path) -> None:
     assert scoped_credentials["token"] == "google_drive-access-token"
 
 
+def test_browser_reset_get_is_non_mutating_and_post_resets_then_authorizes(tmp_path: Path) -> None:
+    """The authenticated browser confirmation should own deletion and continue into OAuth."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        tool_config_service="google_drive",
+    )
+    config = main._app_context(api_app).runtime_config
+    assert config is not None
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    target = oauth_reset.resolve_oauth_reset_target(
+        provider.id,
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+    )
+    scoped_manager = get_runtime_credentials_manager(runtime_paths).for_primary_runtime_scope(
+        "@alice:example.org",
+        "general",
+    )
+    scoped_manager.save_credentials(
+        provider.credential_service,
+        {
+            "token": "old-access-token",
+            "refresh_token": "old-refresh-token",
+            "client_id": "client-id",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+    reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url="http://localhost:8765") as client:
+            _login(client)
+            confirmation = client.get(reset_url, follow_redirects=False)
+            before_confirmation = scoped_manager.load_credentials(provider.credential_service)
+            confirmed = client.post(reset_url, follow_redirects=False)
+
+    assert confirmation.status_code == 200
+    assert "Reset and reconnect Test Drive" in confirmation.text
+    assert before_confirmation is not None
+    assert before_confirmation["refresh_token"] == "old-refresh-token"
+    assert confirmed.status_code == 303
+    assert urlparse(confirmed.headers["location"]).netloc == "auth.example.test"
+    assert scoped_manager.load_credentials(provider.credential_service) is None
+
+
 def test_disconnect_invalidates_oauth_state_issued_before_reset(tmp_path: Path) -> None:
     """A callback state issued before disconnect cannot recreate the deleted connection."""
     runtime_paths = _runtime_paths(
@@ -2741,8 +2809,10 @@ def test_disconnect_cleanup_failure_preserves_credentials(tmp_path: Path, monkey
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             _login(client)
-            with pytest.raises(RuntimeError, match="close failed"):
-                client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
+            response = client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "OAuth disconnect could not start safely"}
 
     assert scoped_manager.load_credentials(provider.credential_service) is not None
 

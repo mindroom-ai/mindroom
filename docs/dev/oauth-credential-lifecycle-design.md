@@ -6,7 +6,7 @@ MindRoom-managed OAuth credentials must remain recoverable when refresh grants a
 
 ## Problem
 
-Before this change, one credential lifecycle was distributed across API routes, provider wrappers, toolkit mixins, MCP session management, reset approval code, and generic OAuth helpers.
+Before this change, one credential lifecycle was distributed across API routes, provider wrappers, toolkit mixins, MCP session management, and generic OAuth helpers.
 Each component was locally reasonable, but no component owned the complete provider-operation-to-persistence transaction.
 That gap produced stale refresh-token preservation, lost rotated tokens, reconnect races, inconsistent failure messages, and destructive resets that could be cancelled after deletion but before returning a recovery link.
 
@@ -28,26 +28,25 @@ OAuth operations are rare enough that this concurrency was not worth the correct
 10. Credential identity is canonicalized only when resolving `OAuthCredentialContext`.
 11. Provider adapters classify structured terminal refresh errors as `OAuthRefreshRejectedError` without exposing provider-controlled text.
 12. All consumers build connection and reconnection responses through one factory.
-13. Approval continuations persist and revalidate the exact credential target descriptor before execution.
-14. Every credential publication advances a durable lease revision used by materialized clients and MCP sessions, while callback replacement, reset, and terminal invalidation also advance a separate connection generation used to fence browser callbacks and approved resets.
-15. Agent approval continuations install their persisted requester context before reconstructing OAuth-backed toolkits.
-16. Every provider token service ends with `_oauth`, making primary-runtime placement and worker-grant rejection structural.
-17. OAuth-backed toolkit construction receives authorization explicitly, and every managed call revalidates its canonical credential scope and durable revision before reusing cached credentials.
-18. Managed Google credentials and services are owned together by one worker thread and keyed by the full canonical credential context plus durable revision.
-19. Caller-supplied Google credentials are accepted only as the exact supported concrete type, copied into private blocking credentials, and serialized for the whole provider call by one reentrant toolkit lock.
-20. Google Drive applies quota configuration before lifecycle refresh wrapping and never clones a managed tracked credential while building a service.
-21. GitHub access tokens and PyGithub clients are owned together by one worker thread, while every managed call reloads authoritative credentials on its execution thread.
-22. OAuth-backed MCP connections revalidate their durable generation and token hash immediately before session publication and each admitted remote use.
-23. Every approval freezes the exact call ID, tool name, canonical arguments, invoking agent, and any sensitive nested target before execution.
-24. An OAuth reset is the sole observed call in its paused run and uses `approval_id:generation:tool_call_id` as its stable lifecycle operation ID.
-25. Reset generation metadata durably records every pending intent, retains permanent completed tombstones only for replayable approval operations, and prunes completed direct or provider-driven intents.
-26. Every credential-use and publication transaction finishes pending reset deletion before reading, refreshing, or storing a credential.
-27. Claimed reset recovery re-enters only a durable pending or completed operation by its stable ID, never starts a missing reset, and never resumes the stale paused Agno run.
+13. Every credential publication advances a durable lease revision used by materialized clients and MCP sessions, while callback replacement, reset, and terminal invalidation also advance a separate connection generation used to fence browser callbacks and confirmed resets.
+14. Agent approval continuations install their persisted requester context before reconstructing OAuth-backed toolkits.
+15. Every provider token service ends with `_oauth`, making primary-runtime placement and worker-grant rejection structural.
+16. OAuth-backed toolkit construction receives authorization explicitly, and every managed call revalidates its canonical credential scope and durable revision before reusing cached credentials.
+17. Managed Google credentials and services are owned together by one worker thread and keyed by the full canonical credential context plus durable revision.
+18. Caller-supplied Google credentials are accepted only as the exact supported concrete type, copied into private blocking credentials, and serialized for the whole provider call by one reentrant toolkit lock.
+19. Google Drive applies quota configuration before lifecycle refresh wrapping and never clones a managed tracked credential while building a service.
+20. GitHub access tokens and PyGithub clients are owned together by one worker thread, while every managed call reloads authoritative credentials on its execution thread.
+21. OAuth-backed MCP connections revalidate their durable generation and token hash immediately before session publication and each admitted remote use.
+22. Every approval freezes the exact call ID, tool name, canonical arguments, and invoking agent before execution.
+23. The agent reset tool is non-destructive and issues only a one-time requester-bound browser action.
+24. The authenticated browser GET is non-mutating, while its POST is the sole reset confirmation and execution boundary.
+25. A browser reset intent freezes provider, service, agent, canonical requester, scope, worker key, connection generation, and a random stable operation ID.
+26. Reset generation metadata durably records every pending intent, retains permanent completed tombstones only for replayable browser operations, and prunes completed direct or provider-driven intents.
+27. Every credential-use and publication transaction finishes pending reset deletion before reading, refreshing, or storing a credential.
 28. Credential documents carry a scope-bound self-describing publication record, are durably saved before their counters are published, and repair an interrupted state-file commit under the operation lock.
 29. Pending reset deletion always takes precedence over credential-publication recovery.
-30. Every live or recovery first claim refreshes surviving reconnect material under response admission, preserves policy-removed links, and holds the membership owner's authorization decision through the atomic durable claim.
-31. Revoked claims emit a link-free completion receipt only when the frozen scope-bound locator proves a completed stable operation; missing proof emits a link-free unverified receipt and never starts deletion.
-32. Requester-scoped MCP OAuth rejects missing requester identity before credential or session lookup, and a same-generation HTTP bearer rejection retires the exact session and returns a canonical reconnect response without replaying the remote call.
+30. A retry of a completed browser operation returns its stored result before MCP retirement or credential deletion.
+31. Requester-scoped MCP OAuth rejects missing requester identity before credential or session lookup, and a same-generation HTTP bearer rejection retires the exact session and returns a canonical reconnect response without replaying the remote call.
 
 ## Architecture
 
@@ -92,20 +91,21 @@ Remote HTTP transports retain only a boolean HTTP 401 observation so an SDK-coll
 
 ### Reset authorization
 
-`src/mindroom/oauth/reset.py` owns only authorization, provider availability, credential-scope resolution, and approval binding validation.
-It returns the canonical credential context plus the invoking agent name.
-It does not delete credentials or build links.
+`src/mindroom/oauth/reset.py` owns provider availability, credential-scope resolution, and the opaque requester-bound browser reset intent.
+It returns the canonical credential context plus the invoking agent name and issues a one-time confirmation URL without changing credentials.
 
 `src/mindroom/mcp/manager.py` owns requester sessions and performs short durable credential-revision checks immediately before connection publication and admitted remote calls.
 
-`src/mindroom/oauth/reset_execution.py` enters MCP retirement, issues a reconnect link immediately before deletion, asks the lifecycle owner to commit the reset, and renders the receipt.
-`src/mindroom/custom_tools/oauth_connections.py` owns only live-request authorization and error translation around that executor.
-If teardown is cancelled or fails, deletion does not occur.
-The shared Matrix outbox applies one type-enforced first-claim policy to live and recovery sends, holds response admission across receipt preparation, and holds the membership owner's authorization decision across the final recheck and atomic claim.
-It remints surviving authorized links from the completed stable operation, preserves links removed by response policy, atomically replaces revoked or unavailable reconnect material with a link-free receipt, and preserves already-attempted payloads for transaction-ID reconciliation.
+`src/mindroom/custom_tools/oauth_connections.py` owns live-request authorization and returns the confirmation URL.
+It never deletes credentials, retires MCP sessions, or enters an Agno approval continuation.
 
-`src/mindroom/approval_bindings.py` freezes and validates every paused call descriptor.
-OAuth reset bindings add the exact canonical credential target under that generic descriptor and reject a reset mixed with any other call.
+`src/mindroom/api/oauth.py` owns authenticated browser confirmation.
+The GET revalidates the exact requester and target but never mutates state.
+The POST revalidates authorization, calls `src/mindroom/oauth/reset_execution.py`, and continues directly into the normal provider authorization flow.
+
+`src/mindroom/oauth/reset_execution.py` returns completed stable operations before transport work, otherwise enters MCP retirement and asks the lifecycle owner to commit the reset.
+If teardown is cancelled or fails, deletion does not occur.
+The opaque reset token is consumed only after reset completion and provider authorization preparation, so a safe retry can reuse the same stable operation after an interruption.
 
 ## Data Flow
 
@@ -139,26 +139,25 @@ The callback cannot preserve a refresh token that another operation rotated conc
 
 ### Reset and disconnect
 
-1. Resolve and revalidate the exact approved credential context.
-2. Return a completed stable operation without entering MCP retirement or touching credentials.
-3. Fence the requester-session key, then load its authoritative credential revision and connection generation.
-4. Skip retirement when the authoritative connection generation differs from the approved connection generation.
-5. Otherwise mark every cached requester session for that key retired, including sessions carrying an older lease revision, so captured callers cannot reconnect it.
-6. Close the retired session and keep its key fenced against new sessions.
-7. If retirement fails or is cancelled, retain credentials and restore the tracked generation when possible.
-8. Mint the requester-bound reconnect link after teardown and immediately before reset submission.
+1. The agent tool resolves the exact credential context and issues a one-time requester-bound browser URL without mutation.
+2. The authenticated browser GET revalidates requester identity, current credential-management authorization, provider availability, agent, scope, and worker key, then renders confirmation.
+3. The browser POST repeats those checks and returns a completed stable operation before entering MCP retirement.
+4. Fence the requester-session key, then load its authoritative credential revision and connection generation.
+5. Skip retirement when the authoritative connection generation differs from the confirmed connection generation.
+6. Otherwise mark every cached requester session for that key retired, including sessions carrying an older lease revision, so captured callers cannot reconnect it.
+7. Close the retired session and keep its key fenced against new sessions.
+8. If retirement fails or is cancelled, retain credentials and leave the reset token reusable.
 9. Submit credential deletion to the transaction loop and wait cancellably for the operation lock.
-10. Recheck the approved connection generation and write the stable reset operation as pending together with new durable lease and connection generations.
+10. Recheck the confirmed connection generation and write the stable reset operation as pending together with new durable lease and connection generations.
 11. Durably delete the exact scoped credential file without first decoding it.
-12. Mark a replayable approval operation completed with its original file-existed result, retain that tombstone permanently, and prune non-replayable completion state.
-13. If completed-state publication fails after deletion, retain the claimed continuation and retry the durable pending operation by its stable ID.
-14. Release the in-memory MCP retirement fence and return the receipt even if cancellation arrived after full durable commit.
+12. Mark the replayable browser operation completed with its original file-existed result and retain that tombstone permanently.
+13. Prepare the normal provider authorization redirect, consume the reset token, and redirect the browser.
+14. Release the in-memory MCP retirement fence and return the redirect even if cancellation arrived after full durable commit.
 
 All credential transactions finish any pending delete before using or publishing the scope.
 A retry of a completed operation returns the stored result without advancing the revision or deleting a credential created by a later callback.
-If a process dies while a stable operation is pending, claimed-continuation recovery re-enters that exact operation to finish deletion and completed-state publication.
-If a process dies after the reset commit but before FINAL delivery, claimed-continuation recovery uses the frozen canonical requester, scope, service, and worker key to prove the completed operation read-only even after live provider configuration changes.
-It skips MCP retirement and deletion and publishes the receipt directly without calling Agno continuation APIs.
+If a process dies while a stable operation is pending, the next credential transaction finishes deletion and completed-state publication before any credential can be used or published.
+If the browser retries after the reset commit, the stable operation returns its stored result without MCP retirement or deletion, then prepares a fresh provider authorization redirect.
 
 Dashboard disconnect uses the same transaction and fails without deleting credentials if MCP teardown cannot complete.
 
@@ -182,7 +181,7 @@ Callback operation-lock wait, exchange, and save are cancellation-safe after pen
 Reset teardown remains cancellable because credentials are still intact at that point.
 Operation-lock waiting remains cancellable and does not mutate credentials.
 Pending-intent publication, durable deletion, and completed-tombstone publication form the reset commit sequence.
-Cancellation after that commit is consumed so the approved destructive tool can return its reconnect receipt.
+Cancellation after that commit is consumed so browser retry can observe the completed stable operation.
 
 ## Testing
 
@@ -196,10 +195,10 @@ Focused tests cover observable lifecycle behavior rather than private lock chore
 - Cancellation or failure during MCP teardown leaves credentials intact.
 - Different credential scopes refresh concurrently.
 - A synchronous refresh invoked from an event-loop thread cannot deadlock behind an asynchronous same-scope transaction.
-- Retired MCP sessions cannot reconnect with captured stale authorization headers or create a replacement session before deletion commits, even when their cached lease revision predates the approved reset.
+- Retired MCP sessions cannot reconnect with captured stale authorization headers or create a replacement session before deletion commits, even when their cached lease revision predates the confirmed reset.
 - Callback state issued before a reset cannot republish credentials after the connection generation advances.
 - Callback success advances both counters, and a second callback bound to the consumed connection generation is rejected.
-- Reset cancellation before operation-lock ownership preserves credentials, while cancellation after deletion still returns the committed receipt.
+- Reset cancellation before operation-lock ownership preserves credentials, while cancellation after deletion leaves a replayable committed operation.
 - On platforms that expose directory fsync, reset success is reported only after the credential unlink and parent-directory update are flushed.
 - Refresh cancellation before operation-lock ownership never calls the provider, while cancellation after ownership waits for local publication.
 - Google lazy refresh, GitHub refresh, MCP refresh, API status refresh, and dashboard callback all use the same operation-lock path.
@@ -207,14 +206,11 @@ Focused tests cover observable lifecycle behavior rather than private lock chore
 - Bridge aliases canonicalize only for OAuth credential targets, reset links authorize for the alias, and callbacks store in the canonical scope.
 - Terminal refresh rejection returns the same structured reconnect reason and instruction from every consumer.
 - Logs never include refresh tokens, access tokens, or unrecognized provider-controlled error text.
-- Approval continuation fails closed when provider, service, scope, key, or routing agent changes.
-- Approval continuation fails closed when the persisted call reuses an ID with a changed name, canonical arguments, or invoking member.
-- OAuth reset is refused when another call is observed in its paused run.
+- Browser reset confirmation fails closed when provider, service, scope, key, requester, agent, or connection generation changes.
+- Opening the browser reset URL never deletes credentials, while its authenticated POST performs the reset and redirects to provider authorization.
 - Reset deletes corrupt plaintext or encrypted credential files by exact scoped path and permits reconnect afterward.
 - A crash after pending intent hides the credential until deletion finishes, while completed-operation replay cannot delete a later callback credential.
-- Claimed reset recovery requires an existing pending or completed stable operation and never resumes Agno.
-- Pending recovery re-enters only that operation to finish deletion and completed-state publication, while completed recovery is read-only and publishes FINAL directly.
-- Missing-operation recovery never starts deletion.
+- Completed browser operation retry skips MCP retirement and cannot delete credentials from a later callback.
 - Agent approval continuation reconstructs OAuth-backed toolkits inside the same runtime and execution-identity context used for resumed calls.
 - Agent and voice toolkit construction receive authorization explicitly, so alias canonicalization does not depend on an ambient call context.
 - Long-lived Google clients discard valid cached access tokens after reset, disconnect, terminal invalidation, or canonical scope change.
@@ -240,4 +236,4 @@ Generated documentation is refreshed after source documentation changes.
 This change does not revoke grants at external providers.
 This change does not redesign OAuth discovery or dynamic client registration beyond keeping it independent from credential transactions.
 This change does not change room membership identity or globally canonicalize Matrix requester IDs.
-This change does not alter tool approval policy beyond binding resets to the exact credential context.
+This change does not alter generic tool approval policy.

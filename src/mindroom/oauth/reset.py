@@ -2,89 +2,56 @@
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, replace
+import secrets
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
+from urllib.parse import urlencode
 
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     load_oauth_credentials_snapshot,
-    oauth_reset_operation_result_for_target,
     resolve_oauth_credential_context,
 )
 from mindroom.oauth.registry import load_oauth_providers
+from mindroom.oauth.service import oauth_credential_target_payload, oauth_public_base_url
+from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, resolve_worker_target
+from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-
-    from agno.models.response import ToolExecution
+    from collections.abc import Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
 
-_OAUTH_RESET_TOOL_NAME = "reset_oauth_connection"
+_BROWSER_OAUTH_RESET_KIND = "browser_oauth_reset"
+_BROWSER_OAUTH_RESET_TTL_SECONDS = 10 * 60
 
 
 class OAuthResetTargetError(ValueError):
     """One requested provider cannot resolve to a safe agent credential target."""
 
 
-class OAuthResetApprovalBindingError(RuntimeError):
-    """One approved OAuth reset no longer resolves to its original credential target."""
-
-
 @dataclass(frozen=True, slots=True)
-class _FrozenOAuthResetBinding:
-    """Typed reset fields recovered from one exact persisted approval descriptor."""
+class BrowserOAuthResetIntent:
+    """One requester-bound browser reset action."""
 
     provider_id: str
-    connection_generation: str | None
-    target: Mapping[str, object]
+    credential_service: str
+    agent_name: str
+    worker_scope: WorkerScope
+    worker_key: str
+    requester_id: str
+    connection_generation: str
+    operation_id: str
 
-    @staticmethod
-    def operation_id(approval_id: str, generation: int, tool_call_id: str) -> str:
-        """Return the stable lifecycle key for one approval generation."""
-        return f"{approval_id}:{generation}:{tool_call_id}"
-
-
-def parse_frozen_oauth_reset_binding(
-    *,
-    invoking_agent: str,
-    stored_binding: Mapping[str, object] | None,
-    require_connection_generation: bool = True,
-) -> _FrozenOAuthResetBinding | None:
-    """Parse one exact approved reset descriptor, failing closed on any drift."""
-    if stored_binding is None:
-        return None
-    nested = stored_binding.get("oauth_reset")
-    if not isinstance(nested, dict):
-        return None
-    target = cast("Mapping[str, object]", nested)
-    provider_id = target.get("provider_id")
-    raw_connection_generation = target.get("connection_generation")
-    connection_generation = (
-        raw_connection_generation if isinstance(raw_connection_generation, str) and raw_connection_generation else None
-    )
-    if (
-        not isinstance(provider_id, str)
-        or not provider_id
-        or (require_connection_generation and connection_generation is None)
-        or stored_binding.get("tool_name") != _OAUTH_RESET_TOOL_NAME
-        or stored_binding.get("invoking_agent") != invoking_agent
-        or stored_binding.get("arguments_json")
-        != json.dumps({"provider_id": provider_id}, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
-    ):
-        return None
-    return _FrozenOAuthResetBinding(
-        provider_id=provider_id,
-        connection_generation=connection_generation,
-        target=target,
-    )
+    @property
+    def execution_scope(self) -> WorkerScope:
+        """Return the worker scope carried in the reset URL."""
+        return self.worker_scope
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,154 +143,107 @@ def resolve_oauth_reset_target(
     )
 
 
-async def build_oauth_reset_approval_bindings(
-    identified_tools: Sequence[tuple[ToolExecution, str, str, str]],
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-) -> dict[str, dict[str, object]]:
-    """Freeze exact credential targets for every OAuth reset in one approval pause."""
-    bindings: dict[str, dict[str, object]] = {}
-    for tool, tool_call_id, tool_name, invoking_agent in identified_tools:
-        if tool_name != _OAUTH_RESET_TOOL_NAME:
-            continue
-        if execution_identity is None:
-            msg = "OAuth reset approval requires an execution identity."
-            raise OAuthResetApprovalBindingError(msg)
-        tool_args = tool.tool_args
-        provider_id = tool_args.get("provider_id") if isinstance(tool_args, dict) else None
-        if not isinstance(provider_id, str) or not provider_id:
-            msg = "OAuth reset approval requires a provider_id."
-            raise OAuthResetApprovalBindingError(msg)
-        try:
-            target = resolve_oauth_reset_target(
-                provider_id,
-                agent_name=invoking_agent,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-            )
-        except OAuthResetTargetError as exc:
-            raise OAuthResetApprovalBindingError(str(exc)) from exc
-        bindings[tool_call_id] = await _oauth_reset_target_binding(target)
-    return bindings
-
-
-async def validate_oauth_reset_approval_bindings(
-    *,
-    calls: Sequence[tuple[str, str, str, bool]],
-    bindings: Mapping[str, Mapping[str, object]],
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity,
-    allow_connection_generation_drift: bool = False,
-) -> dict[str, OAuthCredentialContext]:
-    """Fail closed when an approved reset resolves differently after configuration drift."""
-    credential_contexts: dict[str, OAuthCredentialContext] = {}
-    for tool_call_id, tool_name, invoking_agent, approved in calls:
-        if tool_name != _OAUTH_RESET_TOOL_NAME or not approved:
-            continue
-        stored_binding = bindings.get(tool_call_id)
-        nested_binding = stored_binding.get("oauth_reset") if stored_binding is not None else None
-        binding = cast("Mapping[str, object]", nested_binding) if isinstance(nested_binding, dict) else stored_binding
-        provider_id = binding.get("provider_id") if binding is not None else None
-        if not isinstance(provider_id, str) or not provider_id:
-            msg = "Approved OAuth credential target is missing; run the reset again."
-            raise OAuthResetApprovalBindingError(msg)
-        try:
-            target = resolve_oauth_reset_target(
-                provider_id,
-                agent_name=invoking_agent,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-            )
-        except OAuthResetTargetError as exc:
-            msg = "Approved OAuth credential target changed or is unavailable; run the reset again."
-            raise OAuthResetApprovalBindingError(msg) from exc
-        assert binding is not None
-        ignored_keys = {"credential_generation"}
-        if allow_connection_generation_drift:
-            ignored_keys.add("connection_generation")
-            current_binding = _oauth_reset_target_identity_binding(target)
-        else:
-            current_binding = await _oauth_reset_target_binding(target)
-        binding = {key: value for key, value in binding.items() if key not in ignored_keys}
-        if binding != current_binding:
-            msg = "Approved OAuth credential target changed; run the reset again."
-            raise OAuthResetApprovalBindingError(msg)
-        credential_contexts[tool_call_id] = target.credential_context
-    return credential_contexts
-
-
-async def _oauth_reset_target_binding(target: _ResolvedOAuthResetTarget) -> dict[str, object]:
-    snapshot = await load_oauth_credentials_snapshot(target.credential_context)
-    return {
-        **_oauth_reset_target_identity_binding(target),
-        "connection_generation": snapshot.connection_generation,
-    }
-
-
-def _oauth_reset_target_identity_binding(target: _ResolvedOAuthResetTarget) -> dict[str, object]:
-    """Return the canonical reset target without reading mutable credential state."""
-    worker_target = target.worker_target
-    execution_identity = worker_target.execution_identity
-    credential_requester_id = execution_identity.requester_id if execution_identity is not None else None
-    if not credential_requester_id:
-        msg = "Agent-initiated OAuth reset requires a canonical requester identity."
-        raise OAuthResetApprovalBindingError(msg)
-    return {
-        "provider_id": target.provider.id,
-        "credential_service": target.provider.credential_service,
-        "agent_name": target.agent_name,
-        "worker_scope": cast("str", worker_target.worker_scope),
-        "worker_key": cast("str", worker_target.worker_key),
-        "routing_agent_name": cast("str", worker_target.routing_agent_name),
-        "credential_requester_id": credential_requester_id,
-    }
-
-
-def completed_oauth_reset_result_from_binding(
-    binding: Mapping[str, object],
-    *,
-    execution_identity: ToolExecutionIdentity,
-    runtime_paths: RuntimePaths,
-    operation_id: str,
-) -> bool | None:
-    """Read completed reset debt from one frozen scope without live provider resolution."""
-    credential_service = binding.get("credential_service")
-    worker_scope = binding.get("worker_scope")
-    worker_key = binding.get("worker_key")
-    routing_agent_name = binding.get("routing_agent_name")
-    credential_requester_id = binding.get("credential_requester_id")
+def _browser_oauth_reset_intent_from_payload(
+    provider: OAuthProvider,
+    payload: Mapping[str, object],
+) -> BrowserOAuthResetIntent:
+    """Parse one strict browser reset intent payload."""
+    provider_id = payload.get("provider")
+    credential_service = payload.get("credential_service")
+    agent_name = payload.get("agent_name")
+    worker_scope = payload.get("worker_scope")
+    worker_key = payload.get("worker_key")
+    requester_id = payload.get("requester_id")
+    connection_generation = payload.get("connection_generation")
+    operation_id = payload.get("operation_id")
     if (
-        not isinstance(credential_service, str)
-        or not credential_service.endswith("_oauth")
+        provider_id != provider.id
+        or credential_service != provider.credential_service
+        or not isinstance(agent_name, str)
+        or not agent_name
         or worker_scope not in {"user", "user_agent"}
         or not isinstance(worker_key, str)
         or not worker_key
-        or not isinstance(routing_agent_name, str)
-        or not routing_agent_name
-        or not isinstance(credential_requester_id, str)
-        or not credential_requester_id
+        or not isinstance(requester_id, str)
+        or not requester_id
+        or not isinstance(connection_generation, str)
+        or not connection_generation
+        or not isinstance(operation_id, str)
+        or not operation_id
     ):
-        return None
-    frozen_identity = replace(
-        execution_identity,
-        agent_name=routing_agent_name,
-        requester_id=credential_requester_id,
-    )
-    frozen_target = resolve_worker_target(
-        cast("WorkerScope", worker_scope),
-        routing_agent_name,
-        frozen_identity,
-    )
-    if frozen_target.worker_key != worker_key:
-        return None
-    return oauth_reset_operation_result_for_target(
-        credential_service,
-        credentials_manager=get_runtime_credentials_manager(runtime_paths),
-        worker_target=frozen_target,
+        msg = "OAuth reset link target is invalid"
+        raise OAuthResetTargetError(msg)
+    return BrowserOAuthResetIntent(
+        provider_id=provider.id,
+        credential_service=provider.credential_service,
+        agent_name=agent_name,
+        worker_scope=cast("WorkerScope", worker_scope),
+        worker_key=worker_key,
+        requester_id=requester_id,
+        connection_generation=connection_generation,
         operation_id=operation_id,
     )
+
+
+async def issue_browser_oauth_reset_url(target: _ResolvedOAuthResetTarget) -> str:
+    """Issue a one-time browser URL without mutating the credential."""
+    worker_target = target.worker_target
+    execution_identity = worker_target.execution_identity
+    if execution_identity is None or not execution_identity.requester_id:
+        msg = "OAuth reset requires a requester identity"
+        raise OAuthResetTargetError(msg)
+    snapshot = await load_oauth_credentials_snapshot(target.credential_context)
+    provider = target.provider
+    payload: dict[str, str] = {
+        **oauth_credential_target_payload(provider, worker_target),
+        "requester_id": execution_identity.requester_id,
+        "connection_generation": snapshot.connection_generation,
+        "operation_id": f"browser:{secrets.token_hex(32)}",
+    }
+    reset_token = issue_opaque_oauth_state(
+        target.credential_context.runtime_paths,
+        kind=_BROWSER_OAUTH_RESET_KIND,
+        ttl_seconds=_BROWSER_OAUTH_RESET_TTL_SECONDS,
+        data=payload,
+    )
+    query = urlencode(
+        {
+            "agent_name": target.agent_name,
+            "execution_scope": worker_target.worker_scope,
+            "reset_token": reset_token,
+        },
+    )
+    base_url = oauth_public_base_url(target.credential_context.runtime_paths, provider)
+    return f"{base_url}/api/oauth/{provider.id}/reset?{query}"
+
+
+def lookup_browser_oauth_reset_intent(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    token: str,
+) -> BrowserOAuthResetIntent:
+    """Read one browser reset intent without consuming it."""
+    payload = read_opaque_oauth_state(
+        runtime_paths,
+        kind=_BROWSER_OAUTH_RESET_KIND,
+        token=token,
+    )
+    return _browser_oauth_reset_intent_from_payload(provider, payload)
+
+
+def consume_browser_oauth_reset_intent(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    token: str,
+    *,
+    expected: BrowserOAuthResetIntent,
+) -> None:
+    """Consume one successfully completed browser reset intent exactly once."""
+    payload = consume_opaque_oauth_state(
+        runtime_paths,
+        kind=_BROWSER_OAUTH_RESET_KIND,
+        token=token,
+    )
+    if _browser_oauth_reset_intent_from_payload(provider, payload) != expected:
+        msg = "OAuth reset link target changed"
+        raise OAuthResetTargetError(msg)

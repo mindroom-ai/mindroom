@@ -672,12 +672,6 @@ class AgentBot:
                     turn_id,
                     event_id,
                 ),
-                # Response policy is initialized immediately below. Resolve it
-                # late so every outbox recovery pass, including startup, uses
-                # the same approval-authorization gate.
-                first_claim_policy=lambda delivery: self._response_runner.first_claim_policy(
-                    delivery,
-                ),
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(

@@ -84,6 +84,7 @@ __all__ = [
     "oauth_credentials_usable",
     "oauth_credentials_worker_target",
     "oauth_provider_service_account_configured",
+    "oauth_public_base_url",
     "oauth_success_redirect_url",
     "refresh_oauth_credentials",
     "refresh_oauth_credentials_blocking",
@@ -196,7 +197,7 @@ def consume_oauth_connect_token(
     return connect_target
 
 
-def _mindroom_public_base_url(runtime_paths: RuntimePaths, provider: OAuthProvider | None = None) -> str:
+def oauth_public_base_url(runtime_paths: RuntimePaths, provider: OAuthProvider | None = None) -> str:
     """Return the public MindRoom origin used for user-facing OAuth links."""
     configured = runtime_paths.env_value("MINDROOM_PUBLIC_URL") or runtime_paths.env_value("MINDROOM_BASE_URL")
     if configured:
@@ -215,7 +216,7 @@ def _mindroom_public_base_url(runtime_paths: RuntimePaths, provider: OAuthProvid
 
 def oauth_success_redirect_url(provider: OAuthProvider, runtime_paths: RuntimePaths) -> str:
     """Return the post-callback browser destination for one provider."""
-    base_url = _mindroom_public_base_url(runtime_paths, provider)
+    base_url = oauth_public_base_url(runtime_paths, provider)
     return f"{base_url}/api/oauth/{provider.id}/success"
 
 
@@ -235,7 +236,7 @@ def _build_oauth_authorize_url(
     connect_token: str | None = None,
 ) -> str:
     """Build an authenticated MindRoom URL that starts a provider OAuth flow."""
-    base_url = _mindroom_public_base_url(runtime_paths, provider)
+    base_url = oauth_public_base_url(runtime_paths, provider)
     params: dict[str, str] = {}
     if connect_token:
         params["connect_token"] = connect_token

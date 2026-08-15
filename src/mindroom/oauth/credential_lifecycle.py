@@ -439,34 +439,13 @@ def oauth_connection_generation(context: OAuthCredentialContext) -> str:
 
 def oauth_reset_operation_result(context: OAuthCredentialContext, operation_id: str) -> bool | None:
     """Return one completed replayable reset result without starting or finishing work."""
-    operation = oauth_reset_operation_snapshot(context, operation_id)
+    operation = _oauth_reset_operation_snapshot(context, operation_id)
     if operation is None or operation.status != "completed":
         return None
     return operation.credential_existed
 
 
-def oauth_reset_operation_result_for_target(
-    credential_service: str,
-    *,
-    credentials_manager: CredentialsManager,
-    worker_target: ResolvedWorkerTarget,
-    operation_id: str,
-) -> bool | None:
-    """Read one completed reset result from an exact frozen credential target."""
-    state = _load_oauth_credential_state_path(
-        _credential_generation_path_for_target(
-            credential_service,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        ),
-    )
-    operation = state.reset_operations.get(operation_id)
-    if operation is None or not operation.replayable or operation.status != "completed":
-        return None
-    return operation.credential_existed
-
-
-def oauth_reset_operation_snapshot(
+def _oauth_reset_operation_snapshot(
     context: OAuthCredentialContext,
     operation_id: str,
 ) -> _OAuthResetOperationSnapshot | None:

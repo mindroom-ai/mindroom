@@ -1384,7 +1384,6 @@ class FakeOutbox:
         delivery_id: str,
         stage: DeliveryStage,
         sending_device_id: str | None = None,
-        replacement_payload: Mapping[str, object] | None = None,
     ) -> MatrixDelivery | None:
         """Freeze one delivery before any network call, returning its prior state.
 
@@ -1415,9 +1414,6 @@ class FakeOutbox:
             row,
             attempted=True,
             sending_device_id=sending_device_id if not row.attempted else row.sending_device_id,
-            payload=(
-                dict(replacement_payload) if replacement_payload is not None and not row.attempted else row.payload
-            ),
         )
         self.rows[key] = claimed
         return replace(claimed, attempted=row.attempted)
@@ -1610,14 +1606,12 @@ class DiesAfterAcknowledgement:
         delivery_id: str,
         stage: DeliveryStage,
         sending_device_id: str | None = None,
-        replacement_payload: Mapping[str, object] | None = None,
     ) -> MatrixDelivery | None:
         """Freeze one delivery before network I/O and return what to send."""
         return await self.inner.claim_matrix_delivery(
             delivery_id=delivery_id,
             stage=stage,
             sending_device_id=sending_device_id,
-            replacement_payload=replacement_payload,
         )
 
     async def record_matrix_delivery_device(

@@ -9,7 +9,7 @@ Use these tools when you need requester-scoped OAuth recovery, multi-agent coord
 
 ## Tools On This Page
 
-- [`oauth_connections`] - Reset an approved requester-scoped OAuth connection and return a requester-bound reconnect link.
+- [`oauth_connections`] - Issue a browser-confirmed reset for one requester-scoped OAuth connection.
 - [`subagents`] - Spawn Matrix-backed sub-agent sessions and message them later by session key or label.
 - [`delegate`] - Run another configured agent as a one-shot specialist and return its answer inline.
 - [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
@@ -43,10 +43,11 @@ For [`openclaw_compat`], that means `matrix_message` is added directly and `atta
 
 The toolkit exposes only `reset_oauth_connection(provider_id)`.
 The provider must back one of the current agent's configured tools through that tool's `auth_provider` metadata.
-The call first retires the matching requester-scoped MCP OAuth session when applicable, then durably prepares a requester-bound reconnect link, and finally deletes the matching local scoped credential under the same lock used by token refresh.
+The call returns a one-time requester-bound browser link and does not change credentials itself.
+The authenticated browser confirmation retires the matching requester-scoped MCP OAuth session when applicable, deletes the matching local scoped credential under the same lock used by token refresh, and then opens the provider authorization page.
 The reset does not revoke the grant at the external provider.
-Calling it when no local credential exists is safe and still returns a fresh reconnect link.
-The reset ends the current agent run after returning its reconnect receipt, so already-materialized provider clients cannot reuse the removed credential.
+Opening the link without confirming is non-destructive.
+Confirming when no local credential exists is safe and still continues to provider authorization.
 
 ### Configuration
 
@@ -64,13 +65,13 @@ agents:
       - google_drive
 ```
 
-### Approval And Requester Scope
+### Browser Confirmation And Requester Scope
 
-Every `reset_oauth_connection()` call requires a Matrix human-approval card even when the global `tool_approval` default is `auto_approve`.
-The reset must be the only observed call in its paused run, and approval freezes its exact name, arguments, invoking agent, credential target, and connection generation.
-Refresh-only credential revision drift is allowed because it does not replace the authorized connection lineage.
-Only the original human requester can approve that pending call.
-Before changing credentials, the tool applies `authorization.agent_reply_permissions` for the current agent, including configured sender aliases.
+The tool is not a destructive Matrix action, so it does not create a tool-approval continuation or stop the agent run.
+The browser page is the human approval boundary: its GET only displays the action, and its POST performs the reset.
+The link freezes the provider, credential service, invoking agent, canonical requester, credential scope, worker key, connection generation, and a stable reset operation ID.
+Only the original authenticated human requester can open and confirm the link.
+Both link issuance and confirmation apply `authorization.agent_reply_permissions` for the current agent, including configured sender aliases.
 The resolved credential scope must be `user` or `user_agent`; shared credentials are refused.
 A `user` reset affects the current requester across agents, while a `user_agent` reset affects only the current requester and current agent.
 Providers that define requester-scoped credentials, such as GitHub, may resolve to `user` scope independently of the agent's `worker_scope`.
@@ -78,12 +79,11 @@ Providers that define requester-scoped credentials, such as GitHub, may resolve 
 ### Notes
 
 - `oauth_connections` always runs in the primary MindRoom runtime, even if it appears in `worker_tools`.
-- Invalid, unavailable, unconfigured, or unauthorized provider requests fail before credential deletion or MCP session disconnection.
-- Use the returned link to reconnect, then retry the original provider-backed tool call.
-- If the process restarts with a pending reset, MindRoom re-enters only that stable operation to finish deletion and completed-state publication.
-- If the process restarts after completed-state publication but before the receipt is delivered, MindRoom proves completion read-only, skips deletion and MCP retirement, and delivers a fresh receipt without disturbing a later reconnection.
-- If no durable reset operation exists, recovery never starts deletion.
-- The returned link expires after 10 minutes; run `reset_oauth_connection()` again to issue a fresh link.
+- Invalid, unavailable, unconfigured, unauthorized, expired, or mismatched links fail before credential deletion or MCP session disconnection.
+- Use the returned link, confirm the reset, complete provider authorization, then retry the original provider-backed tool call.
+- If the browser retries after the stable reset completed, MindRoom skips deletion and MCP retirement, so it cannot disturb a later reconnection.
+- If the process restarts with a pending reset, the credential lifecycle finishes that exact stable operation before any credential can be used or published.
+- The browser link expires after 10 minutes; run `reset_oauth_connection()` again to issue a fresh link.
 
 ## [`subagents`]
 

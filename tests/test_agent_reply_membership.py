@@ -212,36 +212,6 @@ async def test_non_join_transition_revokes_ready_member(tmp_path: Path, membersh
 
 
 @pytest.mark.asyncio
-async def test_authorization_decision_serializes_live_membership_revocation(tmp_path: Path) -> None:
-    """A durable response claim must linearize before or after a live membership revocation."""
-    room_id = "!project:example.com"
-    config, runtime_paths = _runtime_config(tmp_path, joined_rooms=["project"])
-    _persist_room(runtime_paths, "project", room_id)
-    client = AsyncMock()
-    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
-    client.joined_members.return_value = _joined_members(room_id, "@alice:example.com")
-    index = AgentReplyMembershipIndex()
-    await index.refresh(config, runtime_paths, client)
-
-    async with index.authorization_decision():
-        revocation = asyncio.create_task(
-            index.apply_member_event_serialized(
-                config,
-                runtime_paths,
-                room_id,
-                _member_event("@alice:example.com", "leave"),
-                control_user_id="@mindroom_router:example.com",
-            ),
-        )
-        await asyncio.sleep(0)
-        assert not revocation.done()
-        assert index.is_allowed("@alice:example.com", ["project"], config.authorization)
-
-    assert await revocation is True
-    assert not index.is_allowed("@alice:example.com", ["project"], config.authorization)
-
-
-@pytest.mark.asyncio
 async def test_join_transition_adds_member_to_ready_snapshot(tmp_path: Path) -> None:
     """Ignoring live joins would require a restart before delegated access works."""
     room_id = "!project:example.com"

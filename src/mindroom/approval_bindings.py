@@ -11,13 +11,6 @@ if TYPE_CHECKING:
     from agno.models.response import ToolExecution
     from agno.run.requirement import RunRequirement
 
-    from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-_OAUTH_RESET_BINDING_KEY = "oauth_reset"
-_OAUTH_RESET_TOOL_NAME = "reset_oauth_connection"
-
 
 def _canonical_tool_arguments(arguments: object) -> str:
     """Encode one tool argument object into deterministic JSON."""
@@ -42,45 +35,10 @@ def approval_tool_descriptor(tool: ToolExecution) -> tuple[str | None, str, bool
     )
 
 
-async def build_approval_tool_bindings(
+def build_approval_tool_bindings(
     identified_tools: Sequence[tuple[ToolExecution, str, str, str]],
-    *,
-    observed_tools: Sequence[ToolExecution] | None = None,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
 ) -> dict[str, dict[str, object]]:
-    """Freeze exact identity, arguments, owner, and sensitive target for every paused call."""
-    from mindroom.oauth.reset import build_oauth_reset_approval_bindings  # noqa: PLC0415
-
-    reset_calls = tuple(item for item in identified_tools if item[2] == _OAUTH_RESET_TOOL_NAME)
-    if reset_calls:
-        reset_tool, reset_call_id, _tool_name, _invoking_agent = reset_calls[0]
-        observed = observed_tools if observed_tools is not None else tuple(item[0] for item in identified_tools)
-        observed_by_call_id: dict[str, tuple[str | None, str, bool]] = {}
-        for tool in observed:
-            tool_call_id = tool.tool_call_id
-            if not tool_call_id:
-                msg = "OAuth reset must be the only tool call in its paused run"
-                raise RuntimeError(msg)
-            descriptor = approval_tool_descriptor(tool)
-            previous = observed_by_call_id.setdefault(tool_call_id, descriptor)
-            if previous != descriptor:
-                msg = "OAuth reset must be the only tool call in its paused run"
-                raise RuntimeError(msg)
-        if (
-            len(reset_calls) != 1
-            or len(identified_tools) != 1
-            or observed_by_call_id != {reset_call_id: approval_tool_descriptor(reset_tool)}
-        ):
-            msg = "OAuth reset must be the only tool call in its paused run"
-            raise RuntimeError(msg)
-    reset_bindings = await build_oauth_reset_approval_bindings(
-        identified_tools,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-    )
+    """Freeze exact identity, arguments, and owner for every paused call."""
     bindings: dict[str, dict[str, object]] = {}
     for tool, tool_call_id, tool_name, invoking_agent in identified_tools:
         binding: dict[str, object] = {
@@ -88,9 +46,6 @@ async def build_approval_tool_bindings(
             "arguments_json": _canonical_tool_arguments(tool.tool_args),
             "invoking_agent": invoking_agent,
         }
-        reset_binding = reset_bindings.get(tool_call_id)
-        if reset_binding is not None:
-            binding[_OAUTH_RESET_BINDING_KEY] = reset_binding
         bindings[tool_call_id] = binding
     return bindings
 

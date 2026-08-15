@@ -163,7 +163,7 @@ def test_export_tools_metadata_json() -> None:
 
 
 def test_oauth_connections_requires_live_room_context() -> None:
-    """OAuth reset must not be advertised where its approval context cannot exist."""
+    """OAuth reset must not be advertised without a requester-bound live context."""
     assert TOOL_METADATA["oauth_connections"].requires_room_context is True
 
 

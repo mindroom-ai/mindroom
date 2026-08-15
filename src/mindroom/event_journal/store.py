@@ -623,9 +623,8 @@ class PrincipalStore:
         delivery_id: str,
         stage: DeliveryStage,
         sending_device_id: str | None = None,
-        replacement_payload: Mapping[str, object] | None = None,
     ) -> MatrixDelivery | None:
-        """Atomically replace eligible recovery content, freeze it, and return it."""
+        """Freeze one delivery before network I/O and return the row as it stood."""
         return await self._backend.write(
             lambda transaction: outbox.claim(
                 transaction,
@@ -633,7 +632,6 @@ class PrincipalStore:
                 delivery_id=delivery_id,
                 stage=stage,
                 sending_device_id=sending_device_id,
-                replacement_payload=replacement_payload,
             ),
         )
 

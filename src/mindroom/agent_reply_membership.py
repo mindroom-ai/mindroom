@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -13,7 +12,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.state import matrix_state_for_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import Sequence
 
     from mindroom.config.auth import AuthorizationConfig
     from mindroom.config.main import Config
@@ -113,12 +112,6 @@ class AgentReplyMembershipIndex:
             and _raw_membership_matches_sender(room.raw_joined_user_ids, sender_id, authorization)
             for room in snapshot.rooms
         )
-
-    @asynccontextmanager
-    async def authorization_decision(self) -> AsyncIterator[None]:
-        """Hold one reply-authorization snapshot through a durable decision commit."""
-        async with self._authorization_lock:
-            yield
 
     async def invalidate_serialized(self, config: Config, *, reason: str) -> None:
         """Revoke room-backed grants after earlier authorization decisions commit."""

@@ -29,12 +29,11 @@ One lifecycle module submits asynchronous callers and synchronous provider adapt
 - Keep GitHub tokens and PyGithub clients together in worker-thread-local state.
 - Revalidate every authenticated MCP connection and call against authoritative cross-process credential revision and token hash immediately before publication or remote use.
 - Use structured provider error codes and never log provider-controlled descriptions or token values.
-- Keep reset approval bound to the exact provider, service, scope, worker key, routing agent, and connection generation.
-- Freeze every approved call's exact ID, name, canonical arguments, and invoking agent.
-- Require reset to be the sole observed call in its paused run.
-- Key approved reset commits by `approval_id:generation:tool_call_id`, retain those completed tombstones permanently, and prune non-replayable direct or provider-driven completion state.
+- Keep the agent reset tool non-destructive and bind its opaque browser intent to the exact provider, service, scope, worker key, routing agent, requester, and connection generation.
+- Make authenticated browser POST the sole reset confirmation and mutation boundary.
+- Key browser reset commits by a random stable operation ID, retain those completed tombstones permanently, and prune non-replayable direct or provider-driven completion state.
 - Finish pending reset deletion before every credential read, refresh, callback publication, or later reset.
-- Recover a claimed reset receipt directly without resuming Agno.
+- Return completed browser reset operations before MCP retirement or credential deletion.
 - Require every provider token credential service to end with `_oauth` so storage policy cannot misclassify plugin tokens.
 - Do not run tests or CI, per user instruction.
 - Run static checks and repository pre-commit hooks on every changed file.
@@ -157,10 +156,10 @@ Apply the same missing, unusable, no-refresh-needed, success, terminal rejection
 `exchange_and_store_oauth_credentials()` must acquire the operation lock, verify the pending callback connection generation, and retain the lock through exchange, claim validation, refresh-token preservation, and publication.
 The API route will wrap the complete lock-wait-through-save coroutine in `run_coroutine_until_complete()` after consuming state.
 
-`reset_oauth_credentials()` must wait cancellably for the operation lock, reject an uncompleted operation whose approved connection generation changed, durably record its pending intent with advanced lease and connection generations, delete the exact scoped file, and durably complete or prune the operation without owning MCP transport cleanup.
+`reset_oauth_credentials()` must wait cancellably for the operation lock, reject an uncompleted operation whose confirmed connection generation changed, durably record its pending intent with advanced lease and connection generations, delete the exact scoped file, and durably complete or prune the operation without owning MCP transport cleanup.
 A completed replayable operation stores the original file-existed result and remains as a permanent tombstone so a stale retry cannot delete credentials from a later callback.
 Every locked credential transaction must finish a pending reset delete before it reads or publishes credentials.
-Cancellation before lock ownership must abort reset, while cancellation after commit must return the deletion result so the caller can publish its receipt.
+Cancellation before lock ownership must abort reset, while cancellation after commit must return the deletion result so the browser can continue authorization safely.
 MCP reset callers must enter requester-session retirement, mint the reconnect link after teardown, invoke the credential transaction, and release the in-memory fence afterward.
 If completed-state publication fails after deletion, durable pending state remains authoritative even when exceptional unwinding releases the in-memory fence.
 
@@ -240,22 +239,21 @@ Keep Google-specific structured `RefreshError` classification in the adapter.
 Translate terminal Google rejection to `OAuthRefreshRejectedError`, let lifecycle deletion occur under the operation lock, and return the shared reconnect payload.
 Continue raising a fixed sanitized `RefreshError` to upstream Google code when transport integration requires that type.
 
-### Task 3: Bind API callback and reset to the lifecycle owner
+### Task 3: Bind API callback and browser reset to the lifecycle owner
 
 **Files:**
 
 - Modify: `src/mindroom/api/oauth.py`
 - Modify: `src/mindroom/oauth/reset.py`
+- Modify: `src/mindroom/oauth/reset_execution.py`
 - Modify: `src/mindroom/custom_tools/oauth_connections.py`
-- Modify: `src/mindroom/approval_response.py`
-- Modify: `src/mindroom/response_runner.py`
 - Modify: `tests/api/test_oauth_api.py`
 - Modify: `tests/test_oauth_connection_tools.py`
 
 **Interfaces:**
 
 - Consumes: lifecycle context, callback publication, reset transaction, and shared prompt factory from Tasks 1 and 2.
-- Produces: `ResolvedOAuthResetTarget(provider, agent_name, credential_context)` with exact approval-binding serialization.
+- Produces: `BrowserOAuthResetIntent` with an exact requester-bound target and stable operation ID.
 
 - [ ] **Step 1: Add callback-versus-refresh rotation specification**
 
@@ -281,22 +279,22 @@ Enter MCP requester-session retirement before calling `reset_oauth_credentials()
 Propagate teardown failure without deleting credentials.
 Return the dashboard disconnect receipt only after successful cleanup and deletion.
 
-- [ ] **Step 5: Return canonical context from reset authorization**
+- [ ] **Step 5: Issue a non-destructive browser reset intent**
 
 Resolve provider-specific requester credential identity once.
 Construct the context with the primary runtime credential manager.
-Persist provider ID, credential service, worker scope, worker key, routing agent, invoking agent, credential revision, and connection generation in approval bindings.
-Re-resolve and compare the target identity plus connection generation before approved execution, while allowing refresh-only credential revision drift.
-Pass authorization into agent reconstruction and install persisted tool runtime and execution-identity contexts before reconstruction and resumed execution.
+Issue an opaque one-time browser URL that freezes provider ID, credential service, worker scope, worker key, routing agent, canonical requester, connection generation, and random stable operation ID.
+Keep the agent tool non-destructive and outside generic Agno approval continuation handling.
+Make GET revalidate and display the exact target without changing credentials.
 
-- [ ] **Step 6: Make agent reset cancellation-safe by ordering**
+- [ ] **Step 6: Make browser POST cancellation-safe by ordering**
 
-Return completed stable operations before retirement, fence the requester-session key, and skip retirement only when authoritative storage proves the connection generation changed after approval.
-Otherwise retire every cached same-key session regardless of lease-revision mismatch, then issue the requester-bound reconnect link immediately before the lifecycle reset transaction.
-If an approved lifecycle reset raises after durable intent publication, propagate the interruption so the claimed continuation retains receipt-delivery ownership.
-For failures before durable intent publication, log one bounded lifecycle-wide failure event and tell the caller to verify status before retrying.
+Authenticate the browser requester and revalidate the complete frozen target before mutation.
+Return completed stable operations before retirement, fence the requester-session key, and skip retirement only when authoritative storage proves the connection generation changed after confirmation.
+Otherwise retire every cached same-key session regardless of lease-revision mismatch, then invoke the lifecycle reset transaction.
 If teardown is cancelled, propagate cancellation while credentials remain intact.
-After deletion, release only the in-memory retirement fence before building the receipt.
+After reset completion, prepare the normal provider authorization redirect and consume the opaque reset token.
+Keep the token reusable when teardown, deletion, or authorization preparation fails safely.
 
 ### Task 4: Consolidate materialized client ownership
 
