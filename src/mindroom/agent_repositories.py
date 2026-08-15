@@ -65,6 +65,8 @@ _MAX_BROKER_RESPONSE_BYTES = 64 * 1024
 _MAX_GITHUB_REPOSITORY_ID_DIGITS = 20
 _MAX_GIT_CONFIG_BYTES = 1024 * 1024
 _GIT_CONFIG_PARSE_TIMEOUT_SECONDS = 5.0
+_GIT_CONFIG_STAGE_NAME = ".config.mindroom-stage"
+_GIT_CONFIG_BACKUP_NAME = ".config.mindroom-backup"
 
 
 class RepositoryBindingError(RuntimeError):
@@ -650,9 +652,9 @@ def _initialize_git_directory_atomically(workspace_fd: int, clone_url: str) -> i
     return git_fd
 
 
-def _open_git_config(git_fd: int) -> int:
+def _open_git_config_at(git_fd: int, name: str) -> int:
     try:
-        config_fd = os.open("config", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=git_fd)
+        config_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=git_fd)
     except OSError as exc:
         msg = "Agent repository workspace Git metadata files must be local regular files"
         raise RepositoryBindingError(msg) from exc
@@ -662,6 +664,10 @@ def _open_git_config(git_fd: int) -> int:
         msg = "Agent repository workspace Git metadata files must be local regular files"
         raise RepositoryBindingError(msg)
     return config_fd
+
+
+def _open_git_config(git_fd: int) -> int:
+    return _open_git_config_at(git_fd, "config")
 
 
 def _read_git_config_payload(config_fd: int) -> bytes:
@@ -821,31 +827,164 @@ def _git_config_is_current(git_fd: int, config_fd: int) -> bool:
     return _regular_file_descriptor_matches(git_fd, "config", config_fd)
 
 
-def _stage_git_config(git_fd: int, payload: bytes) -> tuple[str, int]:
-    staging_name = f".config.mindroom-{secrets.token_hex(8)}"
+def _stage_git_config(git_fd: int, payload: bytes, mode: int) -> int:
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     try:
-        staging_fd = os.open(staging_name, flags, 0o644, dir_fd=git_fd)
+        staging_fd = os.open(_GIT_CONFIG_STAGE_NAME, flags, 0o600, dir_fd=git_fd)
         try:
             _write_all(staging_fd, payload)
+            os.fchmod(staging_fd, mode)
             os.fsync(staging_fd)
+            os.fsync(git_fd)
         except Exception:
             os.close(staging_fd)
             raise
     except Exception:
         with suppress(FileNotFoundError):
-            os.unlink(staging_name, dir_fd=git_fd)
+            os.unlink(_GIT_CONFIG_STAGE_NAME, dir_fd=git_fd)
         raise
-    return staging_name, staging_fd
+    return staging_fd
 
 
-def _restore_git_config_backup(git_fd: int, backup_name: str) -> bool:
+def _restore_git_config_backup(git_fd: int) -> bool:
     try:
-        _rename_at_no_replace(git_fd, backup_name, git_fd, "config")
+        _rename_at_no_replace(git_fd, _GIT_CONFIG_BACKUP_NAME, git_fd, "config")
     except OSError:
         return False
     os.fsync(git_fd)
     return True
+
+
+def _git_config_with_origin(config: bytes, clone_url: str) -> bytes:
+    separator = b"\n" if config and not config.endswith(b"\n") else b""
+    expected = config + separator + _remote_origin_config(clone_url)
+    if len(expected) > _MAX_GIT_CONFIG_BYTES:
+        msg = "Agent repository workspace Git config is too large"
+        raise RepositoryBindingError(msg)
+    return expected
+
+
+def _entry_exists_at(directory_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _validate_git_config_transaction_pair(
+    git_fd: int,
+    original_name: str,
+    original_fd: int,
+    replacement_name: str,
+    replacement_fd: int,
+    clone_url: str,
+) -> None:
+    original = _read_git_config_payload(original_fd)
+    _fetch_urls, _push_urls, has_origin = _origin_urls_from_config(_parse_git_config_entries(original))
+    replacement = _read_git_config_payload(replacement_fd)
+    original_mode = stat.S_IMODE(os.fstat(original_fd).st_mode)
+    replacement_mode = stat.S_IMODE(os.fstat(replacement_fd).st_mode)
+    if has_origin or replacement != _git_config_with_origin(original, clone_url) or replacement_mode != original_mode:
+        msg = "Agent repository workspace has an invalid interrupted Git config transaction"
+        raise RepositoryBindingError(msg)
+    if not _regular_file_descriptor_matches(git_fd, original_name, original_fd) or not _regular_file_descriptor_matches(
+        git_fd,
+        replacement_name,
+        replacement_fd,
+    ):
+        msg = "Agent repository workspace Git config changed during recovery"
+        raise RepositoryBindingError(msg)
+
+
+def _require_git_config_transaction_pair(
+    git_fd: int,
+    original_name: str,
+    replacement_name: str,
+    clone_url: str,
+) -> tuple[int, int]:
+    original_fd = _open_git_config_at(git_fd, original_name)
+    try:
+        replacement_fd = _open_git_config_at(git_fd, replacement_name)
+    except Exception:
+        os.close(original_fd)
+        raise
+    try:
+        _validate_git_config_transaction_pair(
+            git_fd,
+            original_name,
+            original_fd,
+            replacement_name,
+            replacement_fd,
+            clone_url,
+        )
+    except Exception:
+        os.close(replacement_fd)
+        os.close(original_fd)
+        raise
+    return original_fd, replacement_fd
+
+
+def _recover_interrupted_git_config_transaction(git_fd: int, clone_url: str) -> None:
+    config_exists = _entry_exists_at(git_fd, "config")
+    stage_exists = _entry_exists_at(git_fd, _GIT_CONFIG_STAGE_NAME)
+    backup_exists = _entry_exists_at(git_fd, _GIT_CONFIG_BACKUP_NAME)
+    if not stage_exists and not backup_exists:
+        return
+
+    if config_exists and stage_exists and not backup_exists:
+        original_fd, replacement_fd = _require_git_config_transaction_pair(
+            git_fd,
+            "config",
+            _GIT_CONFIG_STAGE_NAME,
+            clone_url,
+        )
+        try:
+            os.unlink(_GIT_CONFIG_STAGE_NAME, dir_fd=git_fd)
+            os.fsync(git_fd)
+        finally:
+            os.close(replacement_fd)
+            os.close(original_fd)
+        return
+
+    if not config_exists and stage_exists and backup_exists:
+        original_fd, replacement_fd = _require_git_config_transaction_pair(
+            git_fd,
+            _GIT_CONFIG_BACKUP_NAME,
+            _GIT_CONFIG_STAGE_NAME,
+            clone_url,
+        )
+        try:
+            if not _restore_git_config_backup(git_fd) or not _git_config_is_current(git_fd, original_fd):
+                msg = "Agent repository workspace Git config changed during recovery"
+                raise RepositoryBindingError(msg)
+            if not _regular_file_descriptor_matches(git_fd, _GIT_CONFIG_STAGE_NAME, replacement_fd):
+                msg = "Agent repository workspace Git config changed during recovery"
+                raise RepositoryBindingError(msg)
+            os.unlink(_GIT_CONFIG_STAGE_NAME, dir_fd=git_fd)
+            os.fsync(git_fd)
+        finally:
+            os.close(replacement_fd)
+            os.close(original_fd)
+        return
+
+    if config_exists and not stage_exists and backup_exists:
+        original_fd, replacement_fd = _require_git_config_transaction_pair(
+            git_fd,
+            _GIT_CONFIG_BACKUP_NAME,
+            "config",
+            clone_url,
+        )
+        try:
+            os.unlink(_GIT_CONFIG_BACKUP_NAME, dir_fd=git_fd)
+            os.fsync(git_fd)
+        finally:
+            os.close(replacement_fd)
+            os.close(original_fd)
+        return
+
+    msg = "Agent repository workspace has an ambiguous interrupted Git config transaction"
+    raise RepositoryBindingError(msg)
 
 
 def _replace_git_config_if_unchanged(
@@ -854,40 +993,42 @@ def _replace_git_config_if_unchanged(
     original: bytes,
     replacement: bytes,
 ) -> None:
-    staging_name, staging_fd = _stage_git_config(git_fd, replacement)
-    backup_name = f".config.mindroom-backup-{secrets.token_hex(8)}"
+    config_mode = stat.S_IMODE(os.fstat(config_fd).st_mode)
+    staging_fd = _stage_git_config(git_fd, replacement, config_mode)
     backup_exists = False
     published = False
     try:
-        os.rename("config", backup_name, src_dir_fd=git_fd, dst_dir_fd=git_fd)
+        _rename_at_no_replace(git_fd, "config", git_fd, _GIT_CONFIG_BACKUP_NAME)
         backup_exists = True
+        os.fsync(git_fd)
         if (
-            not _regular_file_descriptor_matches(git_fd, backup_name, config_fd)
+            not _regular_file_descriptor_matches(git_fd, _GIT_CONFIG_BACKUP_NAME, config_fd)
             or _read_git_config_payload(config_fd) != original
         ):
-            if _restore_git_config_backup(git_fd, backup_name):
+            if _restore_git_config_backup(git_fd):
                 backup_exists = False
             msg = "Agent repository workspace Git config changed during configuration"
             raise RepositoryBindingError(msg)
         try:
-            _rename_at_no_replace(git_fd, staging_name, git_fd, "config")
+            _rename_at_no_replace(git_fd, _GIT_CONFIG_STAGE_NAME, git_fd, "config")
         except OSError as exc:
-            if _restore_git_config_backup(git_fd, backup_name):
+            if _restore_git_config_backup(git_fd):
                 backup_exists = False
             msg = "Agent repository workspace Git config changed during configuration"
             raise RepositoryBindingError(msg) from exc
         published = True
+        os.fsync(git_fd)
         if not _git_config_is_current(git_fd, staging_fd) or _read_git_config_payload(staging_fd) != replacement:
             msg = "Agent repository workspace Git config changed during configuration"
             raise RepositoryBindingError(msg)
-        os.unlink(backup_name, dir_fd=git_fd)
+        os.unlink(_GIT_CONFIG_BACKUP_NAME, dir_fd=git_fd)
         backup_exists = False
         os.fsync(git_fd)
     finally:
         os.close(staging_fd)
         if not published:
             with suppress(FileNotFoundError):
-                os.unlink(staging_name, dir_fd=git_fd)
+                os.unlink(_GIT_CONFIG_STAGE_NAME, dir_fd=git_fd)
         if backup_exists:
             os.fsync(git_fd)
 
@@ -898,11 +1039,7 @@ def _append_origin_to_git_config(git_fd: int, config_fd: int, clone_url: str) ->
     if has_origin:
         msg = "Agent repository workspace origin changed during configuration"
         raise RepositoryOriginConflictError(msg)
-    separator = b"\n" if config and not config.endswith(b"\n") else b""
-    expected = config + separator + _remote_origin_config(clone_url)
-    if len(expected) > _MAX_GIT_CONFIG_BYTES:
-        msg = "Agent repository workspace Git config is too large"
-        raise RepositoryBindingError(msg)
+    expected = _git_config_with_origin(config, clone_url)
 
     _replace_git_config_if_unchanged(git_fd, config_fd, config, expected)
 
@@ -1041,6 +1178,7 @@ def configure_repository_workspace(
             try:
                 _reject_indirect_git_configuration(git_fd)
                 _require_complete_git_directory(git_fd)
+                _recover_interrupted_git_config_transaction(git_fd, clone_url)
                 _configure_git_origin(workspace_fd, git_fd, clone_url, expected)
                 _verify_configured_git_workspace(workspace_path, workspace_fd, git_fd, expected)
                 return workspace_path
