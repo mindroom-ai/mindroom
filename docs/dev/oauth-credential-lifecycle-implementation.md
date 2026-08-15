@@ -223,6 +223,7 @@ Use `refresh_oauth_credentials_sync()` for eager and provider-driven lazy refres
 Pass `AuthorizationConfig` through managed tool construction instead of depending on an ambient runtime context for alias resolution.
 Read eager credentials and their generation under the operation lock, then compare canonical context plus generation before every managed call that could reuse cached credentials.
 Advance generation before terminal credential invalidation so all materialized clients discard the rejected grant.
+Serialize provider-driven refresh per materialized Google client and publish its snapshot, token, expiry, refresh token, and outcome before releasing concurrent callers.
 Keep Google-specific structured `RefreshError` classification in the adapter.
 Translate terminal Google rejection to `OAuthRefreshRejectedError`, let lifecycle deletion occur under the operation lock, and return the shared reconnect payload.
 Continue raising a fixed sanitized `RefreshError` to upstream Google code when transport integration requires that type.

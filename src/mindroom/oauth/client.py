@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import threading
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum, auto
 from functools import wraps
@@ -65,6 +66,24 @@ class _OAuthAuthSource(Enum):
     ORIGINAL_AUTH = auto()
     VALID_CREDENTIALS = auto()
     STORED_OAUTH = auto()
+
+
+class _GoogleRefreshFailure(Enum):
+    """Known refresh failures replayed to concurrent callers of one client."""
+
+    TERMINAL = auto()
+    PROVIDER = auto()
+    MISSING = auto()
+
+
+@dataclass(slots=True)
+class _GoogleRefreshState:
+    """Serialized local publication state for one Google credential object."""
+
+    snapshot: dict[str, Any]
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    last_succeeded: bool = False
+    last_failure: _GoogleRefreshFailure | None = None
 
 
 class _AuthDescriptor(Protocol):
@@ -251,43 +270,78 @@ class ScopedOAuthClientMixin:
     def _credentials_from_token_data(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401
         """Create Google credentials whose lazy refresh uses the lifecycle owner."""
         credentials = self._raw_credentials_from_token_data(token_data)
-        refresh_snapshot = dict(token_data)
-        refresh_snapshot_lock = threading.Lock()
+        refresh_state = _GoogleRefreshState(snapshot=dict(token_data))
 
         def tracked_refresh(request: object) -> None:
-            with refresh_snapshot_lock:
-                triggering_snapshot = dict(refresh_snapshot)
-
-            def refresh_if_unchanged(current: Mapping[str, Any]) -> dict[str, Any] | None:
-                if dict(current) != triggering_snapshot:
-                    return None
-                return self._refresh_google_token_data(current, request, force=True)
-
-            context = self._oauth_credential_context()
-            try:
-                result = refresh_oauth_credentials_sync(
-                    context,
-                    refresh_if_unchanged,
-                )
-            except OAuthRefreshRejectedError:
-                self._mark_oauth_connection_required(reason=OAUTH_REFRESH_REJECTED_REASON)
-                self.service = None
-                raise _SanitizedGoogleRefreshError(_SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE) from None
-            except OAuthProviderError:
-                raise _SanitizedGoogleRefreshError(_SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE) from None
-            if result.credentials is None:
-                self._mark_oauth_connection_required()
-                raise _SanitizedGoogleRefreshError(_SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE)
-            with refresh_snapshot_lock:
-                refresh_snapshot.clear()
-                refresh_snapshot.update(result.credentials)
-            self._oauth_credential_revision = (context, result.generation)
-            refreshed = self._raw_credentials_from_token_data(result.credentials)
-            credentials.token = refreshed.token
-            credentials.expiry = refreshed.expiry
+            self._refresh_google_credentials(credentials, refresh_state, request)
 
         credentials.refresh = tracked_refresh
         return credentials
+
+    def _refresh_google_credentials(
+        self,
+        credentials: Any,  # noqa: ANN401
+        state: _GoogleRefreshState,
+        request: object,
+    ) -> None:
+        """Serialize one client's provider refresh and local credential publication."""
+        joined_inflight_refresh = not state.lock.acquire(blocking=False)
+        if joined_inflight_refresh:
+            state.lock.acquire()
+        try:
+            if joined_inflight_refresh and state.last_succeeded:
+                return
+            if joined_inflight_refresh and state.last_failure is not None:
+                self._raise_google_refresh_failure(state.last_failure)
+            self._refresh_google_credentials_locked(credentials, state, request)
+        finally:
+            state.lock.release()
+
+    def _refresh_google_credentials_locked(
+        self,
+        credentials: Any,  # noqa: ANN401
+        state: _GoogleRefreshState,
+        request: object,
+    ) -> None:
+        """Refresh and publish while holding one materialized client's refresh lock."""
+        state.last_succeeded = False
+        state.last_failure = None
+        triggering_snapshot = dict(state.snapshot)
+
+        def refresh_if_unchanged(current: Mapping[str, Any]) -> dict[str, Any] | None:
+            if dict(current) != triggering_snapshot:
+                return None
+            return self._refresh_google_token_data(current, request, force=True)
+
+        context = self._oauth_credential_context()
+        try:
+            result = refresh_oauth_credentials_sync(context, refresh_if_unchanged)
+        except OAuthRefreshRejectedError:
+            state.last_failure = _GoogleRefreshFailure.TERMINAL
+            self._raise_google_refresh_failure(state.last_failure)
+        except OAuthProviderError:
+            state.last_failure = _GoogleRefreshFailure.PROVIDER
+            self._raise_google_refresh_failure(state.last_failure)
+        if result.credentials is None:
+            state.last_failure = _GoogleRefreshFailure.MISSING
+            self._raise_google_refresh_failure(state.last_failure)
+        refreshed = self._raw_credentials_from_token_data(result.credentials)
+        credentials.token = refreshed.token
+        credentials.expiry = refreshed.expiry
+        credentials.refresh_token = refreshed.refresh_token
+        state.snapshot.clear()
+        state.snapshot.update(result.credentials)
+        self._oauth_credential_revision = (context, result.generation)
+        state.last_succeeded = True
+
+    def _raise_google_refresh_failure(self, failure: _GoogleRefreshFailure) -> NoReturn:
+        """Replay one sanitized refresh outcome to the current caller thread."""
+        if failure is _GoogleRefreshFailure.TERMINAL:
+            self._mark_oauth_connection_required(reason=OAUTH_REFRESH_REJECTED_REASON)
+            self.service = None
+        elif failure is _GoogleRefreshFailure.MISSING:
+            self._mark_oauth_connection_required()
+        raise _SanitizedGoogleRefreshError(_SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE) from None
 
     def _refresh_google_token_data(
         self,

@@ -31,13 +31,18 @@ from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, 
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 from mindroom.oauth import client as oauth_client_module
 from mindroom.oauth.client import ScopedOAuthClientMixin
-from mindroom.oauth.credential_lifecycle import reset_oauth_credentials
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialContext,
+    OAuthCredentialsRefreshResult,
+    reset_oauth_credentials,
+)
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.oauth.service import oauth_credentials_worker_target
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
 
@@ -529,6 +534,106 @@ def test_google_lazy_refresh_reuses_rotation_committed_for_a_stale_client(
     assert provider_calls == 1
     assert tools[0].creds.token == rotated_access
     assert tools[1].creds.token == rotated_access
+
+
+def test_google_lazy_refresh_serializes_local_snapshot_publication(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """One client must not rotate again before its prior local token publication finishes."""
+    first_rotated_access_token = "rotated-access-token-1"  # noqa: S105
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "expired-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 1.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    provider_calls = 0
+    provider_calls_lock = threading.Lock()
+
+    def rotate(credentials: object, _request: object) -> None:
+        nonlocal provider_calls
+        with provider_calls_lock:
+            provider_calls += 1
+            call_number = provider_calls
+        credentials.token = f"rotated-access-token-{call_number}"  # type: ignore[attr-defined]
+        credentials.expiry = datetime.fromtimestamp(4_102_444_800.0, tz=UTC)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", rotate)
+    real_refresh = oauth_client_module.refresh_oauth_credentials_sync
+    lifecycle_calls = 0
+    lifecycle_calls_lock = threading.Lock()
+    second_lifecycle_entered = threading.Event()
+
+    def observe_refresh(
+        context: OAuthCredentialContext,
+        refresh: Callable[[Mapping[str, Any]], dict[str, Any] | None],
+    ) -> OAuthCredentialsRefreshResult:
+        nonlocal lifecycle_calls
+        with lifecycle_calls_lock:
+            lifecycle_calls += 1
+            if lifecycle_calls == 2:
+                second_lifecycle_entered.set()
+        return real_refresh(context, refresh)
+
+    monkeypatch.setattr(oauth_client_module, "refresh_oauth_credentials_sync", observe_refresh)
+    real_raw_credentials = tool._raw_credentials_from_token_data
+    first_publish_blocked = threading.Event()
+    release_first_publish = threading.Event()
+
+    def block_first_publish(token_data: dict[str, Any]) -> Any:  # noqa: ANN401
+        refreshed = real_raw_credentials(token_data)
+        if token_data.get("token") == first_rotated_access_token:
+            first_publish_blocked.set()
+            assert release_first_publish.wait(timeout=5)
+        return refreshed
+
+    monkeypatch.setattr(tool, "_raw_credentials_from_token_data", block_first_publish)
+    second_call_started = threading.Event()
+
+    def second_refresh() -> None:
+        second_call_started.set()
+        tool.creds.refresh(object())
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(tool.creds.refresh, object())
+        assert first_publish_blocked.wait(timeout=5)
+        second = executor.submit(second_refresh)
+        assert second_call_started.wait(timeout=5)
+        try:
+            assert not second_lifecycle_entered.wait(timeout=0.5)
+        finally:
+            release_first_publish.set()
+        first.result(timeout=5)
+        second.result(timeout=5)
+
+    assert provider_calls == 1
+    assert tool.creds.token == first_rotated_access_token
 
 
 def test_google_wrapper_constructor_canonicalizes_alias_without_runtime_context(

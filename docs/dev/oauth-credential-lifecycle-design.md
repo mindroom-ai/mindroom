@@ -155,6 +155,7 @@ Focused tests cover observable lifecycle behavior rather than private lock chore
 - Reset success is reported only after the credential unlink and parent-directory update are flushed.
 - Refresh cancellation before operation-lock ownership never calls the provider, while cancellation after ownership waits for local publication.
 - Google lazy refresh, GitHub refresh, MCP refresh, API status refresh, and dashboard callback all use the same operation-lock path.
+- Concurrent lazy refresh calls on one Google client publish one in-memory snapshot atomically and reuse its outcome.
 - Bridge aliases canonicalize only for OAuth credential targets, reset links authorize for the alias, and callbacks store in the canonical scope.
 - Terminal refresh rejection returns the same structured reconnect reason and instruction from every consumer.
 - Logs never include refresh tokens, access tokens, or unrecognized provider-controlled error text.
