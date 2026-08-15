@@ -67,6 +67,10 @@ class ThreadLocalGoogleServiceMixin:
             state.user_email = None
         state.credential_key = value
 
+    def _adopt_google_credential_revision(self, value: object) -> None:
+        """Advance one same-account revision without invalidating an active service call."""
+        self._google_service_state().credential_key = value
+
     @property
     def _label_cache(self) -> dict[str, str] | None:
         """Return Gmail label identities owned by the current account thread."""

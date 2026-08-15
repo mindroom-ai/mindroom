@@ -24,7 +24,7 @@ _durable_directory_identities_lock = Lock()
 
 
 def create_directory_durable(path: Path, *, mode: int) -> None:
-    """Create one directory and idempotently publish its private entry."""
+    """Create one directory and durably publish it when directory fsync is available."""
     path.mkdir(mode=mode, exist_ok=True)
     path.chmod(mode)
     stat = path.stat()
@@ -43,7 +43,7 @@ def create_directory_durable(path: Path, *, mode: int) -> None:
 
 
 def delete_file_durable(path: Path) -> bool:
-    """Unlink one file and durably publish its directory update."""
+    """Unlink one file and durably publish it when directory fsync is available."""
     try:
         path.unlink()
     except FileNotFoundError:
@@ -54,7 +54,7 @@ def delete_file_durable(path: Path) -> bool:
 
 
 def replace_file_durable(source: Path, target: Path) -> None:
-    """Atomically replace one file and durably publish its directory update."""
+    """Atomically replace one file and durably publish it when directory fsync is available."""
     source.replace(target)
     _fsync_directory_durable(target.parent)
 
@@ -167,7 +167,7 @@ def _fsync_directory(directory: Path) -> None:
 
 
 def _fsync_directory_durable(directory: Path) -> None:
-    """Flush one directory update and propagate durability failures."""
+    """Flush one supported directory update and propagate durability failures."""
     if not _DIRECTORY_FSYNC_SUPPORTED:
         return
     directory_fd = os.open(directory, os.O_RDONLY)

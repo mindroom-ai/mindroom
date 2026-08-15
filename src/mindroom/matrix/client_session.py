@@ -26,7 +26,7 @@ from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable, Mapping
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 
 logger = get_logger(__name__)
 
@@ -91,20 +91,22 @@ class _AsyncRequestHeaders(Protocol):
 class _MindRoomAsyncClient(nio.AsyncClient):
     """Matrix client for MindRoom-specific encrypted event behavior."""
 
-    _before_sync_response_callback: Callable[[nio.SyncResponse | nio.SlidingSyncResponse], None] | None = None
+    _before_sync_response_callback: Callable[[nio.SyncResponse | nio.SlidingSyncResponse], Awaitable[None]] | None = (
+        None
+    )
 
     def set_before_sync_response_callback(
         self,
-        callback: Callable[[nio.SyncResponse | nio.SlidingSyncResponse], None],
+        callback: Callable[[nio.SyncResponse | nio.SlidingSyncResponse], Awaitable[None]],
     ) -> None:
-        """Register synchronous control-plane work that must precede timeline admission."""
+        """Register control-plane work that must complete before timeline admission."""
         self._before_sync_response_callback = callback
 
     async def _handle_to_device(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Run control-plane fencing on nio's accepted response before event fanout."""
         callback = self._before_sync_response_callback
         if callback is not None:
-            callback(response)
+            await callback(response)
         await super()._handle_to_device(response)
 
     async def send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
@@ -216,7 +218,7 @@ def _require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
 
 def set_before_sync_response_callback(
     client: nio.AsyncClient,
-    callback: Callable[[nio.SyncResponse | nio.SlidingSyncResponse], None],
+    callback: Callable[[nio.SyncResponse | nio.SlidingSyncResponse], Awaitable[None]],
 ) -> None:
     """Register pre-admission sync work on a MindRoom-created Matrix client."""
     if not isinstance(client, _MindRoomAsyncClient):

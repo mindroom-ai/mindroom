@@ -118,8 +118,12 @@ Matrix sync callback
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval_execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
+| `approval_bindings.py` | Exact persisted tool descriptors and OAuth reset target bindings for approval replay |
 | `approval_response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |
 | `approval_manager.py` | Matrix-backed tool approval runtime state |
+| `oauth/credential_lifecycle.py` | Single transaction owner for scoped OAuth load, refresh, callback publication, invalidation, and reset state |
+| `oauth/reset.py` | OAuth reset target resolution, authorization binding, and replay validation |
+| `oauth/reset_execution.py` | MCP retirement, durable reset execution, and reconnect receipt rendering |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `agents.py` | Agent creation and configuration |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |

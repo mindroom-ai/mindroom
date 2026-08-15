@@ -445,6 +445,27 @@ def oauth_reset_operation_result(context: OAuthCredentialContext, operation_id: 
     return operation.credential_existed
 
 
+def oauth_reset_operation_result_for_target(
+    credential_service: str,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget,
+    operation_id: str,
+) -> bool | None:
+    """Read one completed reset result from an exact frozen credential target."""
+    state = _load_oauth_credential_state_path(
+        _credential_generation_path_for_target(
+            credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        ),
+    )
+    operation = state.reset_operations.get(operation_id)
+    if operation is None or not operation.replayable or operation.status != "completed":
+        return None
+    return operation.credential_existed
+
+
 def oauth_reset_operation_snapshot(
     context: OAuthCredentialContext,
     operation_id: str,
@@ -461,7 +482,11 @@ def oauth_reset_operation_snapshot(
 
 def _load_oauth_credential_state(context: OAuthCredentialContext) -> _OAuthCredentialState:
     """Load and validate generation plus replay-safe reset state."""
-    path = _credential_generation_path(context)
+    return _load_oauth_credential_state_path(_credential_generation_path(context))
+
+
+def _load_oauth_credential_state_path(path: Path) -> _OAuthCredentialState:
+    """Load and validate generation plus replay-safe reset state from one exact path."""
     if not path.exists():
         return _OAuthCredentialState(
             generation=_INITIAL_CREDENTIAL_GENERATION,
@@ -1037,10 +1062,23 @@ def _operation_lock_path(context: OAuthCredentialContext) -> Path:
 
 
 def _credential_generation_path(context: OAuthCredentialContext) -> Path:
-    credentials_path = scoped_credentials_path(
+    return _credential_generation_path_for_target(
         context.provider.credential_service,
         credentials_manager=context.credentials_manager,
         worker_target=context.worker_target,
+    )
+
+
+def _credential_generation_path_for_target(
+    credential_service: str,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+) -> Path:
+    credentials_path = scoped_credentials_path(
+        credential_service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
     )
     return credentials_path.with_name(f"{credentials_path.name}.oauth-generation.json")
 

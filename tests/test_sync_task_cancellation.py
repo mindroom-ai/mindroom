@@ -128,13 +128,13 @@ class _FakeBot:
         self.membership_invalidations: list[str] = []
         self.runtime_paths = _fake_runtime_paths(**env_overrides)
 
-    def mark_sync_loop_started(self) -> None:
+    async def mark_sync_loop_started(self) -> None:
         self._sync_shutting_down = False
 
     def reset_watchdog_clock(self) -> None:
         self._last_sync_monotonic = None
 
-    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
+    async def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
         """Record fail-closed router membership invalidations."""
         self.membership_invalidations.append(reason)
 
@@ -323,7 +323,11 @@ async def test_sync_forever_cancels_iteration_before_checkpoint_shutdown(monkeyp
             call_order.append("cancel")
 
     bot.prepare_for_sync_shutdown = prepare_for_sync_shutdown
-    monkeypatch.setattr(_SyncIteration, "start", lambda _bot: FakeIteration())
+
+    async def start_iteration(_bot: _ResponseOwningBot) -> FakeIteration:
+        return FakeIteration()
+
+    monkeypatch.setattr(_SyncIteration, "start", start_iteration)
 
     await sync_forever_with_restart(bot)
 
@@ -339,8 +343,8 @@ async def test_sync_forever_with_restart_restarts_stalled_sync(monkeypatch: pyte
     # Arm the monotonic clock so the steady-state watchdog fires.
     original_mark = bot.mark_sync_loop_started
 
-    def arm_and_mark() -> None:
-        original_mark()
+    async def arm_and_mark() -> None:
+        await original_mark()
         bot._last_sync_monotonic = time.monotonic()
 
     bot.mark_sync_loop_started = arm_and_mark
@@ -540,7 +544,7 @@ async def test_replacement_start_failure_is_visible_bounded_and_preserves_respon
             assert shutdown_intent == GENERIC_SHUTDOWN
             cleanup_calls += 1
 
-    def start_iteration(_bot: _ResponseOwningBot) -> StalledIteration:
+    async def start_iteration(_bot: _ResponseOwningBot) -> StalledIteration:
         nonlocal start_calls
         start_calls += 1
         if start_calls == 1:
@@ -586,8 +590,8 @@ async def test_stalled_restart_waits_with_jitter(monkeypatch: pytest.MonkeyPatch
     bot = _FakeBot()
     original_mark = bot.mark_sync_loop_started
 
-    def arm_and_mark() -> None:
-        original_mark()
+    async def arm_and_mark() -> None:
+        await original_mark()
         bot._last_sync_monotonic = time.monotonic()
 
     bot.mark_sync_loop_started = arm_and_mark
@@ -932,7 +936,7 @@ async def test_sync_forever_with_restart_preserves_runtime_before_retry_backoff(
         call_order.append("retry_delay")
         return 0.0
 
-    def invalidate_agent_reply_memberships(*, reason: str) -> None:
+    async def invalidate_agent_reply_memberships(*, reason: str) -> None:
         bot.membership_invalidations.append(reason)
         call_order.append("invalidate")
 
@@ -3107,7 +3111,7 @@ async def test_watchdog_coroutine_closed_on_create_task_failure(monkeypatch: pyt
     monkeypatch.setattr(asyncio, "create_task", failing_create_task)
 
     with pytest.raises(RuntimeError, match="simulated create_task failure"):
-        _SyncIteration.start(bot)
+        await _SyncIteration.start(bot)
 
     # No RuntimeWarning about unawaited coroutines should be produced.
     # The sync_task created by the first create_task was cancelled.
@@ -3153,8 +3157,8 @@ async def test_restart_resets_monotonic_clock(monkeypatch: pytest.MonkeyPatch) -
     # Arm the monotonic clock on iteration 1 so the steady-state watchdog fires.
     original_mark = bot.mark_sync_loop_started
 
-    def arm_and_mark() -> None:
-        original_mark()
+    async def arm_and_mark() -> None:
+        await original_mark()
         if iteration == 0:
             bot._last_sync_monotonic = time.monotonic()
 

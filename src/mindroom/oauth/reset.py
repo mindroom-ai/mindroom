@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     load_oauth_credentials_snapshot,
+    oauth_reset_operation_result_for_target,
     resolve_oauth_credential_context,
 )
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
+from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, resolve_worker_target
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.providers import OAuthProvider
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
 
 _OAUTH_RESET_TOOL_NAME = "reset_oauth_connection"
 
@@ -216,6 +217,11 @@ async def _oauth_reset_target_binding(target: _ResolvedOAuthResetTarget) -> dict
 def _oauth_reset_target_identity_binding(target: _ResolvedOAuthResetTarget) -> dict[str, object]:
     """Return the canonical reset target without reading mutable credential state."""
     worker_target = target.worker_target
+    execution_identity = worker_target.execution_identity
+    credential_requester_id = execution_identity.requester_id if execution_identity is not None else None
+    if not credential_requester_id:
+        msg = "Agent-initiated OAuth reset requires a canonical requester identity."
+        raise _OAuthResetApprovalBindingError(msg)
     return {
         "provider_id": target.provider.id,
         "credential_service": target.provider.credential_service,
@@ -223,4 +229,50 @@ def _oauth_reset_target_identity_binding(target: _ResolvedOAuthResetTarget) -> d
         "worker_scope": cast("str", worker_target.worker_scope),
         "worker_key": cast("str", worker_target.worker_key),
         "routing_agent_name": cast("str", worker_target.routing_agent_name),
+        "credential_requester_id": credential_requester_id,
     }
+
+
+def completed_oauth_reset_result_from_binding(
+    binding: Mapping[str, object],
+    *,
+    execution_identity: ToolExecutionIdentity,
+    runtime_paths: RuntimePaths,
+    operation_id: str,
+) -> bool | None:
+    """Read completed reset debt from one frozen scope without live provider resolution."""
+    credential_service = binding.get("credential_service")
+    worker_scope = binding.get("worker_scope")
+    worker_key = binding.get("worker_key")
+    routing_agent_name = binding.get("routing_agent_name")
+    credential_requester_id = binding.get("credential_requester_id")
+    if (
+        not isinstance(credential_service, str)
+        or not credential_service.endswith("_oauth")
+        or worker_scope not in {"user", "user_agent"}
+        or not isinstance(worker_key, str)
+        or not worker_key
+        or not isinstance(routing_agent_name, str)
+        or not routing_agent_name
+        or not isinstance(credential_requester_id, str)
+        or not credential_requester_id
+    ):
+        return None
+    frozen_identity = replace(
+        execution_identity,
+        agent_name=routing_agent_name,
+        requester_id=credential_requester_id,
+    )
+    frozen_target = resolve_worker_target(
+        cast("WorkerScope", worker_scope),
+        routing_agent_name,
+        frozen_identity,
+    )
+    if frozen_target.worker_key != worker_key:
+        return None
+    return oauth_reset_operation_result_for_target(
+        credential_service,
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=frozen_target,
+        operation_id=operation_id,
+    )

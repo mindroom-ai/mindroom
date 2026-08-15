@@ -76,7 +76,7 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Handle a managed bot completing its first sync."""
         ...
 
-    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
+    def invalidate_agent_reply_memberships(self, *, reason: str) -> Awaitable[None]:
         """Revoke room-backed reply grants until the router refreshes them."""
         ...
 

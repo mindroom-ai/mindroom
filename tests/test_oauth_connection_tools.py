@@ -28,6 +28,7 @@ from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.reset import (
     build_oauth_reset_approval_bindings,
+    completed_oauth_reset_result_from_binding,
     validate_oauth_reset_approval_bindings,
 )
 from mindroom.oauth.service import lookup_oauth_connect_token, oauth_credentials_worker_target
@@ -231,6 +232,58 @@ async def test_oauth_reset_approval_binding_rejects_worker_scope_drift(tmp_path:
             runtime_paths=context.runtime_paths,
             execution_identity=execution_identity,
         )
+
+
+@pytest.mark.asyncio
+async def test_completed_oauth_reset_binding_survives_live_provider_config_removal(tmp_path: Path) -> None:
+    """A frozen credential locator must prove completed reset debt without live provider config."""
+    _tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    tool_call = ToolExecution(
+        tool_call_id="reset-call",
+        tool_name="reset_oauth_connection",
+        tool_args={"provider_id": "google_drive"},
+        requires_confirmation=True,
+    )
+    execution_identity = build_execution_identity_from_runtime_context(context)
+    bindings = await build_oauth_reset_approval_bindings(
+        ((tool_call, "reset-call", "reset_oauth_connection", "research"),),
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        execution_identity=execution_identity,
+    )
+    target = oauth_reset_module.resolve_oauth_reset_target(
+        "google_drive",
+        agent_name="research",
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        execution_identity=execution_identity,
+    )
+    operation_id = "approval-reset:3:reset-call"
+    await credential_lifecycle.reset_oauth_credentials(
+        target.credential_context,
+        operation_id=operation_id,
+    )
+    binding = bindings["reset-call"]
+
+    assert (
+        completed_oauth_reset_result_from_binding(
+            binding,
+            execution_identity=execution_identity,
+            runtime_paths=context.runtime_paths,
+            operation_id=operation_id,
+        )
+        is False
+    )
+    assert binding["credential_requester_id"] == "@alice:example.org"
+    assert (
+        completed_oauth_reset_result_from_binding(
+            {**binding, "worker_key": "v1:default:user_agent:wrong:research"},
+            execution_identity=execution_identity,
+            runtime_paths=context.runtime_paths,
+            operation_id=operation_id,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio

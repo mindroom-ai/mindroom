@@ -200,7 +200,7 @@ async def test_non_join_transition_revokes_ready_member(tmp_path: Path, membersh
     index = AgentReplyMembershipIndex()
     await index.refresh(config, runtime_paths, client)
 
-    index.apply_member_event(
+    await index.apply_member_event_serialized(
         config,
         runtime_paths,
         room_id,
@@ -208,6 +208,36 @@ async def test_non_join_transition_revokes_ready_member(tmp_path: Path, membersh
         control_user_id="@mindroom_router:example.com",
     )
 
+    assert not index.is_allowed("@alice:example.com", ["project"], config.authorization)
+
+
+@pytest.mark.asyncio
+async def test_authorization_decision_serializes_live_membership_revocation(tmp_path: Path) -> None:
+    """A durable response claim must linearize before or after a live membership revocation."""
+    room_id = "!project:example.com"
+    config, runtime_paths = _runtime_config(tmp_path, joined_rooms=["project"])
+    _persist_room(runtime_paths, "project", room_id)
+    client = AsyncMock()
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.return_value = _joined_members(room_id, "@alice:example.com")
+    index = AgentReplyMembershipIndex()
+    await index.refresh(config, runtime_paths, client)
+
+    async with index.authorization_decision():
+        revocation = asyncio.create_task(
+            index.apply_member_event_serialized(
+                config,
+                runtime_paths,
+                room_id,
+                _member_event("@alice:example.com", "leave"),
+                control_user_id="@mindroom_router:example.com",
+            ),
+        )
+        await asyncio.sleep(0)
+        assert not revocation.done()
+        assert index.is_allowed("@alice:example.com", ["project"], config.authorization)
+
+    assert await revocation is True
     assert not index.is_allowed("@alice:example.com", ["project"], config.authorization)
 
 
@@ -223,7 +253,7 @@ async def test_join_transition_adds_member_to_ready_snapshot(tmp_path: Path) -> 
     index = AgentReplyMembershipIndex()
     await index.refresh(config, runtime_paths, client)
 
-    index.apply_member_event(
+    await index.apply_member_event_serialized(
         config,
         runtime_paths,
         room_id,
@@ -254,7 +284,7 @@ async def test_alias_departure_preserves_other_joined_identity_for_canonical_use
     index = AgentReplyMembershipIndex()
     await index.refresh(config, runtime_paths, client)
 
-    index.apply_member_event(
+    await index.apply_member_event_serialized(
         config,
         runtime_paths,
         room_id,
@@ -278,7 +308,7 @@ async def test_control_client_departure_marks_grant_room_unready(tmp_path: Path)
     index = AgentReplyMembershipIndex()
     await index.refresh(config, runtime_paths, client)
 
-    index.apply_member_event(
+    await index.apply_member_event_serialized(
         config,
         runtime_paths,
         room_id,
@@ -308,12 +338,12 @@ async def test_authoritative_control_departure_fences_inflight_initial_snapshot(
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.side_effect = joined_members
     index = AgentReplyMembershipIndex()
-    index.invalidate(config, reason="startup")
+    await index.invalidate_serialized(config, reason="startup")
     refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
     await query_started.wait()
 
     try:
-        assert index.mark_control_room_unready(
+        assert await index.mark_control_room_unready_serialized(
             config,
             runtime_paths,
             room_id,
@@ -345,11 +375,11 @@ async def test_unrelated_membership_event_does_not_fence_inflight_refresh(tmp_pa
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.side_effect = joined_members
     index = AgentReplyMembershipIndex()
-    index.invalidate(config, reason="reload")
+    await index.invalidate_serialized(config, reason="reload")
     refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
     await query_started.wait()
 
-    index.apply_member_event(
+    await index.apply_member_event_serialized(
         config,
         runtime_paths,
         "!unrelated:example.com",
@@ -362,12 +392,13 @@ async def test_unrelated_membership_event_does_not_fence_inflight_refresh(tmp_pa
     assert index.is_allowed("@alice:example.com", ["project"], config.authorization)
 
 
-def test_transition_cannot_make_unready_room_authoritative(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_transition_cannot_make_unready_room_authoritative(tmp_path: Path) -> None:
     """A single live join must not replace the missing full membership baseline."""
     config, runtime_paths = _runtime_config(tmp_path, joined_rooms=["project"])
     index = AgentReplyMembershipIndex()
 
-    index.apply_member_event(
+    await index.apply_member_event_serialized(
         config,
         runtime_paths,
         "!project:example.com",
@@ -460,7 +491,7 @@ async def test_invalidation_revokes_ready_members_until_refresh(tmp_path: Path) 
     index = AgentReplyMembershipIndex()
     await index.refresh(config, runtime_paths, client)
 
-    index.invalidate(config, reason="sync_restart")
+    await index.invalidate_serialized(config, reason="sync_restart")
 
     assert index.needs_refresh(config.authorization)
     assert not index.is_allowed("@alice:example.com", ["project"], config.authorization)
@@ -486,11 +517,11 @@ async def test_invalidation_during_refresh_prevents_stale_publication(tmp_path: 
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.side_effect = joined_members
     index = AgentReplyMembershipIndex()
-    index.invalidate(config, reason="startup")
+    await index.invalidate_serialized(config, reason="startup")
     refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
     await first_query_started.wait()
 
-    index.invalidate(config, reason="reconnect")
+    await index.invalidate_serialized(config, reason="reconnect")
     release_first_query.set()
     await refresh_task
 
@@ -518,12 +549,12 @@ async def test_live_transition_fences_refresh_for_newly_resolved_room(tmp_path: 
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.side_effect = joined_members
     index = AgentReplyMembershipIndex()
-    index.invalidate(empty_config, reason="startup")
-    index.invalidate(config, reason="config_reload")
+    await index.invalidate_serialized(empty_config, reason="startup")
+    await index.invalidate_serialized(config, reason="config_reload")
     refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
     await query_started.wait()
 
-    index.apply_member_event(
+    await index.apply_member_event_serialized(
         config,
         runtime_paths,
         room_id,
@@ -556,12 +587,12 @@ async def test_old_policy_refresh_cannot_publish_after_policy_replacement(tmp_pa
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.side_effect = joined_members
     index = AgentReplyMembershipIndex()
-    index.invalidate(config, reason="startup")
+    await index.invalidate_serialized(config, reason="startup")
     refresh_task = asyncio.create_task(index.refresh(config, runtime_paths, client))
     await query_started.wait()
 
     changed_config, _ = _runtime_config(tmp_path, joined_rooms=["secondary"])
-    index.invalidate(changed_config, reason="config_reload")
+    await index.invalidate_serialized(changed_config, reason="config_reload")
     release_query.set()
     await refresh_task
 

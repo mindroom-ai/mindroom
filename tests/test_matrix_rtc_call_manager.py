@@ -1183,7 +1183,7 @@ async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_p
     await manager.on_room_event(_room(), _member_unknown_event())
     assert bridge.connected_grant is not None
 
-    memberships.apply_member_event(
+    await memberships.apply_member_event_serialized(
         config,
         runtime_paths,
         grant_room_id,
@@ -1228,7 +1228,7 @@ async def test_manager_starts_observed_call_after_grant_snapshot_becomes_ready(t
     state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
     state.save(runtime_paths=runtime_paths)
     memberships = AgentReplyMembershipIndex()
-    memberships.invalidate(config, reason="startup")
+    await memberships.invalidate_serialized(config, reason="startup")
     manager = _manager(
         client,
         bridge,
@@ -1284,7 +1284,7 @@ async def test_manager_starts_observed_call_after_live_grant_join(tmp_path: Path
     await manager.on_room_event(_room(), _member_unknown_event())
     assert bridge.connected_grant is None
 
-    memberships.apply_member_event(
+    await memberships.apply_member_event_serialized(
         config,
         runtime_paths,
         grant_room_id,
@@ -1423,7 +1423,7 @@ async def test_reply_revocation_stops_call_while_admission_is_closed(tmp_path: P
     assert bridge.connected_grant is GRANT
     assert gate.close_if_idle()
 
-    memberships.apply_member_event(
+    await memberships.apply_member_event_serialized(
         config,
         runtime_paths,
         grant_room_id,
@@ -1495,7 +1495,7 @@ async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -
 
     join_task = asyncio.create_task(manager.on_room_event(_room(), _member_unknown_event()))
     await asyncio.wait_for(bridge.agent_starting.wait(), timeout=1)
-    memberships.apply_member_event(
+    await memberships.apply_member_event_serialized(
         config,
         runtime_paths,
         grant_room_id,

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from html import escape, unescape
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from agno.db.base import SessionType
@@ -68,7 +71,11 @@ from mindroom.memory import (
     strip_user_turn_time_prefix,
 )
 from mindroom.oauth.credential_lifecycle import oauth_reset_operation_snapshot
-from mindroom.oauth.reset import resolve_oauth_reset_target, validate_oauth_reset_approval_bindings
+from mindroom.oauth.reset import (
+    completed_oauth_reset_result_from_binding,
+    resolve_oauth_reset_target,
+    validate_oauth_reset_approval_bindings,
+)
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     classify_cancel_source,
@@ -428,6 +435,11 @@ _REVOKED_OAUTH_RESET_RECEIPT = (
     "OAuth connection reset completed. Current authorization no longer permits "
     "publishing a reconnect link in this conversation."
 )
+_UNVERIFIED_OAUTH_RESET_RECEIPT = (
+    "OAuth connection reset status could not be verified. Current authorization no longer permits "
+    "publishing a reconnect link in this conversation."
+)
+_OAUTH_CONNECT_URL_PATTERN = re.compile(r"https?://[^\s<>\"'`]+?(?=;\s|[\s<>\"'`]|$)")
 
 
 def _replace_final_delivery_body(payload: Mapping[str, object], body: str) -> dict[str, object]:
@@ -450,6 +462,52 @@ def _replace_final_delivery_body(payload: Mapping[str, object], body: str) -> di
             replacement[DURABLE_FINAL_OUTCOME_KEY] = {**top_level_semantic, "body": body}
         replacement.pop(TOOL_TRACE_CONTENT_KEY, None)
     return replacement
+
+
+def _oauth_connect_url_from_text(text: str) -> str | None:
+    """Return the first structurally valid requester-bound OAuth connect URL."""
+    for match in _OAUTH_CONNECT_URL_PATTERN.finditer(text):
+        candidate = unescape(match.group(0))
+        parsed = urlparse(candidate)
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if (
+            parsed.scheme in {"http", "https"}
+            and len(path_parts) >= 4
+            and path_parts[-4:-2] == ["api", "oauth"]
+            and path_parts[-1] == "authorize"
+            and parse_qs(parsed.query).get("connect_token")
+        ):
+            return candidate
+    return None
+
+
+def _refresh_oauth_connect_urls_in_delivery(
+    payload: Mapping[str, object],
+    response_text: str,
+) -> dict[str, object]:
+    """Refresh only reconnect URLs that survived before-response hooks."""
+    fresh_url = _oauth_connect_url_from_text(response_text)
+    if fresh_url is None:
+        msg = "Fresh OAuth reset receipt has no requester-bound connect URL"
+        raise ValueError(msg)
+
+    def refresh(value: object) -> object:
+        if isinstance(value, str):
+
+            def replace_url(match: re.Match[str]) -> str:
+                matched = match.group(0)
+                if _oauth_connect_url_from_text(matched) is None:
+                    return matched
+                return escape(fresh_url, quote=True) if "&amp;" in matched else fresh_url
+
+            return _OAUTH_CONNECT_URL_PATTERN.sub(replace_url, value)
+        if isinstance(value, dict):
+            return {key: refresh(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [refresh(item) for item in value]
+        return value
+
+    return {key: refresh(value) for key, value in payload.items()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -2450,30 +2508,69 @@ class ResponseRunner:
         target: MessageTarget,
     ) -> FinalDeliveryOutcome | None:
         """Deliver proved reset debt without publishing reconnect material."""
+        if not await self._complete_revoked_oauth_reset_operation(claimed):
+            return None
+        return await self._deliver_recovered_oauth_reset_outcome(
+            claimed,
+            target=target,
+            response_text=_REVOKED_OAUTH_RESET_RECEIPT,
+        )
+
+    async def _complete_revoked_oauth_reset_operation(self, claimed: ApprovalContinuation) -> bool:
+        """Finish an existing stable reset operation without minting reconnect material."""
         from mindroom.oauth.reset_execution import complete_oauth_connection_reset  # noqa: PLC0415
 
+        frozen_result = self._completed_frozen_oauth_reset_result(claimed)
+        if frozen_result is not None:
+            return True
         try:
             recovery = await self._oauth_reset_recovery(claimed)
         except RuntimeError:
-            return None
+            return False
         if recovery is None:
-            return None
+            return False
         operation = oauth_reset_operation_snapshot(
             recovery.credential_context,
             recovery.operation.operation_id,
         )
         if operation is None:
-            return None
+            return False
         await complete_oauth_connection_reset(
             recovery.credential_context,
             mcp_servers=self.deps.runtime.config.mcp_servers,
             operation_id=recovery.operation.operation_id,
             expected_connection_generation=recovery.operation.connection_generation,
         )
-        return await self._deliver_recovered_oauth_reset_outcome(
-            claimed,
-            target=target,
-            response_text=_REVOKED_OAUTH_RESET_RECEIPT,
+        return True
+
+    def _completed_frozen_oauth_reset_result(self, claimed: ApprovalContinuation) -> bool | None:
+        """Read completed reset debt from its persisted canonical credential locator."""
+        if len(claimed.calls) != 1:
+            return None
+        call = claimed.calls[0]
+        if call.tool_name != "reset_oauth_connection" or call.decision is not ContinuationDecision.APPROVED:
+            return None
+        binding = claimed.tool_bindings.get(call.tool_call_id)
+        reset_binding = binding.get("oauth_reset") if binding is not None else None
+        reset_target = cast("dict[str, object]", reset_binding) if isinstance(reset_binding, dict) else None
+        if reset_target is None:
+            return None
+        provider_id = reset_target.get("provider_id") if reset_target is not None else None
+        if (
+            not isinstance(provider_id, str)
+            or not provider_id
+            or binding is None
+            or binding.get("tool_name") != call.tool_name
+            or binding.get("invoking_agent") != call.invoking_agent
+            or binding.get("arguments_json") != canonical_tool_arguments({"provider_id": provider_id})
+        ):
+            return None
+        operation_id = f"{claimed.approval_id}:{claimed.generation}:{call.tool_call_id}"
+        return completed_oauth_reset_result_from_binding(
+            reset_target,
+            execution_identity=self._approval_continuation_execution_identity(claimed),
+            runtime_paths=self.deps.runtime_paths,
+            operation_id=operation_id,
         )
 
     def _approval_continuation_is_authorized(self, continuation: ApprovalContinuation) -> bool:
@@ -2507,7 +2604,22 @@ class ResponseRunner:
     async def first_claim_policy(self, delivery: MatrixDelivery) -> AsyncIterator[Mapping[str, object] | None]:
         """Keep current authorization through replacement and the durable first claim."""
         async with admitted_response_decision(self._admission_gate, self.wait_for_admission_or_shutdown):
-            yield await self._prepare_first_claim_delivery(delivery)
+            replacement = await self._prepare_first_claim_delivery(delivery)
+            if replacement is None:
+                yield None
+                return
+            continuation = await self.deps.approval_store.approval_continuation_for_source(delivery.delivery_id)
+            if continuation is None:
+                yield _replace_final_delivery_body(delivery.payload, _UNVERIFIED_OAUTH_RESET_RECEIPT)
+                return
+            async with self.deps.runtime.agent_reply_memberships.authorization_decision():
+                if not self._approval_continuation_is_authorized(continuation):
+                    operation_completed = self._completed_frozen_oauth_reset_result(continuation) is not None
+                    response_text = (
+                        _REVOKED_OAUTH_RESET_RECEIPT if operation_completed else _UNVERIFIED_OAUTH_RESET_RECEIPT
+                    )
+                    replacement = _replace_final_delivery_body(delivery.payload, response_text)
+                yield replacement
 
     async def _prepare_first_claim_delivery(self, delivery: MatrixDelivery) -> Mapping[str, object] | None:
         """Authorize and refresh one durable reset receipt immediately before first claim."""
@@ -2530,7 +2642,9 @@ class ResponseRunner:
         if not isinstance(visible.get(DURABLE_FINAL_OUTCOME_KEY), dict):
             return None
         if not self._approval_continuation_is_authorized(continuation):
-            return _replace_final_delivery_body(delivery.payload, _REVOKED_OAUTH_RESET_RECEIPT)
+            operation_completed = await self._complete_revoked_oauth_reset_operation(continuation)
+            response_text = _REVOKED_OAUTH_RESET_RECEIPT if operation_completed else _UNVERIFIED_OAUTH_RESET_RECEIPT
+            return _replace_final_delivery_body(delivery.payload, response_text)
 
         from mindroom.oauth.reset_execution import execute_oauth_connection_reset  # noqa: PLC0415
 
@@ -2554,7 +2668,7 @@ class ResponseRunner:
             operation_id=recovery.operation.operation_id,
             expected_connection_generation=recovery.operation.connection_generation,
         )
-        return _replace_final_delivery_body(delivery.payload, response_text)
+        return _refresh_oauth_connect_urls_in_delivery(delivery.payload, response_text)
 
     async def _settle_unauthorized_approval_continuation(
         self,

@@ -27,7 +27,7 @@ from mindroom.credentials import get_runtime_credentials_manager, load_scoped_cr
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.errors import MCPConnectionError, MCPProtocolError, MCPTimeoutError, MCPToolCallError
-from mindroom.mcp.manager import MCPServerManager, _discovery_retry_delay_seconds
+from mindroom.mcp.manager import MCPServerManager, _discovery_retry_delay_seconds, _MCPAuthorizationChangedError
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
 from mindroom.oauth import credential_lifecycle
@@ -731,6 +731,47 @@ async def test_mcp_manager_does_not_replay_ambiguous_call_after_authorization_ch
         )
 
     assert replaced is True
+    assert _FakeClientSession.call_tool_invocation_count == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_does_not_replay_when_authorization_changes_during_rejection_classification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Authorization drift discovered after dispatch must require manual retry without replay."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("write")]
+    _FakeClientSession.planned_tool_results = [
+        BrokenPipeError("transport closed after dispatch"),
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="replayed")]),
+    ]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "account-a-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    async def authorization_changed_after_dispatch(
+        _state: MCPServerState,
+        _authorization_lease: _MCPAuthorizationLease,
+        exc: BaseException | None = None,
+    ) -> None:
+        if exc is not None:
+            raise _MCPAuthorizationChangedError
+
+    monkeypatch.setattr(manager, "_oauth_transport_rejection", authorization_changed_after_dispatch)
+
+    with pytest.raises(MCPConnectionError, match="authorization changed after remote dispatch"):
+        await manager.call_tool(
+            "demo",
+            "write",
+            {"value": "once"},
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
     assert _FakeClientSession.call_tool_invocation_count == 1
 
 
@@ -1934,7 +1975,7 @@ async def test_mcp_manager_retirement_fences_captured_state_and_new_requesters(
 
     async with manager.retire_request_session(credential_context=credential_context):
         assert captured_state.retired is True
-        with pytest.raises(MCPConnectionError, match="retired"):
+        with pytest.raises(_MCPAuthorizationChangedError):
             await manager._refresh_server_catalog(
                 captured_state,
                 notify=False,

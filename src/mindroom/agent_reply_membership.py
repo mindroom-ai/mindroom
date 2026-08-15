@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -12,7 +13,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.state import matrix_state_for_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
     from mindroom.config.auth import AuthorizationConfig
     from mindroom.config.main import Config
@@ -79,6 +80,7 @@ class AgentReplyMembershipIndex:
         self._desired_signature: _AgentReplyMembershipPolicySignature | None = None
         self._epoch = 0
         self._refresh_lock = asyncio.Lock()
+        self._authorization_lock = asyncio.Lock()
 
     @property
     def snapshot(self) -> _AgentReplyMembershipSnapshot:
@@ -112,7 +114,18 @@ class AgentReplyMembershipIndex:
             for room in snapshot.rooms
         )
 
-    def invalidate(self, config: Config, *, reason: str) -> None:
+    @asynccontextmanager
+    async def authorization_decision(self) -> AsyncIterator[None]:
+        """Hold one reply-authorization snapshot through a durable decision commit."""
+        async with self._authorization_lock:
+            yield
+
+    async def invalidate_serialized(self, config: Config, *, reason: str) -> None:
+        """Revoke room-backed grants after earlier authorization decisions commit."""
+        async with self._authorization_lock:
+            self._invalidate(config, reason=reason)
+
+    def _invalidate(self, config: Config, *, reason: str) -> None:
         """Revoke every room-backed grant until an authoritative refresh succeeds."""
         previous_rooms = {room.room_key: room for room in self._snapshot.rooms}
         room_keys = _referenced_room_keys(config.authorization)
@@ -137,7 +150,7 @@ class AgentReplyMembershipIndex:
             grant_room_count=len(room_keys),
         )
 
-    def mark_control_room_unready(
+    def _mark_control_room_unready(
         self,
         config: Config,
         runtime_paths: RuntimePaths,
@@ -188,6 +201,23 @@ class AgentReplyMembershipIndex:
             )
         return True
 
+    async def mark_control_room_unready_serialized(
+        self,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        room_id: str,
+        *,
+        reason: str,
+    ) -> bool:
+        """Serialize one control-room revocation with durable response decisions."""
+        async with self._authorization_lock:
+            return self._mark_control_room_unready(
+                config,
+                runtime_paths,
+                room_id,
+                reason=reason,
+            )
+
     async def refresh(
         self,
         config: Config,
@@ -197,23 +227,25 @@ class AgentReplyMembershipIndex:
         """Atomically replace membership state from authoritative Matrix queries."""
         authorization = config.authorization
         signature = _agent_reply_membership_policy_signature(authorization)
-        if self._desired_signature is None:
-            self._desired_signature = signature
-        elif self._desired_signature != signature:
-            self.invalidate(config, reason="policy_changed_before_refresh")
         async with self._refresh_lock:
-            expected_epoch = self._epoch
+            async with self._authorization_lock:
+                if self._desired_signature is None:
+                    self._desired_signature = signature
+                elif self._desired_signature != signature:
+                    self._invalidate(config, reason="policy_changed_before_refresh")
+                expected_epoch = self._epoch
             candidate = await _build_authoritative_snapshot(
                 config,
                 runtime_paths,
                 client,
                 signature=signature,
             )
-            if self._desired_signature != signature or self._epoch != expected_epoch:
-                return
-            self._snapshot = candidate
+            async with self._authorization_lock:
+                if self._desired_signature != signature or self._epoch != expected_epoch:
+                    return
+                self._snapshot = candidate
 
-    def apply_member_event(
+    def _apply_member_event(
         self,
         config: Config,
         runtime_paths: RuntimePaths,
@@ -279,6 +311,25 @@ class AgentReplyMembershipIndex:
                 authorization_source="joined_room",
             )
         return True
+
+    async def apply_member_event_serialized(
+        self,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        room_id: str,
+        event: nio.RoomMemberEvent,
+        *,
+        control_user_id: str,
+    ) -> bool:
+        """Serialize one live membership transition with durable response decisions."""
+        async with self._authorization_lock:
+            return self._apply_member_event(
+                config,
+                runtime_paths,
+                room_id,
+                event,
+                control_user_id=control_user_id,
+            )
 
 
 def _apply_transition_to_room(

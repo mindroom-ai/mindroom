@@ -224,7 +224,10 @@ async def test_before_sync_response_callback_precedes_timeline_admission() -> No
     ) -> None:
         callback_order.append("admission")
 
-    set_before_sync_response_callback(client, lambda _response: callback_order.append("before"))
+    async def before_sync(_response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
+        callback_order.append("before")
+
+    set_before_sync_response_callback(client, before_sync)
     client.add_event_admission_callback(admit)
 
     await client.receive_response(response)
@@ -251,7 +254,7 @@ async def test_before_sync_response_callback_ignores_stale_generation() -> None:
             sync_storage=MatrixSyncStorage(store_tokens=False, persist_recovery=False),
         ),
     )
-    callback = Mock()
+    callback = AsyncMock()
     set_before_sync_response_callback(client, callback)
     generation_token = cast("Any", client._sync_request_generation).set(object())
     try:
@@ -293,7 +296,7 @@ async def test_before_sync_response_callback_uses_ordered_room_view() -> None:
             sync_storage=MatrixSyncStorage(store_tokens=False, persist_recovery=False),
         ),
     )
-    callback = Mock()
+    callback = AsyncMock()
     set_before_sync_response_callback(client, callback)
     request_id = issue_sync_request(client._sync_reset_fence, "classic")
     request_token = client._sync_request_id.set(request_id)

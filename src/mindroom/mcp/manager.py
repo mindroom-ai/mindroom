@@ -793,6 +793,7 @@ class MCPServerManager:
         include_tools: Collection[str] | None = None,
         exclude_tools: Collection[str] | None = None,
     ) -> ToolResult:
+        self._require_desired_oauth_lease(state, authorization_lease)
         self._require_active_state(state)
         if authorization_lease is not None:
             rejection = await self._oauth_transport_rejection(state, authorization_lease)
@@ -817,7 +818,7 @@ class MCPServerManager:
             raise
         except (MCPConnectionError, MCPTimeoutError) as dispatch_error:
             if authorization_lease is not None:
-                rejection = await self._oauth_transport_rejection(
+                rejection = await self._post_dispatch_oauth_rejection(
                     state,
                     authorization_lease,
                     dispatch_error,
@@ -863,8 +864,8 @@ class MCPServerManager:
         exclude_tools: Collection[str] | None = None,
     ) -> ToolResult:
         async with state.semaphore, state.call_lock.read():
-            self._require_active_state(state)
             self._require_desired_oauth_lease(state, authorization_lease)
+            self._require_active_state(state)
             if state.last_error is not None:
                 raise state.last_error
             await self._validate_authoritative_oauth_lease(state, authorization_lease)
@@ -892,8 +893,8 @@ class MCPServerManager:
     ) -> MCPServerCatalog:
         """Return catalog only while its connected authorization lease is current."""
         async with state.call_lock.read():
-            self._require_active_state(state)
             self._require_desired_oauth_lease(state, authorization_lease)
+            self._require_active_state(state)
             if state.last_error is not None:
                 raise state.last_error
             await self._validate_authoritative_oauth_lease(state, authorization_lease)
@@ -934,15 +935,16 @@ class MCPServerManager:
         auth_headers: Mapping[str, str] | None = None,
         authorization_lease: _MCPAuthorizationLease | None = None,
     ) -> bool:
+        self._require_desired_oauth_lease(state, authorization_lease)
         self._require_active_state(state)
         should_notify_catalog_change = False
         authorization_rejection: OAuthConnectionRequired | None = None
         authorization_rejection_cause: MCPError | None = None
         async with state.lock:
+            self._require_desired_oauth_lease(state, authorization_lease)
             self._require_active_state(state)
             if expected_refresh_revision is not None and state.refresh_revision != expected_refresh_revision:
                 return False
-            self._require_desired_oauth_lease(state, authorization_lease)
             state.refresh_revision += 1
             state.stale = False
             async with state.call_lock.write():
@@ -1040,10 +1042,8 @@ class MCPServerManager:
         try:
             await self._validate_authoritative_oauth_lease(state, authorization_lease)
             self._require_desired_oauth_lease(state, authorization_lease)
-            if state.retired:
-                await self._disconnect_state(state)
-                self._require_active_state(state)
             async with self._catalog_validation_lock:
+                self._require_desired_oauth_lease(state, authorization_lease)
                 self._require_active_state(state)
                 collision_error = self._candidate_function_validation_error(state, catalog)
                 if collision_error is not None:
@@ -1447,7 +1447,8 @@ class MCPServerManager:
         if state.config.auth is not None and authorization_lease is None:
             raise _MCPAuthorizationChangedError
         if authorization_lease is not None and (
-            state.oauth_access_token_hash != authorization_lease.token_hash
+            state.retired
+            or state.oauth_access_token_hash != authorization_lease.token_hash
             or state.oauth_credential_generation != authorization_lease.credential_generation
             or state.config_generation != authorization_lease.session_key.config_generation
             or state.oauth_provider_id != authorization_lease.session_key.provider_id
@@ -1961,6 +1962,23 @@ class MCPServerManager:
             authorization_lease.credential_context,
             reason=OAUTH_ACCESS_REJECTED_REASON,
         )
+
+    async def _post_dispatch_oauth_rejection(
+        self,
+        state: MCPServerState,
+        authorization_lease: _MCPAuthorizationLease,
+        dispatch_error: MCPConnectionError | MCPTimeoutError,
+    ) -> OAuthConnectionRequired | None:
+        """Classify bearer rejection without replaying after authorization drift."""
+        try:
+            return await self._oauth_transport_rejection(
+                state,
+                authorization_lease,
+                dispatch_error,
+            )
+        except _MCPAuthorizationChangedError as exc:
+            msg = f"MCP server '{state.server_id}' authorization changed after remote dispatch; retry manually"
+            raise MCPConnectionError(state.server_id, msg) from exc
 
     @classmethod
     def _runtime_exception_has_http_status(cls, exc: BaseException, status_code: int) -> bool:

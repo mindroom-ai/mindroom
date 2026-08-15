@@ -89,7 +89,7 @@ class _GoogleRefreshState:
     context: OAuthCredentialContext
     connection_generation: str
     snapshot: dict[str, Any]
-    lock: threading.Lock = field(default_factory=threading.Lock)
+    lock: threading.RLock = field(default_factory=threading.RLock)
     last_succeeded: bool = False
     last_failure: _GoogleRefreshFailure | None = None
 
@@ -130,6 +130,8 @@ class ScopedOAuthClientMixin:
     creds: Any | None
     service: Any | None
     _google_credential_key: object | None
+
+    def _adopt_google_credential_revision(self, value: object) -> None: ...
 
     def _apply_runtime_original_auth_kwargs(self, kwargs: dict[str, Any]) -> bool:
         """Populate upstream Google auth kwargs from the resolved runtime env."""
@@ -354,6 +356,13 @@ class ScopedOAuthClientMixin:
             self._refresh_google_credentials(credentials, refresh_state, request)
 
         credentials.refresh = tracked_refresh
+        original_before_request = credentials.before_request
+
+        def tracked_before_request(*args: object, **kwargs: object) -> None:
+            with refresh_state.lock:
+                original_before_request(*args, **kwargs)
+
+        credentials.before_request = tracked_before_request
         return credentials
 
     def _refresh_google_credentials(
@@ -422,7 +431,7 @@ class ScopedOAuthClientMixin:
         state.snapshot.clear()
         state.snapshot.update(result.credentials)
         state.connection_generation = result.connection_generation
-        self._google_credential_key = (context, result.generation)
+        self._adopt_google_credential_revision((context, result.generation))
         if result.refreshed and refreshed.token == (
             triggering_snapshot.get("token") or triggering_snapshot.get("access_token")
         ):

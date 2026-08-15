@@ -7,14 +7,14 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from html import escape as html_escape
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from weakref import WeakValueDictionary
 
 import nio
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
-from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, SKIP_MENTIONS_KEY, TOOL_TRACE_CONTENT_KEY
 from mindroom.event_journal import (
     MatrixDelivery,
     MatrixDeliveryView,
@@ -97,6 +97,7 @@ if TYPE_CHECKING:
         CompactionOutcome,
     )
     from mindroom.hooks import MessageEnvelope
+    from mindroom.interactive import InteractiveMetadata
     from mindroom.message_target import MessageTarget
     from mindroom.streaming import StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
@@ -423,6 +424,49 @@ def _matrix_delivery_failure_reason(outcome: MatrixSendOutcome) -> str:
     if isinstance(outcome, MatrixDeliveryFailure):
         return f"{_MATRIX_DELIVERY_FAILURE_REASONS[outcome.kind]}: {outcome.detail}"
     return "matrix delivery failed"
+
+
+@dataclass(frozen=True, slots=True)
+class _DeliveredFinalFacts:
+    """Semantic final facts reconstructed from the exact accepted Matrix content."""
+
+    body: str
+    tool_trace: tuple[ToolTraceEntry, ...]
+    extra_content: dict[str, Any]
+    interactive_metadata: InteractiveMetadata | None
+
+
+def _delivered_final_facts(
+    delivered: DeliveredMatrixEvent,
+    *,
+    fallback_body: str,
+    tool_trace: list[ToolTraceEntry] | None,
+    extra_content: dict[str, Any],
+    interactive_metadata: InteractiveMetadata | None,
+) -> _DeliveredFinalFacts:
+    """Return lifecycle facts from exact sent content, never the pre-policy draft."""
+    content = delivered.content_sent
+    nested = content.get("m.new_content")
+    visible = cast("dict[str, Any]", nested) if isinstance(nested, dict) else content
+    semantic = visible.get(DURABLE_FINAL_OUTCOME_KEY)
+    stored_semantic = cast("dict[str, object]", semantic) if isinstance(semantic, dict) else None
+    semantic_body = stored_semantic.get("body") if stored_semantic is not None else None
+    visible_body = visible.get("body")
+    body = semantic_body if isinstance(semantic_body, str) else visible_body
+    if not isinstance(body, str):
+        body = fallback_body
+    restored_interactive = (
+        interactive.InteractiveMetadata.from_metadata(stored_semantic.get("interactive"))
+        if stored_semantic is not None
+        else interactive_metadata
+    )
+    exact_extra_content = {key: visible[key] for key in extra_content if key in visible}
+    return _DeliveredFinalFacts(
+        body=body,
+        tool_trace=tuple(tool_trace or ()) if TOOL_TRACE_CONTENT_KEY in visible else (),
+        extra_content=exact_extra_content,
+        interactive_metadata=restored_interactive,
+    )
 
 
 @dataclass(frozen=True)
@@ -904,8 +948,8 @@ class DeliveryGateway:
         # delivered answer look lost and invite a duplicate.
         return await self._acknowledged_delivery(request.delivery_turn_id, request.delivery_stage, event_id, content)
 
-    async def send_text(self, request: SendTextRequest) -> str | None:
-        """Send one response message to a room."""
+    async def _send_text_outcome(self, request: SendTextRequest) -> DeliveredMatrixEvent | None:
+        """Send one response message and preserve the exact content accepted by Matrix."""
         config = self.deps.runtime.config
         resolved_target = request.target
         effective_thread_id = resolved_target.resolved_thread_id
@@ -951,13 +995,18 @@ class DeliveryGateway:
                 failure_reason = _matrix_delivery_failure_reason(outcome)
         if delivered is not None:
             self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
-            return delivered.event_id
+            return delivered
         self.deps.logger.error(
             "Failed to send response to room",
             error=failure_reason,
             **resolved_target.log_context,
         )
         return None
+
+    async def send_text(self, request: SendTextRequest) -> str | None:
+        """Send one response message to a room."""
+        delivered = await self._send_text_outcome(request)
+        return delivered.event_id if delivered is not None else None
 
     async def _edit_content(
         self,
@@ -1060,8 +1109,8 @@ class DeliveryGateway:
         # earlier run, so nothing was sent and the callback never ran.
         return await self._acknowledged_delivery(request.delivery_turn_id, DeliveryStage.FINAL, event_id, envelope)
 
-    async def edit_text(self, request: EditTextRequest) -> bool:
-        """Edit one existing response message."""
+    async def _edit_text_outcome(self, request: EditTextRequest) -> DeliveredMatrixEvent | None:
+        """Edit one response and preserve the exact content accepted by Matrix."""
         config = self.deps.runtime.config
         target = request.target
         # The edit envelope discards any pre-existing relation before adding m.replace.
@@ -1085,14 +1134,18 @@ class DeliveryGateway:
                 failure_reason = _matrix_delivery_failure_reason(outcome)
         if delivered is not None:
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
-            return True
+            return delivered
         self.deps.logger.error(
             "Failed to edit message",
             event_id=request.event_id,
             error=failure_reason,
             **target.log_context,
         )
-        return False
+        return None
+
+    async def edit_text(self, request: EditTextRequest) -> bool:
+        """Edit one existing response message."""
+        return await self._edit_text_outcome(request) is not None
 
     async def deliver_final(  # noqa: C901, PLR0911, PLR0912
         self,
@@ -1235,7 +1288,7 @@ class DeliveryGateway:
             }
 
         if request.existing_event_id is not None:
-            edited = await self.edit_text(
+            delivered = await self._edit_text_outcome(
                 EditTextRequest(
                     target=request.target,
                     event_id=request.existing_event_id,
@@ -1247,16 +1300,23 @@ class DeliveryGateway:
                     defer_source_handoff=request.defer_source_handoff,
                 ),
             )
-            if edited:
+            if delivered is not None:
+                facts = _delivered_final_facts(
+                    delivered,
+                    fallback_body=display_text,
+                    tool_trace=draft.tool_trace,
+                    extra_content=delivery_extra_content,
+                    interactive_metadata=interactive_response.interactive_metadata,
+                )
                 return FinalDeliveryOutcome(
                     terminal_status="completed",
                     event_id=request.existing_event_id,
                     is_visible_response=True,
-                    final_visible_body=display_text,
+                    final_visible_body=facts.body,
                     delivery_kind="edited",
-                    tool_trace=tuple(draft.tool_trace or ()),
-                    extra_content=delivery_extra_content,
-                    interactive_metadata=interactive_response.interactive_metadata,
+                    tool_trace=facts.tool_trace,
+                    extra_content=facts.extra_content,
+                    interactive_metadata=facts.interactive_metadata,
                 )
 
             if request.existing_event_is_placeholder:
@@ -1278,7 +1338,7 @@ class DeliveryGateway:
                 tool_trace=tuple(draft.tool_trace or ()),
                 extra_content=delivery_extra_content,
             )
-        event_id = await self.send_text(
+        delivered = await self._send_text_outcome(
             SendTextRequest(
                 target=request.target,
                 response_text=display_text,
@@ -1293,7 +1353,7 @@ class DeliveryGateway:
                 defer_source_handoff=request.defer_source_handoff,
             ),
         )
-        if event_id is None:
+        if delivered is None:
             return FinalDeliveryOutcome(
                 terminal_status="error",
                 event_id=None,
@@ -1301,15 +1361,22 @@ class DeliveryGateway:
                 tool_trace=tuple(draft.tool_trace or ()),
                 extra_content=delivery_extra_content,
             )
-        return FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id=event_id,
-            is_visible_response=True,
-            final_visible_body=display_text,
-            delivery_kind="sent",
-            tool_trace=tuple(draft.tool_trace or ()),
+        facts = _delivered_final_facts(
+            delivered,
+            fallback_body=display_text,
+            tool_trace=draft.tool_trace,
             extra_content=delivery_extra_content,
             interactive_metadata=interactive_response.interactive_metadata,
+        )
+        return FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id=delivered.event_id,
+            is_visible_response=True,
+            final_visible_body=facts.body,
+            delivery_kind="sent",
+            tool_trace=facts.tool_trace,
+            extra_content=facts.extra_content,
+            interactive_metadata=facts.interactive_metadata,
         )
 
     async def deliver_cancelled_visible_note(

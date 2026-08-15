@@ -21,7 +21,7 @@ OAuth operations are rare enough that this concurrency was not worth the correct
 3. Every credential mutation uses one cross-process operation lock derived from that context.
 4. Refresh, authorization-code exchange, reset, disconnect, and provider-driven lazy refresh serialize on that same lock.
 5. A provider operation that can consume or rotate remote state completes its matching local commit before cancellation propagates.
-6. Credential save and delete commits fsync their payload and parent-directory updates before reporting success.
+6. On platforms that expose directory fsync, credential save and delete commits fsync their payload and parent-directory updates before reporting success; other platforms retain atomic replace and unlink semantics without claiming crash-durable directory publication.
 7. A destructive reset performs all fallible asynchronous cleanup before deleting local credentials.
 8. After deletion, the durable pending intent remains the reset owner until completed-state publication succeeds, while the in-memory MCP fence may release during exceptional unwinding because every later credential transaction must finish that pending intent before use.
 9. Request actor identity remains raw for room and membership checks.
@@ -45,8 +45,9 @@ OAuth operations are rare enough that this concurrency was not worth the correct
 27. Claimed reset recovery re-enters only a durable pending or completed operation by its stable ID, never starts a missing reset, and never resumes the stale paused Agno run.
 28. Credential documents carry a scope-bound self-describing publication record, are durably saved before their counters are published, and repair an interrupted state-file commit under the operation lock.
 29. Pending reset deletion always takes precedence over credential-publication recovery.
-30. Every live or recovery first claim of a reset receipt rechecks current authorization under response admission, remints authorized reconnect material from the completed stable operation, and emits only a link-free completion receipt after revocation.
-31. Requester-scoped MCP OAuth rejects missing requester identity before credential or session lookup, and a same-generation HTTP bearer rejection retires the exact session and returns a canonical reconnect response without replaying the remote call.
+30. Every live or recovery first claim of a reset receipt remints reconnect material under response admission, then holds the membership owner's authorization decision through the atomic durable claim.
+31. Revoked claims emit a link-free completion receipt only when the frozen scope-bound locator proves a completed stable operation; missing proof emits a link-free unverified receipt and never starts deletion.
+32. Requester-scoped MCP OAuth rejects missing requester identity before credential or session lookup, and a same-generation HTTP bearer rejection retires the exact session and returns a canonical reconnect response without replaying the remote call.
 
 ## Architecture
 
@@ -100,7 +101,8 @@ It does not delete credentials or build links.
 `src/mindroom/oauth/reset_execution.py` enters MCP retirement, issues a reconnect link immediately before deletion, asks the lifecycle owner to commit the reset, and renders the receipt.
 `src/mindroom/custom_tools/oauth_connections.py` owns only live-request authorization and error translation around that executor.
 If teardown is cancelled or fails, deletion does not occur.
-The shared Matrix outbox applies one type-enforced first-claim policy to live and recovery sends, holds response admission from authorization through the atomic claim, remints an authorized link from the completed stable operation, atomically replaces revoked reconnect material with a link-free receipt, and preserves already-attempted payloads for transaction-ID reconciliation.
+The shared Matrix outbox applies one type-enforced first-claim policy to live and recovery sends, holds response admission across receipt preparation, and holds the membership owner's authorization decision across the final recheck and atomic claim.
+It remints an authorized link from the completed stable operation, atomically replaces revoked reconnect material with a link-free receipt, and preserves already-attempted payloads for transaction-ID reconciliation.
 
 `src/mindroom/approval_bindings.py` freezes and validates every paused call descriptor.
 OAuth reset bindings add the exact canonical credential target under that generic descriptor and reject a reset mixed with any other call.
@@ -155,7 +157,8 @@ The callback cannot preserve a refresh token that another operation rotated conc
 All credential transactions finish any pending delete before using or publishing the scope.
 A retry of a completed operation returns the stored result without advancing the revision or deleting a credential created by a later callback.
 If a process dies while a stable operation is pending, claimed-continuation recovery re-enters that exact operation to finish deletion and completed-state publication.
-If a process dies after the reset commit but before FINAL delivery, claimed-continuation recovery proves the completed operation read-only, skips MCP retirement and deletion, and publishes the receipt directly without calling Agno continuation APIs.
+If a process dies after the reset commit but before FINAL delivery, claimed-continuation recovery uses the frozen canonical requester, scope, service, and worker key to prove the completed operation read-only even after live provider configuration changes.
+It skips MCP retirement and deletion and publishes the receipt directly without calling Agno continuation APIs.
 
 Dashboard disconnect uses the same transaction and fails without deleting credentials if MCP teardown cannot complete.
 
@@ -195,7 +198,7 @@ Focused tests cover observable lifecycle behavior rather than private lock chore
 - Callback state issued before a reset cannot republish credentials after the connection generation advances.
 - Callback success advances both counters, and a second callback bound to the consumed connection generation is rejected.
 - Reset cancellation before operation-lock ownership preserves credentials, while cancellation after deletion still returns the committed receipt.
-- Reset success is reported only after the credential unlink and parent-directory update are flushed.
+- On platforms that expose directory fsync, reset success is reported only after the credential unlink and parent-directory update are flushed.
 - Refresh cancellation before operation-lock ownership never calls the provider, while cancellation after ownership waits for local publication.
 - Google lazy refresh, GitHub refresh, MCP refresh, API status refresh, and dashboard callback all use the same operation-lock path.
 - Concurrent lazy refresh calls on one Google client publish one in-memory snapshot atomically and reuse its outcome.

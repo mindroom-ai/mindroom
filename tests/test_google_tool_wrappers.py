@@ -211,6 +211,27 @@ def test_google_account_cache_clears_when_credential_key_changes(
     assert getattr(tool, cache_field) is None
 
 
+def test_google_refresh_revision_adoption_preserves_active_service_and_account_caches() -> None:
+    """Same-account refresh must not invalidate service state midway through one tool call."""
+
+    class Tool(ThreadLocalGoogleServiceMixin):
+        pass
+
+    tool = Tool()
+    service = object()
+    tool._google_credential_key = "revision-a"
+    tool.service = service
+    tool._label_cache = {"inbox": "label-a"}
+    tool._user_email = "alice@example.com"
+
+    tool._adopt_google_credential_revision("revision-b")
+
+    assert tool._google_credential_key == "revision-b"
+    assert tool.service is service
+    assert tool._label_cache == {"inbox": "label-a"}
+    assert tool._user_email == "alice@example.com"
+
+
 @pytest.mark.parametrize(
     ("cache_field", "values"),
     [
@@ -920,6 +941,86 @@ def test_google_lazy_refresh_serializes_local_snapshot_publication(  # noqa: PLR
     assert credentials.token == first_rotated_access_token
 
 
+def test_google_before_request_serializes_validity_check_with_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """A delayed same-wave request must observe the first rotation before deciding to refresh."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "expired-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 1.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    provider_entered = threading.Event()
+    release_provider = threading.Event()
+    delayed_observed_expired = threading.Event()
+    provider_calls = 0
+    rotated_access_token = "rotated-access-token"  # noqa: S105
+
+    def rotate(credentials: object, _request: object) -> None:
+        nonlocal provider_calls
+        provider_calls += 1
+        provider_entered.set()
+        assert release_provider.wait(timeout=5)
+        credentials.token = rotated_access_token  # type: ignore[attr-defined]
+        credentials.expiry = datetime.fromtimestamp(4_102_444_800.0, tz=UTC)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", rotate)
+    real_blocking_refresh = GoogleOAuthCredentials._blocking_refresh
+
+    def observe_delayed_expiry(credentials: GoogleOAuthCredentials, request: object) -> None:
+        if threading.current_thread().name == "delayed-google-request":
+            delayed_observed_expired.set()
+        real_blocking_refresh(credentials, request)
+
+    monkeypatch.setattr(GoogleOAuthCredentials, "_blocking_refresh", observe_delayed_expiry)
+    credentials = tool.creds
+
+    def delayed_request() -> None:
+        threading.current_thread().name = "delayed-google-request"
+        credentials.before_request(object(), "GET", "https://example.test", {})
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="google-request") as executor:
+        first = executor.submit(credentials.before_request, object(), "GET", "https://example.test", {})
+        assert provider_entered.wait(timeout=5)
+        delayed = executor.submit(delayed_request)
+        try:
+            assert not delayed_observed_expired.wait(timeout=0.2)
+        finally:
+            release_provider.set()
+        first.result(timeout=5)
+        delayed.result(timeout=5)
+
+    assert provider_calls == 1
+    assert credentials.token == rotated_access_token
+
+
 def test_google_wrapper_constructor_canonicalizes_alias_without_runtime_context(
     runtime_paths: RuntimePaths,
 ) -> None:
@@ -1431,6 +1532,8 @@ def test_google_wrapper_keeps_refresh_rejection_state_per_call(
     )
     failure_recorded = threading.Event()
     release_failure = threading.Event()
+    successful_authenticated = threading.Event()
+    release_success = threading.Event()
 
     def swallowed_failure() -> str:
         try:
@@ -1441,16 +1544,24 @@ def test_google_wrapper_keeps_refresh_rejection_state_per_call(
             return f"Unexpected error: {exc}"
         return "unexpected success"
 
+    def successful_call() -> str:
+        successful_authenticated.set()
+        assert release_success.wait(timeout=5)
+        return "success"
+
     tool.functions = {
         "swallowed_failure": Function(name="swallowed_failure", entrypoint=swallowed_failure),
-        "successful_call": Function(name="successful_call", entrypoint=lambda: "success"),
+        "successful_call": Function(name="successful_call", entrypoint=successful_call),
     }
     tool._wrap_oauth_function_entrypoints()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
+        successful_future = executor.submit(tool.successful_call)
+        assert successful_authenticated.wait(timeout=5)
         failed_future = executor.submit(tool.swallowed_failure)
         assert failure_recorded.wait(timeout=5)
-        successful_result = executor.submit(tool.successful_call).result(timeout=5)
+        release_success.set()
+        successful_result = successful_future.result(timeout=5)
         release_failure.set()
         failed_result = failed_future.result(timeout=5)
 

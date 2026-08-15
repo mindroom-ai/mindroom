@@ -517,7 +517,7 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
             },
         )
         assert isinstance(leave, nio.RoomMemberEvent)
-        memberships.apply_member_event(
+        await memberships.apply_member_event_serialized(
             config,
             runner.deps.runtime_paths,
             grant_room_id,
@@ -3007,8 +3007,8 @@ async def test_interrupted_reset_recovery_hides_reconnect_link_after_revocation(
 
 
 @pytest.mark.asyncio
-async def test_outbox_first_claim_redacts_unattempted_reset_link_after_revocation(tmp_path: Path) -> None:
-    """Every first claim must sanitize a frozen reset receipt before claiming it."""
+async def test_outbox_first_claim_does_not_invent_reset_success_after_revocation(tmp_path: Path) -> None:
+    """A revoked first claim without stable reset state must report an unverified reset."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
@@ -3074,9 +3074,9 @@ async def test_outbox_first_claim_redacts_unattempted_reset_link_after_revocatio
     assert reconnect_link not in str(sent[0].payload)
     nested = sent[0].payload["m.new_content"]
     assert isinstance(nested, dict)
-    assert nested["body"] == response_runner._REVOKED_OAUTH_RESET_RECEIPT
+    assert nested["body"] == response_runner._UNVERIFIED_OAUTH_RESET_RECEIPT
     assert nested[DURABLE_FINAL_OUTCOME_KEY] == {
-        "body": response_runner._REVOKED_OAUTH_RESET_RECEIPT,
+        "body": response_runner._UNVERIFIED_OAUTH_RESET_RECEIPT,
         "interactive": None,
     }
 
@@ -3132,8 +3132,8 @@ async def test_outbox_first_claim_remints_authorized_reset_link(tmp_path: Path) 
         },
     )
     assert await store.create_approval_continuation(continuation) == continuation
-    stale_link = "https://example.test/oauth/connect?token=expired"
-    fresh_link = "https://example.test/oauth/connect?token=fresh"
+    stale_link = "https://example.test/api/oauth/google/authorize?connect_token=expired"
+    fresh_link = "https://example.test/api/oauth/google/authorize?connect_token=fresh"
     stale_body = f"OAuth connection reset. Reconnect: {stale_link}"
     fresh_body = f"OAuth connection reset. Reconnect: {fresh_link}"
     await store.enqueue_matrix_delivery(
@@ -3185,6 +3185,213 @@ async def test_outbox_first_claim_remints_authorized_reset_link(tmp_path: Path) 
     assert stale_link not in str(sent[0].payload)
     assert fresh_link in str(sent[0].payload)
     assert execute_reset.await_args.kwargs["operation_id"] == "approval-reset-final-fresh-link:3:reset-call"
+
+
+@pytest.mark.asyncio
+async def test_outbox_first_claim_preserves_hook_removed_reset_link(tmp_path: Path) -> None:
+    """Fresh receipt minting must not undo a before-response hook's URL removal."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-reset-final-hook-redacted",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(
+            ApprovalCall(
+                tool_call_id="reset-call",
+                tool_name="reset_oauth_connection",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        ),
+        state="claimed",
+        generation=3,
+        tool_bindings={
+            "reset-call": {
+                "tool_name": "reset_oauth_connection",
+                "arguments_json": '{"provider_id":"google"}',
+                "invoking_agent": "general",
+                "oauth_reset": {
+                    "provider_id": "google",
+                    "credential_generation": "credential-generation-1",
+                    "connection_generation": "connection-generation-1",
+                },
+            },
+        },
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    hook_body = "OAuth reset receipt withheld by response policy."
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={
+            "body": f"* {hook_body}",
+            "formatted_body": hook_body,
+            "m.new_content": {
+                "body": hook_body,
+                "formatted_body": hook_body,
+                DURABLE_FINAL_OUTCOME_KEY: {"body": hook_body, "interactive": None},
+            },
+            DURABLE_FINAL_OUTCOME_KEY: {"body": hook_body, "interactive": None},
+        },
+        edits_event_id="$waiting",
+    )
+    fresh_link = "https://example.test/api/oauth/google/authorize?connect_token=fresh"
+    sent: list[MatrixDelivery] = []
+
+    async def send(delivery: MatrixDelivery) -> str:
+        sent.append(delivery)
+        return "$final"
+
+    with (
+        patch.object(runner, "_approval_continuation_is_authorized", return_value=True),
+        patch.object(runner, "_approval_continuation_execution_identity", return_value=identity),
+        patch("mindroom.response_runner.validate_oauth_reset_approval_bindings", new=AsyncMock()),
+        patch("mindroom.response_runner.resolve_oauth_reset_target") as resolve_reset_target,
+        patch(
+            "mindroom.response_runner.oauth_reset_operation_snapshot",
+            return_value=SimpleNamespace(status="completed", credential_existed=True),
+        ),
+        patch(
+            "mindroom.oauth.reset_execution.execute_oauth_connection_reset",
+            new=AsyncMock(return_value=f"OAuth connection reset. `connect_url`: {fresh_link}; reconnect."),
+        ),
+    ):
+        resolve_reset_target.return_value.credential_context = MagicMock()
+        outcome = await MatrixDeliveryWorker(
+            store=store,
+            send=send,
+            first_claim_policy=runner.first_claim_policy,
+        ).recover()
+
+    assert outcome.recovered == 1
+    assert len(sent) == 1
+    assert sent[0].payload["m.new_content"]["body"] == hook_body
+    assert fresh_link not in str(sent[0].payload)
+
+
+@pytest.mark.asyncio
+async def test_outbox_first_claim_rechecks_membership_after_receipt_remint(tmp_path: Path) -> None:
+    """Membership revocation during receipt minting must win before durable claim."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-reset-final-revoked-during-remint",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(
+            ApprovalCall(
+                tool_call_id="reset-call",
+                tool_name="reset_oauth_connection",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        ),
+        state="claimed",
+    )
+    fresh_link = "https://example.test/api/oauth/google/authorize?connect_token=fresh"
+    delivery = MatrixDelivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        membership_epoch=0,
+        thread_id="$thread",
+        transaction_id="tx-$source-final",
+        payload={
+            "body": fresh_link,
+            "m.new_content": {
+                "body": fresh_link,
+                DURABLE_FINAL_OUTCOME_KEY: {"body": fresh_link, "interactive": None},
+            },
+        },
+        edits_event_id="$waiting",
+        acknowledged_event_id=None,
+        created_at_ns=1,
+    )
+
+    with (
+        patch.object(runner, "_prepare_first_claim_delivery", new=AsyncMock(return_value=delivery.payload)),
+        patch.object(
+            runner.deps.approval_store,
+            "approval_continuation_for_source",
+            new=AsyncMock(return_value=continuation),
+        ),
+        patch.object(runner, "_approval_continuation_is_authorized", return_value=False),
+        patch.object(runner, "_completed_frozen_oauth_reset_result", return_value=True),
+    ):
+        async with runner.first_claim_policy(delivery) as replacement:
+            assert replacement is not None
+            assert fresh_link not in str(replacement)
+            nested = replacement["m.new_content"]
+            assert isinstance(nested, dict)
+            assert nested["body"] == response_runner._REVOKED_OAUTH_RESET_RECEIPT
+
+
+@pytest.mark.asyncio
+async def test_outbox_first_claim_hides_reminted_link_when_continuation_disappears(tmp_path: Path) -> None:
+    """Missing continuation after remint removes authorization proof and must hide the link."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    fresh_link = "https://example.test/api/oauth/google/authorize?connect_token=fresh"
+    delivery = MatrixDelivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        membership_epoch=0,
+        thread_id="$thread",
+        transaction_id="tx-$source-final",
+        payload={
+            "body": fresh_link,
+            "m.new_content": {
+                "body": fresh_link,
+                DURABLE_FINAL_OUTCOME_KEY: {"body": fresh_link, "interactive": None},
+            },
+        },
+        edits_event_id="$waiting",
+        acknowledged_event_id=None,
+        created_at_ns=1,
+    )
+
+    with (
+        patch.object(runner, "_prepare_first_claim_delivery", new=AsyncMock(return_value=delivery.payload)),
+        patch.object(
+            runner.deps.approval_store,
+            "approval_continuation_for_source",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        async with runner.first_claim_policy(delivery) as replacement:
+            assert replacement is not None
+            assert fresh_link not in str(replacement)
+            nested = replacement["m.new_content"]
+            assert isinstance(nested, dict)
+            assert nested["body"] == response_runner._UNVERIFIED_OAUTH_RESET_RECEIPT
 
 
 @pytest.mark.asyncio

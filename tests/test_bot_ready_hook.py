@@ -90,9 +90,11 @@ def _router_bot_with_orchestrator(tmp_path: Path) -> tuple[AgentBot, MagicMock]:
     """Return a router bot wired to a narrow mocked orchestrator lifecycle."""
     bot = _agent_bot(tmp_path, agent_name="router")
     orchestrator = MagicMock()
-    orchestrator.invalidate_agent_reply_memberships = MagicMock(
-        side_effect=lambda *, reason: bot._router_reply_membership_sync.invalidate(bot.config, reason=reason),
-    )
+
+    async def invalidate_agent_reply_memberships(*, reason: str) -> None:
+        await bot._router_reply_membership_sync.invalidate(bot.config, reason=reason)
+
+    orchestrator.invalidate_agent_reply_memberships = AsyncMock(side_effect=invalidate_agent_reply_memberships)
     orchestrator.refresh_agent_reply_memberships = AsyncMock()
     orchestrator.revoke_reply_authorized_calls = AsyncMock()
     orchestrator.handle_bot_ready = AsyncMock()
@@ -298,38 +300,40 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
         patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
     ):
-        bot.mark_sync_loop_started()
+        await bot.mark_sync_loop_started()
         await bot._on_sync_response(MagicMock())
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
         await bot._on_sync_response(MagicMock())
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-        bot.mark_sync_loop_started()
+        await bot.mark_sync_loop_started()
         await bot._on_sync_response(MagicMock())
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert call_manager.reconcile_joined_rooms.await_count == 2
 
 
-def test_router_sync_loop_start_revokes_room_backed_grants(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_router_sync_loop_start_revokes_room_backed_grants(tmp_path: Path) -> None:
     """A reconnect generation must fail closed before its first response arrives."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
 
-    bot.mark_sync_loop_started()
+    await bot.mark_sync_loop_started()
 
-    orchestrator.invalidate_agent_reply_memberships.assert_called_once_with(reason="sync_loop_started")
+    orchestrator.invalidate_agent_reply_memberships.assert_awaited_once_with(reason="sync_loop_started")
 
 
-def test_router_prepared_startup_snapshot_survives_only_the_first_sync_start(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_router_prepared_startup_snapshot_survives_only_the_first_sync_start(tmp_path: Path) -> None:
     """The pre-sync snapshot must reach first admission, while reconnect still fails closed."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
 
     bot.preserve_reply_memberships_on_next_sync_start()
-    bot.mark_sync_loop_started()
+    await bot.mark_sync_loop_started()
     orchestrator.invalidate_agent_reply_memberships.assert_not_called()
 
-    bot.mark_sync_loop_started()
-    orchestrator.invalidate_agent_reply_memberships.assert_called_once_with(reason="sync_loop_started")
+    await bot.mark_sync_loop_started()
+    orchestrator.invalidate_agent_reply_memberships.assert_awaited_once_with(reason="sync_loop_started")
 
 
 @pytest.mark.asyncio
@@ -339,7 +343,7 @@ async def test_router_prepared_startup_snapshot_refreshes_after_the_first_sync(t
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
 
     bot.preserve_reply_memberships_on_next_sync_start()
-    bot.mark_sync_loop_started()
+    await bot.mark_sync_loop_started()
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
@@ -356,7 +360,7 @@ async def test_router_first_response_refreshes_room_backed_grants(tmp_path: Path
     """The first successful response in each receive generation rebuilds grants."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    bot.mark_sync_loop_started()
+    await bot.mark_sync_loop_started()
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
@@ -372,11 +376,11 @@ async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(
     """A limited timeline must discard its uncertain baseline before taking a new authoritative snapshot."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    bot.mark_sync_loop_started()
+    await bot.mark_sync_loop_started()
     orchestrator.invalidate_agent_reply_memberships.reset_mock()
     orchestrator.refresh_agent_reply_memberships.reset_mock()
     response = _limited_classic_sync_response("s-after-gap")
-    bot._before_sync_response_admission(response)
+    await bot._before_sync_response_admission(response)
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
@@ -384,18 +388,19 @@ async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(
     ):
         await bot._on_sync_response(response)
 
-    orchestrator.invalidate_agent_reply_memberships.assert_called_once_with(reason="uncertain_sync_response")
+    orchestrator.invalidate_agent_reply_memberships.assert_awaited_once_with(reason="uncertain_sync_response")
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
 
 
-def test_router_limited_sync_invalidates_before_timeline_admission(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_router_limited_sync_invalidates_before_timeline_admission(tmp_path: Path) -> None:
     """The Matrix client's pre-admission hook must fail room grants closed immediately."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
     response = _limited_classic_sync_response("s-before-gap-timeline")
 
-    bot._before_sync_response_admission(response)
+    await bot._before_sync_response_admission(response)
 
-    orchestrator.invalidate_agent_reply_memberships.assert_called_once_with(reason="uncertain_sync_response")
+    orchestrator.invalidate_agent_reply_memberships.assert_awaited_once_with(reason="uncertain_sync_response")
 
 
 @pytest.mark.asyncio
@@ -436,7 +441,7 @@ async def test_router_departure_revokes_grant_before_timeline_admission(
     else:
         response.rooms[second_room_id] = nio.SlidingSyncRoom(membership="leave")
 
-    bot._before_sync_response_admission(response)
+    await bot._before_sync_response_admission(response)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert not bot._runtime_view.agent_reply_memberships.is_allowed(
@@ -454,7 +459,7 @@ async def test_failed_membership_refresh_is_backed_off_between_sync_responses(tm
     bot.config.authorization.agent_reply_permissions = {
         "router": AgentReplyPermission(joined_rooms=["grant"]),
     }
-    bot._runtime_view.agent_reply_memberships.invalidate(bot.config, reason="test")
+    await bot._runtime_view.agent_reply_memberships.invalidate_serialized(bot.config, reason="test")
 
     with patch("mindroom.agent_reply_membership_sync.time.monotonic", return_value=100.0):
         await bot._refresh_agent_reply_memberships_if_needed()
@@ -470,11 +475,11 @@ async def test_repeated_membership_invalidation_preserves_refresh_backoff(tmp_pa
     bot.config.authorization.agent_reply_permissions = {
         "router": AgentReplyPermission(joined_rooms=["grant"]),
     }
-    bot._runtime_view.agent_reply_memberships.invalidate(bot.config, reason="test")
+    await bot._runtime_view.agent_reply_memberships.invalidate_serialized(bot.config, reason="test")
 
     with patch("mindroom.agent_reply_membership_sync.time.monotonic", return_value=100.0):
         await bot._refresh_agent_reply_memberships_if_needed()
-        bot._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+        await bot._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
         await bot._refresh_agent_reply_memberships_if_needed()
 
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
@@ -527,7 +532,7 @@ async def test_router_authoritative_departure_revokes_grant_before_membership_fe
         if isinstance(response, nio.SyncResponse)
         else bot._apply_own_room_membership_from_sliding_sync
     )
-    bot._before_sync_response_admission(response)
+    await bot._before_sync_response_admission(response)
     with patch.object(
         type(bot._membership_fence),
         "fence_reported_departures",
@@ -604,7 +609,7 @@ async def test_router_leave_then_rejoin_in_one_sync_requires_grant_refresh(tmp_p
     )
     assert isinstance(response, nio.SyncResponse)
 
-    bot._before_sync_response_admission(response)
+    await bot._before_sync_response_admission(response)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
@@ -645,7 +650,7 @@ async def test_router_final_invite_revokes_grant_before_timeline_admission(
     else:
         response = _sliding_response_with_room_membership(room_id, membership="invite")
 
-    bot._before_sync_response_admission(response)
+    await bot._before_sync_response_admission(response)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
@@ -730,7 +735,7 @@ async def test_grant_user_revocation_waits_for_durable_live_admission(
         )
         assert isinstance(response, nio.SlidingSyncResponse)
 
-    bot._before_sync_response_admission(response)
+    await bot._before_sync_response_admission(response)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert index.is_allowed(sender_id, ["grant"], bot.config.authorization)
@@ -797,7 +802,7 @@ async def test_grant_user_join_waits_for_durable_timeline_admission(
         )
         assert isinstance(response, nio.SlidingSyncResponse)
 
-    bot._before_sync_response_admission(response)
+    await bot._before_sync_response_admission(response)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
@@ -871,7 +876,7 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
     assert isinstance(live_revoke_event, nio.RoomMemberEvent)
 
     orchestrator.reconcile_reply_authorized_calls = AsyncMock()
-    bot._before_sync_response_admission(response)
+    await bot._before_sync_response_admission(response)
     assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
 
     await bot._apply_live_reply_membership_transition(room_id, live_join_event)
@@ -1636,7 +1641,7 @@ async def test_bot_ready_fires_after_shutdown_clears(tmp_path: Path) -> None:
         assert fired_count == 0
 
         # Shutdown clears (restart)
-        bot.mark_sync_loop_started()
+        await bot.mark_sync_loop_started()
 
         # Next sync — bot:ready must fire now
         await bot._on_sync_response(MagicMock())

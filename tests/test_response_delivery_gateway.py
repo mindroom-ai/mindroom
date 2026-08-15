@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -34,7 +35,7 @@ from mindroom.event_journal import DepartureSource
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
-from mindroom.matrix_delivery import MatrixDeliveryWorker, RecoveryOutcome
+from mindroom.matrix_delivery import FirstClaimPolicy, MatrixDeliveryWorker, RecoveryOutcome
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionGate, admitted_response_decision
 from mindroom.streaming import PROGRESS_PLACEHOLDER
@@ -127,6 +128,7 @@ def _gateway(
     sending_device_id: str | None = "CURRENT-DEVICE",
     terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None,
     terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None,
+    first_claim_policy: FirstClaimPolicy | None = None,
 ) -> DeliveryGateway:
     """Return a delivery gateway whose only real collaborator is the outbox."""
     config = bind_runtime_paths(
@@ -163,6 +165,7 @@ def _gateway(
             sending_device_id=lambda: sending_device_id,
             terminal_turn_for=terminal_turn_for,
             terminal_turn_committed=terminal_turn_committed,
+            first_claim_policy=first_claim_policy,
         ),
     )
 
@@ -681,6 +684,47 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert semantic["body"] == outcome.final_visible_body
         assert semantic["interactive"]["question_text"] == "Pick"
         assert semantic["interactive"]["option_map"] == {"1": "yes", "✅": "yes"}
+
+    @pytest.mark.parametrize("existing_event_id", [None, "$placeholder"])
+    async def test_final_outcome_uses_policy_frozen_content(
+        self,
+        tmp_path: Path,
+        existing_event_id: str | None,
+    ) -> None:
+        """Hooks and summaries must observe exact first-claim content, not stale draft text."""
+
+        @asynccontextmanager
+        async def policy(delivery: MatrixDelivery) -> AsyncIterator[Mapping[str, object]]:
+            replacement = deepcopy(delivery.payload)
+            nested = replacement.get("m.new_content")
+            visible = cast("dict[str, object]", nested) if isinstance(nested, dict) else replacement
+            visible["body"] = "safe receipt"
+            semantic = visible["io.mindroom.final_delivery"]
+            assert isinstance(semantic, dict)
+            semantic["body"] = "safe receipt"
+            if nested is not None:
+                replacement["body"] = "* safe receipt"
+            yield replacement
+
+        async def send_exact(_client: object, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
+            return DeliveredMatrixEvent("$wire", dict(content))
+
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox, first_claim_policy=policy)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        request = replace(
+            self._final_request("stale reconnect URL"),
+            existing_event_id=existing_event_id,
+            defer_source_handoff=True,
+        )
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", new=AsyncMock(side_effect=send_exact)):
+            outcome = await gateway.deliver_final(request)
+
+        assert outcome.final_visible_body == "safe receipt"
+        assert outcome.delivery_kind == ("edited" if existing_event_id is not None else "sent")
+        assert outcome.extra_content["io.mindroom.final_delivery"]["body"] == "safe receipt"
+        assert "stale reconnect URL" not in str(outcome)
 
     async def test_a_regenerated_answer_cannot_go_out_under_a_frozen_edit(
         self,
