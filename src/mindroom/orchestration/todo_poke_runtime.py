@@ -16,6 +16,7 @@ from mindroom.custom_tools.todo_poke import (
 )
 from mindroom.custom_tools.todo_state import state_root as todo_state_root
 from mindroom.entity_resolution import mindroom_user_id
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.scheduling import get_pending_schedule_thread_ids_for_room
 
@@ -25,6 +26,9 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -110,7 +114,19 @@ class TodoPokeRuntimeCoordinator:
             client = agent_bot.client
             if client is None:
                 continue
-            joined_room_ids = await get_joined_rooms(client)
+            try:
+                joined_room_ids = await get_joined_rooms(client)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "todo_poke_membership_query_failed",
+                    assigned_agent=agent_name,
+                    room_id=room_id,
+                    error=str(exc),
+                    exc_info=True,
+                )
+                continue
             if joined_room_ids is not None and room_id in joined_room_ids:
                 return agent_bot
         return None

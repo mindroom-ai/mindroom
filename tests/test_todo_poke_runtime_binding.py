@@ -227,6 +227,34 @@ async def test_schedule_query_rejects_stale_joined_room_cache(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_schedule_query_continues_after_candidate_membership_probe_failure(tmp_path: Path) -> None:
+    """One failed membership probe must not hide a later joined candidate."""
+    failing_client = _client()
+    failing_client.joined_rooms = AsyncMock(side_effect=RuntimeError("membership unavailable"))
+    joined_client = _client("!room:localhost")
+    coordinator = _coordinator(
+        test_runtime_paths(tmp_path),
+        _config(tmp_path),
+        {
+            "code": _bot(client=failing_client),
+            "reviewer": _bot(client=joined_client),
+        },
+    )
+
+    with patch(
+        "mindroom.orchestration.todo_poke_runtime.get_pending_schedule_thread_ids_for_room",
+        new=AsyncMock(return_value=frozenset({"$scheduled"})),
+    ) as schedule_query:
+        pending = await coordinator._schedule_query(
+            "!room:localhost",
+            ("code", "reviewer"),
+        )
+
+    assert pending == frozenset({"$scheduled"})
+    schedule_query.assert_awaited_once_with(joined_client, "!room:localhost")
+
+
+@pytest.mark.asyncio
 async def test_send_rejects_stale_joined_room_cache(tmp_path: Path) -> None:
     """Cached room state must not authorize delivery after membership ended."""
     stale_client = _client(cached_room_ids=("!room:localhost",))
@@ -247,6 +275,30 @@ async def test_send_rejects_stale_joined_room_cache(tmp_path: Path) -> None:
         )
 
     stale_bot._hook_send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_maps_membership_probe_failure_to_delivery_unavailable(tmp_path: Path) -> None:
+    """A failed membership probe must remain a no-attempt delivery outcome."""
+    failing_client = _client()
+    failing_client.joined_rooms = AsyncMock(side_effect=RuntimeError("membership unavailable"))
+    failing_bot = _bot(client=failing_client)
+    failing_bot._hook_send_message = AsyncMock(return_value="$wrong")
+    coordinator = _coordinator(
+        test_runtime_paths(tmp_path),
+        _config(tmp_path),
+        {"code": failing_bot},
+    )
+
+    with pytest.raises(TodoPokeDeliveryUnavailableError):
+        await coordinator._send_poke(
+            "code",
+            "!room:localhost",
+            "@code Todo work is ready.",
+            "$thread",
+        )
+
+    failing_bot._hook_send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
