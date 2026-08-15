@@ -24,7 +24,8 @@ Run the bridge manager from `local/instances/deploy/`:
 Provide Telegram credentials with `--api-id`, `--api-hash`, and `--bot-token`, export the matching `TELEGRAM_*` variables, or create `local/instances/deploy/.env.telegram` before running the command.
 When a credential is still missing, the command prompts for it and writes the resulting values into the generated bridge configuration and bridge registry.
 
-Synapse and Tuwunel use different appservice registration mechanisms; `bridge.py register` selects the correct path for the instance homeserver.
+For Synapse, `bridge.py register` installs the generated registration automatically.
+For Tuwunel, it generates the registration file and prints the manual admin-room steps; alternatively, run `./bridge.py register-with-matrix telegram --instance <instance>` after generation.
 
 ## Configure MindRoom
 
