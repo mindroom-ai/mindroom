@@ -9,13 +9,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.turn_controller import _PrecheckedEvent
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     install_generate_response_mock,
@@ -66,7 +66,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     )
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -155,7 +155,7 @@ async def test_edit_event_reserves_prompt_order_while_regenerating(tmp_path: Pat
         tmp_path,
         usernames={ROUTER_AGENT_NAME: "router"},
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -244,7 +244,7 @@ async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) 
         default_room_access=True,
         agent_reply_permissions={ROUTER_AGENT_NAME: AgentReplyPermission(users=[])},
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -317,7 +317,7 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     )
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -415,7 +415,7 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     )
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,

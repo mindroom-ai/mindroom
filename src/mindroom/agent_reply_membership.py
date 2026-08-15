@@ -20,29 +20,19 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-type _AgentReplyMembershipPolicySignature = tuple[
-    tuple[tuple[str, tuple[str, ...]], ...],
-    tuple[tuple[str, tuple[str, ...]], ...],
-]
+type _AgentReplyMembershipPolicySignature = tuple[tuple[str, tuple[str, ...]], ...]
 
 
 def _agent_reply_membership_policy_signature(
     authorization: AuthorizationConfig,
 ) -> _AgentReplyMembershipPolicySignature:
-    """Return the policy inputs that determine canonical membership grants."""
-    room_grants = tuple(
+    """Return the configured room grants that determine membership snapshots."""
+    return tuple(
         sorted(
             (entity_name, tuple(sorted(policy.joined_rooms)))
             for entity_name, policy in authorization.agent_reply_permissions.items()
         ),
     )
-    aliases = tuple(
-        sorted(
-            (canonical_user_id, tuple(sorted(alias_user_ids)))
-            for canonical_user_id, alias_user_ids in authorization.aliases.items()
-        ),
-    )
-    return room_grants, aliases
 
 
 def agent_reply_membership_policy_changed(
@@ -70,7 +60,6 @@ class _GrantRoomMembership:
     room_id: str | None
     ready: bool
     raw_joined_user_ids: frozenset[str] = frozenset()
-    joined_user_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,10 +104,11 @@ class AgentReplyMembershipIndex:
         snapshot = self._snapshot
         if snapshot.policy_signature != _agent_reply_membership_policy_signature(authorization):
             return False
-        resolved_sender = authorization.resolve_alias(sender_id)
         allowed_room_keys = frozenset(joined_rooms)
         return any(
-            room.ready and room.room_key in allowed_room_keys and resolved_sender in room.joined_user_ids
+            room.ready
+            and room.room_key in allowed_room_keys
+            and _raw_membership_matches_sender(room.raw_joined_user_ids, sender_id, authorization)
             for room in snapshot.rooms
         )
 
@@ -178,7 +168,6 @@ class AgentReplyMembershipIndex:
                 room_id=room_id,
                 ready=False,
                 raw_joined_user_ids=frozenset(),
-                joined_user_ids=frozenset(),
             )
             if room.room_key in matching_room_keys
             else room
@@ -264,7 +253,6 @@ class AgentReplyMembershipIndex:
                 room_id=room_id,
                 event=event,
                 control_user_id=control_user_id,
-                authorization=config.authorization,
             )
             for room in snapshot.rooms
         )
@@ -299,7 +287,6 @@ def _apply_transition_to_room(
     room_id: str,
     event: nio.RoomMemberEvent,
     control_user_id: str,
-    authorization: AuthorizationConfig,
 ) -> _GrantRoomMembership:
     """Return one grant-room value after applying a matching live transition."""
     if room.room_id != room_id:
@@ -309,7 +296,6 @@ def _apply_transition_to_room(
             room,
             ready=False,
             raw_joined_user_ids=frozenset(),
-            joined_user_ids=frozenset(),
         )
     if not room.ready:
         return room
@@ -318,12 +304,7 @@ def _apply_transition_to_room(
         raw_joined_user_ids.add(event.state_key)
     else:
         raw_joined_user_ids.discard(event.state_key)
-    frozen_raw_user_ids = frozenset(raw_joined_user_ids)
-    return replace(
-        room,
-        raw_joined_user_ids=frozen_raw_user_ids,
-        joined_user_ids=_canonical_user_ids(frozen_raw_user_ids, authorization),
-    )
+    return replace(room, raw_joined_user_ids=frozenset(raw_joined_user_ids))
 
 
 async def _build_authoritative_snapshot(
@@ -365,14 +346,12 @@ async def _build_authoritative_snapshot(
         if raw_joined_user_ids is None:
             rooms.append(_unready_room(room_key, room_id, reason="joined_members_unavailable"))
             continue
-        joined_user_ids = _canonical_user_ids(raw_joined_user_ids, authorization)
         rooms.append(
             _GrantRoomMembership(
                 room_key=room_key,
                 room_id=room_id,
                 ready=True,
                 raw_joined_user_ids=raw_joined_user_ids,
-                joined_user_ids=joined_user_ids,
             ),
         )
         logger.info(
@@ -380,7 +359,7 @@ async def _build_authoritative_snapshot(
             room_key=room_key,
             room_id=room_id,
             readiness="ready",
-            member_count=len(joined_user_ids),
+            member_count=len(raw_joined_user_ids),
         )
     frozen_rooms = tuple(rooms)
     return _AgentReplyMembershipSnapshot(
@@ -445,12 +424,15 @@ async def _authoritative_room_members(
     return frozenset(member.user_id for member in response.members)
 
 
-def _canonical_user_ids(
+def _raw_membership_matches_sender(
     raw_user_ids: frozenset[str],
+    sender_id: str,
     authorization: AuthorizationConfig,
-) -> frozenset[str]:
-    """Resolve raw room members without losing alias multiplicity for transitions."""
-    return frozenset(authorization.resolve_alias(user_id) for user_id in raw_user_ids)
+) -> bool:
+    """Match current alias equivalence against the raw Matrix membership roster."""
+    canonical_sender = authorization.resolve_alias(sender_id)
+    equivalent_user_ids = {canonical_sender, *authorization.aliases.get(canonical_sender, ())}
+    return not raw_user_ids.isdisjoint(equivalent_user_ids)
 
 
 def _unready_room(room_key: str, room_id: str | None, *, reason: str) -> _GrantRoomMembership:

@@ -43,6 +43,7 @@ from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_system.plugins import PluginReloadResult
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -1539,7 +1540,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         ),
         tmp_path,
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
         storage_path=tmp_path,
         config=config,
@@ -2233,7 +2234,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
 
     # Create agent1 bot with initial config
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
-    agent1_bot = AgentBot(
+    agent1_bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
         storage_path=tmp_path,
         config=config,
@@ -2316,7 +2317,7 @@ async def test_router_updates_rooms_on_config_reload(
 
     # Create router bot with updated config
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
-    router_bot = AgentBot(
+    router_bot = make_test_agent_bot(
         agent_user=mock_agent_users[ROUTER_AGENT_NAME],
         storage_path=tmp_path,
         config=config,
@@ -2386,7 +2387,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
 
     # Create agent3 bot (new agent in updated config)
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
-    agent3_bot = AgentBot(
+    agent3_bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent3"],
         storage_path=tmp_path,
         config=config,
@@ -2463,7 +2464,7 @@ async def test_team_room_changes_on_config_reload(
 
     # Create team1 bot with updated config
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
-    team1_bot = AgentBot(
+    team1_bot = make_test_agent_bot(
         agent_user=mock_agent_users["team1"],
         storage_path=tmp_path,
         config=config,
@@ -2701,7 +2702,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
@@ -2754,7 +2755,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
         ),
         tmp_path,
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
         storage_path=tmp_path,
         config=config,
@@ -2837,7 +2838,7 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
     )
     bots = {}
     for agent_name in ("agent1", "agent2"):
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=mock_agent_users[agent_name],
             storage_path=tmp_path,
             config=config,
@@ -2903,7 +2904,7 @@ async def test_closed_admission_defers_response_until_gate_reopens(
         ),
         tmp_path,
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
         storage_path=tmp_path,
         config=config,
@@ -2964,7 +2965,7 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
         ),
         tmp_path,
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
         storage_path=tmp_path,
         config=config,

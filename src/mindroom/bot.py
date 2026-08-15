@@ -12,7 +12,6 @@ from uuid import uuid4
 import nio
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.approval_inbound import (
     handle_tool_approval_action,
     maybe_handle_tool_approval_reply,
@@ -173,6 +172,7 @@ if TYPE_CHECKING:
     import structlog
     from agno.agent import Agent
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync, ReplyMembershipPreAdmission
     from mindroom.coalescing_batch import PreparedTurn
     from mindroom.config.main import Config
@@ -268,7 +268,8 @@ def create_bot_for_entity(
     storage_path: Path,
     config_path: Path | None = None,
     journal_store: EventJournalStore | None = None,
-    agent_reply_memberships: AgentReplyMembershipIndex | None = None,
+    *,
+    agent_reply_memberships: AgentReplyMembershipIndex,
     agent_reply_membership_sync: AgentReplyMembershipSync | None = None,
 ) -> AgentBot | TeamBot | None:
     """Create appropriate bot instance for an entity (agent, team, or router).
@@ -408,7 +409,8 @@ class AgentBot:
         config_path: Path | None = None,
         enable_streaming: bool = True,
         journal_store: EventJournalStore | None = None,
-        agent_reply_memberships: AgentReplyMembershipIndex | None = None,
+        *,
+        agent_reply_memberships: AgentReplyMembershipIndex,
         agent_reply_membership_sync: AgentReplyMembershipSync | None = None,
     ) -> None:
         """Initialize the bot with canonical runtime-backed config state.
@@ -453,12 +455,10 @@ class AgentBot:
         self._room_member_join_hooks_armed = False
         self._room_member_join_lock = asyncio.Lock()
         self._sliding_sync_startup_warning_emitted = False
-        membership_index = agent_reply_memberships or (
-            agent_reply_membership_sync.memberships
-            if agent_reply_membership_sync is not None
-            else AgentReplyMembershipIndex()
-        )
-        if agent_reply_membership_sync is not None and agent_reply_membership_sync.memberships is not membership_index:
+        if (
+            agent_reply_membership_sync is not None
+            and agent_reply_membership_sync.memberships is not agent_reply_memberships
+        ):
             msg = "The reply-membership sync coordinator must control the bot's shared membership index."
             raise ValueError(msg)
         self._reply_membership_sync = agent_reply_membership_sync
@@ -466,7 +466,7 @@ class AgentBot:
             client=None,
             config=config,
             runtime_paths=self.runtime_paths,
-            agent_reply_memberships=membership_index,
+            agent_reply_memberships=agent_reply_memberships,
             enable_streaming=enable_streaming,
             orchestrator=None,
         )
@@ -2899,7 +2899,7 @@ class TeamBot(AgentBot):
         team_model: str | None = None,
         enable_streaming: bool = True,
         journal_store: EventJournalStore | None = None,
-        agent_reply_memberships: AgentReplyMembershipIndex | None = None,
+        agent_reply_memberships: AgentReplyMembershipIndex,
     ) -> None:
         """Initialize the team bot and its shared agent runtime."""
         super().__init__(

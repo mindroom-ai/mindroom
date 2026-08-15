@@ -30,7 +30,10 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamMode, TeamOutcome, TeamResolution
 from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread, is_router_only_agent_mention
-from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps, _ResponderAvailability
+from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _ResponderAvailability
+from tests.authorization_helpers import (
+    make_test_turn_policy_deps,
+)
 from tests.conftest import (
     agent_response_should_respond,
     bind_runtime_paths,
@@ -163,7 +166,7 @@ class TestAgentResponseLogic:
         runtime.config = config
         runtime.orchestrator = None
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=MagicMock(),
                 runtime_paths=runtime_paths,
@@ -217,7 +220,7 @@ class TestAgentResponseLogic:
         runtime.config = config
         runtime.orchestrator = None
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=MagicMock(),
                 runtime_paths=runtime_paths,
@@ -274,7 +277,7 @@ class TestAgentResponseLogic:
         runtime.config = config
         runtime.orchestrator = None
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=MagicMock(),
                 runtime_paths=runtime_paths,
@@ -313,7 +316,7 @@ class TestAgentResponseLogic:
         runtime.config = self.config
         runtime.orchestrator = None
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=MagicMock(),
                 runtime_paths=self.runtime_paths,
@@ -390,7 +393,7 @@ class TestAgentResponseLogic:
         runtime.orchestrator = None
         logger = MagicMock()
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=logger,
                 runtime_paths=self.runtime_paths,
@@ -472,7 +475,7 @@ class TestAgentResponseLogic:
         runtime.orchestrator = None
         logger = MagicMock()
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=logger,
                 runtime_paths=self.runtime_paths,
@@ -542,7 +545,7 @@ class TestAgentResponseLogic:
         runtime.config = self.config
         runtime.orchestrator = None
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=MagicMock(),
                 runtime_paths=self.runtime_paths,
@@ -632,7 +635,7 @@ class TestAgentResponseLogic:
         runtime.config = config
         runtime.orchestrator = None
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=MagicMock(),
                 runtime_paths=runtime_paths,

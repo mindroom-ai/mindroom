@@ -22,7 +22,6 @@ from agno.session.team import TeamSession
 from mindroom import interactive
 from mindroom.agent_storage import get_agent_session
 from mindroom.agents import remove_run_by_event_id
-from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing_batch import tagged_coalesced_prompt
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
@@ -50,7 +49,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.session_ids import create_session_id
-from tests.bot_helpers import dispatch_reaction_durably
+from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot, make_test_team_bot
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -70,6 +69,8 @@ from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_acco
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+
+    from mindroom.bot import AgentBot, TeamBot
 
 
 def _room_send_response(event_id: str) -> MagicMock:
@@ -333,7 +334,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     config = _test_config(tmp_path)
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -486,7 +487,7 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
         password="test_password",  # noqa: S106
     )
     config = _test_config(tmp_path)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -593,7 +594,7 @@ async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrat
         password="test_password",  # noqa: S106
     )
     config = _test_config(tmp_path, agent_names=("test_agent", "other_agent"))
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -680,7 +681,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         password="test_password",  # noqa: S106
     )
     config = _test_config(tmp_path)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -925,7 +926,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     )
     config = _team_test_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    bot = TeamBot(
+    bot = make_test_team_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -1089,7 +1090,7 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
     config = _test_config(tmp_path)
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -1173,7 +1174,7 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
     config = _test_config(tmp_path, agent_names=("test_agent", "helper_agent"))
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -1321,7 +1322,7 @@ async def test_bot_ignores_agent_edits_from_actual_persisted_id_after_drift(tmp_
     state.add_account("agent_helper_agent", "actual_helper_agent", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -1395,7 +1396,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
 
     config = _test_config(tmp_path)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -1554,7 +1555,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
 
     config = _test_config(tmp_path)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -1670,7 +1671,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
 
     config = _test_config(tmp_path)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -1781,7 +1782,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
 
     config = _test_config(tmp_path)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -1898,7 +1899,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
 
     config = _test_config(tmp_path)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -2078,7 +2079,7 @@ async def test_load_turn_prefers_newest_matching_run(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
     config = _test_config(tmp_path)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -2153,7 +2154,7 @@ async def test_load_turn_keeps_ledger_anchor_for_interactive_selection(tmp_path:
         password="test_password",  # noqa: S106
     )
     config = _test_config(tmp_path)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -2219,7 +2220,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_interrupted_
     config = _test_config(tmp_path)
     session_id = create_session_id("!test:example.com", None)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -2354,7 +2355,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
     config = _test_config(tmp_path)
     session_id = create_session_id("!test:example.com", None)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -2520,7 +2521,7 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
     runtime_paths = runtime_paths_for(config)
     session_id = create_session_id("!test:example.com", None)
 
-    bot = TeamBot(
+    bot = make_test_team_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -2655,7 +2656,7 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
         password="test_password",  # noqa: S106
     )
     config = _test_config(tmp_path)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -2796,7 +2797,7 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
         password="test_password",  # noqa: S106
     )
     config = _test_config(tmp_path)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -2931,7 +2932,7 @@ async def test_load_turn_prefers_newest_match_across_thread_and_room_sessions(tm
         password="test_password",  # noqa: S106
     )
     config = _test_config(tmp_path)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -3021,7 +3022,7 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
     )
 
     config = _test_config(tmp_path)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -3130,7 +3131,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     config = _test_config(tmp_path)
     config.agents["test_agent"].thread_mode = "room"
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -3339,7 +3340,7 @@ async def test_handle_message_edit_recovers_threaded_turn_using_resolved_context
         password="test_password",  # noqa: S106
     )
     config = _test_config(tmp_path)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -3491,7 +3492,7 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
     config = _test_config(tmp_path)
     config.agents["test_agent"].thread_mode = "room"
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -3642,7 +3643,7 @@ async def test_handle_message_edit_recovers_newer_run_response_event_id_after_re
 
     async def start_bot() -> AgentBot:
         """Build one warmed bot, the way startup does before any callback runs."""
-        started = AgentBot(
+        started = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
@@ -3837,7 +3838,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
     config = _test_config(tmp_path)
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -3949,7 +3950,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
 
     config = _test_config(tmp_path)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -4036,7 +4037,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
     )
 
     config = _test_config(tmp_path)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -4173,7 +4174,7 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
         tmp_path,
     )
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -4293,7 +4294,7 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
         tmp_path,
     )
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -4366,7 +4367,7 @@ async def test_committed_config_confirmation_resumes_before_changed_reply_permis
         ),
         tmp_path,
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -4434,7 +4435,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     config = _test_config(tmp_path, voice_enabled=True)
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -4544,7 +4545,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
     config = _test_config(tmp_path, voice_enabled=True)
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -4666,7 +4667,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     )
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -4744,7 +4745,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
     config = _test_config(tmp_path, voice_enabled=True)
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,

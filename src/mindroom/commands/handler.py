@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
@@ -38,6 +37,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
@@ -109,10 +109,10 @@ class CommandHandlerContext:
     record_handled_turn: Callable[[TurnRecord], Awaitable[None]]
     record_command_result: Callable[[str], Awaitable[None]]
     send_response: _CommandResponseSender
+    agent_reply_memberships: AgentReplyMembershipIndex
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]] | None = None
-    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:
@@ -201,7 +201,7 @@ async def generate_welcome_message_for_room(
     sender_id: str | None,
     config: Config,
     runtime_paths: RuntimePaths,
-    agent_reply_memberships: AgentReplyMembershipIndex | None = None,
+    agent_reply_memberships: AgentReplyMembershipIndex,
 ) -> str:
     """Generate a welcome message for callers without a live turn-policy candidate source."""
     if sender_id is None:
@@ -213,7 +213,7 @@ async def generate_welcome_message_for_room(
             sender_id,
             config,
             runtime_paths,
-            agent_reply_memberships or AgentReplyMembershipIndex(),
+            agent_reply_memberships,
         )
     return _format_welcome_message(candidate_entities, config, runtime_paths)
 

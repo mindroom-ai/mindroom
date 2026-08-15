@@ -32,7 +32,6 @@ from mindroom.ai_runtime import (
     queued_message_signal_context,
     register_queued_notice_storage,
 )
-from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing_batch import (
     CoalescingKey,
@@ -86,6 +85,7 @@ from mindroom.response_runner import (
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -111,6 +111,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import FinalDeliveryRequest
     from mindroom.turn_origin import TurnOrigin
 
@@ -164,7 +165,7 @@ def _bot(tmp_path: Path) -> AgentBot:
         display_name="General",
         user_id="@mindroom_general:localhost",
     )
-    bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     install_runtime_journal_support(bot)

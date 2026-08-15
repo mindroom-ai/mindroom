@@ -50,6 +50,9 @@ import certifi
 import httpx
 import nio
 
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 SRC = str(Path(__file__).resolve().parents[3] / "src")
@@ -557,7 +560,7 @@ async def main() -> int:  # noqa: C901, PLR0915
                     user_id: str | None,
                     **_kw: object,
                 ) -> ToolRuntimeContext:
-                    return ToolRuntimeContext(
+                    return make_test_tool_runtime_context(
                         agent_name=AGENT,
                         target=target,
                         requester_id=user_id or bot.user_id,

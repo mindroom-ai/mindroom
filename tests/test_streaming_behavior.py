@@ -18,7 +18,6 @@ from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 from pydantic import ValidationError
 
-from mindroom.bot import AgentBot
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, CancelSource
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -68,6 +67,7 @@ from mindroom.streaming import _consume_streaming_chunks as _consume_streaming_c
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -85,6 +85,8 @@ from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
+
+    from mindroom.bot import AgentBot
 
 IN_PROGRESS_MARKER = " ⋯"
 _INTERRUPTION_SUMMARY = "(turn stopped before completion)"
@@ -144,7 +146,7 @@ def _make_bot_with_shared_knowledge(
         runtime_paths,
     )
     persist_entity_accounts(config, runtime_paths_for(config))
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent,
         tmp_path,
         rooms=["!test:localhost"],
@@ -317,7 +319,7 @@ class TestStreamingBehavior:
         # Set up helper bot (the one that will stream)
         config = self.config
 
-        helper_bot = AgentBot(
+        helper_bot = make_test_agent_bot(
             mock_helper_agent,
             tmp_path,
             rooms=["!test:localhost"],
@@ -336,7 +338,7 @@ class TestStreamingBehavior:
         # Set up calculator bot (the one that will be mentioned)
         config = self.config
 
-        calc_bot = AgentBot(
+        calc_bot = make_test_agent_bot(
             mock_calculator_agent,
             tmp_path,
             rooms=["!test:localhost"],
@@ -457,7 +459,7 @@ class TestStreamingBehavior:
         # Set up calculator bot
         config = self.config
 
-        calc_bot = AgentBot(
+        calc_bot = make_test_agent_bot(
             mock_calculator_agent,
             tmp_path,
             rooms=["!test:localhost"],
@@ -1947,7 +1949,7 @@ class TestStreamingBehavior:
 
         sent_contents: list[dict[str, object]] = []
         config = self.config
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             mock_helper_agent,
             tmp_path,
             rooms=["!test:localhost"],

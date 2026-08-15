@@ -18,7 +18,6 @@ from agno.session.team import TeamSession
 from agno.team import Team
 
 from mindroom.ai import _prepare_agent_and_prompt
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -48,6 +47,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_materialized_team_execution
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -62,6 +62,8 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
 
 
 def _config(tmp_path: Path) -> Config:
@@ -171,7 +173,7 @@ def _make_bot(tmp_path: Path) -> AgentBot:
         display_name="CodeAgent",
         password=TEST_PASSWORD,
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,

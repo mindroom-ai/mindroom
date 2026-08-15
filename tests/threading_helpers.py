@@ -13,7 +13,6 @@ import pytest_asyncio
 from nio.api import RelationshipType
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -30,6 +29,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -44,6 +44,7 @@ from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
 
+    from mindroom.bot import AgentBot
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 
@@ -562,7 +563,7 @@ class ThreadingBehaviorTestBase:
             tmp_path,
         )
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],

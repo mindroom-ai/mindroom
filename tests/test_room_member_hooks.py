@@ -36,6 +36,7 @@ from mindroom.matrix import room_member_joins
 from mindroom.matrix.sync_certification import SyncTrustState
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -171,7 +172,9 @@ def _agent_bot(tmp_path: Path) -> AgentBot:
         display_name="Helper",
         password=TEST_PASSWORD,
     )
-    return install_runtime_journal_support(AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths))
+    return install_runtime_journal_support(
+        make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths),
+    )
 
 
 def test_room_member_joined_is_a_builtin_hook_event() -> None:

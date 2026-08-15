@@ -12,7 +12,6 @@ import nio
 import pytest
 
 from mindroom.authorization import is_authorized_sender as real_is_authorized_sender
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
@@ -60,6 +59,7 @@ from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -81,6 +81,8 @@ from tests.turn_dispatch_helpers import dispatch_test_turn
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
 
 
 def _config(tmp_path: Path) -> Config:
@@ -170,7 +172,7 @@ def _synthetic_envelope(*, agent_name: str = "code") -> MessageEnvelope:
 
 def _hook_bot(tmp_path: Path) -> AgentBot:
     config = _config(tmp_path)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="router",
             password=TEST_PASSWORD,
@@ -207,7 +209,7 @@ def _hook_bot(tmp_path: Path) -> AgentBot:
 def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     config = _config(tmp_path)
     config.authorization = AuthorizationConfig(default_room_access=True)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,
             password=TEST_PASSWORD,

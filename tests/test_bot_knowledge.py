@@ -11,7 +11,6 @@ import pytest
 from agno.knowledge.document import Document
 from agno.knowledge.knowledge import Knowledge
 
-from mindroom.bot import AgentBot
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import _MultiKnowledgeVectorDb, knowledge_runtime_identity
@@ -23,6 +22,7 @@ from tests.bot_helpers import (
     _fake_indexing_settings,
     _SyncStubVectorDb,
     make_mock_agent_user,
+    make_test_agent_bot,
 )
 from tests.conftest import (
     runtime_paths_for,
@@ -56,7 +56,7 @@ class TestAgentBot(AgentBotTestBase):
             },
             runtime_root=tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
         assert bot._knowledge_access_support.for_agent("calculator") is None
 
@@ -73,7 +73,7 @@ class TestAgentBot(AgentBotTestBase):
             },
             runtime_root=tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         expected_knowledge = Knowledge()
         lookup = SimpleNamespace(
             key=SimpleNamespace(
@@ -110,7 +110,7 @@ class TestAgentBot(AgentBotTestBase):
             },
             runtime_root=tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
         research_vector_db = MagicMock()
         research_vector_db.search.return_value = [

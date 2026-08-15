@@ -379,8 +379,8 @@ def test_transition_cannot_make_unready_room_authoritative(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_policy_signature_change_invalidates_old_snapshot(tmp_path: Path) -> None:
-    """An old ready snapshot must not authorize under changed alias or room policy."""
+async def test_room_grant_policy_change_invalidates_old_snapshot(tmp_path: Path) -> None:
+    """An old ready snapshot must not authorize under a changed grant-room policy."""
     room_id = "!project:example.com"
     config, runtime_paths = _runtime_config(tmp_path, joined_rooms=["project"])
     _persist_room(runtime_paths, "project", room_id)
@@ -391,11 +391,36 @@ async def test_policy_signature_change_invalidates_old_snapshot(tmp_path: Path) 
     await index.refresh(config, runtime_paths, client)
     changed_config, _ = _runtime_config(
         tmp_path,
-        joined_rooms=["project"],
-        aliases={"@bob:example.com": ["@bridge_bob:example.com"]},
+        joined_rooms=["secondary"],
     )
 
+    assert not index.is_allowed("@alice:example.com", ["secondary"], changed_config.authorization)
+
+
+@pytest.mark.asyncio
+async def test_alias_policy_change_reuses_raw_membership_snapshot(tmp_path: Path) -> None:
+    """Alias edits should take effect at lookup without rebuilding Matrix membership."""
+    room_id = "!project:example.com"
+    config, runtime_paths = _runtime_config(
+        tmp_path,
+        joined_rooms=["project"],
+        aliases={"@alice:example.com": ["@bridge:example.com"]},
+    )
+    _persist_room(runtime_paths, "project", room_id)
+    client = AsyncMock()
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.return_value = _joined_members(room_id, "@bridge:example.com")
+    index = AgentReplyMembershipIndex()
+    await index.refresh(config, runtime_paths, client)
+    changed_config, _ = _runtime_config(
+        tmp_path,
+        joined_rooms=["project"],
+        aliases={"@bob:example.com": ["@bridge:example.com"]},
+    )
+
+    assert not index.needs_refresh(changed_config.authorization)
     assert not index.is_allowed("@alice:example.com", ["project"], changed_config.authorization)
+    assert index.is_allowed("@bob:example.com", ["project"], changed_config.authorization)
 
 
 @pytest.mark.asyncio

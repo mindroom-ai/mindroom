@@ -63,21 +63,29 @@ Credential and OAuth management evaluates only the selected policy's static `use
 
 Membership-only policies therefore grant no credential-management access.
 
+Long-lived tool runtimes keep their construction-time `config` as the pinned execution snapshot used for model and tool materialization.
+
+Authorization and capability checks use `ToolRuntimeContext.current_config`, which resolves through the live config provider when the runtime is managed by the orchestrator.
+
+Authorization-aware production collaborators require the orchestrator-owned membership service as an explicit dependency and never create a private fallback index.
+
 ## Membership State
 
 Add one orchestrator-owned in-memory membership service shared by all bot and API reply evaluators.
 
 The service publishes immutable snapshots so a message observes either the previous complete snapshot or the replacement complete snapshot.
 
-Each snapshot records the authorization policy signature, the stable Matrix room ID for every referenced managed room key, whether that room is ready, and its canonicalized joined-user IDs.
+Each snapshot records the room-grant policy signature, the stable Matrix room ID for every referenced managed room key, whether that room is ready, and its raw joined Matrix user IDs.
 
-The policy signature covers configured membership grants and bridge aliases so stale snapshots cannot authorize after a config change.
+The policy signature covers configured membership grants so stale snapshots cannot authorize after a grant-room policy change.
+
+Bridge aliases are resolved from the current authorization policy at lookup time, so alias edits take effect without a Matrix membership refresh.
 
 The router Matrix client is the control-plane client because the router is configured to join every managed room.
 
 An authoritative refresh first resolves every referenced key through persisted `MatrixState.rooms`, confirms the router is currently joined, and then calls `joined_members()` once for each resolved grant room.
 
-Successful member snapshots canonicalize every Matrix user ID through bridge aliases and store only joined users.
+Successful member snapshots store only raw joined Matrix user IDs.
 
 An unresolved room, an unjoined router client, or an unsuccessful `joined_members()` result publishes that room as unready and logs a structured warning without logging its member list.
 

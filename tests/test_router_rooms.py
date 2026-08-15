@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
-from mindroom.bot import TeamBot, create_bot_for_entity
+from mindroom.bot import TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -18,6 +18,9 @@ from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.authorization_helpers import (
+    make_test_bot_for_entity,
+)
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -103,7 +106,7 @@ async def test_router_gets_all_configured_rooms(
 
     # Create the router bot
     memberships, membership_sync = _router_membership_dependencies()
-    router_bot = create_bot_for_entity(
+    router_bot = make_test_bot_for_entity(
         ROUTER_AGENT_NAME,
         router_user,
         config_with_rooms,
@@ -146,7 +149,7 @@ def test_team_bot_uses_defaults_streaming_setting(
         password=TEST_PASSWORD,
     )
 
-    team_bot = create_bot_for_entity(
+    team_bot = make_test_bot_for_entity(
         "team1",
         team_user,
         config_with_rooms,
@@ -180,7 +183,7 @@ def test_team_bot_uses_persisted_member_usernames(
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
-    team_bot = create_bot_for_entity(
+    team_bot = make_test_bot_for_entity(
         "team1",
         AgentMatrixUser(
             agent_name="team1",
@@ -250,7 +253,7 @@ async def test_router_joins_rooms_on_start(
 
     # Create and configure the router bot
     memberships, membership_sync = _router_membership_dependencies()
-    router_bot = create_bot_for_entity(
+    router_bot = make_test_bot_for_entity(
         ROUTER_AGENT_NAME,
         router_user,
         config_with_rooms,

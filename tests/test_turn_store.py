@@ -42,6 +42,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_store import TurnStore, TurnStoreDeps
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -2387,7 +2388,7 @@ def test_only_turn_store_imports_handled_turn_ledger_in_production() -> None:
 def test_agent_bot_does_not_expose_removed_handled_turn_ledger_shim(tmp_path: Path) -> None:
     """AgentBot instances should route handled-turn state only through TurnStore."""
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="agent",
             user_id="@mindroom_agent:localhost",

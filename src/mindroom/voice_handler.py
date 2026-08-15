@@ -15,7 +15,6 @@ from agno.agent import Agent
 from agno.media import Audio
 
 from mindroom import model_loading
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.attachments import register_audio_attachment
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.config.voice import normalize_speech_base_url
@@ -41,6 +40,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -151,7 +151,7 @@ async def _compute_normalized_voice_message(
     event: AudioMessageEvent,
     config: Config,
     runtime_paths: RuntimePaths,
-    membership_index: AgentReplyMembershipIndex | None = None,
+    membership_index: AgentReplyMembershipIndex,
     *,
     thread_id: str | None,
 ) -> _NormalizedVoiceMessage | None:
@@ -179,7 +179,7 @@ async def _compute_normalized_voice_message(
         event,
         config,
         runtime_paths,
-        membership_index or AgentReplyMembershipIndex(),
+        membership_index,
         audio=audio,
     )
     if not isinstance(transcribed_message, str) or not transcribed_message.strip():
@@ -198,7 +198,7 @@ async def _normalize_voice_message(
     event: AudioMessageEvent,
     config: Config,
     runtime_paths: RuntimePaths,
-    membership_index: AgentReplyMembershipIndex | None = None,
+    membership_index: AgentReplyMembershipIndex,
     *,
     thread_id: str | None,
 ) -> _NormalizedVoiceMessage | None:
@@ -210,7 +210,6 @@ async def _normalize_voice_message(
 
     task = _voice_normalization_tasks.get(cache_key)
     if task is None:
-        effective_membership_index = membership_index or AgentReplyMembershipIndex()
 
         async def _compute_bounded() -> _NormalizedVoiceMessage | None:
             # Hard deadline so a hung download/STT/normalizer fails this shared
@@ -223,7 +222,7 @@ async def _normalize_voice_message(
                     event,
                     config,
                     runtime_paths,
-                    effective_membership_index,
+                    membership_index,
                     thread_id=thread_id,
                 )
 
@@ -243,7 +242,7 @@ async def prepare_voice_message(
     *,
     runtime_paths: RuntimePaths,
     thread_id: str | None,
-    membership_index: AgentReplyMembershipIndex | None = None,
+    membership_index: AgentReplyMembershipIndex,
 ) -> _PreparedVoiceMessage | None:
     """Download/register audio and normalize it into a synthetic text event."""
     normalized = await _normalize_voice_message(
@@ -253,7 +252,7 @@ async def prepare_voice_message(
         event,
         config,
         runtime_paths,
-        membership_index or AgentReplyMembershipIndex(),
+        membership_index,
         thread_id=thread_id,
     )
     if normalized is None:
@@ -378,7 +377,7 @@ async def _handle_voice_message(
     event: AudioMessageEvent,
     config: Config,
     runtime_paths: RuntimePaths,
-    membership_index: AgentReplyMembershipIndex | None = None,
+    membership_index: AgentReplyMembershipIndex,
     audio: Audio | None = None,
 ) -> str | None:
     """Handle a voice message event.
@@ -424,7 +423,7 @@ async def _handle_voice_message(
             event.sender,
             config,
             runtime_paths,
-            membership_index or AgentReplyMembershipIndex(),
+            membership_index,
         )
 
         # Process transcription with AI for command/agent recognition

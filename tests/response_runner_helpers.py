@@ -5,7 +5,6 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -14,6 +13,7 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -28,6 +28,8 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
 
 
 def _config(tmp_path: Path) -> Config:
@@ -50,7 +52,7 @@ def _bot(tmp_path: Path) -> AgentBot:
         display_name="General",
         user_id="@mindroom_general:localhost",
     )
-    bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     install_runtime_journal_support(bot)
     wrap_extracted_collaborators(bot)

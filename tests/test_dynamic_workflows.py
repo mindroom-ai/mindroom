@@ -40,6 +40,9 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import _matching_tool_approval_rule
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -145,7 +148,7 @@ def _make_context(tmp_path: Path) -> ToolRuntimeContext:
         ),
         runtime_paths,
     )
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
             room_id="!room:localhost",
@@ -182,7 +185,7 @@ def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> Tool
     for agent_name in room_agents:
         room.add_member(registry.current_id(agent_name).full_id, config.agents[agent_name].display_name, None)
     room.members_synced = True
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
             room_id="!room:localhost",

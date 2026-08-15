@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -16,6 +15,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -31,6 +31,8 @@ from tests.identity_helpers import persist_entity_accounts
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
 
 
 async def _empty_event_iterator() -> AsyncGenerator[object, None]:
@@ -66,7 +68,7 @@ def setup_test_bot(
             config = bind_runtime_paths(config, runtime_paths)
     persist_entity_accounts(config, runtime_paths_for(config))
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent,
         storage_path,
         config,

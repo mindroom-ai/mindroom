@@ -25,8 +25,11 @@ from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.metadata import TOOL_METADATA
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -239,7 +242,7 @@ class TestDelegateTools:
         replacement_config.authorization = AuthorizationConfig(
             agent_reply_permissions={"code": AgentReplyPermission(users=[])},
         )
-        runtime_context = ToolRuntimeContext(
+        runtime_context = make_test_tool_runtime_context(
             agent_name="leader",
             target=MessageTarget(
                 room_id="!room:example.org",
@@ -336,7 +339,7 @@ class TestDelegateTools:
             config=config,
             delegation_depth=0,
         )
-        runtime_context = ToolRuntimeContext(
+        runtime_context = make_test_tool_runtime_context(
             agent_name="leader",
             target=MessageTarget(
                 room_id="!dm:example.org",
@@ -708,7 +711,7 @@ class TestDelegateKnowledge:
             delegation_depth=0,
         )
         tool_function_filter = MagicMock(return_value=True)
-        runtime_context = ToolRuntimeContext(
+        runtime_context = make_test_tool_runtime_context(
             agent_name="leader",
             target=MessageTarget(
                 room_id="!room:example.org",
@@ -797,7 +800,7 @@ class TestDelegateKnowledge:
             execution_identity=execution_identity,
             delegation_depth=0,
         )
-        runtime_context = ToolRuntimeContext(
+        runtime_context = make_test_tool_runtime_context(
             agent_name="leader",
             target=MessageTarget(
                 room_id="!room:example.org",

@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -18,7 +18,6 @@ from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
 
 from mindroom.agents import create_agent
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
@@ -52,6 +51,10 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -64,6 +67,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
 
 type SyncBridgeEvent = (
@@ -180,7 +184,7 @@ def _tool_runtime_context(
     hook_registry: HookRegistry | None = None,
 ) -> ToolRuntimeContext:
     config = _config(tmp_path, log_llm_requests=log_llm_requests)
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name=agent_name,
         target=MessageTarget(
             room_id="!room:localhost",
@@ -204,6 +208,25 @@ def _tool_runtime_context(
     )
 
 
+def test_tool_runtime_context_requires_reply_membership_index(tmp_path: Path) -> None:
+    """Tool contexts must fail construction when their shared security dependency is omitted."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+
+    context_constructor = cast("Any", ToolRuntimeContext)
+    with pytest.raises(TypeError, match="agent_reply_memberships"):
+        context_constructor(
+            agent_name="general",
+            target=MessageTarget.resolve(room_id="!room:example.org", thread_id=None, reply_to_event_id=None),
+            requester_id="@alice:example.org",
+            client=AsyncMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            conversation_reader=make_conversation_reader_mock(),
+            relations=make_relation_lookup(),
+        )
+
+
 def _execution_identity() -> ToolExecutionIdentity:
     return ToolExecutionIdentity(
         channel="matrix",
@@ -225,7 +248,7 @@ def _dispatch_context(
 
 
 def _agent_bot(tmp_path: Path, *, config: Config, agent_name: str = "code") -> AgentBot:
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,
             user_id=f"@mindroom_{agent_name}:localhost",

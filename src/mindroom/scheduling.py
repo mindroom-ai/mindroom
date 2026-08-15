@@ -7,7 +7,7 @@ import json
 import typing
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, NamedTuple
 from zoneinfo import ZoneInfo
@@ -20,7 +20,6 @@ from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field, field_validator
 
 from mindroom import model_loading, scheduling_executor
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import build_hook_matrix_admin
@@ -32,6 +31,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 
 if TYPE_CHECKING:
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
@@ -178,8 +178,8 @@ class SchedulingRuntime:
     runtime_paths: RuntimePaths
     room: nio.MatrixRoom
     conversation_reader: ConversationReader
+    agent_reply_memberships: AgentReplyMembershipIndex
     matrix_admin: HookMatrixAdmin | None = None
-    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
 
 
 @dataclass

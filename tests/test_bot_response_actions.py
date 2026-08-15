@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
@@ -40,6 +39,8 @@ from tests.bot_helpers import (
     _policy_dispatch,
     _runtime_bound_config,
     make_mock_agent_user,
+    make_test_agent_bot,
+    make_test_team_bot,
 )
 from tests.conftest import (
     TEST_PASSWORD,
@@ -105,7 +106,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with patch("mindroom.turn_policy.decide_team_formation", new_callable=MagicMock) as mock_decide:
             mock_decide.return_value = TeamResolution.none()
-            bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+            bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
             bot.orchestrator = MagicMock()
             bot.orchestrator.agent_bots = {"calculator": MagicMock()}
 
@@ -139,7 +140,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(own_user_id=bot.matrix_id.full_id, user_ids=[bot.matrix_id.full_id])
         context = MessageContext(
             am_i_mentioned=True,
@@ -212,7 +213,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -267,7 +268,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.orchestrator = MagicMock()
         bot.orchestrator.agent_bots = {"calculator": MagicMock()}
         room = _matrix_room(
@@ -324,7 +325,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.orchestrator = MagicMock()
         bot.orchestrator.agent_bots = {
             "alpha": MagicMock(running=False),
@@ -389,7 +390,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -446,7 +447,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -491,7 +492,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -538,7 +539,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[entity_ids(config, runtime_paths)["calculator"].full_id],
@@ -598,7 +599,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Ops Team",
             password=TEST_PASSWORD,
         )
-        bot = TeamBot(
+        bot = make_test_team_bot(
             team_user,
             tmp_path,
             config=config,
@@ -646,7 +647,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -726,7 +727,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -813,7 +814,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.orchestrator = MagicMock()
         bot.orchestrator.agent_bots = {"calculator": MagicMock(running=True)}
         room = _matrix_room(
@@ -867,7 +868,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(own_user_id=bot.matrix_id.full_id, user_ids=[bot.matrix_id.full_id])
         context = MessageContext(
             am_i_mentioned=False,
@@ -922,7 +923,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         ids = entity_ids(config, runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
@@ -1024,7 +1025,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -1102,7 +1103,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -1162,7 +1163,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         ids = entity_ids(config, runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
@@ -1245,7 +1246,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         ids = entity_ids(config, runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
@@ -1334,7 +1335,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Router",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = AsyncMock()
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
@@ -1417,7 +1418,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Router",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = AsyncMock()
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
@@ -1491,7 +1492,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Synthesis",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -1585,7 +1586,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Synthesis",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -1649,7 +1650,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Synthesis",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -1717,7 +1718,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Synthesis",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -1784,7 +1785,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Router",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         ids = entity_ids(config, runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
@@ -1854,7 +1855,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Router",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         ids = entity_ids(config, runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,

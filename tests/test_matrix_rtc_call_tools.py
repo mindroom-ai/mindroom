@@ -36,6 +36,9 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -100,7 +103,7 @@ def _runtime_context(
     orchestrator: object | None = None,
 ) -> ToolRuntimeContext:
     """Build the real typed call context expected by production code."""
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name=AGENT,
         target=target,
         requester_id=REQUESTER,
@@ -474,7 +477,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
             agent_name: str | None = None,
             active_model_name: str | None = None,
         ) -> ToolRuntimeContext:
-            context = ToolRuntimeContext(
+            context = make_test_tool_runtime_context(
                 agent_name=agent_name or AGENT,
                 target=target,
                 requester_id=user_id or REQUESTER,
@@ -723,7 +726,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
             agent_name: str | None = None,
             active_model_name: str | None = None,
         ) -> ToolRuntimeContext:
-            return ToolRuntimeContext(
+            return make_test_tool_runtime_context(
                 agent_name=agent_name or AGENT,
                 target=target,
                 requester_id=user_id or REQUESTER,

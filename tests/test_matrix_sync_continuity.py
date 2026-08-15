@@ -17,7 +17,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import AgentBot, TeamBot, _create_best_effort_task_wrapper
+from mindroom.bot import AgentBot, _create_best_effort_task_wrapper
 from mindroom.cancellation import request_task_cancel
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent, PreparedTurn, RequesterCoalescingOwner
@@ -56,6 +56,8 @@ from tests.bot_helpers import (
     FencedRoomRecorder,
     _configured_team_test_config,
     _configured_team_user,
+    make_test_agent_bot,
+    make_test_team_bot,
 )
 from tests.conftest import (
     TEST_PASSWORD,
@@ -107,7 +109,7 @@ def _config(tmp_path: Path, *, authorize_senders: bool = False) -> Config:
 
 def _agent_bot(tmp_path: Path, *, agent_name: str = "code", authorize_senders: bool = False) -> AgentBot:
     config = _config(tmp_path, authorize_senders=authorize_senders)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,
             password=TEST_PASSWORD,
@@ -1132,7 +1134,7 @@ async def test_orchestrated_team_start_gates_turn_recovery_on_responder_fleet(
     """Team startup must leave turn-backed replay gated until its member fleet starts."""
     config = _configured_team_test_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    bot = TeamBot(
+    bot = make_test_team_bot(
         _configured_team_user(config, runtime_paths),
         tmp_path,
         config=config,

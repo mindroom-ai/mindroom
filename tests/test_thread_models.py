@@ -28,6 +28,9 @@ from mindroom.thread_models import (
 )
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -469,7 +472,7 @@ def test_store_drops_records_with_corrupt_set_at(tmp_path: Path) -> None:
 
 def _make_tool_context(*, thread_id: str | None = THREAD_ID) -> ToolRuntimeContext:
     config = _config_with_models(Path(tempfile.mkdtemp()))
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="test_agent",
         target=MessageTarget.resolve(
             room_id=ROOM_ID,

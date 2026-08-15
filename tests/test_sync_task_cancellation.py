@@ -81,7 +81,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
     shutdown_intent_for_entity,
 )
-from tests.bot_helpers import FencedRoomRecorder
+from tests.bot_helpers import FencedRoomRecorder, make_test_agent_bot
 
 if TYPE_CHECKING:
     from mindroom.event_journal.models import DepartureOutcome, DepartureSource
@@ -1922,7 +1922,7 @@ def _sliding_response_bot(tmp_path: Path) -> AgentBot:
         ),
         runtime_paths,
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="code",
             password=TEST_PASSWORD,

@@ -55,13 +55,6 @@ _ToolContextReturn = TypeVar("_ToolContextReturn")
 _StreamChunk = TypeVar("_StreamChunk")
 
 
-def _new_agent_reply_memberships() -> AgentReplyMembershipIndex:
-    """Create an inert standalone index without loading Matrix nio at tool-catalog import time."""
-    from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: PLC0415
-
-    return AgentReplyMembershipIndex()
-
-
 @contextmanager
 def _tool_runtime_context_scope(tool_context: ToolRuntimeContext | None) -> Iterator[None]:
     """Bind tool runtime state only for the duration of one concrete operation."""
@@ -81,6 +74,7 @@ class ToolRuntimeContext:
     runtime_paths: RuntimePaths
     conversation_reader: ConversationReader
     relations: RelationLookup
+    agent_reply_memberships: AgentReplyMembershipIndex
     transport_agent_name: str | None = None
     active_model_name: str | None = None
     room: nio.MatrixRoom | None = None
@@ -99,7 +93,6 @@ class ToolRuntimeContext:
     tool_function_filter: Callable[[Function], bool] | None = None
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
-    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=_new_agent_reply_memberships)
     config_provider: Callable[[], Config] | None = None
 
     @property
@@ -447,9 +440,10 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
     if context.room is None:
         msg = "Scheduling runtime requires a cached Matrix room in tool runtime context"
         raise RuntimeError(msg)
+    active_config = context.current_config
     return SchedulingRuntime(
         client=context.client,
-        config=context.config,
+        config=active_config,
         runtime_paths=context.runtime_paths,
         room=context.room,
         conversation_reader=context.conversation_reader,

@@ -37,7 +37,7 @@ def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
         return True
     return is_authorized_sender(
         context.requester_id,
-        context.config,
+        context.current_config,
         room_id,
         context.runtime_paths,
     )

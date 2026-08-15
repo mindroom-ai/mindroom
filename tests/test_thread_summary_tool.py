@@ -18,6 +18,9 @@ from mindroom.message_target import MessageTarget
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH, ThreadSummaryWriteError, _ThreadSummaryWriteResult
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -38,7 +41,7 @@ def _make_context(
         Config(agents={"general": AgentConfig(display_name="General Agent")}),
         test_runtime_paths(runtime_root),
     )
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
             room_id=room_id,

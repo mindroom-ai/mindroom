@@ -19,6 +19,7 @@ from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
+from tests.authorization_helpers import isolated_membership_index
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import persist_actual_entity_accounts
 
@@ -85,6 +86,7 @@ async def _handle_voice_message(
         event,
         config,
         runtime_paths_for(config),
+        isolated_membership_index(),
         audio=audio,
     )
 
@@ -116,6 +118,7 @@ async def _prepare_voice_message(
         event,
         config,
         runtime_paths=runtime_paths_for(config),
+        membership_index=isolated_membership_index(),
         thread_id=thread_id,
     )
 
@@ -707,6 +710,7 @@ class TestVoiceHandler:
                             event,
                             config,
                             runtime_paths_for(config),
+                            isolated_membership_index(),
                             thread_id=None,
                         ),
                         timeout=2.0,

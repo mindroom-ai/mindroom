@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -21,6 +20,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -81,7 +81,7 @@ class TestResponseTrackingRegression:
         test_room_id = "!test:localhost"
 
         # Set up router bot (only router handles commands)
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
@@ -171,7 +171,7 @@ class TestResponseTrackingRegression:
         test_room_id = "!test:localhost"
 
         # Set up router bot
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
@@ -254,7 +254,7 @@ class TestResponseTrackingRegression:
         test_room_id = "!test:localhost"
 
         # Set up router bot
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,

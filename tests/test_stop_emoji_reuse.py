@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path  # noqa: TC003
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.main import Config
 from mindroom.handled_turns import TurnRecord
@@ -18,7 +18,7 @@ from mindroom.logging_config import setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.stop import StopManager
-from tests.bot_helpers import dispatch_reaction_durably
+from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     install_send_response_mock,
@@ -28,6 +28,9 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+
+if TYPE_CHECKING:
+    from mindroom.bot import AgentBot
 
 
 async def _drain_stop_cleanup(stop_manager: StopManager) -> None:
@@ -82,7 +85,7 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
     config = _stop_test_config(tmp_path)
     agent_user = _stop_test_agent_user(config)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -170,7 +173,7 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
     config = _stop_test_config(tmp_path)
     agent_user = _stop_test_agent_user(config)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -227,7 +230,7 @@ async def test_stop_emoji_threaded_target_sends_no_acknowledgement(tmp_path: Pat
     config = _stop_test_config(tmp_path)
     agent_user = _stop_test_agent_user(config)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -624,7 +627,7 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -703,7 +706,7 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
     persist_entity_accounts(config, runtime_paths_for(config))
     agent_user = _stop_test_agent_user(config)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,

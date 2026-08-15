@@ -14,6 +14,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.scheduling import ScheduledWorkflow, SchedulingRuntime, schedule_task
+from tests.authorization_helpers import (
+    make_test_scheduling_runtime,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -59,7 +62,7 @@ def _scheduling_runtime(
     config: Config,
     room: nio.MatrixRoom,
 ) -> SchedulingRuntime:
-    return SchedulingRuntime(
+    return make_test_scheduling_runtime(
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
@@ -236,7 +239,7 @@ async def test_schedule_allows_agents_in_room() -> None:
 
         # Try to schedule in a thread where calculator is in the room
         task_id, response = await schedule_task(
-            runtime=SchedulingRuntime(
+            runtime=make_test_scheduling_runtime(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
@@ -369,7 +372,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
         mock_parse.return_value = mock_workflow
 
         task_id, response = await schedule_task(
-            runtime=SchedulingRuntime(
+            runtime=make_test_scheduling_runtime(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths_for(config),

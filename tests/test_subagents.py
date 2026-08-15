@@ -32,6 +32,9 @@ from mindroom.session_ids import create_session_id, parse_session_id
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import delivered_matrix_side_effect, make_conversation_reader_mock, make_relation_lookup
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
 
@@ -112,7 +115,7 @@ def _make_context(
     effective_config = config or _make_config()
     _persist_subagent_accounts(effective_config, runtime_paths)
     room = _make_room(effective_config, runtime_paths, room_id, agent_name, room_agent_names)
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name=agent_name,
         target=MessageTarget.resolve(
             room_id=room_id,

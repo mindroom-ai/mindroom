@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import (
     is_sender_allowed_for_agent_reply,
     is_sender_allowed_for_agent_reply_in_room,
@@ -62,6 +61,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.conversation_resolver import MessageContext
     from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, PreparedIngress
     from mindroom.matrix.identity import MatrixID
@@ -274,7 +274,7 @@ class TurnPolicyDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     matrix_id: MatrixID
-    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
+    agent_reply_memberships: AgentReplyMembershipIndex
 
 
 @dataclass(frozen=True)

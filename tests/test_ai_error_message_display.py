@@ -16,7 +16,6 @@ from agno.models.message import Message
 from agno.run.agent import RunCancelledEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
 
-from mindroom.bot import AgentBot
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -30,6 +29,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import _CANCELLED_RESPONSE_NOTE, _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -45,6 +45,8 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from mindroom.bot import AgentBot
+
 
 def _runtime_bound_config() -> Config:
     """Return a minimal runtime-bound config for bot error-display tests."""
@@ -59,7 +61,7 @@ def _runtime_bound_config() -> Config:
 def _mock_bot(tmp_path: Path) -> AgentBot:
     """Create a bot test instance with explicit mocked collaborators."""
     config = _runtime_bound_config()
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         AgentMatrixUser(
             agent_name="test_agent",
             password=TEST_PASSWORD,

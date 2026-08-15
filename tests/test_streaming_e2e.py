@@ -12,7 +12,6 @@ import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallStartedEvent
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
@@ -24,6 +23,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -349,7 +349,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
 
                 # Create the actual bot with config
                 runtime_config = bind_runtime_paths(config, runtime_paths)
-                return AgentBot(
+                return make_test_agent_bot(
                     agent_user,
                     storage_path,
                     runtime_config,
@@ -603,7 +603,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             orchestrator_runtime_paths(tmp_path),
         )
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             calc_user,
             tmp_path,
             config,

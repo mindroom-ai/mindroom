@@ -425,6 +425,7 @@ class _MultiAgentOrchestrator:
                 self.runtime_paths,
                 config_path=self.config_path,
                 journal_store=self._shared_journal_store(),
+                agent_reply_memberships=self.agent_reply_memberships,
             )
             bot.orchestrator = self
             bot.hook_registry = self.hook_registry

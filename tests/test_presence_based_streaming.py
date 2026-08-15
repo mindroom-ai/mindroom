@@ -9,12 +9,15 @@ from unittest.mock import AsyncMock, Mock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot, create_bot_for_entity
+from mindroom.bot import AgentBot
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_runner import ResponseRequest
+from tests.authorization_helpers import (
+    make_test_bot_for_entity,
+)
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
@@ -296,7 +299,7 @@ class TestBotIntegration:
             access_token="test_token",  # noqa: S106
         )
 
-        bot = create_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config), tmp_path)
+        bot = make_test_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config), tmp_path)
         assert isinstance(bot, AgentBot)
         bot.client = _mock_client()
         bot.client.user_id = "@mindroom_test_agent:localhost"
@@ -389,7 +392,7 @@ class TestBotIntegration:
             access_token="test_token",  # noqa: S106
         )
 
-        bot = create_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config), tmp_path)
+        bot = make_test_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config), tmp_path)
         assert isinstance(bot, AgentBot)
         bot.client = _mock_client()
         bot.client.user_id = "@mindroom_test_agent:localhost"

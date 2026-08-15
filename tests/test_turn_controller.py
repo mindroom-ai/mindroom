@@ -11,7 +11,6 @@ import nio
 import pytest
 
 from mindroom import interactive
-from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, LaneSlot, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
 from mindroom.config.agent import AgentConfig
@@ -24,6 +23,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
 from mindroom.streaming import send_streaming_response
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.hooks import MessageEnvelope
 
 
@@ -239,7 +240,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         display_name="GeneralAgent",
         password="test_password",  # noqa: S106
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -376,7 +377,7 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
         display_name="GeneralAgent",
         password="test_password",  # noqa: S106
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -439,7 +440,7 @@ async def test_on_message_claims_interactive_text_by_durable_source_event(
         display_name="GeneralAgent",
         password="test_password",  # noqa: S106
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -524,7 +525,7 @@ async def test_sidecar_preview_claims_interactive_text_by_durable_source_event(
         display_name="GeneralAgent",
         password="test_password",  # noqa: S106
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,

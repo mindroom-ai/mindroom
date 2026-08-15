@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import get_joined_rooms
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -24,8 +24,8 @@ class ExternalTriggerRuntimeCoordinator:
     """Own external trigger API runtime binding and live deliverability state."""
 
     runtime_paths: RuntimePaths
+    agent_reply_memberships: AgentReplyMembershipIndex
     api_enabled: bool = True
-    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
 
     def bind_if_ready(
         self,
