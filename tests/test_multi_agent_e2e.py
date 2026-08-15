@@ -22,6 +22,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.teams import TeamMode
+from tests.bot_helpers import owned_matrix_login
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -109,14 +110,14 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
     test_room_id = "!test:localhost"
     test_user_id = "@alice:localhost"
 
-    with patch("mindroom.bot.login_agent_user") as mock_login:
+    with patch("mindroom.bot.login_agent_owned_session") as mock_login:
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
         mock_client.user_id = mock_calculator_agent.user_id
         mock_client.access_token = mock_calculator_agent.access_token
         mock_client.room_send = AsyncMock(
             return_value=nio.RoomSendResponse("$placeholder:localhost", test_room_id),
         )
-        mock_login.return_value = mock_client
+        mock_login.return_value = owned_matrix_login(mock_client)
 
         config = _make_config(tmp_path)
 
@@ -217,10 +218,10 @@ async def test_agent_ignores_other_agents(
     """Test that agents ignore messages from other agents."""
     test_room_id = "!test:localhost"
 
-    with patch("mindroom.bot.login_agent_user") as mock_login:
+    with patch("mindroom.bot.login_agent_owned_session") as mock_login:
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
         mock_client.user_id = mock_calculator_agent.user_id
-        mock_login.return_value = mock_client
+        mock_login.return_value = owned_matrix_login(mock_client)
 
         config = _make_config(tmp_path)
 
@@ -286,7 +287,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     mock_calculator_agent.user_id = f"@mindroom_calculator:{domain}"
 
     with (
-        patch("mindroom.bot.login_agent_user") as mock_login,
+        patch("mindroom.bot.login_agent_owned_session") as mock_login,
         patch("mindroom.config.main.load_config", return_value=mock_config),
         patch("mindroom.teams._select_team_mode", new=AsyncMock()) as mock_select_mode,
     ):
@@ -296,7 +297,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, test_room_id),
             nio.RoomSendResponse.from_dict({"event_id": "$edit"}, test_room_id),
         ]
-        mock_login.return_value = mock_client
+        mock_login.return_value = owned_matrix_login(mock_client)
         mock_select_mode.return_value = TeamMode.COLLABORATE
 
         config = _make_config(tmp_path)
@@ -595,7 +596,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
 
             # Test that agents can be started
             with (
-                patch("mindroom.bot.login_agent_user") as mock_login,
+                patch("mindroom.bot.login_agent_owned_session") as mock_login,
                 patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock()),
             ):
                 mock_client = AsyncMock()
@@ -605,7 +606,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
                 mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id="!test:localhost"))
                 # Don't run sync_forever, just verify setup
                 mock_client.sync_forever = AsyncMock()
-                mock_login.return_value = mock_client
+                mock_login.return_value = owned_matrix_login(mock_client)
 
                 # Manually start agents without running sync_forever
                 for bot in orchestrator.agent_bots.values():
@@ -623,11 +624,11 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
     initial_room = "!initial:localhost"
     invite_room = "!invite:localhost"
 
-    with patch("mindroom.bot.login_agent_user") as mock_login:
+    with patch("mindroom.bot.login_agent_owned_session") as mock_login:
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
         mock_client.user_id = mock_calculator_agent.user_id
         mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id=invite_room))
-        mock_login.return_value = mock_client
+        mock_login.return_value = owned_matrix_login(mock_client)
 
         config = _make_config(tmp_path)
 

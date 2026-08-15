@@ -24,6 +24,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
+from tests.bot_helpers import owned_matrix_login
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -187,7 +188,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
 @pytest.mark.requires_matrix  # Requires real Matrix server for streaming e2e test
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 @patch("mindroom.response_attempt.is_user_online")
-@patch("mindroom.bot.login_agent_user")
+@patch("mindroom.bot.login_agent_owned_session")
 @patch("mindroom.bot.AgentBot.ensure_user_account")
 async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     mock_ensure_user: AsyncMock,
@@ -245,16 +246,16 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     def login_side_effect(_homeserver: str, agent_user: object, **_kwargs: object) -> object:
         if hasattr(agent_user, "agent_name"):
             if agent_user.agent_name == "helper":
-                return helper_client
+                return owned_matrix_login(helper_client)
             if agent_user.agent_name == "calculator":
-                return calc_client
+                return owned_matrix_login(calc_client)
             if agent_user.agent_name == "router":
                 # Return a mock client for the router
                 router_client = _matrix_client_mock()
                 router_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[test_room_id])
                 router_client.sync_forever = AsyncMock()
-                return router_client
-        return _matrix_client_mock()  # Default mock client
+                return owned_matrix_login(router_client)
+        return owned_matrix_login(_matrix_client_mock())  # Default mock client
 
     mock_login.side_effect = login_side_effect
 
@@ -557,9 +558,9 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
     )
 
     # Mock login
-    with patch("mindroom.bot.login_agent_user") as mock_login:
+    with patch("mindroom.bot.login_agent_owned_session") as mock_login:
         mock_client = _matrix_client_mock()
-        mock_login.return_value = mock_client
+        mock_login.return_value = owned_matrix_login(mock_client)
 
         # Track events
         events_sent: list[dict[str, object]] = []

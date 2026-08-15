@@ -9,6 +9,7 @@ only ever happened to share a sync callback with.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -37,29 +38,57 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
     """Startup, checkpoint certification, redaction ownership, and drain behavior."""
 
     @pytest.mark.asyncio
-    async def test_start_resets_running_flag_when_agent_started_hooks_fail(self, bot: AgentBot) -> None:
+    @pytest.mark.parametrize(
+        "startup_error",
+        [RuntimeError("hook boom"), asyncio.CancelledError()],
+        ids=["error", "cancel"],
+    )
+    async def test_start_resets_running_flag_when_agent_started_hooks_fail(
+        self,
+        bot: AgentBot,
+        startup_error: BaseException,
+    ) -> None:
         """Startup cleanup should clear running state if EVENT_AGENT_STARTED emission fails."""
         start_client = _make_client_mock(user_id="@mindroom_general:localhost")
         start_client.add_event_callback = MagicMock()
         start_client.add_response_callback = MagicMock()
         start_client.close = AsyncMock()
+        ingestion_session = AsyncMock()
+        close_order: list[str] = []
+        cleanup_error = RuntimeError("ingestion cleanup boom")
+
+        async def close_ingestion() -> None:
+            close_order.append("ingestion")
+            raise cleanup_error
+
+        async def close_http() -> None:
+            close_order.append("http")
+
+        ingestion_session.close.side_effect = close_ingestion
+        start_client.close.side_effect = close_http
         bot.hook_registry = MagicMock()
         bot.hook_registry.has_hooks.side_effect = lambda event_name: event_name == EVENT_AGENT_STARTED
 
         with (
             patch.object(bot, "ensure_user_account", AsyncMock()),
-            patch("mindroom.bot.login_agent_user", AsyncMock(return_value=start_client)),
+            patch(
+                "mindroom.bot.login_agent_owned_session",
+                AsyncMock(return_value=SimpleNamespace(client=start_client, session=ingestion_session)),
+            ),
             patch.object(bot, "_set_avatar_if_available", AsyncMock()),
             patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
             patch("mindroom.bot.interactive.init_persistence"),
-            patch("mindroom.bot.emit", AsyncMock(side_effect=RuntimeError("hook boom"))),
-            pytest.raises(RuntimeError, match="hook boom"),
+            patch("mindroom.bot.emit", AsyncMock(side_effect=startup_error)),
+            pytest.raises(type(startup_error), match="hook boom" if isinstance(startup_error, RuntimeError) else None),
         ):
             await bot.start()
 
         start_client.close.assert_awaited_once()
+        ingestion_session.close.assert_awaited_once()
+        assert close_order == ["ingestion", "http"]
         assert bot.running is False
         assert bot.client is None
+        assert bot._ingestion_session is None
 
     @pytest.mark.asyncio
     async def test_a_login_as_another_user_keeps_the_journal_this_bot_already_opened(self, bot: AgentBot) -> None:

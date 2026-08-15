@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import nio
 import pytest
 from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
+from nio.ingest.config import ClassicSourceConfig, SlidingSourceConfig
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
+from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
@@ -25,6 +30,7 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.sync_loop import bot_ingestion_config
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
@@ -64,6 +70,14 @@ def mock_agent_user() -> AgentMatrixUser:
     return make_mock_agent_user()
 
 
+def _owned_login(client: object, session: object | None = None) -> SimpleNamespace:
+    """Return the private Bot login carrier around one test client."""
+    return SimpleNamespace(
+        client=client,
+        session=AsyncMock() if session is None else session,
+    )
+
+
 def test_agent_bot_init_requires_prepared_matrix_user_id(tmp_path: Path) -> None:
     """Runtime bot construction requires the orchestrator account-preparation barrier."""
     agent_user = AgentMatrixUser(
@@ -83,6 +97,50 @@ def test_agent_bot_init_requires_prepared_matrix_user_id(tmp_path: Path) -> None
 
     with pytest.raises(PermanentMatrixStartupError, match="Missing Matrix ID for 'calculator'"):
         AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+
+@pytest.mark.parametrize("mode", ["classic", "sliding"])
+def test_bot_ingestion_config_freezes_existing_transport_settings(
+    mode: str,
+    tmp_path: Path,
+) -> None:
+    """Owned source settings must exactly mirror the pre-cutover bot loop."""
+    config = _runtime_bound_config(
+        Config(matrix_sync=MatrixSyncConfig(mode=mode, sliding_timeline_limit=7)),
+        tmp_path,
+    )
+
+    ingestion = bot_ingestion_config(
+        config,
+        agent_name="general",
+        room_ids=["!joined:localhost", "#alias:localhost"],
+        timeout_ms=30_000,
+        sync_filter={"room": {"timeline": {"limit": 50}}},
+    )
+
+    if mode == "classic":
+        assert ingestion.source == ClassicSourceConfig(
+            timeout_ms=30_000,
+            filter_json=b'{"room":{"timeline":{"limit":50}}}',
+        )
+        return
+    assert ingestion.source == SlidingSourceConfig(
+        timeout_ms=30_000,
+        connection_name="mindroom-general",
+        lists_json=(
+            b'{"mindroom":{"ranges":[[0,99]],"required_state":'
+            b'[["m.room.create",""],["m.room.name",""],["m.room.topic",""],'
+            b'["m.room.avatar",""],["m.room.encryption",""],["m.room.member","$LAZY"]],'
+            b'"timeline_limit":7}}'
+        ),
+        room_subscriptions_json=(
+            b'{"!joined:localhost":{"required_state":'
+            b'[["m.room.create",""],["m.room.name",""],["m.room.topic",""],'
+            b'["m.room.avatar",""],["m.room.encryption",""],["m.room.member","$LAZY"]],'
+            b'"timeline_limit":7}}'
+        ),
+        extensions_json=(b'{"account_data":{"enabled":true},"e2ee":{"enabled":true},"to_device":{"enabled":true}}'),
+    )
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -184,7 +242,7 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
-    @patch("mindroom.bot.login_agent_user")
+    @patch("mindroom.bot.login_agent_owned_session")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
     @patch("mindroom.bot.interactive.init_persistence")
     @patch("mindroom.config.main.load_config")
@@ -204,7 +262,8 @@ class TestAgentBot(AgentBotTestBase):
         mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
         mock_client.clear_persisted_sync_recovery = MagicMock()
-        mock_login.return_value = mock_client
+        ingestion_session = AsyncMock()
+        mock_login.return_value = _owned_login(mock_client, ingestion_session)
 
         # Mock ensure_user_account to not change the agent_user
         mock_ensure_user.return_value = None
@@ -217,9 +276,18 @@ class TestAgentBot(AgentBotTestBase):
 
         assert bot.running
         assert bot.client == mock_client
+        assert bot._ingestion_session is ingestion_session
         # The bot calls ensure_setup which calls ensure_user_account
         # and then login with whatever user account was ensured
         assert mock_login.called
+        login_kwargs = mock_login.await_args.kwargs
+        assert login_kwargs["consumer_store"] == bot._journal_principal()
+        assert type(login_kwargs["new_consumer_generation"]) is UUID
+        assert login_kwargs["completion_sink"] == bot._on_ingestion_frame_completion
+        ingestion_config = login_kwargs["config"]
+        assert type(ingestion_config.source) is ClassicSourceConfig
+        assert ingestion_config.source.timeout_ms == 30_000
+        assert ingestion_config.source.filter_json == b'{"room":{"timeline":{"limit":50}}}'
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
         # Every timeline event, including an undecryptable one, is admitted
         # through one durable callback. Only invites and membership events,
@@ -269,7 +337,7 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
-    @patch("mindroom.bot.login_agent_user")
+    @patch("mindroom.bot.login_agent_owned_session")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
     @patch("mindroom.bot.interactive.init_persistence")
     async def test_agent_bot_start_rebuilds_identity_bound_runtime_after_login_user_id_change(
@@ -311,7 +379,7 @@ class TestAgentBot(AgentBotTestBase):
         ) -> object:
             login_user.user_id = actual_user_id
             login_user.__dict__.pop("matrix_id", None)
-            return mock_client
+            return _owned_login(mock_client)
 
         mock_login.side_effect = _login_with_actual_identity
 
@@ -334,7 +402,7 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
-    @patch("mindroom.bot.login_agent_user")
+    @patch("mindroom.bot.login_agent_owned_session")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
     async def test_agent_bot_start_revalidates_identity_after_login(
         self,
@@ -371,14 +439,14 @@ class TestAgentBot(AgentBotTestBase):
         )
         mock_client = AsyncMock()
         mock_client.close = AsyncMock()
-        mock_login.return_value = mock_client
+        mock_login.return_value = _owned_login(mock_client)
         mock_ensure_user.return_value = None
 
         async def _login_with_duplicate_identity(*_args: object, **_kwargs: object) -> object:
             state = MatrixState.load(runtime_paths=runtime_paths)
             state.add_account("agent_general", "actual_writer", TEST_PASSWORD, domain="localhost")
             state.save(runtime_paths=runtime_paths)
-            return mock_client
+            return _owned_login(mock_client)
 
         mock_login.side_effect = _login_with_duplicate_identity
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
@@ -395,7 +463,7 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
-    @patch("mindroom.bot.login_agent_user")
+    @patch("mindroom.bot.login_agent_owned_session")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
     async def test_agent_bot_enters_sync_without_startup_cleanup(
         self,
@@ -421,7 +489,7 @@ class TestAgentBot(AgentBotTestBase):
 
         mock_client.sync_forever = AsyncMock(side_effect=_sync_forever)
         mock_client.sliding_sync_forever = AsyncMock(side_effect=_sync_forever)
-        mock_login.return_value = mock_client
+        mock_login.return_value = _owned_login(mock_client)
         mock_ensure_user.return_value = None
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
@@ -458,14 +526,55 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        close_order: list[str] = []
         bot.client = _make_matrix_client_mock()
         bot.client.next_batch = "s_test_token"
+        bot.client.close.side_effect = lambda: close_order.append("http")
+        bot._ingestion_session = AsyncMock()
+        bot._ingestion_session.close.side_effect = lambda: close_order.append("ingestion")
         bot.running = True
 
         await bot.stop()
 
         assert not bot.running
+        assert close_order == ["ingestion", "http"]
+        bot._ingestion_session.close.assert_awaited_once()
         bot.client.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "close_error",
+        [RuntimeError("ingestion close failed"), asyncio.CancelledError()],
+        ids=["error", "cancel"],
+    )
+    async def test_agent_bot_stop_releases_http_after_ingestion_close_failure(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        close_error: BaseException,
+    ) -> None:
+        """One failed ownership lane must not skip the later HTTP release."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        close_order: list[str] = []
+        bot.client = _make_matrix_client_mock()
+        bot.client.close.side_effect = lambda: close_order.append("http")
+        bot._ingestion_session = AsyncMock()
+
+        async def fail_ingestion_close() -> None:
+            close_order.append("ingestion")
+            raise close_error
+
+        bot._ingestion_session.close.side_effect = fail_ingestion_close
+
+        with pytest.raises(
+            type(close_error),
+            match="ingestion close failed" if isinstance(close_error, RuntimeError) else None,
+        ):
+            await bot.stop()
+
+        assert close_order == ["ingestion", "http"]
+        bot.client.close.assert_awaited_once()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("accept_invites", "expected_join_calls"), [(True, 1), (False, 0)])

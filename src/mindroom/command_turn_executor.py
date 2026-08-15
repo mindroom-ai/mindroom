@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.commands.parsing import Command
+    from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.dispatch_handoff import TextDispatchEvent
     from mindroom.handled_turns import TurnRecord
     from mindroom.hooks import HookMatrixAdmin
@@ -55,6 +56,7 @@ class CommandTurnExecutorDeps:
     turn_store: TurnStore
     visible_responses: VisibleResponseReconciler
     recover_config_confirmation_setup: Callable[[str, str], Awaitable[bool]]
+    controller_identity: Callable[[str], DesktopControllerIdentity]
 
 
 @dataclass
@@ -151,6 +153,7 @@ class CommandTurnExecutor:
             send_response=send_response,
             reload_plugins=reload_plugins,
             responder_candidates_for_room=self.deps.turn_policy.responder_candidates_for_room,
+            controller_identity=self.deps.controller_identity,
         )
         await handle_command(
             context=context,

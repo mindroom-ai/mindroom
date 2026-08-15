@@ -20,6 +20,7 @@ from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.authorization import is_authorized_sender
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.desktop.identity import controller_identity_for_live_bot
 from mindroom.embedder_health import check_embedder_health, handle_embedder_config_reload
 from mindroom.entity_resolution import (
     DuplicateManagedEntityIdentityError,
@@ -124,6 +125,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import ApprovalView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
 
@@ -317,6 +319,13 @@ class _MultiAgentOrchestrator:
         if bot is None:
             return None
         return bot.running and bot.first_sync_complete
+
+    def desktop_controller_identity(self, entity_name: str) -> DesktopControllerIdentity:
+        """Resolve the current running bot's already-owned Matrix device pin."""
+        return controller_identity_for_live_bot(
+            entity_name,
+            self.agent_bots.get(entity_name),
+        )
 
     async def _stop_memory_auto_flush_worker(self) -> None:
         """Stop the background memory auto-flush worker if running."""

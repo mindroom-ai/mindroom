@@ -220,6 +220,14 @@ def _make_matrix_client_mock() -> AsyncMock:
     return make_matrix_client_mock()
 
 
+def owned_matrix_login(client: object, session: object | None = None) -> SimpleNamespace:
+    """Wrap a test client in Bot's private owned-login carrier shape."""
+    return SimpleNamespace(
+        client=client,
+        session=AsyncMock() if session is None else session,
+    )
+
+
 def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
     """Wrap frozen extracted collaborators so tests can patch their methods."""
     wrapped_bot = wrap_extracted_collaborators(bot)

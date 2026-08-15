@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import stat
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
+from uuid import UUID
 
 import nio
 import pytest
+from nio.ingest.config import ClassicSourceConfig, IngestionConfig
+from nio.store.database import DefaultStore, SqliteStore
 
 from mindroom.bot import _SYNC_TIMELINE_LIMIT
 from mindroom.constants import (
@@ -19,11 +23,12 @@ from mindroom.constants import (
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     RuntimePaths,
 )
-from mindroom.matrix import client_session
+from mindroom.event_journal.models import IngestionConsumer
+from mindroom.matrix import _owned_session, client_session
 from mindroom.matrix.client_session import (
     MatrixSyncStorage,
+    MindRoomAsyncClient,
     PermanentMatrixStartupError,
-    _MindRoomAsyncClient,
     login_flows,
     login_with_token,
     matrix_client_config,
@@ -49,7 +54,7 @@ def test_encryption_exposes_only_mindroom_recovery_markers(
         }
 
     monkeypatch.setattr(nio.AsyncClient, "encrypt", fake_encrypt)
-    client = _MindRoomAsyncClient("https://example.org", "@mindroom_agent:example.org")
+    client = MindRoomAsyncClient("https://example.org", "@mindroom_agent:example.org")
 
     message_type, encrypted_content = client.encrypt(
         "!room:example.org",
@@ -89,7 +94,7 @@ def test_encryption_does_not_add_metadata_to_ordinary_events(
         return "m.room.encrypted", {"ciphertext": "encrypted payload"}
 
     monkeypatch.setattr(nio.AsyncClient, "encrypt", fake_encrypt)
-    client = _MindRoomAsyncClient("https://example.org", "@mindroom_agent:example.org")
+    client = MindRoomAsyncClient("https://example.org", "@mindroom_agent:example.org")
 
     _, encrypted_content = client.encrypt(
         "!room:example.org",
@@ -105,7 +110,7 @@ def test_explicit_zero_one_time_key_count_requests_replenishment(
 ) -> None:
     """A drained server OTK pool must make nio upload replacement keys."""
     user_id = "@agent:example.org"
-    client = _MindRoomAsyncClient(
+    client = MindRoomAsyncClient(
         "https://example.org",
         user_id,
         device_id="AGENTDEVICE",
@@ -207,8 +212,8 @@ async def test_unrecovered_timeline_gap_survives_client_restart(tmp_path: Path) 
             presence_events=[],
         )
 
-    def load_client() -> _MindRoomAsyncClient:
-        client = _MindRoomAsyncClient(
+    def load_client() -> MindRoomAsyncClient:
+        client = MindRoomAsyncClient(
             "https://example.org",
             user_id,
             device_id=device_id,
@@ -461,3 +466,475 @@ async def test_login_flows_uses_proxy_headers_and_closes_client(
         http_headers={"X-Access-Client": "test-secret"},
     )
     client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_password_credentials_use_storeless_client_and_close_before_return(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Credential HTTP must finish and close before exclusive store construction."""
+    response = nio.LoginResponse(
+        "@agent:example.org",
+        "AGENTDEVICE",
+        "access-token",
+    )
+    temporary = SimpleNamespace(
+        login=AsyncMock(return_value=response),
+        close=AsyncMock(),
+        store=None,
+        olm=None,
+        store_path=None,
+    )
+    create_temporary = Mock(return_value=temporary)
+    monkeypatch.setattr(
+        _owned_session,
+        "_create_credential_client",
+        create_temporary,
+        raising=False,
+    )
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "data",
+    )
+
+    credentials = await _owned_session.login_password_credentials(
+        "https://matrix.example.org",
+        "@agent:example.org",
+        "password",
+        runtime_paths,
+        http_headers={"X-Access-Client": "test-secret"},
+    )
+
+    assert type(credentials) is _owned_session.MatrixCredentials
+    assert (
+        credentials.user_id,
+        credentials.device_id,
+        credentials.access_token,
+    ) == (
+        "@agent:example.org",
+        "AGENTDEVICE",
+        "access-token",
+    )
+    create_temporary.assert_called_once_with(
+        "https://matrix.example.org",
+        runtime_paths,
+        "@agent:example.org",
+        http_headers={"X-Access-Client": "test-secret"},
+    )
+    temporary.login.assert_awaited_once_with("password")
+    temporary.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("login_result", "expected_exception"),
+    [
+        (nio.LoginError("rejected", "M_FORBIDDEN"), PermanentMatrixStartupError),
+        (asyncio.CancelledError(), asyncio.CancelledError),
+    ],
+)
+async def test_password_credentials_close_temporary_client_on_failure_or_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    login_result: object,
+    expected_exception: type[BaseException],
+) -> None:
+    """No credential failure may leave HTTP or a pre-lease client alive."""
+    login = (
+        AsyncMock(side_effect=login_result)
+        if isinstance(login_result, BaseException)
+        else AsyncMock(return_value=login_result)
+    )
+    temporary = SimpleNamespace(
+        login=login,
+        close=AsyncMock(),
+        store=None,
+        olm=None,
+        store_path=None,
+    )
+    monkeypatch.setattr(
+        _owned_session,
+        "_create_credential_client",
+        Mock(return_value=temporary),
+        raising=False,
+    )
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "data",
+    )
+
+    with pytest.raises(expected_exception):
+        await _owned_session.login_password_credentials(
+            "https://matrix.example.org",
+            "@agent:example.org",
+            "password",
+            runtime_paths,
+        )
+
+    temporary.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_restored_credentials_verify_identity_storeless_and_close(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Restored tokens are verified before any configured store is opened."""
+    temporary = SimpleNamespace(
+        user_id="",
+        device_id="",
+        access_token="",
+        whoami=AsyncMock(
+            return_value=nio.WhoamiResponse(
+                "@agent:example.org",
+                "AGENTDEVICE",
+                False,
+            ),
+        ),
+        close=AsyncMock(),
+        store=None,
+        olm=None,
+        store_path=None,
+    )
+    create_temporary = Mock(return_value=temporary)
+    monkeypatch.setattr(
+        _owned_session,
+        "_create_credential_client",
+        create_temporary,
+    )
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "data",
+    )
+
+    credentials = await _owned_session.restore_credentials(
+        "https://matrix.example.org",
+        "@agent:example.org",
+        "AGENTDEVICE",
+        "access-token",
+        runtime_paths,
+        http_headers={"X-Access-Client": "test-secret"},
+    )
+
+    assert credentials == _owned_session.MatrixCredentials(
+        "@agent:example.org",
+        "AGENTDEVICE",
+        "access-token",
+    )
+    assert (
+        temporary.user_id,
+        temporary.device_id,
+        temporary.access_token,
+    ) == (
+        credentials.user_id,
+        credentials.device_id,
+        credentials.access_token,
+    )
+    create_temporary.assert_called_once_with(
+        "https://matrix.example.org",
+        runtime_paths,
+        "@agent:example.org",
+        http_headers={"X-Access-Client": "test-secret"},
+    )
+    temporary.whoami.assert_awaited_once()
+    temporary.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_owned_matrix_session_factory_creates_one_fresh_store_and_binding(
+    tmp_path: Path,
+) -> None:
+    """Fresh credentials transfer one store and stream into one owned session."""
+    generation = UUID("22222222-2222-4222-8222-222222222222")
+    consumer_store = SimpleNamespace(
+        load_or_create_ingestion_consumer=AsyncMock(
+            return_value=IngestionConsumer(generation, None),
+        ),
+        bind_ingestion_stream=AsyncMock(),
+    )
+
+    async def bind_stream(*, generation: UUID, stream_id: UUID) -> IngestionConsumer:
+        return IngestionConsumer(generation, stream_id)
+
+    consumer_store.bind_ingestion_stream.side_effect = bind_stream
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "data",
+    )
+    credentials = _owned_session.MatrixCredentials(
+        "@agent:example.org",
+        "AGENTDEVICE",
+        "access-token",
+    )
+    config = IngestionConfig(
+        ClassicSourceConfig(
+            timeout_ms=30_000,
+            filter_json=b'{"room":{"timeline":{"limit":50}}}',
+        ),
+    )
+
+    opened = await _owned_session.open_owned_matrix_session(
+        "https://matrix.example.org",
+        credentials,
+        runtime_paths,
+        consumer_store=consumer_store,
+        new_consumer_generation=generation,
+        config=config,
+        http_headers={"X-Access-Client": "test-secret"},
+    )
+    try:
+        assert type(opened) is _owned_session.OwnedMatrixSession
+        assert opened.consumer.generation == generation
+        assert type(opened.consumer.stream_id) is UUID
+        assert opened.client.user_id == credentials.user_id
+        assert opened.client.device_id == credentials.device_id
+        assert opened.client.access_token == credentials.access_token
+        assert type(opened.client.store) is SqliteStore
+        assert opened.client.olm is not None
+        assert opened.session.next_batch(max_records=1) is None
+        consumer_store.load_or_create_ingestion_consumer.assert_awaited_once_with(
+            new_generation=generation,
+        )
+        consumer_store.bind_ingestion_stream.assert_awaited_once_with(
+            generation=generation,
+            stream_id=opened.consumer.stream_id,
+        )
+        database_path = (
+            client_session.olm_store_dir(credentials.user_id, runtime_paths)
+            / f"{credentials.user_id}_{credentials.device_id}.db"
+        )
+        assert database_path.is_file()
+    finally:
+        await opened.session.close()
+        assert opened.client.store is None
+        assert opened.client.olm is None
+        await opened.client.close()
+
+
+@pytest.mark.asyncio
+async def test_owned_matrix_session_factory_failure_closes_http_and_reopens(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed transfer closes its client and releases the marked store lease."""
+    generation = UUID("22222222-2222-4222-8222-222222222222")
+    consumer_store = SimpleNamespace(
+        load_or_create_ingestion_consumer=AsyncMock(
+            return_value=IngestionConsumer(generation, None),
+        ),
+        bind_ingestion_stream=AsyncMock(
+            side_effect=lambda *, generation, stream_id: IngestionConsumer(
+                generation,
+                stream_id,
+            ),
+        ),
+    )
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "data",
+    )
+    credentials = _owned_session.MatrixCredentials(
+        "@agent:example.org",
+        "AGENTDEVICE",
+        "access-token",
+    )
+    config = IngestionConfig(
+        ClassicSourceConfig(
+            timeout_ms=30_000,
+            filter_json=b'{"room":{"timeline":{"limit":50}}}',
+        ),
+    )
+    real_open = _owned_session._open_owned_ingestion
+    failed_clients: list[nio.AsyncClient] = []
+    transfer_error = RuntimeError("owned transfer failed")
+
+    def fail_transfer(client: nio.AsyncClient, *_args: object, **_kwargs: object) -> None:
+        client.close = AsyncMock(  # type: ignore[method-assign]
+            side_effect=OSError("HTTP close failed"),
+        )
+        failed_clients.append(client)
+        raise transfer_error
+
+    monkeypatch.setattr(_owned_session, "_open_owned_ingestion", fail_transfer)
+    with pytest.raises(RuntimeError, match="owned transfer failed"):
+        await _owned_session.open_owned_matrix_session(
+            "https://matrix.example.org",
+            credentials,
+            runtime_paths,
+            consumer_store=consumer_store,
+            new_consumer_generation=generation,
+            config=config,
+        )
+
+    assert len(failed_clients) == 1
+    failed_clients[0].close.assert_awaited_once()  # type: ignore[attr-defined]
+    monkeypatch.setattr(_owned_session, "_open_owned_ingestion", real_open)
+    reopened = await _owned_session.open_owned_matrix_session(
+        "https://matrix.example.org",
+        credentials,
+        runtime_paths,
+        consumer_store=consumer_store,
+        new_consumer_generation=generation,
+        config=config,
+    )
+    await reopened.session.close()
+    await reopened.client.close()
+
+
+@pytest.mark.asyncio
+async def test_owned_matrix_session_factory_cancellation_releases_bootstrap(
+    tmp_path: Path,
+) -> None:
+    """Cancellation while binding the consumer leaves the fresh graph reopenable."""
+    generation = UUID("22222222-2222-4222-8222-222222222222")
+    bind_calls = 0
+
+    async def bind_stream(*, generation: UUID, stream_id: UUID) -> IngestionConsumer:
+        nonlocal bind_calls
+        bind_calls += 1
+        if bind_calls == 1:
+            raise asyncio.CancelledError
+        return IngestionConsumer(generation, stream_id)
+
+    consumer_store = SimpleNamespace(
+        load_or_create_ingestion_consumer=AsyncMock(
+            return_value=IngestionConsumer(generation, None),
+        ),
+        bind_ingestion_stream=AsyncMock(side_effect=bind_stream),
+    )
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "data",
+    )
+    credentials = _owned_session.MatrixCredentials(
+        "@agent:example.org",
+        "AGENTDEVICE",
+        "access-token",
+    )
+    config = IngestionConfig(
+        ClassicSourceConfig(
+            timeout_ms=30_000,
+            filter_json=b'{"room":{"timeline":{"limit":50}}}',
+        ),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await _owned_session.open_owned_matrix_session(
+            "https://matrix.example.org",
+            credentials,
+            runtime_paths,
+            consumer_store=consumer_store,
+            new_consumer_generation=generation,
+            config=config,
+        )
+
+    reopened = await _owned_session.open_owned_matrix_session(
+        "https://matrix.example.org",
+        credentials,
+        runtime_paths,
+        consumer_store=consumer_store,
+        new_consumer_generation=generation,
+        config=config,
+    )
+    await reopened.session.close()
+    await reopened.client.close()
+
+
+@pytest.mark.asyncio
+async def test_owned_matrix_session_factory_adopts_default_then_reopens_marked(
+    tmp_path: Path,
+) -> None:
+    """Historical DefaultStore identity survives adoption and typed marked retry."""
+    generation = UUID("22222222-2222-4222-8222-222222222222")
+    bound = IngestionConsumer(generation, None)
+
+    async def load_consumer(*, new_generation: UUID) -> IngestionConsumer:
+        assert new_generation == generation
+        return bound
+
+    async def bind_stream(*, generation: UUID, stream_id: UUID) -> IngestionConsumer:
+        nonlocal bound
+        assert generation == bound.generation
+        if bound.stream_id is not None:
+            assert stream_id == bound.stream_id
+        bound = IngestionConsumer(generation, stream_id)
+        return bound
+
+    consumer_store = SimpleNamespace(
+        load_or_create_ingestion_consumer=AsyncMock(side_effect=load_consumer),
+        bind_ingestion_stream=AsyncMock(side_effect=bind_stream),
+    )
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "data",
+    )
+    credentials = _owned_session.MatrixCredentials(
+        "@agent:example.org",
+        "AGENTDEVICE",
+        "access-token",
+    )
+    legacy = client_session.create_authenticated_client(
+        "https://matrix.example.org",
+        credentials.user_id,
+        credentials.device_id,
+        credentials.access_token,
+        runtime_paths,
+    )
+    assert type(legacy.store) is DefaultStore
+    assert legacy.olm is not None
+    identity_keys = dict(legacy.olm.account.identity_keys)
+    await legacy.close()
+    legacy.store.database.close()
+    config = IngestionConfig(
+        ClassicSourceConfig(
+            timeout_ms=30_000,
+            filter_json=b'{"room":{"timeline":{"limit":50}}}',
+        ),
+    )
+
+    adopted = await _owned_session.open_owned_matrix_session(
+        "https://matrix.example.org",
+        credentials,
+        runtime_paths,
+        consumer_store=consumer_store,
+        new_consumer_generation=generation,
+        config=config,
+    )
+    assert type(adopted.client.store) is SqliteStore
+    assert adopted.client.olm is not None
+    assert adopted.client.olm.account.identity_keys == identity_keys
+    first_stream = adopted.consumer.stream_id
+    await adopted.session.close()
+    await adopted.client.close()
+
+    reopened = await _owned_session.open_owned_matrix_session(
+        "https://matrix.example.org",
+        credentials,
+        runtime_paths,
+        consumer_store=consumer_store,
+        new_consumer_generation=generation,
+        config=config,
+    )
+    try:
+        assert reopened.consumer.stream_id == first_stream
+        assert type(reopened.client.store) is SqliteStore
+        assert reopened.client.olm is not None
+        assert reopened.client.olm.account.identity_keys == identity_keys
+    finally:
+        await reopened.session.close()
+        await reopened.client.close()

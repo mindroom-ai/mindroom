@@ -19,6 +19,7 @@ from mindroom.approval_inbound import (
 )
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import legacy_responses_file_path
@@ -60,11 +61,12 @@ from mindroom.matrix.sync_checkpoint_trust import SyncCheckpointTrust
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
 from mindroom.matrix.sync_loop import (
     OwnRoomMembership,
+    bot_ingestion_config,
     own_membership_from_sliding_sync,
     own_membership_from_sync,
     run_matrix_sync_forever,
 )
-from mindroom.matrix.users import AgentMatrixUser, login_agent_user
+from mindroom.matrix.users import AgentMatrixUser, login_agent_owned_session
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
@@ -123,7 +125,7 @@ from .knowledge import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
-from .matrix.client_session import MatrixSyncStorage, PermanentMatrixStartupError
+from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.conversation_hydration import ConversationHydrator
 from .matrix.conversation_reads import ConversationReader, latest_agent_message_snapshot
 from .matrix.journal_ingress import event_is_live as journal_event_is_live
@@ -163,9 +165,11 @@ if TYPE_CHECKING:
 
     import structlog
     from agno.agent import Agent
+    from nio.ingest.coordinator import _FrameCompletion, _OwnedIngestionSession
 
     from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.config.main import Config
+    from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
@@ -347,6 +351,7 @@ class AgentBot:
     _sync_shutting_down: bool
     _delivery_recovery_wake: asyncio.Event
     _delivery_recovery_task: asyncio.Task[None] | None
+    _ingestion_session: _OwnedIngestionSession | None
 
     # Shared runtime state and extracted collaborators
     _hook_registry_state: HookRegistryState
@@ -425,6 +430,7 @@ class AgentBot:
         self._sync_shutting_down = False
         self._delivery_recovery_wake = asyncio.Event()
         self._delivery_recovery_task = None
+        self._ingestion_session = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
@@ -779,6 +785,7 @@ class AgentBot:
                 visible_responses=self._visible_responses,
                 conversation_reader=self._conversation_reader,
                 recover_config_confirmation_setup=self._recover_config_confirmation_setup,
+                controller_identity=self._desktop_controller_identity,
             ),
         )
         self._user_stop_reconciler = UserStopReconciler(
@@ -1835,6 +1842,16 @@ class AgentBot:
                 invited_rooms[agent_name] = frozenset(bot._room_lifecycle.invited_rooms)
         return invited_rooms
 
+    def _desktop_controller_identity(self, entity_name: str) -> DesktopControllerIdentity:
+        """Resolve a Desktop pin through the current live-bot ownership boundary."""
+        orchestrator = self.orchestrator
+        if orchestrator is not None:
+            return orchestrator.desktop_controller_identity(entity_name)
+        if entity_name != self.agent_name:
+            msg = f"MindRoom entity {entity_name!r} is not running."
+            raise DesktopIdentityError(msg)
+        return controller_identity_for_live_bot(entity_name, self)
+
     async def _on_room_membership_event(
         self,
         room: nio.MatrixRoom,
@@ -1845,20 +1862,54 @@ class AgentBot:
         if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)
 
+    async def _on_ingestion_frame_completion(self, completion: _FrameCompletion) -> None:
+        """Reserve the Task 5D frame-completion callback before source activation."""
+        del completion
+
+    async def _open_owned_matrix_client(self) -> nio.AsyncClient:
+        """Acquire and retain the bot's exclusive ingestion/client ownership."""
+        opened = await login_agent_owned_session(
+            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
+            self.agent_user,
+            runtime_paths=self.runtime_paths,
+            consumer_store=self._journal_principal(),
+            new_consumer_generation=uuid4(),
+            config=bot_ingestion_config(
+                self.config,
+                agent_name=self.agent_name,
+                room_ids=self.rooms,
+                timeout_ms=_SYNC_TIMEOUT_MS,
+                sync_filter=_SYNC_FILTER,
+            ),
+            completion_sink=self._on_ingestion_frame_completion,
+        )
+        self.client = opened.client
+        self._ingestion_session = opened.session
+        return opened.client
+
+    async def _close_owned_matrix_after_start_failure(self) -> None:
+        """Release both Matrix ownership lanes without masking startup failure."""
+        ingestion_session = self._ingestion_session
+        client = self.client
+        self.running = False
+        self._ingestion_session = None
+        self.client = None
+        if ingestion_session is not None:
+            try:
+                await ingestion_session.close()
+            except BaseException:
+                self.logger.warning("Failed to close ingestion session after startup failure", exc_info=True)
+        if client is not None:
+            try:
+                await client.close()
+            except BaseException:
+                self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
+
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         await self.ensure_user_account()
         matrix_id_before_login = self.matrix_id
-        client = await login_agent_user(
-            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
-            self.agent_user,
-            runtime_paths=self.runtime_paths,
-            sync_storage=MatrixSyncStorage(
-                store_tokens=False,
-                persist_recovery=self.config.matrix_sync.mode == "sliding",
-            ),
-        )
-        self.client = client
+        client = await self._open_owned_matrix_client()
         # Captured the moment it becomes true. A restart that logs in as a new
         # device must not resend under the old device's transaction IDs
         # believing they still deduplicate.
@@ -1912,15 +1963,8 @@ class AgentBot:
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
             await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
             self._journal_dispatcher.start()
-        except Exception:
-            client = self.client
-            self.running = False
-            self.client = None
-            if client is not None:
-                try:
-                    await client.close()
-                except Exception:
-                    self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
+        except BaseException:
+            await self._close_owned_matrix_after_start_failure()
             raise
 
     async def recover_pending_turn_journal_events(self) -> None:
@@ -2026,8 +2070,10 @@ class AgentBot:
         # the client and then aborted the config reload's removal of this
         # generation -- leaving it registered, half-stopped, while its
         # replacement opened the same database under the same principal.
-        failures: list[Exception] = []
+        failures: list[BaseException] = []
         await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
+        if self._ingestion_session is not None:
+            await self._release("ingestion session", self._ingestion_session.close(), failures)
         if self._own_journal is not None:
             await self._release("journal store", self._own_journal.close(), failures)
         if self.client is not None:
@@ -2042,11 +2088,11 @@ class AgentBot:
             raise failures[0]
         self.logger.info("Stopped agent bot")
 
-    async def _release(self, what: str, closing: Awaitable[None], failures: list[Exception]) -> None:
+    async def _release(self, what: str, closing: Awaitable[None], failures: list[BaseException]) -> None:
         """Await one shutdown step, recording failure so the later steps still run."""
         try:
             await closing
-        except Exception as error:
+        except BaseException as error:
             self.logger.exception("Failed to release resource during stop", resource=what)
             failures.append(error)
 

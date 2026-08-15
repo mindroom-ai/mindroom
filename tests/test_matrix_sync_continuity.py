@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from nio.ingest.config import ClassicSourceConfig, SlidingSourceConfig
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
@@ -34,7 +35,6 @@ from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.client import DeliveredMatrixEvent
-from mindroom.matrix.client_session import MatrixSyncStorage
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.sync_certification import SyncRecoveryOutcome, SyncTrustState
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
@@ -55,6 +55,7 @@ from tests.bot_helpers import (
     FencedRoomRecorder,
     _configured_team_test_config,
     _configured_team_user,
+    owned_matrix_login,
 )
 from tests.conftest import (
     TEST_PASSWORD,
@@ -589,8 +590,8 @@ async def test_restart_loads_only_exact_unfinished_join_decrypt_fence(
     with (
         patch.object(restarted_bot, "ensure_user_account", AsyncMock()),
         patch(
-            "mindroom.bot.login_agent_user",
-            AsyncMock(return_value=restarted_client),
+            "mindroom.bot.login_agent_owned_session",
+            AsyncMock(return_value=owned_matrix_login(restarted_client)),
         ),
         patch.object(restarted_bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(restarted_bot, "_set_presence_with_model_info", AsyncMock()),
@@ -907,7 +908,7 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch("mindroom.bot.login_agent_owned_session", AsyncMock(return_value=owned_matrix_login(client))),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
         patch("mindroom.bot.interactive.init_persistence"),
@@ -919,31 +920,29 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("mode", "persist_recovery"), [("classic", False), ("sliding", True)])
+@pytest.mark.parametrize("mode", ["classic", "sliding"])
 async def test_bot_start_gives_mindroom_sync_cursor_ownership(
     tmp_path: Path,
     mode: Literal["classic", "sliding"],
-    persist_recovery: bool,
 ) -> None:
-    """Every bot disables nio token storage while Sliding retains its recovery lane."""
+    """Every bot freezes its selected transport into the owned source config."""
     bot = _agent_bot(tmp_path)
     bot.config.matrix_sync = MatrixSyncConfig(mode=mode)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    login = AsyncMock(return_value=client)
+    login = AsyncMock(return_value=owned_matrix_login(client))
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", login),
+        patch("mindroom.bot.login_agent_owned_session", login),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
         patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
 
-    assert login.await_args.kwargs["sync_storage"] == MatrixSyncStorage(
-        store_tokens=False,
-        persist_recovery=persist_recovery,
-    )
+    source = login.await_args.kwargs["config"].source
+    assert type(source) is (ClassicSourceConfig if mode == "classic" else SlidingSourceConfig)
+    assert "sync_storage" not in login.await_args.kwargs
 
 
 @pytest.mark.asyncio
@@ -966,7 +965,7 @@ async def test_bot_start_leaves_trusted_joined_room_unfenced_for_catch_up(
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch("mindroom.bot.login_agent_owned_session", AsyncMock(return_value=owned_matrix_login(client))),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
         patch("mindroom.bot.interactive.init_persistence"),
@@ -999,7 +998,7 @@ async def test_bot_start_keeps_fences_when_joined_rooms_query_is_unavailable(
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch("mindroom.bot.login_agent_owned_session", AsyncMock(return_value=owned_matrix_login(client))),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
         patch("mindroom.bot.interactive.init_persistence"),
@@ -1025,7 +1024,7 @@ async def test_bot_start_skips_joined_rooms_query_without_pending_join_fences(
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch("mindroom.bot.login_agent_owned_session", AsyncMock(return_value=owned_matrix_login(client))),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
         patch("mindroom.bot.interactive.init_persistence"),
@@ -1054,7 +1053,7 @@ async def test_orchestrated_entity_start_defers_turn_recovery_to_coordinator(
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch("mindroom.bot.login_agent_owned_session", AsyncMock(return_value=owned_matrix_login(client))),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
         patch("mindroom.bot.interactive.init_persistence"),
@@ -1086,7 +1085,7 @@ async def test_start_runs_pending_invite_recovery_after_callbacks_and_running(
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch("mindroom.bot.login_agent_owned_session", AsyncMock(return_value=owned_matrix_login(client))),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
         patch("mindroom.bot.interactive.init_persistence"),
@@ -1122,7 +1121,7 @@ async def test_orchestrated_team_start_gates_turn_recovery_on_responder_fleet(
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch("mindroom.bot.login_agent_owned_session", AsyncMock(return_value=owned_matrix_login(client))),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
         patch("mindroom.bot.interactive.init_persistence"),
@@ -1221,7 +1220,7 @@ async def test_bot_start_rejects_checkpoint_from_reset_store_generation(tmp_path
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch("mindroom.bot.login_agent_owned_session", AsyncMock(return_value=owned_matrix_login(client))),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
         patch("mindroom.bot.interactive.init_persistence"),
@@ -1248,7 +1247,7 @@ async def test_bot_start_clears_checkpoint_when_store_generation_is_unavailable(
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch("mindroom.bot.login_agent_owned_session", AsyncMock(return_value=owned_matrix_login(client))),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
         patch("mindroom.bot.interactive.init_persistence"),
@@ -1276,7 +1275,7 @@ async def test_legacy_v2_sync_token_path_is_not_parsed(tmp_path: Path) -> None:
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch("mindroom.bot.login_agent_owned_session", AsyncMock(return_value=owned_matrix_login(client))),
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
         patch("mindroom.bot.interactive.init_persistence"),

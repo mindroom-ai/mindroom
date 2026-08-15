@@ -118,6 +118,7 @@ visibility = [
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.journal_ingress",
+    "mindroom.matrix._owned_session",
     "mindroom.matrix.relation_lookup",
     "mindroom.matrix.sync_checkpoint_trust",
     "mindroom.matrix.transport_progress",
@@ -1442,6 +1443,7 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.matrix.appservice",
+    "mindroom.matrix._owned_session",
     "mindroom.matrix.client_session",
     "mindroom.matrix.cross_signing",
     "mindroom.matrix.provisioning",
@@ -1492,6 +1494,7 @@ depends_on = [
     "mindroom.bot",
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.desktop.identity",
     "mindroom.embedder_health",
     "mindroom.entity_resolution",
     "mindroom.hooks",
@@ -2135,6 +2138,7 @@ visibility = [
     "mindroom.desktop.identity",
     "mindroom.desktop.session",
     "mindroom.matrix.appservice",
+    "mindroom.matrix._owned_session",
     "mindroom.matrix.client",
     "mindroom.matrix.provisioning",
     "mindroom.matrix.rooms",
@@ -2142,6 +2146,16 @@ visibility = [
     "mindroom.orchestration.runtime",
     "mindroom.orchestrator",
 ]
+
+[[modules]]
+path = "mindroom.matrix._owned_session"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.event_journal",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_session",
+]
+visibility = ["mindroom.matrix.users"]
 
 [[modules]]
 path = "mindroom.matrix.sync_loop"
@@ -2306,11 +2320,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.desktop.identity"
-depends_on = [
-    "mindroom.matrix.client_session",
-    "mindroom.matrix.identity",
-    "mindroom.matrix.state",
-]
+depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.client_visible_messages"
@@ -2690,6 +2700,7 @@ depends_on = [
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
+    "mindroom.desktop.identity",
     "mindroom.desktop.pairing_receiver",
     "mindroom.dispatch_callback_outcome",
     "mindroom.edit_regenerator",
@@ -4037,6 +4048,15 @@ expose = [
     "restore_login",
 ]
 from = ["mindroom.matrix.client_session"]
+
+[[interfaces]]
+expose = [
+    "MindRoomAsyncClient",
+    "maybe_ssl_context",
+    "require_runtime_paths_arg",
+]
+from = ["mindroom.matrix.client_session"]
+visibility = ["mindroom.matrix._owned_session"]
 
 [[interfaces]]
 expose = ["AuthenticatedToDeviceEvent"]

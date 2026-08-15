@@ -476,6 +476,9 @@ def _build_harness(
             turn_store=turn_store,
             visible_responses=visible_responses,
             recover_config_confirmation_setup=_recover_config_confirmation_setup,
+            controller_identity=lambda _entity_name: (_ for _ in ()).throw(
+                AssertionError("status must not resolve the controller identity"),
+            ),
         ),
     )
 

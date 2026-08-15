@@ -70,6 +70,7 @@ class MatrixSyncStorage:
 
 DEFAULT_MATRIX_SYNC_STORAGE = MatrixSyncStorage()
 
+
 # How many recovered history events nio may hold for one room while it closes a
 # limited-timeline gap; exceeding it abandons the gap and leaves the room
 # unrecovered. nio's 200 is far below what a MindRoom room produces: a
@@ -88,7 +89,7 @@ class _AsyncRequestHeaders(Protocol):
         ...
 
 
-class _MindRoomAsyncClient(nio.AsyncClient):
+class MindRoomAsyncClient(nio.AsyncClient):
     """Matrix client for MindRoom-specific encrypted event behavior."""
 
     async def send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
@@ -200,7 +201,7 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         )
 
 
-def _require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
+def require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
     """Reject stale positional call shapes with a clear error."""
     if isinstance(runtime_paths, RuntimePaths):
         return runtime_paths
@@ -225,10 +226,11 @@ def matrix_startup_error(
     return ValueError(message)
 
 
-def _maybe_ssl_context(
+def maybe_ssl_context(
     homeserver: str,
     runtime_paths: RuntimePaths,
 ) -> ssl_module.SSLContext | None:
+    """Return the configured Matrix SSL context when HTTPS requires one."""
     if homeserver.startswith("https://"):
         if not runtime_matrix_ssl_verify(runtime_paths=runtime_paths):
             ssl_context = ssl_module.create_default_context()
@@ -280,8 +282,8 @@ def _create_matrix_client(
     sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
 ) -> nio.AsyncClient:
     """Create a Matrix client with consistent configuration."""
-    runtime_paths = _require_runtime_paths_arg(runtime_paths)
-    ssl_context = _maybe_ssl_context(homeserver, runtime_paths=runtime_paths)
+    runtime_paths = require_runtime_paths_arg(runtime_paths)
+    ssl_context = maybe_ssl_context(homeserver, runtime_paths=runtime_paths)
 
     if store_path is None and user_id:
         store_path = str(olm_store_dir(user_id, runtime_paths=runtime_paths))
@@ -290,7 +292,7 @@ def _create_matrix_client(
         if os.name != "nt":
             store_dir.chmod(0o700)
 
-    client = _MindRoomAsyncClient(
+    client = MindRoomAsyncClient(
         homeserver,
         user_id or "",
         store_path=store_path,
@@ -341,7 +343,7 @@ async def matrix_client(
     access_token: str | None = None,
 ) -> AsyncGenerator[nio.AsyncClient, None]:
     """Context manager for Matrix client that ensures proper cleanup."""
-    runtime_paths = _require_runtime_paths_arg(runtime_paths)
+    runtime_paths = require_runtime_paths_arg(runtime_paths)
     client = _create_matrix_client(homeserver, runtime_paths, user_id, access_token)
     try:
         yield client
@@ -359,7 +361,7 @@ async def login(
     sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
 ) -> nio.AsyncClient:
     """Login to Matrix and return an authenticated client."""
-    runtime_paths = _require_runtime_paths_arg(runtime_paths)
+    runtime_paths = require_runtime_paths_arg(runtime_paths)
     client = _create_matrix_client(
         homeserver,
         runtime_paths,
@@ -390,7 +392,7 @@ async def login_with_token(
     sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
 ) -> nio.AsyncClient:
     """Exchange one short-lived Matrix login token and restore its exact device."""
-    runtime_paths = _require_runtime_paths_arg(runtime_paths)
+    runtime_paths = require_runtime_paths_arg(runtime_paths)
     login_client = _create_matrix_client(
         homeserver,
         runtime_paths,
@@ -463,7 +465,7 @@ async def login_flows(
     http_headers: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Return login methods advertised by one Matrix homeserver."""
-    runtime_paths = _require_runtime_paths_arg(runtime_paths)
+    runtime_paths = require_runtime_paths_arg(runtime_paths)
     client = _create_matrix_client(homeserver, runtime_paths, http_headers=http_headers)
     try:
         response = await client.login_info()
@@ -486,7 +488,7 @@ async def restore_login(
     sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
 ) -> nio.AsyncClient:
     """Restore one authenticated Matrix session without creating a new device."""
-    runtime_paths = _require_runtime_paths_arg(runtime_paths)
+    runtime_paths = require_runtime_paths_arg(runtime_paths)
     client = _create_matrix_client(
         homeserver,
         runtime_paths,
@@ -517,6 +519,7 @@ async def restore_login(
 __all__ = [
     "DEFAULT_MATRIX_SYNC_STORAGE",
     "MatrixSyncStorage",
+    "MindRoomAsyncClient",
     "PermanentMatrixStartupError",
     "create_authenticated_client",
     "login",
@@ -525,7 +528,9 @@ __all__ = [
     "matrix_client",
     "matrix_client_config",
     "matrix_startup_error",
+    "maybe_ssl_context",
     "olm_store_dir",
     "olm_store_exists",
+    "require_runtime_paths_arg",
     "restore_login",
 ]

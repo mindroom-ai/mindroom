@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
@@ -110,6 +111,7 @@ class CommandHandlerContext:
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]] | None = None
+    controller_identity: Callable[[str], DesktopControllerIdentity] | None = None
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:
@@ -328,6 +330,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 "❌ Use `!desktop` in a private room containing only you, the serving bot, "
                 "and exactly one Desktop-enabled agent."
             )
+        elif context.controller_identity is None:
+            response_text = "❌ Desktop setup is unavailable until the target agent is running."
         else:
             response_text = handle_desktop_command(
                 command.args.get("args_text", ""),
@@ -336,6 +340,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     runtime_paths=context.runtime_paths,
                     agent_name=desktop_agent_name,
                     requester_id=requester_user_id,
+                    controller_identity=context.controller_identity,
                 ),
             )
 

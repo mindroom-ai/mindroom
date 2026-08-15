@@ -3,16 +3,28 @@
 import hashlib
 import hmac
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import cached_property
+from uuid import UUID
 
 import httpx
 import nio
 from nio import crypto
+from nio.ingest.config import IngestionConfig
+from nio.ingest.coordinator import _FrameCompletion
 
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix import appservice, provisioning
+from mindroom.matrix._owned_session import (
+    IngestionConsumerStore,
+    MatrixCredentials,
+    OwnedMatrixSession,
+    login_password_credentials,
+    open_owned_matrix_session,
+    restore_credentials,
+)
 from mindroom.matrix.client_session import (
     DEFAULT_MATRIX_SYNC_STORAGE,
     MatrixSyncStorage,
@@ -1027,6 +1039,147 @@ async def _login_agent_with_configured_auth(
         sync_storage=sync_storage,
     )
     return client, "Matrix password login"
+
+
+async def _owned_agent_credentials(
+    homeserver: str,
+    agent_user: AgentMatrixUser,
+    expected_user_id: str,
+    auth: appservice.ManagedAccountAuth,
+    runtime_paths: RuntimePaths,
+) -> tuple[MatrixCredentials, str, bool]:
+    """Resolve exact credentials without opening an ordinary MatrixStore."""
+    store_intact = not crypto.ENCRYPTION_ENABLED or (
+        agent_user.device_id is None
+        or olm_store_exists(
+            expected_user_id,
+            agent_user.device_id,
+            runtime_paths,
+        )
+    )
+    if store_intact and agent_user.access_token and agent_user.device_id:
+        try:
+            restored = await restore_credentials(
+                homeserver,
+                expected_user_id,
+                agent_user.device_id,
+                agent_user.access_token,
+                runtime_paths,
+            )
+        except ValueError:
+            logger.warning(
+                "matrix_login_restore_failed_falling_back_to_configured_auth",
+                agent=agent_user.agent_name,
+                user_id=agent_user.user_id,
+                device_id=agent_user.device_id,
+            )
+        else:
+            if restored.user_id == expected_user_id:
+                return restored, "Matrix session restore", False
+            logger.warning(
+                "matrix_login_restore_identity_mismatch_falling_back_to_configured_auth",
+                agent=agent_user.agent_name,
+                expected_user_id=expected_user_id,
+                returned_user_id=restored.user_id,
+                device_id=agent_user.device_id,
+            )
+
+    if auth.mode == "appservice":
+        assert auth.appservice_token is not None
+        credentials = await appservice.login_appservice_credentials(
+            homeserver,
+            user_id=expected_user_id,
+            token=auth.appservice_token,
+            runtime_paths=runtime_paths,
+        )
+        return (
+            MatrixCredentials(*credentials),
+            "Matrix application-service login",
+            True,
+        )
+    if agent_user.password is None:
+        msg = f"Stored Matrix password for {agent_user.agent_name} is missing"
+        raise matrix_startup_error(msg, permanent=True)
+    return (
+        await login_password_credentials(
+            homeserver,
+            expected_user_id,
+            agent_user.password,
+            runtime_paths,
+        ),
+        "Matrix password login",
+        False,
+    )
+
+
+async def _close_failed_owned_agent_login(opened: OwnedMatrixSession) -> None:
+    """Release session ownership before HTTP despite either cleanup error."""
+    try:
+        await opened.session.close()
+    except BaseException:
+        logger.exception("owned_matrix_session_cleanup_failed")
+    try:
+        await opened.client.close()
+    except BaseException:
+        logger.exception("owned_matrix_http_cleanup_failed")
+
+
+async def login_agent_owned_session(
+    homeserver: str,
+    agent_user: AgentMatrixUser,
+    runtime_paths: RuntimePaths,
+    *,
+    consumer_store: IngestionConsumerStore,
+    new_consumer_generation: UUID,
+    config: IngestionConfig,
+    completion_sink: Callable[[_FrameCompletion], Awaitable[None]] | None = None,
+) -> OwnedMatrixSession:
+    """Authenticate and open one agent's exclusive durable Matrix session."""
+    auth = appservice.resolve_managed_account_auth(runtime_paths)
+    expected_user_id = _validated_expected_agent_user_id(agent_user)
+    credentials, source, set_appservice_display_name = await _owned_agent_credentials(
+        homeserver,
+        agent_user,
+        expected_user_id,
+        auth,
+        runtime_paths,
+    )
+    opened = await open_owned_matrix_session(
+        homeserver,
+        credentials,
+        runtime_paths,
+        consumer_store=consumer_store,
+        new_consumer_generation=new_consumer_generation,
+        config=config,
+        completion_sink=completion_sink,
+    )
+    try:
+        matrix_id = _validated_authenticated_agent_matrix_id(
+            opened.client,
+            expected_user_id=expected_user_id,
+            source=source,
+        )
+        if set_appservice_display_name:
+            display_response = await opened.client.set_displayname(
+                agent_user.display_name,
+            )
+            if isinstance(display_response, nio.ErrorResponse):
+                logger.warning(
+                    "matrix_user_display_name_sync_failed",
+                    user_id=expected_user_id,
+                    error=str(display_response),
+                )
+        _persist_authenticated_agent_session(
+            agent_user,
+            opened.client,
+            runtime_paths,
+            matrix_id=matrix_id,
+        )
+        await ensure_agent_cross_signing(opened.client, agent_user)
+    except BaseException:
+        await _close_failed_owned_agent_login(opened)
+        raise
+    return opened
 
 
 async def login_agent_user(
