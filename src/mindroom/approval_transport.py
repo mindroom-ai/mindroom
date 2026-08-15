@@ -411,8 +411,14 @@ class ApprovalMatrixTransport:
         bot = self.transport_bot(room_id)
         if bot is None or bot.client is None:
             msg = f"Router approval transport cannot read {room_id} to verify a card action"
-            raise ToolApprovalTransportError(msg)
+            raise approval_manager.UnverifiableApprovalCardError(msg)
         response = await bot.client.room_get_event(room_id, card_event_id)
+        if isinstance(response, nio.RoomGetEventError) and response.status_code in {
+            "M_FORBIDDEN",
+            "M_NOT_FOUND",
+        }:
+            msg = f"Matrix cannot verify approval card {card_event_id!r}: {response}"
+            raise approval_manager.UnverifiableApprovalCardError(msg)
         if not isinstance(response, nio.RoomGetEventResponse):
             msg = f"Matrix could not verify approval card {card_event_id!r}: {response}"
             raise ToolApprovalTransportError(msg)

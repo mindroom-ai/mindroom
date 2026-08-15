@@ -19,7 +19,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
-from mindroom import interactive
+from mindroom import approval_manager, approval_transport, interactive
 from mindroom.approval_manager import (
     initialize_approval_store,
 )
@@ -137,6 +137,23 @@ def _approval_reply_event(event_id: str = "$approval-reply") -> nio.RoomMessageT
         },
     )
     assert isinstance(event, nio.RoomMessageText)
+    return event
+
+
+def _approval_action_event(event_id: str, *, status: str) -> nio.UnknownEvent:
+    event = nio.UnknownEvent.from_dict(
+        {
+            "type": "io.mindroom.tool_approval_response",
+            "sender": "@user:localhost",
+            "event_id": event_id,
+            "origin_server_ts": 1,
+            "content": {
+                "status": status,
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$approval"}},
+            },
+        },
+    )
+    assert isinstance(event, nio.UnknownEvent)
     return event
 
 
@@ -1809,6 +1826,67 @@ class TestAgentBot(AgentBotTestBase):
             await bot._on_unknown_event(room, event)
 
         handle_matrix_approval_action.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unverifiable_legacy_approval_action_does_not_block_later_room_events(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A terminal ignored legacy action settles before the room lane advances."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        cards = bot._journal_store.principal("router@shared")
+        transport = approval_transport.ApprovalMatrixTransport(
+            runtime_paths=runtime_paths,
+            bot_provider=lambda _name: None,
+            cards_provider=lambda: cards,
+        )
+        manager = initialize_approval_store(
+            runtime_paths,
+            cards=cards,
+            resolve_action_delivery=transport.resolve_approval_action_delivery,
+        )
+        dispatched: list[str] = []
+        on_approval = bot._journal_dispatcher.callbacks.on_approval
+
+        async def record_dispatch(dispatch_room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+            dispatched.append(event.event_id)
+            await on_approval(dispatch_room, event)
+
+        bot._journal_dispatcher.callbacks = replace(
+            bot._journal_dispatcher.callbacks,
+            on_approval=record_dispatch,
+        )
+        ignored = _approval_action_event("$legacy-action", status="approved")
+        later = _approval_action_event("$later-action", status="invalid")
+
+        try:
+            with patch.object(approval_manager.logger, "warning") as warning:
+                await bot._journal_dispatcher.admit_out_of_band(
+                    room,
+                    ignored,
+                    EventKind.APPROVAL,
+                    EventClass.ACTIONABLE,
+                )
+                await bot._journal_dispatcher.admit_out_of_band(
+                    room,
+                    later,
+                    EventKind.APPROVAL,
+                    EventClass.ACTIONABLE,
+                )
+                await bot._journal_dispatcher.drain_once()
+            await _cancel_dispatch_retry(bot)
+        finally:
+            await manager.shutdown()
+            await shutdown_approval_runtime()
+
+        assert dispatched == [ignored.event_id, later.event_id]
+        assert await bot._journal_dispatcher.store.pending() == ()
+        warning.assert_called_once()
+        assert warning.call_args.args == ("unverifiable_legacy_approval_action_ignored",)
 
     @pytest.mark.asyncio
     async def test_interrupted_approval_reply_replay_cannot_become_ai_input(
