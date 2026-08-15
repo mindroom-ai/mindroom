@@ -23,6 +23,7 @@ from mindroom.constants import (
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     RuntimePaths,
 )
+from mindroom.event_journal import EventJournalStore
 from mindroom.event_journal.models import IngestionConsumer
 from mindroom.matrix import _owned_session, client_session
 from mindroom.matrix.client_session import (
@@ -718,6 +719,91 @@ async def test_owned_matrix_session_factory_creates_one_fresh_store_and_binding(
         assert opened.client.store is None
         assert opened.client.olm is None
         await opened.client.close()
+
+
+@pytest.mark.asyncio
+async def test_owned_matrix_session_factory_reopens_with_established_consumer_identity(
+    tmp_path: Path,
+) -> None:
+    """A later creation candidate must reopen the exact durable consumer."""
+    first_candidate = UUID("22222222-2222-4222-8222-222222222222")
+    later_candidate = UUID("33333333-3333-4333-8333-333333333333")
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "data",
+    )
+    credentials = _owned_session.MatrixCredentials(
+        "@agent:example.org",
+        "AGENTDEVICE",
+        "access-token",
+    )
+    config = IngestionConfig(
+        ClassicSourceConfig(
+            timeout_ms=30_000,
+            filter_json=b'{"room":{"timeline":{"limit":50}}}',
+        ),
+    )
+    journal = EventJournalStore.open_sqlite(tmp_path / "event-journal.db")
+    principal = journal.principal(credentials.user_id)
+    reopened: _owned_session.OwnedMatrixSession | None = None
+    try:
+        first = await _owned_session.open_owned_matrix_session(
+            "https://matrix.example.org",
+            credentials,
+            runtime_paths,
+            consumer_store=principal,
+            new_consumer_generation=first_candidate,
+            config=config,
+        )
+        established = first.consumer
+        assert established.generation == first_candidate
+        assert type(established.stream_id) is UUID
+        await first.session.close()
+        await first.client.close()
+
+        async def consumer_row() -> tuple[object, ...]:
+            row = await journal.backend.read(
+                lambda transaction: transaction.fetchone(
+                    "SELECT principal_id, consumer_generation, stream_id, "
+                    "next_sequence FROM matrix_sync_consumers WHERE principal_id = ?",
+                    (credentials.user_id,),
+                ),
+            )
+            assert row is not None
+            return tuple(
+                row[column]
+                for column in (
+                    "principal_id",
+                    "consumer_generation",
+                    "stream_id",
+                    "next_sequence",
+                )
+            )
+
+        before = await consumer_row()
+        reopened = await _owned_session.open_owned_matrix_session(
+            "https://matrix.example.org",
+            credentials,
+            runtime_paths,
+            consumer_store=principal,
+            new_consumer_generation=later_candidate,
+            config=config,
+        )
+
+        assert reopened.consumer == established
+        owner = reopened.session._journal.load_owner()
+        assert (owner.consumer_generation, owner.stream_id) == (
+            established.generation,
+            established.stream_id,
+        )
+        assert await consumer_row() == before
+    finally:
+        if reopened is not None:
+            await reopened.session.close()
+            await reopened.client.close()
+        await journal.close()
 
 
 @pytest.mark.asyncio

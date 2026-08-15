@@ -257,7 +257,13 @@ async def open_owned_matrix_session(
     consumer = await consumer_store.load_or_create_ingestion_consumer(
         new_generation=new_consumer_generation,
     )
-    if type(consumer) is not IngestionConsumer or consumer.generation != new_consumer_generation:
+    # The candidate seeds only a missing row. An established consumer is the
+    # durable identity shared with nio and must survive every process restart.
+    if (
+        type(consumer) is not IngestionConsumer
+        or type(consumer.generation) is not UUID
+        or (consumer.stream_id is not None and type(consumer.stream_id) is not UUID)
+    ):
         _raise_owned_factory_value_error("ingestion consumer generation is invalid")
 
     store_path = olm_store_dir(credentials.user_id, runtime_paths)
