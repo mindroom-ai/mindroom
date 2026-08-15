@@ -43,7 +43,7 @@ For [`openclaw_compat`], that means `matrix_message` is added directly and `atta
 
 The toolkit exposes only `reset_oauth_connection(provider_id)`.
 The provider must back one of the current agent's configured tools through that tool's `auth_provider` metadata.
-The call returns a one-time requester-bound browser link and does not change credentials itself.
+The call returns a time-limited, retryable, requester-bound browser link and does not change credentials itself.
 The authenticated browser confirmation retires the matching requester-scoped MCP OAuth session when applicable, deletes the matching local scoped credential under the same lock used by token refresh, and then opens the provider authorization page.
 The reset does not revoke the grant at the external provider.
 Opening the link without confirming is non-destructive.

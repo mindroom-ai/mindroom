@@ -38,7 +38,7 @@ OAuth operations are rare enough that this concurrency was not worth the correct
 20. GitHub access tokens and PyGithub clients are owned together by one worker thread, while every managed call reloads authoritative credentials on its execution thread.
 21. OAuth-backed MCP connections revalidate their durable generation and token hash immediately before session publication and each admitted remote use.
 22. Every approval freezes the exact call ID, tool name, canonical arguments, and invoking agent before execution.
-23. The agent reset tool is non-destructive and issues only a one-time requester-bound browser action.
+23. The agent reset tool is non-destructive and issues only a time-limited, retryable, requester-bound browser action.
 24. The authenticated browser GET is non-mutating, while its POST is the sole reset confirmation and execution boundary.
 25. A browser reset intent freezes provider, service, agent, canonical requester, scope, worker key, connection generation, and a random stable operation ID.
 26. Reset generation metadata durably records every pending intent, retains permanent completed tombstones only for replayable browser operations, and prunes completed direct or provider-driven intents.
@@ -92,7 +92,7 @@ Remote HTTP transports retain only a boolean HTTP 401 observation so an SDK-coll
 ### Reset authorization
 
 `src/mindroom/oauth/reset.py` owns provider availability, credential-scope resolution, and the opaque requester-bound browser reset intent.
-It returns the canonical credential context plus the invoking agent name and issues a one-time confirmation URL without changing credentials.
+It returns the canonical credential context plus the invoking agent name and issues a time-limited, retryable confirmation URL without changing credentials.
 
 `src/mindroom/mcp/manager.py` owns requester sessions and performs short durable credential-revision checks immediately before connection publication and admitted remote calls.
 

@@ -73,8 +73,8 @@ MindRoom synthesizes an OAuth provider from each `mcp_servers.*.auth.type: oauth
 Generated MCP OAuth token services use the `<provider_id>_oauth` naming pattern; the default provider ID is already `mcp_<server_id>`.
 Custom provider IDs that do not start with `mcp_` get an `mcp_` credential-service prefix.
 These token services stay in the primary runtime credential store.
-The matching MCP toolkit loads the token for the current resolved worker scope before opening the remote MCP transport.
-Use `worker_scope: user` or `worker_scope: user_agent` when different requesters must receive distinct OAuth tokens and MCP sessions; shared scope deliberately reuses one agent-scoped identity.
+The matching MCP toolkit always loads the token for the current canonical requester from a `user` credential scope before opening the remote MCP transport.
+Generated MCP OAuth credentials and sessions remain requester-isolated even when the agent's execution worker uses `shared` or `user_agent`; `worker_scope` still controls worker-runtime reuse, not the MCP OAuth credential identity.
 Generated MCP OAuth providers can use public clients with `token_endpoint_auth_method: none`, PKCE, and empty scope lists.
 Generated MCP OAuth providers can also discover protected-resource metadata and authorization-server metadata lazily when the first OAuth flow starts.
 If the authorization server advertises dynamic client registration and no client config is stored yet, MindRoom registers a public client and persists the returned registration metadata in the generated OAuth client config service.
