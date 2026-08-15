@@ -19,6 +19,7 @@ import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
+from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
 from agno.run.base import RunContext, RunStatus
@@ -27,8 +28,8 @@ from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents as agents_module
+from mindroom import approval_receipt, response_runner
 from mindroom import background_tasks as background_tasks_module
-from mindroom import response_runner
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.approval import ApprovalRuleConfig
@@ -106,6 +107,7 @@ from tests.conftest import (
     request_envelope,
     unwrap_extracted_collaborator,
 )
+from tests.history_helpers import RecordingModel
 from tests.response_runner_helpers import (
     _bot,
     _config,
@@ -1738,7 +1740,9 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         patch("mindroom.approval_execution.typing_indicator", _noop_typing),
         patch("mindroom.approval_execution.close_agent_runtime_state_dbs"),
         patch("mindroom.approval_execution.ai_runtime.install_queued_message_notice_hook") as install_notice,
+        patch("mindroom.approval_execution.install_approval_receipt_hooks") as install_receipt,
         patch("mindroom.approval_execution.ai_runtime.register_queued_notice_storage") as register_notice,
+        approval_receipt.approval_receipt_context("trusted approval receipt"),
     ):
         result = await runner._approval_execution.continue_run(
             continuation,
@@ -1765,6 +1769,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         agent.model,
         notice_text=runner.deps.runtime.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
     )
+    install_receipt.assert_called_once_with(agent.model, agent.fallback_config)
     register_notice.assert_called_once()
     assert register_notice.call_args.kwargs["session_id"] == "session-1"
     assert register_notice.call_args.kwargs["session_type"] is SessionType.AGENT
@@ -2001,6 +2006,35 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
 
     assert plan.calls[0].decision is response_runner.ContinuationDecision.DENIED
     assert plan.calls[0].reason == "No approval recipient is configured; the tool was denied safely."
+    assert plan.calls[0].human_approval_required is True
+
+
+@pytest.mark.asyncio
+async def test_pause_plan_keeps_each_calls_approval_provenance(tmp_path: Path) -> None:
+    """A mixed tool generation must not copy its final policy decision onto every call."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    human_tool = ToolExecution(tool_call_id="call-human", tool_name="publish_report", tool_args={})
+    policy_tool = ToolExecution(tool_call_id="call-policy", tool_name="read_report", tool_args={})
+
+    with (
+        patch(
+            "mindroom.approval_response.resolve_tool_approval_approver",
+            return_value="@user:localhost",
+        ),
+        patch(
+            "mindroom.approval_response.evaluate_tool_approval",
+            new=AsyncMock(side_effect=[(True, 60.0), (False, 60.0)]),
+        ),
+    ):
+        plan = await runner._approval_responses.plan_pause(
+            (
+                (human_tool, "call-human", "publish_report", "general"),
+                (policy_tool, "call-policy", "read_report", "general"),
+            ),
+            requester_id="@user:localhost",
+        )
+
+    assert [call.human_approval_required for call in plan.calls] == [True, False]
 
 
 @pytest.mark.asyncio
@@ -2427,6 +2461,7 @@ async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_defa
         )
 
     assert plan.calls[0].decision is None
+    assert plan.calls[0].human_approval_required is True
 
 
 @pytest.mark.asyncio
@@ -2465,6 +2500,7 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
 
     assert plan.calls[0].decision is ApprovalDecision.APPROVED
     assert plan.waiting_text is None
+    assert plan.calls[0].human_approval_required is False
 
 
 @pytest.mark.asyncio
@@ -2516,6 +2552,7 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
 
     assert plan.calls[0].decision is ApprovalDecision.APPROVED
     assert plan.waiting_text is None
+    assert plan.calls[0].human_approval_required is False
 
 
 @pytest.mark.asyncio
@@ -3005,7 +3042,16 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         requester_id="@user:localhost",
         response_event_id="$waiting",
         source_event_ids=("$source",),
-        calls=(),
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="publish_report",
+                invoking_agent="general",
+                expires_at_ns=1,
+                decision=ApprovalDecision.APPROVED,
+                human_approval_required=True,
+            ),
+        ),
         state="claimed",
         execution_identity={},
         correlation_id="correlation-original",
@@ -3015,6 +3061,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         correlation_id="correlation-original",
     )
     observed: list[str | None] = []
+    model_messages: list[tuple[str, object]] = []
 
     def build_dispatch_context(
         *_args: object,
@@ -3024,12 +3071,24 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         observed.append(correlation_id)
         return ToolDispatchContext(execution_identity=identity)
 
+    async def continue_run(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
+        model = RecordingModel(id="approval-receipt", provider="fake")
+        approval_receipt.install_approval_receipt_hooks(model, None)
+        await model.aresponse(
+            messages=[
+                Message(role="system", content="base rules"),
+                Message(role="tool", content="published"),
+            ],
+        )
+        model_messages.extend((message.role, message.content) for message in model.seen_messages)
+        return CompletedApprovalRun(response_text="done", metadata_content={})
+
     with (
         patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
         patch.object(runner.deps.tool_runtime, "build_dispatch_context", side_effect=build_dispatch_context),
         patch(
             "mindroom.approval_execution.AgentApprovalExecution.continue_run",
-            new=AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={})),
+            new=continue_run,
         ),
     ):
         await runner._continue_entity_call(
@@ -3040,6 +3099,16 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         )
 
     assert observed == ["correlation-original"]
+    assert model_messages == [
+        (
+            "system",
+            "base rules\n\n"
+            "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
+            "paused tool calls were authorized. Do not infer approval policy from tool success alone.\n"
+            "- `publish_report` (call #1): an approval card was shown and approved before execution.",
+        ),
+        ("tool", "published"),
+    ]
 
 
 @pytest.mark.asyncio

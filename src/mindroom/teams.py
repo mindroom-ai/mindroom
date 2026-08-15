@@ -40,6 +40,7 @@ from mindroom.ai_run_metadata import (
     build_model_request_metrics_fallback,
     build_prepared_history_metadata_content,
 )
+from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.authorization import get_available_responders_in_room
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
@@ -1859,6 +1860,9 @@ async def continue_paused_team_run(
         dynamic_tool_continuation=True,
         supports_native_tool_approval=True,
     )
+    for member in members.agents:
+        if member.model is not None:
+            install_approval_receipt_hooks(member.model, member.fallback_config)
     stack = ExitStack()
     scope: ScopeSessionContext | None = None
     team: Team | None = None
@@ -1888,6 +1892,8 @@ async def continue_paused_team_run(
             configured_team_name=configured_team_name,
             execution_identity=execution_identity,
         )
+        if team.model is not None:
+            install_approval_receipt_hooks(team.model, team.fallback_config)
         session = await team.aget_session(session_id=session_id, user_id=user_id)
         persisted = None if session is None else session.get_run(run_id)
         if not isinstance(persisted, TeamRunOutput) or persisted.status != RunStatus.paused:

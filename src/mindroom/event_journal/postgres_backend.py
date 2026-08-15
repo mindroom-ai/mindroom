@@ -120,14 +120,23 @@ class PostgresBackend:
             cursor.execute(cast("LiteralString", f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK_KEY})"))
             cursor.execute(
                 """
-                SELECT column_name
+                SELECT table_name, column_name
                 FROM information_schema.columns
                 WHERE table_schema = current_schema()
-                  AND table_name = 'interactive_questions'
+                  AND table_name IN ('approval_continuation_calls', 'interactive_questions')
                 """,
             )
-            interactive_question_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
+            existing_columns = cursor.fetchall()
+            approval_continuation_call_columns = frozenset(
+                str(row["column_name"])
+                for row in existing_columns
+                if row["table_name"] == "approval_continuation_calls"
+            )
+            interactive_question_columns = frozenset(
+                str(row["column_name"]) for row in existing_columns if row["table_name"] == "interactive_questions"
+            )
             for statement in pre_schema_migration_statements(
+                approval_continuation_call_columns=approval_continuation_call_columns,
                 interactive_question_columns=interactive_question_columns,
             ):
                 cursor.execute(cast("LiteralString", statement))

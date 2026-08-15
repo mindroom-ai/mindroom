@@ -120,7 +120,7 @@ class ApprovalResponseCoordinator:
         """Evaluate policy once and normalize exact calls with integer deadlines."""
         config = self.config()
         approver_id = resolve_tool_approval_approver(config, self.runtime_paths, requester_id)
-        decisions: dict[str, tuple[ContinuationDecision | None, float]] = {}
+        decisions: dict[str, tuple[ContinuationDecision | None, float, bool]] = {}
         for tool, tool_call_id, tool_name, invoking_agent in identified:
             requires_approval, timeout_seconds = await evaluate_tool_approval(
                 config,
@@ -140,6 +140,7 @@ class ApprovalResponseCoordinator:
                 if requires_approval
                 else ContinuationDecision.APPROVED,
                 timeout_seconds,
+                requires_approval,
             )
         now = datetime.now(UTC)
         calls = tuple(
@@ -154,6 +155,7 @@ class ApprovalResponseCoordinator:
                     if decisions[tool_call_id][0] is ContinuationDecision.DENIED
                     else None
                 ),
+                human_approval_required=decisions[tool_call_id][2],
             )
             for _tool, tool_call_id, tool_name, invoking_agent in identified
         )
