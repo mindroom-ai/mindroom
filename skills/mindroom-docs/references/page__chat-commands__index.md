@@ -28,7 +28,7 @@ The **router** normally handles commands.
 `!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
 Commands work in both main room messages and within threads.
 
-Voice messages that contain commands (e.g., spoken `!schedule`) are recognized after transcription and processed the same way.
+Voice transcription is not rewritten into chat-command syntax; commands must arrive as text commands.
 
 ## Permission Behavior
 
@@ -56,7 +56,7 @@ Display available commands or get detailed help on a specific topic.
 !help edit_schedule
 ```
 
-**Topics:** `schedule`, `config`, `model`, `thread_mode`, `thread-mode`, `threadmode`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
+**Topics:** `schedule`, `config`, `model`, `thread_mode`, `thread-mode`, `threadmode`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
 
 ### `!hi`
 
@@ -180,7 +180,7 @@ Run these commands in a private Matrix room containing only the requester and on
 !desktop disconnect confirm
 ```
 
-`!desktop setup` returns a local `mindroom desktop pair` command and a short-lived pairing code.
+`!desktop setup` returns a local `mindroom desktop setup` command and a short-lived pairing code.
 The local pairing command presents that code through an authenticated encrypted Matrix device event.
 It then prints an exact chat confirmation command with a verification value derived from the authenticated local device key.
 Only the same Matrix requester in the same agent scope can confirm the matching claim.

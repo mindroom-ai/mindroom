@@ -6,6 +6,8 @@
 
 ## Browse By Category
 
+The tool names in this table are representative highlights rather than an exhaustive registry dump; follow each category link for its current full inventory.
+
 | Category | Tools | Link |
 |----------|-------|------|
 | **Execution & Coding** | file, shell, python, coding, docker, calculator, reasoning, sleep | [→ execution-and-coding](https://docs.mindroom.chat/tools/execution-and-coding/) |
@@ -14,7 +16,7 @@
 | **Web Scraping & Browser** | firecrawl, crawl4ai, browser, jina, website, trafilatura | [→ web-scraping-and-browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) |
 | **Research Sources** | arxiv, google_scholar, wikipedia, pubmed, hackernews | [→ research-sources](https://docs.mindroom.chat/tools/research-sources/) |
 | **AI & Generation** | openai, gemini, groq, replicate, fal, dalle, eleven_labs | [→ ai-and-generation](https://docs.mindroom.chat/tools/ai-and-generation/) |
-| **Media & Content** | youtube, spotify, giphy, moviepy, unsplash, brandfetch | [→ media-and-content](https://docs.mindroom.chat/tools/media-and-content/) |
+| **Media & Content** | youtube, spotify, giphy, moviepy_video_tools, unsplash, brandfetch | [→ media-and-content](https://docs.mindroom.chat/tools/media-and-content/) |
 | **Matrix & Attachments** | matrix_message, matrix_voice_message, thread_tags, thread_resolution, thread_summary, thread_model, matrix_api, attachments | [→ matrix-and-attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) |
 | **Messaging & Social** | gmail, slack, discord, telegram, whatsapp, email, x, reddit | [→ messaging-and-social](https://docs.mindroom.chat/tools/messaging-and-social/) |
 | **Project Management** | github, jira, linear, clickup, notion, trello, todo, todoist | [→ project-management](https://docs.mindroom.chat/tools/project-management/) |

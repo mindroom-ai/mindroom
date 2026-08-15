@@ -59,10 +59,20 @@ if TYPE_CHECKING:
     ],
     dependencies=["httpx"],
     docs_url="https://docs.agno.com/tools/toolkits/search/pubmed",
-    function_names=("fetch_details", "fetch_pubmed_ids", "parse_details", "search_pubmed"),
+    function_names=("search_pubmed",),
 )
 def pubmed_tools() -> type[PubmedTools]:
     """Return PubMed tools for medical research and literature search."""
     from agno.tools.pubmed import PubmedTools
 
-    return PubmedTools
+    class MindRoomPubmedTools(PubmedTools):
+        """PubMed toolkit whose configured result limit is the call default."""
+
+        def search_pubmed(self, query: str, max_results: int | None = None) -> str:
+            """Search PubMed, using the configured max_results when the call omits it."""
+            if max_results == 0:
+                return "[]"
+            resolved_max_results = self.max_results if max_results is None else max_results
+            return super().search_pubmed(query, max_results=resolved_max_results)
+
+    return MindRoomPubmedTools

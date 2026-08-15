@@ -3,6 +3,7 @@
 > **Audit note (2026-03-18):** Platform pods still run as root and container image tags use `:latest`.
 > Internal TLS/mTLS decision has been deferred since September 2025.
 > Deployment manifests may not match the current cluster structure — verify against live manifests before acting on recommendations.
+> This is a historical repository review, not a live deployment attestation.
 
 **Review Date:** 2025-09-12
 **Scope:** Kubernetes Infrastructure Security
@@ -14,7 +15,8 @@ This report analyzes the infrastructure security of the MindRoom SaaS platform, 
 
 **Risk Summary (Sept 17, 2025):**
 - **High:** Internal TLS/mTLS still outstanding
-- **Medium:** Platform pods run as root; images use `:latest`; etcd encryption unverified
+- **Critical:** Platform frontend and backend pods lack security contexts and can run as root.
+- **Medium:** Images use `:latest`; etcd encryption is unverified.
 - **Low:** Resource alerts, PDBs, policy automation
 
 ## Detailed Findings
@@ -25,8 +27,9 @@ This report analyzes the infrastructure security of the MindRoom SaaS platform, 
 **Severity: CRITICAL**
 
 #### Current State
-- **Backend deployment:** Security context hardened (runAsNonRoot, drop caps, no priv-esc)
-- **Frontend deployment:** App container hardened; nginx kept capable of binding :80
+- **Platform backend deployment:** No pod or container security context is configured in the current platform chart.
+- **Platform frontend deployment:** No pod or container security context is configured; the application image serves port 3000 and is not an nginx sidecar.
+- **Per-instance MindRoom deployment:** The current instance chart includes non-root and capability-drop hardening.
 - **Synapse deployment:** Startup performs file ownership adjustments (unchanged)
 
 #### Notes
@@ -39,8 +42,8 @@ This report analyzes the infrastructure security of the MindRoom SaaS platform, 
        # Fix permissions
        chown -R 991:991 /data
    ```
-2. **Backend hardened** with `allowPrivilegeEscalation: false`, `runAsNonRoot: true`, and capability drop
-3. **Frontend app container** hardened; nginx left with defaults to serve on port 80
+2. **Platform backend and frontend pods remain unhardened** in the tracked platform chart.
+3. **Per-instance MindRoom containers are hardened** with non-root and capability-drop settings.
 
 #### Impact
 - Container escape potential through privilege escalation
@@ -129,8 +132,8 @@ spec:
 #### Current State
 All deployments have proper resource limits configured:
 
-- **Backend:** requests: 512Mi/250m, limits: 2Gi/1000m
-- **Frontend:** requests: 1Gi/500m, limits: 4Gi/2000m
+- **Backend:** requests: 512Mi/250m, limits: 1Gi/1000m
+- **Frontend:** requests: 256Mi/100m, limits: 512Mi/500m
 - **Synapse:** requests: 512Mi/250m, limits: 2Gi/1000m
 
 #### Strengths
@@ -144,12 +147,12 @@ All deployments have proper resource limits configured:
 
 ### 4. RBAC Permissions and Least Privilege
 
-**Status: ✅ PASS (backend scoped to namespace)**
+**Status: ⚠️ PARTIAL (namespace workload access plus cluster namespace management)**
 **Severity: MEDIUM (further tightening possible)**
 
 #### Current State
-- Backend uses a namespaced Role in `mindroom-instances` with a RoleBinding from the platform namespace service account
-- No ClusterRole with broad wildcard access
+- Backend uses a namespaced Role in `mindroom-instances` with a RoleBinding from the platform namespace service account.
+- A narrowly scoped `platform-backend-namespace-manager` ClusterRole and binding permit namespace management without wildcard resources or verbs.
 
 #### Remaining Gaps
 - Review verbs for secret/configmap/actions and restrict to minimal set per controller needs
@@ -162,7 +165,7 @@ All deployments have proper resource limits configured:
 
 #### Current State
 - **Custom images:** `ghcr.io/mindroom-ai/mindroom-*:latest`
-- **Third-party:** `matrixdotorg/synapse:latest`, `nginx:alpine`
+- **Third-party:** `matrixdotorg/synapse:latest`
 - **Base images:** Use public ECR (good practice)
 
 #### Issues
@@ -212,7 +215,7 @@ spec:
 **Severity: LOW**
 
 #### Current State
-- Tracked defaults removed; Helm templates generate strong secrets when not provided
+- Secrets must be supplied through values or an existing-Secret workflow; the platform chart renders empty values when required inputs are omitted rather than generating strong secrets.
 - ✅ K8s Secrets properly implemented: mounted as files at `/etc/secrets` with 0400 permissions
 - ✅ Application reads secrets via `_get_secret()` function with file fallback
 - ✅ More secure than env vars: won't show in `ps`, `/proc/*/environ`, or crash dumps
@@ -343,14 +346,15 @@ spec:
 
 ## Conclusion
 
-The MindRoom infrastructure has a solid foundation with proper resource limits and basic TLS implementation. However, critical security gaps in network isolation, privilege management, and secrets handling create significant risk exposure. Immediate implementation of NetworkPolicies and security contexts is essential to prevent multi-tenant security breaches.
+The per-instance chart has network isolation, read-only secret mounts, and container hardening, while the platform frontend and backend still lack security contexts and a platform NetworkPolicy.
+Remaining infrastructure work should be scoped to the platform pods and namespace, plus live verification of secret lifecycle, etcd encryption, and internal TLS.
 
 **Risk Score: 6.5/10 (HIGH)**
 
 **Priority Actions:**
-1. Implement secret volume mounts / External Secrets (High – 1 week)
-2. Confirm etcd encryption; plan rotation (High – 1 week)
-3. Evaluate internal mTLS (High – spike + rollout)
-4. Add policy automation (Kyverno/Gatekeeper) (Medium)
+1. Harden platform frontend and backend pods and add a platform NetworkPolicy.
+2. Confirm etcd encryption and test the current rotation workflow.
+3. Evaluate internal mTLS.
+4. Add policy automation such as Kyverno or Gatekeeper.
 
 This review should be updated quarterly or after significant infrastructure changes.

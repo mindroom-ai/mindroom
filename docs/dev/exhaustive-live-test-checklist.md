@@ -325,13 +325,13 @@ Expected outcome: The runtime returns the documented or implemented fallback beh
 - [ ] `MEDIA-009` Repeat the voice flow with `voice.visible_router_echo` enabled and disabled.
 Expected outcome: Visible router echo behavior matches the configuration without changing the underlying responder selection logic.
 
-- [ ] `MEDIA-010` Exercise voice command intelligence with an explicit spoken help request, an explicit spoken removed-`!skill` request, and a similar non-command question.
-Expected outcome: Explicit help intent can normalize to `!help`, removed `!skill` intent stays an unknown command, and speculative command rewrites are rejected so natural-language queries stay natural language.
+- [ ] `MEDIA-010` Exercise voice transcript normalization with an explicit spoken help request, an explicit spoken removed-`!skill` request, and a similar natural-language question.
+Expected outcome: The normalizer never invents `!help`, `!skill`, or another command, so all three natural-language requests remain natural language while mentions and light ASR errors may be corrected.
 
 - [ ] `MEDIA-011` Speak or inject unavailable entity mentions while voice normalization runs in a room with limited available entities.
 Expected outcome: Unavailable configured entities lose their `@` mention marker while available room-scoped entities keep valid mentions and dispatch correctly.
 
-- [ ] `MEDIA-012` Send a voice message that becomes a normalized command or threaded follow-up and then inspect later follow-up or attachment-aware handling.
+- [ ] `MEDIA-012` Send a voice message that becomes a normalized transcript or threaded follow-up and then inspect later follow-up or attachment-aware handling.
 Expected outcome: The synthetic voice-derived message preserves original sender identity, thread context, attachment IDs, and raw-audio fallback metadata so router handling and later follow-ups can recover the correct audio context.
 
 - [ ] `MEDIA-013` Repeat a voice flow that emits visible router echo, retry the same event, hand off to the final responder, and repeat with reply permissions denied.
@@ -567,7 +567,7 @@ Expected outcome: Base CRUD, upload, delete, status, file listing, and reindex f
 - [ ] `UI-015` Use the Credentials tab for create, edit, save, delete, test, and copy flows.
 Expected outcome: Service validation, masked values, raw JSON editing, and credential-status loading all match backend behavior.
 
-- [ ] `UI-016` Use the Voice tab to edit STT and command-intelligence settings.
+- [ ] `UI-016` Use the Voice tab to edit STT and transcript-normalization settings.
 Expected outcome: Enablement, router echo, host normalization, API key fields, and model settings all persist and display the effective current state.
 
 - [ ] `UI-017` Use the Tools or Integrations tab with agents across different execution scopes.

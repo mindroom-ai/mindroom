@@ -167,7 +167,7 @@ Matrix sync callback
 | `commands/` | Chat command parsing (`!help`, `!schedule`, `!config`, etc.) |
 | `commands/config_commands.py` | Chat-based config commands (`!config`) |
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
-| `voice_handler.py` | Voice message download, transcription, and command recognition |
+| `voice_handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup |
 | `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
 | `shell_execution.py` | Shell command execution core: spawning, output buffering, background handle registry |
 | `shell_supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
@@ -466,7 +466,7 @@ Use this when Matrix + chat UI are hosted and only the MindRoom backend runs loc
 
 1) Initialize local config with hosted defaults
 ```bash
-uvx mindroom config init --profile public
+uvx mindroom config init --matrix-server mindroom.chat
 ```
 
 2) Add at least one model provider key in `~/.mindroom/.env` (for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`)
@@ -559,7 +559,7 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 
 ### Step 6: Viewing the Widget
 
-- **Taking Screenshots**: To view the dashboard without Jupyter, use `python frontend/take_screenshot.py` from the project root.
+- **Taking Screenshots**: To view the dashboard without Jupyter, use `uv run python frontend/take_screenshot.py` from the project root.
 - **Manual Screenshot**: From the frontend directory, run `bun run dev` to start the development server, then run `bun run screenshot` in another terminal.
 - **Screenshot Location**: Screenshots are saved to `frontend/screenshots/` with timestamps.
 - **Use Cases**: This is helpful for visual verification, documentation, and sharing the dashboard appearance.

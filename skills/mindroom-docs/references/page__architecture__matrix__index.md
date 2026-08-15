@@ -92,6 +92,9 @@ This provenance remains attached across recovery, restart, and decryption indepe
 `matrix/journal_ingress.py` commits every inbound event to the event journal before nio treats it as delivered, and a refused write raises `nio.CallbackNotAcceptedError` so nio redelivers the event rather than advancing the checkpoint past it.
 Admission is fail-closed at every provenance, not only for recovery, because an event the journal never accepted is one no later process would see again.
 Conversation history is hydrated on demand rather than pre-warmed at join: a bounded backward walk fills one room or thread and records the membership epoch it filled under, so a rejoin rebuilds from what the new membership can see instead of merging two memberships into one conversation.
+Every derived conversation row, pending turn, and delivery outbox entry is tied to that membership epoch.
+A departure advances the epoch, removes old projected history, retires unsent old-membership delivery work, and prevents an in-flight response admitted before departure from being sent after rejoin.
+Attempted but unacknowledged deliveries retain their frozen transaction identity for exact reconciliation instead of being blindly resent.
 Changing `matrix_sync` restarts running entities on config hot reload.
 Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart on connection failures.
 
@@ -109,7 +112,8 @@ See [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) for the 
 ### Streaming Responses
 
 Agents stream responses by progressively editing messages.
-Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
+When requester identity is available, `should_use_streaming()` enables streaming only while that requester is online, avoiding progressive Matrix edits for offline users.
+When requester identity is unavailable, the presence check cannot run and `should_use_streaming()` defaults to streaming.
 See [Streaming Responses](https://docs.mindroom.chat/streaming/) for the full feature documentation.
 
 Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.

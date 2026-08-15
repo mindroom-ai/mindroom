@@ -17,7 +17,7 @@ Use these tools when you need Google Calendar access, Cal.com booking APIs, or M
 
 `google_calendar` is a per-service Google OAuth integration.
 It uses the `google_calendar` OAuth provider instead of an API key form.
-It always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets.
+It supports shared and requester-isolated worker scopes, with OAuth credentials resolved for the active execution identity.
 Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) to connect Google before enabling `google_calendar`.
 `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
 `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys.
@@ -30,7 +30,7 @@ MindRoom also includes `scheduler` in `defaults.tools` by default on this branch
 
 ### What It Does
 
-`google_calendar` exposes `list_events()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `create_event()`, `update_event()`, and `delete_event()`.
+`google_calendar` exposes `list_events()`, `get_event()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `check_availability()`, `get_event_attendees()`, `search_events()`, `create_event()`, `update_event()`, `delete_event()`, `quick_add_event()`, `move_event()`, and `respond_to_event()`.
 MindRoom loads the connected Google account from its unified credential store instead of relying on a per-process `token.json`.
 The OAuth provider requests narrowly targeted scopes for event access, calendar listing, availability, and working-hours settings, while MindRoom gates write methods with the `allow_update` setting.
 Write calls are enabled by default and can be removed from the tool surface with `allow_update: false`.
@@ -42,14 +42,13 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `calendar_id` | `text` | `no` | `primary` | Google Calendar ID to query or update. |
-| `allow_update` | `boolean` | `no` | `true` | Expose create, update, and delete operations. |
+| `allow_update` | `boolean` | `no` | `true` | Expose create, update, delete, quick-add, move, and invitation-response operations. |
 
 ### Example
 
 ```yaml
 agents:
   assistant:
-    worker_scope: shared
     tools:
       - google_calendar:
           calendar_id: primary
@@ -136,7 +135,7 @@ get_upcoming_bookings(email="alex@example.com")
 
 `scheduler` exposes `schedule()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`.
 It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`.
-By default `schedule()` posts back into the current room or thread scope, while `new_thread=True` schedules a future room-level root message.
+Pass `new_thread=False` to post back into the current room or thread scope, or `new_thread=True` to schedule a future room-level root message.
 The optional `history_limit` argument caps how many recent messages the scheduled responder sees each time the task fires.
 Use `history_limit=0` for no prior conversation context, or a positive integer to keep that many recent messages.
 Scheduled tasks are stored in Matrix room state and persist across restarts.
@@ -157,9 +156,9 @@ agents:
 ```
 
 ```python
-schedule("tomorrow at 9am @ops check the deployment")
+schedule("tomorrow at 9am @ops check the deployment", new_thread=False)
 schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
-schedule("every hour @ops check deployment health", history_limit=0)
+schedule("every hour @ops check deployment health", new_thread=False, history_limit=0)
 list_schedules()
 edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5)
 cancel_schedule("a1b2c3d4")

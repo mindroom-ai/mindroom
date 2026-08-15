@@ -1,245 +1,92 @@
 # Telegram Bridge
 
-Bridge Telegram and Matrix using [mautrix-telegram](https://docs.mau.fi/bridges/python/telegram/) in **puppet mode**. Each user logs in with their own Telegram account, so messages appear as the real user on both sides.
-
-## What Can You Do With This?
-
-The bridge enables two main use cases:
-
-1. **Talk to MindRoom agents from Telegram** -- Link a Telegram group to a Matrix room (like Lobby) so you can chat with AI agents directly from the Telegram app, without opening Element.
-
-2. **Access Telegram chats from Matrix** -- Your existing Telegram conversations appear as Matrix rooms in Element, so you can use one client for everything.
-
-Most users want use case 1. See [Bridging Matrix rooms to Telegram](#step-2-bridge-matrix-rooms-to-telegram) after setup.
-
-## Architecture
-
-```
-Telegram Cloud <--> mautrix-telegram <--> Synapse <--> Element
-                    (bridge bot)         (homeserver)   (client)
-```
-
-- **mautrix-telegram** runs locally and connects outbound to Telegram's API -- your Matrix server does NOT need to be publicly accessible
-- Each Matrix user can log into their own Telegram account (puppeting)
-- Messages flow bidirectionally in real time
+Bridge Telegram and Matrix with `mautrix-telegram` in puppet mode.
+Each user can authenticate their own Telegram account, and linked Telegram groups become Matrix rooms.
 
 ## Prerequisites
 
-### 1. Telegram API Credentials
+Create Telegram API credentials at [my.telegram.org](https://my.telegram.org), and create a bridge bot through [@BotFather](https://t.me/BotFather).
+Keep the API hash and bot token secret.
 
-1. Go to [my.telegram.org](https://my.telegram.org) and log in
-2. Click "API development tools"
-3. Create an app (title: "MindRoom Bridge", short name: "mindroom")
-4. Note the **api_id** (numeric) and **api_hash** (string)
+## Deploy
 
-### 2. Telegram Bot
+Run the bridge manager from `local/instances/deploy/`:
 
-1. Message [@BotFather](https://t.me/BotFather) on Telegram
-2. Send `/newbot`, choose a name and username
-3. Note the **bot token** (format: `123456789:ABCdefGHI...`)
+```bash
+./bridge.py add telegram --instance <instance>
+./bridge.py register telegram --instance <instance>
+./bridge.py start telegram --instance <instance>
+./bridge.py status --instance <instance>
+./bridge.py logs telegram --instance <instance>
+```
 
-## Setup
+`bridge.py add` creates the bridge data directory, bridge configuration, registry entry, and generated `docker-compose.yml` service named `telegram`.
+Provide Telegram credentials with `--api-id`, `--api-hash`, and `--bot-token`, export the matching `TELEGRAM_*` variables, or create `local/instances/deploy/.env.telegram` before running the command.
+When a credential is still missing, the command prompts for it and writes the resulting values into the generated bridge configuration and bridge registry.
 
-### 1. Add credentials to config
+For Synapse, `bridge.py register` updates `homeserver.yaml`, but the local Compose layout does not mount the generated bridge registration into the Synapse container.
+Manually expose the generated file at the configured `app_service_config_files` path, then restart Synapse.
+For Tuwunel, it generates the registration file and prints the manual admin-room steps; alternatively, run `./bridge.py register-with-matrix telegram --instance <instance>` after generation.
 
-Edit `telegram-bridge/config.yaml` and replace the placeholders in the `telegram:` section:
+## Configure MindRoom
+
+Telegram ghost users must resolve to an authorized Matrix requester when room access is restrictive.
+Register the bridge bot as a bot account when it can originate events, and use room-level thread mode because Telegram does not preserve Matrix thread relations:
 
 ```yaml
-telegram:
-    api_id: 12345678          # Your numeric api_id
-    api_hash: abcdef123456    # Your api_hash string
-    bot_token: 123456:ABC...  # Your bot token from BotFather
+bot_accounts:
+  - "@telegrambot:matrix.example.com"
+
+authorization:
+  default_room_access: false
+  global_users:
+    - "@owner:matrix.example.com"
+  aliases:
+    "@owner:matrix.example.com":
+      - "@telegram_12345:matrix.example.com"
+  agent_reply_permissions:
+    "*":
+      - "@owner:matrix.example.com"
+
+agents:
+  assistant:
+    thread_mode: room
 ```
 
-Also update the same values in your `.env`:
+Replace the canonical owner and exact Telegram ghost IDs with values from your deployment.
+Aliases use exact Matrix user IDs rather than glob patterns, so add every bridge ghost that should inherit the canonical user's permissions.
+Validate the complete configuration before starting MindRoom.
 
-```bash
-TELEGRAM_API_ID=12345678
-TELEGRAM_API_HASH=abcdef123456
-TELEGRAM_BOT_TOKEN=123456:ABC...
-```
+## Authenticate Telegram
 
-### 2. Recreate Synapse and start the bridge
+Start a Matrix DM with the generated Telegram bridge bot.
+Use either:
 
-Synapse needs a new volume mount for the bridge registration file, so it must be **recreated** (not just restarted):
+- `login` for interactive phone authentication.
+- `login-qr` for QR authentication.
 
-```bash
-# Recreate Synapse to pick up the new volume mount and bridge registration
-docker compose up -d synapse
+Telegram normally sends the login code to an already authenticated Telegram client.
+Accounts with two-factor authentication receive an additional password prompt.
 
-# Wait for Synapse to become healthy
-docker compose ps synapse
+## Link a Room
 
-# Start the bridge
-docker compose up -d telegram-bridge
-```
+1. Create a Telegram group and add the generated Telegram bot.
+2. Invite the Matrix bridge bot into the MindRoom-managed Matrix room.
+3. Follow the bridge bot's current `help` output to create or link the portal.
 
-> **Note:** `docker compose restart synapse` will NOT work here because the `registration.yaml` volume mount is new in `compose.yaml`.
-> A restart reuses the existing container; `up -d` recreates it with the updated mounts.
+Exact portal commands depend on the running `mautrix-telegram` version.
+The manager pins `v0.15.3`, the legacy Python bridge release compatible with its generated configuration and relay-bot workflow.
+Moving to the newer Go bridge requires a coordinated image, configuration, and portal-command migration.
+Use the running bridge's `help` output rather than commands copied from another version.
 
-### 3. Verify
+## Operations
 
-```bash
-# Check bridge logs
-docker compose logs telegram-bridge --tail 20
+Use the manager for status, logs, start, stop, and registration operations.
+Generated configuration, registration, and SQLite state live under the instance's bridge data directory.
 
-# Look for "Startup actions complete"
-```
+Deleting the bridge database removes Telegram login and portal state and requires users to authenticate again.
+Back up the generated bridge data directory before any reset.
 
-## Usage
-
-### Step 1: Log in to Telegram via the bridge
-
-Before you can bridge anything, you must link your Telegram account:
-
-1. Open Element at your Element URL
-2. Start a DM with `@telegrambot:your.matrix.domain`
-3. Send `login`
-4. Enter your phone number in international format (e.g., `+1234567890`)
-5. Enter the verification code sent to your Telegram app
-6. Your existing Telegram chats will appear as Matrix rooms
-
-### Step 2: Bridge Matrix rooms to Telegram
-
-This is the primary use case -- talking to MindRoom agents from Telegram.
-
-The bridge connects a **Telegram group** to a **Matrix room**. You need a Telegram group on the Telegram side because that's what you'll open in the Telegram app to send and receive messages.
-
-**For each Matrix room you want to access from Telegram** (e.g., Lobby):
-
-1. **Create a Telegram group** in the Telegram app (e.g., name it "MindRoom Lobby")
-2. **Add your bridge bot** (e.g., `@your_bridge_bot`) to that Telegram group
-3. **In Element**, go to the Matrix room you want to bridge (e.g., Lobby)
-4. **Invite the bridge bot**: invite `@telegrambot:your.matrix.domain` to the room
-5. **Link the rooms**: in the Matrix room, send `!tg bridge` -- the bot will list your Telegram groups and let you pick which one to link
-
-Once linked:
-- Messages you send in the **Telegram group** appear in the **Matrix room** -- MindRoom agents will see and respond to them
-- Agent responses in the **Matrix room** appear in the **Telegram group**
-- You can chat with MindRoom agents entirely from the Telegram app
-
-Repeat for any other Matrix rooms you want accessible from Telegram.
-
-> **Why can't I just invite the bot directly?**
-> The bridge bot (`@telegrambot`) is Matrix-side infrastructure -- it manages the bridge but isn't a Telegram chat.
-> To use Telegram as your client, there must be a Telegram group for the Telegram app to display.
-> The bridge connects that group to the Matrix room bidirectionally.
-
-### Accessing Telegram chats from Matrix
-
-After logging in (step 1), your Telegram chats automatically appear as Matrix rooms in Element. This lets you use Element as a unified client for both Matrix and Telegram conversations.
-
-- **Private chats**: Automatically bridged as Matrix DMs
-- **Groups**: Automatically bridged if within `sync_create_limit` (default: 30)
-- **Additional groups**: Use `search <query>` in the bridge bot DM to find and bridge more
-
-### Bot Commands Reference
-
-Send these to `@telegrambot:your.matrix.domain` in a DM, or in a bridged room:
-
-| Command | Description |
-|---------|-------------|
-| `login` | Link your Telegram account |
-| `logout` | Unlink your Telegram account |
-| `ping` | Check bridge connection status |
-| `search <query>` | Search your Telegram chats |
-| `!tg bridge` | Link current Matrix room to a Telegram group (send in the room) |
-| `unbridge` | Unlink current room from Telegram |
-| `sync` | Re-sync Telegram chat list |
-| `help` | Show all commands |
-
-## Configuration Reference
-
-Key settings in `telegram-bridge/config.yaml`:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `bridge.username_template` | `telegram_{userid}` | Matrix username pattern for Telegram ghosts |
-| `bridge.displayname_template` | `{displayname} (TG)` | Display name pattern for Telegram users |
-| `bridge.sync_create_limit` | `30` | Max chats to auto-create on first sync |
-| `bridge.sync_direct_chats` | `true` | Auto-bridge private chats |
-| `bridge.encryption.allow` | `true` | Allow E2EE in bridged rooms |
-| `bridge.permissions` | See config | Who can use the bridge and at what level |
-
-### Permission Levels
-
-Set in `bridge.permissions`:
-
-- `relaybot` - Messages relayed through the bot (not puppeted)
-- `user` - Can use the bridge but not log in
-- `puppeting` - Can log in with their Telegram account
-- `full` - Full access including creating portals
-- `admin` - Bridge administration
-
-Default config gives `full` to all users on your homeserver domain.
-
-## Troubleshooting
-
-### Bridge won't start
-
-- Check credentials: `api_id` must be numeric, `api_hash` must be a hex string, `bot_token` must be a valid BotFather token
-- Check logs: `docker compose logs telegram-bridge --tail 50`
-- Verify Synapse is healthy: `docker compose ps`
-
-### Login fails
-
-- Ensure `api_id` and `api_hash` are from the same Telegram app
-- The bot token must be from a bot you own (not revoked)
-- If you get "FLOOD_WAIT", wait the indicated time before retrying
-
-### Messages not bridging
-
-- Check the bridge is connected: DM the bot and send `ping`
-- Verify Synapse has the registration: check `app_service_config_files` in `homeserver.yaml`
-- Check bridge permissions in `config.yaml` - your user domain must have `full` or `puppeting`
-
-### Double puppeting
-
-To make your messages from Matrix appear as your real Telegram account (not the bridge bot):
-
-1. This is automatic when you log in via `login` - puppet mode is the default
-2. If messages still show as the bot, check `bridge.sync_with_custom_puppets` in config
-
-### Database issues
-
-The bridge uses SQLite stored in the `telegram-bridge` data volume. To reset:
-
-```bash
-docker compose stop telegram-bridge
-rm <data-dir>/telegram-bridge/mautrix-telegram.db
-docker compose up -d telegram-bridge
-```
-
-Note: This will require re-logging into Telegram.
-
-### Registration out of sync
-
-If Synapse reports appservice errors, regenerate the registration:
-
-```bash
-docker compose stop telegram-bridge
-rm telegram-bridge/registration.yaml
-# Temporarily set valid api_id in config.yaml, then:
-docker compose run --rm --no-deps --entrypoint \
-  "python -m mautrix_telegram -g -c /data/config.yaml -r /data/registration.yaml" \
-  telegram-bridge
-docker compose restart synapse
-docker compose up -d telegram-bridge
-```
-
-## Maintenance
-
-### Updating
-
-```bash
-docker compose pull telegram-bridge
-docker compose up -d telegram-bridge
-```
-
-### Backup
-
-Important data locations:
-
-- `telegram-bridge/config.yaml` - Bridge configuration
-- `telegram-bridge/registration.yaml` - Appservice registration
-- Telegram bridge data volume - SQLite database with session data
+Telegram-side puppeting is established by Telegram login.
+Matrix double puppeting is a separate feature controlled by the generated configuration's current `double_puppet` settings.
+Do not assume Telegram login configures Matrix double puppeting automatically.

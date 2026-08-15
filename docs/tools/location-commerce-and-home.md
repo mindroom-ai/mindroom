@@ -46,6 +46,14 @@ MindRoom does not add extra runtime behavior on top of the upstream toolkit beyo
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `key` | `password` | `no` | `null` | Google Maps API key stored through the dashboard or credential store. |
+| `search_places` | `boolean` | `no` | `true` | Enable `search_places()`. |
+| `get_directions` | `boolean` | `no` | `true` | Enable `get_directions()`. |
+| `validate_address` | `boolean` | `no` | `true` | Enable `validate_address()`. |
+| `geocode_address` | `boolean` | `no` | `true` | Enable `geocode_address()`. |
+| `reverse_geocode` | `boolean` | `no` | `true` | Enable `reverse_geocode()`. |
+| `get_distance_matrix` | `boolean` | `no` | `true` | Enable `get_distance_matrix()`. |
+| `get_elevation` | `boolean` | `no` | `true` | Enable `get_elevation()`. |
+| `get_timezone` | `boolean` | `no` | `true` | Enable `get_timezone()`. |
 
 ### Example
 
@@ -67,7 +75,7 @@ validate_address("1600 Amphitheatre Pkwy, Mountain View, CA", region_code="US")
 ### Notes
 
 - `key` is optional in MindRoom metadata only because the upstream toolkit can also read `GOOGLE_MAPS_API_KEY` from the runtime environment.
-- In practice, the tool still needs a valid Google Maps API key before any call succeeds.
+- The upstream toolkit also constructs a Google Places client through Google Application Default Credentials, so configure ADC in addition to a valid Google Maps API key.
 - If you plan to use `validate_address()`, enable the Address Validation API for the same Google Cloud project as the key.
 
 ## [`openweather`]
@@ -156,7 +164,7 @@ get_shop_info()
 get_products(max_results=25, status="ACTIVE")
 get_orders(max_results=50, created_after="2026-03-01", created_before="2026-03-31")
 get_low_stock_products(threshold=10)
-get_average_order_value(days=30)
+get_average_order_value(group_by="day", created_after="2026-03-01", created_before="2026-03-31")
 ```
 
 ### Notes

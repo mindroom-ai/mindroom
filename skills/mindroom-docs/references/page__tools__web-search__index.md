@@ -54,6 +54,9 @@ The tool returns JSON strings from DDGS rather than a MindRoom-specific normaliz
 | `enable_news` | `boolean` | `no` | `true` | Enable `search_news()`. |
 | `modifier` | `text` | `no` | `null` | Prepends fixed query text to every web search. |
 | `fixed_max_results` | `number` | `no` | `null` | Caps result count for both web and news searches. |
+| `timelimit` | `text` | `no` | `null` | Optional age filter: `d`, `w`, `m`, or `y`. |
+| `region` | `text` | `no` | `null` | DDGS region code. |
+| `backend` | `text` | `no` | `null` | Search backend override; defaults effectively to `duckduckgo`. |
 | `proxy` | `url` | `no` | `null` | Optional proxy for DDGS requests. |
 | `timeout` | `number` | `no` | `10` | Request timeout in seconds. |
 | `verify_ssl` | `boolean` | `no` | `true` | Verify TLS certificates for DDGS requests. |
@@ -95,13 +98,15 @@ This is still a DDGS-backed scraper-style search path rather than an official Go
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `enable_search` | `boolean` | `no` | `true` | Enable `web_search()`. The current registry metadata marks this field as text, but the wrapper expects a boolean. |
-| `enable_news` | `boolean` | `no` | `true` | Enable `search_news()`. The current registry metadata marks this field as text, but the wrapper expects a boolean. |
+| `enable_search` | `boolean` | `no` | `true` | Enable `web_search()`. |
+| `enable_news` | `boolean` | `no` | `true` | Enable `search_news()`. |
 | `modifier` | `text` | `no` | `null` | Prepends fixed query text to every web search. |
-| `fixed_max_results` | `number` | `no` | `null` | Caps result count for both web and news searches. The current registry metadata marks this field as text. |
-| `proxy` | `url` | `no` | `null` | Optional proxy for DDGS requests. The current registry metadata marks this field as text. |
-| `timeout` | `number` | `no` | `10` | Request timeout in seconds. The current registry metadata marks this field as text. |
-| `verify_ssl` | `boolean` | `no` | `true` | Verify TLS certificates for DDGS requests. The current registry metadata marks this field as text. |
+| `fixed_max_results` | `number` | `no` | `null` | Caps result count for both web and news searches. |
+| `timelimit` | `text` | `no` | `null` | Optional age filter: `d`, `w`, `m`, or `y`. |
+| `region` | `text` | `no` | `null` | DDGS region code. |
+| `proxy` | `url` | `no` | `null` | Optional proxy for DDGS requests. |
+| `timeout` | `number` | `no` | `10` | Request timeout in seconds. |
+| `verify_ssl` | `boolean` | `no` | `true` | Verify TLS certificates for DDGS requests. |
 
 ### Example
 

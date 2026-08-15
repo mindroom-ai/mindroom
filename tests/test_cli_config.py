@@ -3703,6 +3703,46 @@ class TestConnect:
         assert "Owner user ID from pairing: @alice:mindroom.chat" in result.output
         assert not (tmp_path / ".env").exists()
 
+    def test_connect_no_persist_shell_quotes_export_values(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Printed exports must remain one literal shell value."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        client_secret = f"[red]{'x' * 120};$(id)[/red]"
+        monkeypatch.setattr(
+            "mindroom.cli.main._httpx_post",
+            lambda *_a, **_kw: httpx.Response(
+                200,
+                json={
+                    "client_id": "client value",
+                    "client_secret": client_secret,
+                    "namespace": "a1b2c3d4",
+                    "owner_user_id": "@alice:mindroom.chat",
+                },
+            ),
+        )
+
+        result = _invoke_with_runtime(
+            [
+                "connect",
+                "--pair-code",
+                "ABCD-EFGH",
+                "--provisioning-url",
+                "https://x.test/a b",
+                "--no-persist-env",
+            ],
+            cfg,
+        )
+
+        assert result.exit_code == 0
+        assert "export MINDROOM_PROVISIONING_URL='https://x.test/a b'" in result.output
+        assert "export MINDROOM_LOCAL_CLIENT_ID='client value'" in result.output
+        assert f"  export MINDROOM_LOCAL_CLIENT_SECRET='{client_secret}'" in result.output.splitlines()
+        assert "export MINDROOM_NAMESPACE=a1b2c3d4" in result.output
+
     def test_connect_uses_runtime_env_default_provisioning_url(
         self,
         tmp_path: Path,

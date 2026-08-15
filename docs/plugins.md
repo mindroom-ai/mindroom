@@ -10,7 +10,7 @@ icon: lucide/plug-2
 > Only install plugins you trust and have reviewed.
 
 MindRoom plugins extend agents with custom tools, [hooks](hooks.md), and skills.
-A plugin is a directory with a `mindroom.plugin.json` manifest, one or more Python modules, and optionally skill directories.
+A plugin is a directory with a `mindroom.plugin.json` manifest and optional Python modules or skill directories.
 Plugins are loaded from paths listed under `plugins:` in `config.yaml`.
 
 ## Plugin structure
@@ -28,7 +28,8 @@ my-plugin/
         └── SKILL.md
 ```
 
-A plugin must have at least one of `tools_module`, `hooks_module`, `oauth_module`, or `skills`.
+Capability fields are optional, but the `name` field is required.
+A name-only manifest loads but contributes no tools, hooks, OAuth providers, or skills.
 A tools-only plugin exposes callable functions to agents.
 A plugin with `oauth_module` registers OAuth providers whose state, callbacks, and scoped credential storage are handled by MindRoom core.
 A hooks-only plugin observes or transforms events without adding agent-facing tools.
@@ -415,6 +416,9 @@ MindRoom does **not** auto-detect constructor parameter names — undeclared man
 | `RUNTIME_PATHS` | `runtime_paths` | Storage paths, environment values, and data directory access |
 | `CREDENTIALS_MANAGER` | `credentials_manager` | Read and write the per-tool credentials store |
 | `WORKER_TARGET` | `worker_target` | Resolved worker routing context (scope, execution identity, worker key) |
+| `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | Workspace root used for managed tool-output saves |
+| `WORKER_TOOLS_OVERRIDE` | `worker_tools_override` | Effective worker-routed tool override |
+| `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 
 Example:
 
@@ -452,7 +456,7 @@ context = get_tool_runtime_context()
 worker_target = context.resolve_worker_target()
 ```
 
-This returns the exact worker target that agent toolkit construction uses, so requester-scoped state such as OAuth MCP sessions and scoped credentials resolves identically.
+This returns the exact worker target that agent toolkit construction uses, so worker-scoped state such as OAuth MCP sessions and scoped credentials resolves identically.
 `resolve_worker_target()` raises `ValueError` for team and router dispatches, because those contexts have no single agent execution scope to mirror; catch it if your tool can run inside a team.
 
 ## MCP via plugins (advanced)
@@ -509,7 +513,9 @@ MCP toolkits are async; Agno's async agent runs (`arun`, `aprint_response`) hand
 
 List skill directories in the manifest `skills` array.
 Each listed directory is added to MindRoom's skill search roots.
-Skill subdirectories must contain a `SKILL.md` file with YAML frontmatter (name, description, requirements).
+Skill subdirectories must contain a `SKILL.md` file.
+YAML frontmatter is optional: discovery falls back to the directory name, and a missing description falls back to the resolved skill name.
+Requirements are declared only when needed.
 
 ## Hooks
 
@@ -621,7 +627,7 @@ The hot-reload path is intentionally best-effort, not transactional.
 - **In-flight turns keep their old code.** A reload swaps the registry for new events, but any callback already running on the old module finishes there, and only new events use the new module.
 - **No partial-write detection.** If your editor saves the file in two writes, the watcher may briefly load the half-written first state, log an import error, and then reload again on the second write.
 - **CPU-bound infinite loops still wedge the event loop.** The hook dispatcher uses `asyncio.timeout()` for cooperative cancellation, so truly blocking CPU code is not preempted.
-- **Background resources held by the old module can leak until natural cleanup.** Only `asyncio.Task` objects directly attached to module globals are cancelled, so plugins that hold long-lived non-task resources need their own cleanup bookkeeping.
+- **Background resources held by the old module can leak until natural cleanup.** Reload cancels direct module-global `asyncio.Task` objects and tasks in one-level built-in dict, tuple, list, or set containers; deeper or custom containers and non-task resources need their own cleanup bookkeeping.
 - **New plugins added to disk are not auto-enabled.** You still have to add them under `plugins:` in `config.yaml`, because the watcher only reloads plugins that are already configured.
 
 ### Production tip

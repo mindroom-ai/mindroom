@@ -1,6 +1,7 @@
 # Web Dashboard
 
-MindRoom includes a web dashboard for configuring agents, teams, rooms, and integrations without editing YAML files. Changes are synchronized to `config.yaml` in real-time.
+MindRoom includes a web dashboard for configuring agents, teams, rooms, and integrations without editing YAML files.
+Editors keep local draft state and write `config.yaml` when you use their save action.
 
 ## Accessing the Dashboard
 
@@ -69,11 +70,10 @@ View and manage rooms that agents have joined but are not in the configuration:
 Configure AI model providers:
 
 - **Add/edit models** with provider, model ID, host URL, and advanced settings
-- **Provider filter** to show models by provider
-- **Test connection** to verify model accessibility
 - **Provider API keys** section for configuring credentials
 
-**Runtime-supported providers:** OpenAI, Codex CLI ChatGPT authentication (`codex`), Anthropic, Google Gemini (`google`/`gemini`), Vertex AI Claude (`vertexai_claude`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
+**Runtime-supported providers:** Anthropic, Bedrock Claude, Azure OpenAI, OpenAI, Codex CLI ChatGPT authentication, Kimi Code, Google Gemini, Vertex AI Claude, Ollama, llama.cpp, Groq, OpenRouter, Cerebras, DeepSeek, Z.ai, and the internal synthetic provider.
+The dashboard preserves provider IDs already present in the configuration; not every runtime provider has a dedicated icon or preset in the add-model dropdown.
 
 ### Memory
 
@@ -154,7 +154,7 @@ Configure voice message handling:
 
 - **Enable/disable** voice message support
 - **Speech-to-Text** - OpenAI transcription or a self-hosted OpenAI-compatible service
-- **Command Intelligence** - Model selection for command recognition
+- **Transcript intelligence** - Model selection for mention normalization and light ASR cleanup
 
 ### Integrations
 
@@ -166,7 +166,7 @@ Connect external services to enable agent capabilities:
 
 ## Features
 
-### Real-time Sync
+### Save Status
 
 The sync status indicator in the header shows:
 
@@ -276,7 +276,7 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Returns `{"status": "healthy"}` when the HTTP server is running and Matrix sync is active. Returns `503` with `{"status": "unhealthy", "stale_sync_entities": [...]}` when Matrix sync has been stale for >180s (after watchdog recovery attempts) |
+| GET | `/api/health` | Liveness endpoint that returns `503` with `{"status": "unhealthy", "stale_sync_entities": [...]}` for stale Matrix sync after startup is ready, while `/api/ready` owns startup state before readiness. |
 | GET | `/api/ready` | Returns `{"status": "ready"}` when the orchestrator has finished startup. Returns `503` with `{"status": "<phase>", "detail": "..."}` otherwise |
 
 MindRoom tracks runtime phases internally:

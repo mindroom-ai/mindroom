@@ -47,7 +47,8 @@ Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_call
 `calls.profiles` defines reusable, complete voice pipelines.
 `calls.agents` maps each enabled agent to exactly one profile name.
 The `model` in a realtime profile is the provider-specific OpenAI realtime speech model ID.
-Cascaded profiles require complete STT and TTS settings, and each speech leg selects its own credential service.
+Cascaded profiles require complete STT and TTS settings.
+OpenAI speech legs require either `credentials_service` or `api_key`; OpenAI-compatible speech legs require `host` and may omit credentials.
 The optional `model` in a cascaded profile references a named entry from the top-level `models` mapping.
 An explicit cascaded call model takes precedence over room and agent models for the calls-enabled agent.
 Omitting it keeps the existing room and agent model resolution.
@@ -159,7 +160,7 @@ calls:
     assistant: openai-cascaded
 ```
 
-Each speech component has its own `provider`, `model`, `credentials_service`, `host`, and `extra_kwargs`.
+Each speech component has its own `provider`, `model`, `credentials_service`, `api_key`, `host`, and `extra_kwargs`.
 The two speech legs may select the same named credential or different ones.
 The current OpenAI model catalog documents [`gpt-4o-transcribe`](https://developers.openai.com/api/docs/models/gpt-4o-transcribe) for transcription and [`tts-1`](https://developers.openai.com/api/docs/models/tts-1) for text-to-speech.
 

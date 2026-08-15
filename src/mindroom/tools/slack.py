@@ -159,7 +159,6 @@ if TYPE_CHECKING:
     docs_url="https://docs.agno.com/tools/toolkits/social/slack",
     function_names=(
         "download_file",
-        "download_file_bytes",
         "get_channel_history",
         "get_channel_info",
         "get_thread",

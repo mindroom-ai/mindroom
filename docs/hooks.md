@@ -471,13 +471,15 @@ If you are writing internal code or tests and already have an explicit `HookRegi
 ### Fault isolation
 
 Every hook invocation runs inside an `asyncio.timeout()` with structured error logging.
-No hook can crash the bot.
+Ordinary `Exception` and `SystemExit` failures are logged and isolated so later hooks can continue.
+Cancellation follows the caller and event policy, and external side effects completed before a failure cannot be rolled back.
 
 Failure semantics are mode-aware:
 
-- **Observer** failures lose only side effects; the next hook still runs
+- **Observer** failures stop that callback; completed external side effects remain, and the next hook still runs
 - **Collector** failures lose only that hook's contributed items
-- **Transformer** failures lose only that hook's draft changes; the previous draft continues
+- **`message:before_response` transformer** failures preserve mutations already made to the shared draft before the failure
+- **`message:final_response_transform` transformer** failures discard the failed hook's copy and continue with the previous draft
 
 ### No quarantine, no cooldown
 
@@ -513,9 +515,9 @@ Scoped sub-paths (per-room, per-user) are the plugin author's responsibility.
 
 ## Context reference
 
-### Base fields (all hooks)
+### Base fields (non-tool hooks)
 
-Every hook context includes these fields:
+Contexts derived from `HookContext` include these fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -529,7 +531,10 @@ Every hook context includes these fields:
 | `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful when plugin state must ignore anything recorded before it |
 | `state_root` | `Path` | Plugin state directory (property) |
 
-Every hook context also exposes the following helpers:
+Those non-tool contexts also expose the following helpers:
+
+`ToolBeforeCallContext` and `ToolAfterCallContext` use a separate tool-hook surface.
+Their `config` and `runtime_paths` values may be absent, and they do not expose `runtime_started_at` or `get_latest_agent_message_snapshot()`.
 
 **`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`**
 Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
@@ -568,7 +573,8 @@ Transport exceptions from the underlying Matrix client propagate to the hook.
 Provides a narrow Matrix admin facade when MindRoom has a router-backed admin client available for the current hook context.
 This facade is part of the supported hook contract and is intentionally not the raw Matrix client.
 It is `None` when no admin-capable client is bound.
-The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `get_room_members(room_id)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
+The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `force_join_user(room_id, user_id)`, `kick_user(room_id, user_id, reason=None)`, `get_room_members(room_id)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
+Membership mutation methods return a boolean success result and surface transport exceptions consistently with the other admin operations.
 `get_room_members` returns `None` when the membership fetch fails, so callers can distinguish an unreadable room from a genuinely empty one.
 Rooms created via `create_room` are retained for the creating bot across room cleanup and restarts, the same way rooms it is invited to are kept.
 

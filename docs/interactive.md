@@ -12,7 +12,7 @@ When an agent's response contains a specially formatted JSON block, MindRoom aut
 1. An agent includes an `interactive` code block in its response.
 2. MindRoom parses the JSON, formats the options as a numbered list, and adds emoji reactions to the message.
 3. The user clicks a reaction emoji or types the option number.
-4. MindRoom captures the selection and feeds it back to the agent as a follow-up prompt (`"The user selected: <value>"`).
+4. MindRoom captures the selection and feeds the agent structured selection context containing the question event, thread, question text, and selected option key, label, and value.
 
 The entire flow happens within the thread where the original question was asked.
 
@@ -41,6 +41,9 @@ Agents emit interactive questions by wrapping JSON in an `interactive` code bloc
 | `options[].emoji` | string | No | Emoji shown as a reaction button. Defaults to `"❓"`. |
 | `options[].label` | string | No | Human-readable label for the option. Defaults to `"Option"`. |
 | `options[].value` | string | No | Value passed back to the agent when selected. Defaults to the label in lowercase. |
+
+Use a unique emoji for every option when reaction buttons must distinguish the choices.
+Duplicate emoji keys, including repeated default `❓` values, collapse in the reaction map; numeric replies remain available as a fallback.
 
 ### Rendered Output
 
@@ -87,7 +90,8 @@ agents:
 ## Limitations
 
 - Maximum of **5 options** per question. Additional options are silently truncated.
-- Only **one active question per message**. If a response contains multiple interactive blocks, only the first is processed.
+- Only **one active question per message**.
+  The first valid block receives interactive metadata and reaction buttons; later valid blocks render as plain, non-interactive question text.
 - Questions and in-flight selections persist across restarts in the event journal and remain tied to the prompt revision current when the answer is admitted.
 - Interactive metadata over 8,000 bytes is omitted, so the formatted question remains visible without reaction buttons or numeric selection.
 - Interactive blocks are supported in normal agent responses; direct `matrix_message` sends and edits reject them because those operations have no durable response identity.

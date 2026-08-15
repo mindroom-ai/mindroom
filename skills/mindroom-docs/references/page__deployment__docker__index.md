@@ -99,15 +99,20 @@ A `Dockerfile.mindroom-minimal` variant is also available, which builds a smalle
 For development, run MindRoom alongside a local Matrix server:
 
 ```bash
-# Start Matrix (Synapse + Postgres + Redis)
-cd local/matrix && docker compose up -d
+# Start Matrix (Synapse + Postgres + Redis) without changing directories
+docker compose -f local/matrix/docker-compose.yml up -d
 
 # Verify Matrix is running
 curl -s http://localhost:8008/_matrix/client/versions
 
-# Start MindRoom using the docker-compose.yml you created above
+# Start MindRoom using the docker-compose.yml you created above.
+# Its MATRIX_HOMESERVER must resolve from inside the MindRoom container.
 docker compose up -d
 ```
+
+The two Compose projects do not share a network automatically.
+Either attach both services to one named external network and use the Synapse service name, such as `http://mindroom-synapse:8008`, or configure an explicit host-gateway address.
+Do not use `http://localhost:8008` inside the MindRoom container; there, `localhost` means the MindRoom container itself.
 
 The local Matrix stack includes:
 

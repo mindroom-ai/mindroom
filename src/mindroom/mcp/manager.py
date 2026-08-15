@@ -233,7 +233,7 @@ class MCPServerManager:
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
     ) -> MCPServerCatalog:
-        """Return a requester-scoped catalog for one OAuth-backed MCP server."""
+        """Return a worker-scoped catalog for one OAuth-backed MCP server."""
         state, auth_headers = await self._request_state_and_headers(
             server_id,
             credentials_manager=credentials_manager,
@@ -254,7 +254,7 @@ class MCPServerManager:
         *,
         worker_target: ResolvedWorkerTarget | None,
     ) -> MCPServerCatalog | None:
-        """Return an already-discovered requester-scoped catalog without network or credential I/O."""
+        """Return an already-discovered worker-scoped catalog without network or credential I/O."""
         base_state = self._states.get(server_id)
         if base_state is None or base_state.config.auth is None:
             return None
@@ -273,7 +273,7 @@ class MCPServerManager:
         *,
         worker_target: ResolvedWorkerTarget | None,
     ) -> None:
-        """Close a requester-scoped OAuth MCP session, if one is active."""
+        """Close a worker-scoped OAuth MCP session, if one is active."""
         base_state = self._states.get(server_id)
         if base_state is None or base_state.config.auth is None:
             return
@@ -996,7 +996,7 @@ class MCPServerManager:
                 state.stale = False
 
     async def _mark_scoped_states_failed(self, server_id: str, error_message: str) -> None:
-        """Disconnect requester-scoped states after server-level function-name validation fails."""
+        """Disconnect worker-scoped states after server-level function-name validation fails."""
         for key, state in list(self._scoped_states.items()):
             if key.server_id != server_id:
                 continue

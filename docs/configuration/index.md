@@ -207,18 +207,17 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
-| `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765` |
+| `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling; it does **not** change the API server bind port, which uses `mindroom run --api-port`. | `8765` |
 | `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the dashboard API with credentials | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
-| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
+| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline | _(wait indefinitely)_ |
+| `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may wait for one active durable sync-cache phase before treating it as wedged | `600` |
-| `MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS` | Wall-clock seconds allowed for live dispatch-safe Matrix thread reads before dispatch proceeds with degraded thread evidence | `1.0` |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 
-The sync cache-write grace is a hang backstop, not the ordinary Matrix transport timeout.
-Set it above the observed healthy cache-write p99 for the deployment.
+The sync cache-write grace is a hang backstop rather than the ordinary Matrix transport timeout; set it above the observed healthy cache-write p99 for the deployment.
 Raising it delays both watchdog cancellation and liveness failure only while a sync callback is actively completing its sequential durable cache phase.
 
 ### OpenAI-Compatible API
@@ -336,13 +335,12 @@ agents:
 # Model configurations (at least a "default" model is recommended)
 models:
   default:
-    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: anthropic, azure, bedrock_claude, openai, codex, kimi, llama_cpp, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek, zai, or synthetic
     id: claude-sonnet-5            # Required: Model ID for the provider
   sonnet:
-    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: anthropic, azure, bedrock_claude, openai, codex, kimi, llama_cpp, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek, zai, or synthetic
     id: claude-sonnet-5            # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
-    api_key: null                  # Optional: API key (usually from env vars)
     extra_kwargs: null             # Optional: Provider-specific parameters
     context_window: null           # Optional: Needed on the active runtime model for replay safety; explicit compaction.model also needs its own window for summary generation
 
@@ -422,29 +420,19 @@ defaults:
 # defaults.streaming is also global-only and controls streamed message edit cadence.
 # Tools can be plain strings or single-key dicts with per-agent config overrides.
 
-MindRoom uses `defaults.thread_summary_temperature` for automatic thread summaries on providers that support runtime temperature overrides.
-Set it to `null` to omit the field and use provider defaults.
-MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite thread summaries.
-Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
-Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
-
-When a thread has no trusted prior summary, its first automatic summary call is summary-only so a useful thread title appears early.
-The next scheduled automatic summary refresh also returns one to three topic tags when the thread has no existing tags, whether the prior summary was automatic or manual.
-This delayed initial enrichment uses the same summary model, room override, temperature, prompt, and background task as the refreshed summary.
-After initial enrichment completes, later summary refreshes do not regenerate or replace tags.
-
-`defaults.worker_grantable_credentials` is a list of credential service names.
-Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
-Google OAuth client config and Google OAuth token services stay in the primary runtime and cannot be mirrored into isolated workers.
-If a tool runs inside an isolated worker, only the services listed here are available to that worker.
-Leave this unset to keep isolated workers deny-by-default for shared credentials.
-This setting never injects provider env vars such as `OPENAI_API_KEY`.
-
-For worker-routed tools, it only controls which shared credentials MindRoom may load inside isolated workers.
-This setting also does not control local shared-only integrations that stay in the main runtime, such as `homeassistant`.
-Those tools keep using normal shared credentials even when `worker_grantable_credentials` is empty.
-`google_vertex_adc` is intentionally not supported here because isolated workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; use that auth path only in the main runtime.
-Sandbox-proxied execution is stricter than direct local execution: ordinary runtime `.env` values and provider env do not carry over unless they are explicitly passed through.
+# defaults.thread_summary_temperature controls automatic summaries on providers that support runtime temperature overrides.
+# Set it to null to use provider defaults.
+# Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite always use provider defaults.
+# room_thread_summary_models can override defaults.thread_summary_model for a room alias or raw Matrix room ID.
+#
+# A thread's first trusted automatic summary call is summary-only.
+# Its next scheduled refresh adds one to three tags when none exist.
+# Later refreshes preserve those tags.
+#
+# worker_grantable_credentials lists shared credential service names that isolated workers may load.
+# Google OAuth client and token services stay in the primary runtime and cannot be mirrored.
+# Provider environment variables are not injected by this setting.
+# google_vertex_adc is unsupported because isolated workers do not receive ADC files.
 
 # Required compaction is destructive inside the active session.
 # It uses one Matrix lifecycle notice that is edited in place.
@@ -545,7 +533,7 @@ voice:
     api_key: null
     host: null
   intelligence:
-    model: default                 # Model for command recognition
+    model: default                 # Model for mention normalization and light ASR cleanup
 
 # Voice calls via Element Call / MatrixRTC (optional)
 calls:

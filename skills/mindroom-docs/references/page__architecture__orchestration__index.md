@@ -110,7 +110,7 @@ Skills are watched separately via `_watch_skills_task()` with cache invalidation
 
 The `src/mindroom/orchestration/` subpackage contains helpers extracted from the monolithic orchestrator:
 
-- **`runtime.py`** — Sync loop helpers: `sync_forever_with_restart()` with linear backoff (capped at 60s), `cancel_task()`, and `create_logged_task()` for safe asyncio task creation.
+- **`runtime.py`** — Sync loop helpers: `sync_forever_with_restart()` with exponential backoff capped at 60 seconds, `cancel_task()`, and `create_logged_task()` for safe asyncio task creation.
 - **`config_lifecycle.py`** — Debounced config-reload and shared replacement-admission lifecycle: `ConfigReloadLifecycle` owns reload queueing, serialized global response draining for config and MCP replacements, and the load → diff → plan sequencing that dispatches config plans back to the orchestrator.
 - **`config_updates.py`** — Config diffing and reload planning: `build_config_update_plan()` computes a `ConfigUpdatePlan` by calling `_identify_entities_to_restart()`, which diffs old and new configs using `model_dump(exclude_none=True)`.
 - **`plugin_watch.py`** — Plugin hot-reload watcher: `watch_plugins_task()` polls configured plugin roots, with `PluginWatchState` owning the watcher baselines and dirty-state revision.
@@ -131,19 +131,16 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 
 ## Message Handling
 
-Event callbacks are wrapped in `_create_task_wrapper()` to run as background tasks, ensuring the sync loop is never blocked.
+Correctness-critical timeline callbacks cross durable journal admission before ordinary callbacks run, and background dispatch workers then process committed work without blocking the sync loop.
 
-**`_on_message` flow:**
+**Inbound message flow:**
 
-1. Skip own messages (except voice transcriptions from router)
-2. Check sender authorization and handle edits
-3. Check if already responded (`TurnStore.is_handled`)
-4. Router handles commands exclusively
-5. Extract message context (mentions, thread history, non-agent mention detection)
-6. Skip messages from other agents (unless mentioned)
-7. Router routes when no agent or team is mentioned and thread doesn't have multiple human participants
-8. Check for team formation or individual response
-9. Generate response and store memory
+1. `matrix/journal_ingress.py` commits the event before nio accepts it.
+2. `journal_dispatch.py` and `pending_event_worker.py` dispatch admitted or recovered work.
+3. `turn_controller.py` runs ingress validation, normalization, conversation resolution, receipt ordering, and coalescing.
+4. `text_ingress_dispatch.py` and `turn_policy.py` decide whether to ignore, route, execute a command, or respond.
+5. `response_runner.py` and `response_turn.py` execute the selected agent or team.
+6. `delivery_gateway.py` sends or edits the Matrix response and `TurnStore` records durable terminal truth.
 
 **Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content.
 The agent edits its own previous reply in place rather than sending a new message.
@@ -162,12 +159,12 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 ## Concurrency
 
 - Each bot runs its own sync loop via `sync_forever_with_restart()`
-- Sync loop failures trigger automatic restart with linear backoff (5s, 10s, 15s, ... up to 60s max)
+- Sync loop failures trigger automatic restart with capped exponential backoff (5s, 10s, 20s, 40s, then 60s maximum)
 - Watchdog-driven restarts of stalled sync loops add 0–10s of random jitter on top of the backoff so a loop-wide stall does not restart every sync loop as one thundering herd
 - An automatic receive-loop restart replaces only the sync task and its watchdog, so in-flight responses keep their original owner and finish across the restart
 - The response runtime is drained and cancelled only when the bot itself stops: a config reload replacing the entity, entity removal, or process shutdown
 - Each of those lifecycle events logs `restart_reason_category` and `resulting_action`, so `matrix_sync_transport_restart` is distinguishable from `matrix_agent_response_runtime_shutdown` in logs
-- Event callbacks run as background tasks (never block the sync loop)
+- Admitted callbacks are dispatched as background work and remain durably retryable until settled
 - `TurnStore`, backed by the durable handled-turn ledger, prevents duplicate replies
 - `StopManager` handles cancellation of in-progress responses
 
@@ -175,13 +172,9 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 On `orchestrator.stop()`:
 
-1. Set `self.running = False`
-2. Cancel config reload task
-3. Drain orchestrator-owned MCP catalog replacement tasks for up to 5 seconds before MCP or entity teardown
-4. Stop memory auto-flush worker
-5. Shut down the per-binding knowledge refresh scheduler
-6. Cancel pending bot start tasks
-7. Stop the MCP manager
-8. Cancel all sync tasks
-9. Signal all bots to stop (`bot.running = False`)
-10. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)
+1. Mark the runtime stopped, signal runtime shutdown, unbind external triggers, and close approval transport/runtime state.
+2. Cancel config reload, drain MCP catalog and dispatch-recovery work, and cancel startup maintenance.
+3. Stop todo-poke and memory auto-flush workers plus knowledge watching and refresh scheduling.
+4. Cancel pending bot starts and stop the MCP manager.
+5. Cancel sync tasks before stopping bots so shutdown cannot race active receive loops.
+6. Stop all bots concurrently, wait for attachment cleanup, and close the shared event journal last because bots borrow it while draining delivery work.

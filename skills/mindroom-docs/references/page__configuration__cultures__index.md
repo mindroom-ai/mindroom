@@ -52,4 +52,5 @@ All modes include the culture description in the agent's context. The difference
 - All agents listed in a culture must exist in the top-level `agents` section.
 - Culture state is persisted to `mindroom_data/culture/<culture_name>.db` and survives restarts.
 - Culture managers are cached and shared across agents in the same culture — if two agents belong to the same culture, they share the same `CultureManager` instance.
+- For private agents, culture storage and manager caches are scoped to the resolved requester identity, so different requesters do not share culture state.
 - Changes to a culture's `description` or `mode` in `config.yaml` invalidate the cache, so the manager is recreated on the next hot-reload.

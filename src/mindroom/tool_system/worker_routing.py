@@ -465,9 +465,9 @@ def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | Non
 def _requires_shared_only_integration_scope(name: str) -> bool:
     """Return whether a tool or dashboard integration is restricted to shared scope.
 
-    MCP registry tools are supported on every scope: OAuth-backed servers use
-    requester-scoped sessions, and non-OAuth servers always execute through the
-    shared server session without requester credentials.
+    MCP registry tools are supported on every scope: OAuth-backed servers follow
+    the configured worker scope, and non-OAuth servers always execute through
+    the shared server session without requester credentials.
     """
     return name in _SHARED_ONLY_INTEGRATION_NAMES
 

@@ -16,7 +16,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 - **100+ tool integrations** - Connect to external services like GitHub, Slack, Gmail, and more
 - **Hot-reload configuration** - Update `config.yaml` and agents restart automatically
 - **Scheduled tasks** - Schedule agents to run at specific times with cron expressions or natural language
-- **Voice messages** - Speech-to-text transcription with intelligent command recognition
+- **Voice messages** - Speech-to-text transcription with mention normalization and light ASR cleanup
 - **Image analysis** - Pass images to vision-capable AI models for analysis
 - **Matrix desktop bridge** - Observe or locally lease control of a computer without opening inbound ports
 - **Authorization** - Fine-grained access control for users and rooms
@@ -55,7 +55,7 @@ See [Getting Started](getting-started.md) for the full walkthrough and [Hosted M
 ### Preferred alternative: NixOS LXC container (agent-controlled machine)
 
 Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-A standalone NixOS flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, Element, Caddy) plus Docker and secrets wiring, so the agent can rebuild and manage the persistent virtual machine it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
+A standalone NixOS flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, and Caddy) plus Docker and secrets wiring, so the agent can rebuild and manage the persistent virtual machine it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
 It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
 See [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) for the full setup.
 
@@ -116,13 +116,22 @@ models:
 defaults:
   tools: [scheduler]
   markdown: true
+
+authorization:
+  global_users:
+    - "@alice:matrix.example.com"
+  agent_reply_permissions:
+    "*":
+      - "@alice:matrix.example.com"
 ```
 
 2. Set up your environment in `.env`:
 
 ```bash
-# Matrix homeserver (must allow open registration)
+# Matrix homeserver must allow agent registration, either through a
+# registration token/provisioning service or intentionally open registration.
 MATRIX_HOMESERVER=https://matrix.example.com
+# MATRIX_REGISTRATION_TOKEN=your-registration-token
 
 # AI provider API keys
 OPENAI_API_KEY=your_api_key
@@ -148,7 +157,7 @@ mindroom run
 | **Agents** | Single-specialty actors with specific tools and instructions |
 | **Teams** | Collaborative bundles of agents (coordinate or collaborate modes) |
 | **Router** | Built-in traffic director that routes messages to the right agent |
-| **Memory** | Mem0-inspired memory system with agent and team scopes |
+| **Memory** | Pluggable Mem0/ChromaDB and Markdown-file backends with agent and team scopes |
 | **Knowledge Bases** | File-backed semantic RAG or files-only access with per-agent base assignment |
 | **Tools** | 100+ integrations for external services |
 | **Skills** | OpenClaw-compatible skills system for extended agent capabilities |

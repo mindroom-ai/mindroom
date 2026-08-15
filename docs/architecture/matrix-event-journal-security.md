@@ -40,15 +40,23 @@ The row is kept and the payload is dropped, which is the smallest thing that sur
 
 A context-only event never carries a payload at all: it is admitted already settled, so the field it would have used is written empty from the start.
 
-`visible_messages.content_json` holds the current visible body of one logical message, and it is the only long-lived plaintext store.
+`visible_messages.content_json` holds the current visible body of one logical message and is the general long-lived conversation-body projection.
 
 The projection keeps no edit history, so an edit overwrites the body and the previous text is gone.
+
+`interactive_questions.question_json` duplicates the active question text and options while its visible-message row survives.
+It is deleted when the current question revision is cleared, and its foreign key also cascades when the visible message is deleted.
+
+`turn_records.record_json` retains durable turn identity, outcome, and regeneration content.
 
 `unresolved_edits.content_json` holds an edit whose target has not arrived yet, and it is deleted the moment the target lands or is redacted.
 
 `matrix_delivery_outbox.payload_json` holds each ordinary response or tool-approval event frozen before it is sent.
 
 `approval_cards` retains only the durable delivery reference, exact continuation and tool-call identity, and membership epoch while a card is actionable.
+
+`approval_continuations.context_json` may contain the original `request_body`, `memory_prompt`, and `memory_thread_history[*].body` required to resume an approved call.
+`finish()` and `discard_unavailable()` delete the continuation after terminal delivery or cleanup, and foreign-key cascades remove its sources and calls.
 
 The decision remains in the exact-call continuation ledger, the terminal edit is another frozen outbox stage, and `approval_action_tombstones` retains the acknowledged card event ID after retirement so duplicate clicks remain consumed.
 
@@ -157,8 +165,8 @@ SQLite stores the journal at `mindroom_data/tracking/event_journal.db`, and Post
 
 That URL carries a password, so it is excluded from the backend's dataclass representation, which would otherwise reach logs and tracebacks without anyone choosing to print it.
 
-Every SQL statement originates in a module constant, and the only transformations applied to it are the parameter marker and the byte-order pin.
+SQL structure is authored only from fixed internal constants and controlled fragments, including fixed column selections, cursor clauses, placeholder counts, and PRAGMA values.
 
 Both rewrites are plain string substitution, so both refuse a statement that places their marker adjacent to a string literal rather than trusting that no statement does.
 
-Values are bound by the driver in every case and are never formatted into SQL.
+Caller-provided values are bound by the driver in every case and are never formatted into SQL.

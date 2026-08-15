@@ -1,8 +1,9 @@
 """Test that ConfigField definitions match actual tool parameters from agno."""
 
 import inspect
+from pathlib import Path
 from types import UnionType
-from typing import Union, get_args, get_origin, get_type_hints
+from typing import Any, Union, cast, get_args, get_origin, get_type_hints
 
 import pytest
 from agno.tools import Toolkit
@@ -12,7 +13,7 @@ from agno.tools.dalle import DalleTools
 import mindroom.tools  # noqa: F401
 from mindroom.constants import RuntimePaths
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY
+from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, validate_authored_tool_entry_overrides
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 SKIP_CONFIG_FIELD_VALIDATION = {
@@ -32,8 +33,12 @@ OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph", "telegram"})
 IGNORED_AGNO_PARAMS = {
     # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
     "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
+    # Mapping-only inputs have no safe authored ConfigField representation.
+    "mem0": {"config"},
+    "scrapegraph": {"headers"},
     # Agno accepts an SSLContext for Slack, but MindRoom has no safe serialized UI/config path for it.
     "slack": {"ssl"},
+    "youtube": {"proxies"},
     # Agno accepts a live HTTP session object, which MindRoom cannot serialize safely in UI/YAML config.
     "yfinance": {"session"},
 }
@@ -50,6 +55,222 @@ def test_dalle_default_model_is_accepted_by_agno() -> None:
     assert isinstance(model_field.default, str)
     assert model_field.default
     DalleTools(model=model_field.default, api_key="sk-test")
+
+
+def test_youtube_languages_accepts_authored_string_list() -> None:
+    """YouTube language preferences should preserve the list expected by Agno."""
+    overrides = validate_authored_tool_entry_overrides("youtube", {"languages": ["en", "nl"]})
+
+    assert overrides == {"languages": ["en", "nl"]}
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "mapping_field"),
+    [("youtube", "proxies"), ("mem0", "config"), ("scrapegraph", "headers")],
+)
+def test_mapping_only_upstream_fields_are_not_authored(tool_name: str, mapping_field: str) -> None:
+    """Mapping-only upstream inputs should not be exposed as misleading text fields."""
+    authored_names = {field.name for field in TOOL_METADATA[tool_name].config_fields or []}
+
+    assert mapping_field not in authored_names
+
+
+def test_arxiv_download_directory_is_converted_to_path(tmp_path: Path) -> None:
+    """Authored ArXiv download paths should reach Agno as Path objects."""
+    tool_class = cast("Any", TOOL_REGISTRY["arxiv"]())
+
+    tool = tool_class(download_dir=str(tmp_path / "papers"))
+
+    assert tool.download_dir == tmp_path / "papers"
+
+
+def test_arxiv_blank_download_directory_preserves_upstream_default() -> None:
+    """A blank optional path should retain Agno's default download directory."""
+    tool_class = cast("Any", TOOL_REGISTRY["arxiv"]())
+
+    default_tool = tool_class()
+    blank_tool = tool_class(download_dir="")
+
+    assert blank_tool.download_dir == default_tool.download_dir
+
+
+def test_arxiv_string_union_config_type_is_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path-or-string authored fields must not escape config type validation."""
+    tool_class = cast("Any", TOOL_REGISTRY["arxiv"]())
+    download_field = next(field for field in TOOL_METADATA["arxiv"].config_fields or [] if field.name == "download_dir")
+    monkeypatch.setattr(download_field, "type", "number")
+
+    with pytest.raises(pytest.fail.Exception, match="download_dir: expected type 'text'"):
+        verify_tool_configfields("arxiv", tool_class, inspect.signature(tool_class.__init__))
+
+
+def test_pubmed_configured_max_results_applies_when_call_omits_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Configured PubMed result limits should be the default for model calls."""
+    tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())
+    tool = tool_class(max_results=5)
+    captured: dict[str, int] = {}
+
+    def fetch_pubmed_ids(_query: str, max_results: int, _email: str) -> list[str]:
+        captured["max_results"] = max_results
+        return []
+
+    monkeypatch.setattr(tool, "fetch_pubmed_ids", fetch_pubmed_ids)
+    monkeypatch.setattr(tool, "fetch_details", lambda _ids: object())
+    monkeypatch.setattr(tool, "parse_details", lambda _root: [])
+
+    tool.search_pubmed("durable agents")
+
+    assert captured == {"max_results": 5}
+
+
+def test_pubmed_explicit_zero_max_results_is_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit PubMed result limit must not fall back to the configured default."""
+    tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())
+    tool = tool_class(max_results=5)
+    captured: dict[str, int] = {}
+
+    def fetch_pubmed_ids(_query: str, max_results: int, _email: str) -> list[str]:
+        captured["max_results"] = max_results
+        return []
+
+    monkeypatch.setattr(tool, "fetch_pubmed_ids", fetch_pubmed_ids)
+    monkeypatch.setattr(tool, "fetch_details", lambda _ids: object())
+    monkeypatch.setattr(tool, "parse_details", lambda _root: [])
+
+    result = tool.search_pubmed("durable agents", max_results=0)
+
+    assert result == "[]"
+    assert captured == {}
+
+
+def test_pubmed_model_description_explains_configured_default() -> None:
+    """The model-facing PubMed method description should explain omitted limits."""
+    tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())
+
+    assert "configured max_results" in inspect.getdoc(tool_class.search_pubmed)
+
+
+def test_modelslabs_converts_authored_file_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dashboard-authored media types should reach Agno as FileType values."""
+    from agno.tools.models_labs import ModelsLabTools  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    def capture_init(_self: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(ModelsLabTools, "__init__", capture_init)
+    tool_class = cast("Any", TOOL_REGISTRY["modelslabs"]())
+
+    tool_class(file_type="gif")
+
+    assert getattr(captured["file_type"], "value", None) == "gif"
+
+
+@pytest.mark.parametrize("authored_file_type", [None, "", "   "])
+def test_modelslabs_blank_file_type_uses_mp4_default(
+    authored_file_type: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleared optional file types should preserve the ModelsLab MP4 default."""
+    from agno.tools.models_labs import ModelsLabTools  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    def capture_init(_self: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(ModelsLabTools, "__init__", capture_init)
+    overrides = validate_authored_tool_entry_overrides("modelslabs", {"file_type": authored_file_type})
+    tool_class = cast("Any", TOOL_REGISTRY["modelslabs"]())
+
+    tool_class(**overrides)
+
+    assert getattr(captured["file_type"], "value", None) == "mp4"
+
+
+def test_daytona_converts_authored_sandbox_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dashboard-authored Daytona values should reach Agno with its declared types."""
+    from agno.tools.daytona import DaytonaTools  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    def capture_init(_self: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
+    tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
+
+    tool_class(
+        sandbox_language="PYTHON",
+        sandbox_env_vars='{"TOKEN": "value"}',
+        sandbox_labels='{"team": "agents"}',
+    )
+
+    assert getattr(captured["sandbox_language"], "value", None) == "python"
+    assert captured["sandbox_env_vars"] == {"TOKEN": "value"}
+    assert captured["sandbox_labels"] == {"team": "agents"}
+
+
+def test_daytona_blank_optional_sandbox_values_become_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cleared dashboard fields should preserve Daytona's optional defaults."""
+    from agno.tools.daytona import DaytonaTools  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    def capture_init(_self: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
+    tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
+
+    tool_class(sandbox_language="", sandbox_env_vars="", sandbox_labels="")
+
+    assert captured["sandbox_language"] is None
+    assert captured["sandbox_env_vars"] is None
+    assert captured["sandbox_labels"] is None
+
+
+def test_tool_metadata_lists_only_model_callable_functions() -> None:
+    """Tool metadata must not advertise internal toolkit helpers."""
+    assert TOOL_METADATA["pubmed"].function_names == ("search_pubmed",)
+    assert TOOL_METADATA["youtube"].function_names == (
+        "get_video_timestamps",
+        "get_youtube_video_captions",
+        "get_youtube_video_data",
+    )
+    assert TOOL_METADATA["twilio"].function_names == ("get_call_details", "list_messages", "send_sms")
+    assert TOOL_METADATA["x"].function_names == (
+        "create_post",
+        "get_home_timeline",
+        "get_user_info",
+        "reply_to_post",
+        "search_posts",
+        "send_dm",
+    )
+    assert TOOL_METADATA["slack"].function_names == (
+        "download_file",
+        "get_channel_history",
+        "get_channel_info",
+        "get_thread",
+        "get_user_info",
+        "list_channels",
+        "list_users",
+        "search_messages",
+        "search_workspace",
+        "send_message",
+        "send_message_thread",
+        "upload_file",
+    )
+
+
+def test_zep_metadata_lists_only_model_callable_functions() -> None:
+    """Internal Zep initialization must not be advertised as a model-callable function."""
+    assert TOOL_METADATA["zep"].function_names == (
+        "add_zep_message",
+        "get_zep_memory",
+        "search_zep_memory",
+    )
 
 
 @pytest.mark.parametrize("tool_name", list(TOOL_REGISTRY.keys()))
@@ -169,10 +390,11 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
         actual_type = param_type
         origin = get_origin(param_type)
         if origin in {Union, UnionType}:
-            args = get_args(param_type)
-            if type(None) in args:
-                # It's Optional, get the actual type
-                actual_type = next(arg for arg in args if arg is not type(None))
+            concrete_types = tuple(arg for arg in get_args(param_type) if arg is not type(None))
+            if str in concrete_types:
+                actual_type = str
+            elif len(concrete_types) == 1:
+                actual_type = concrete_types[0]
 
         if actual_type is bool:
             expected_type = "boolean"

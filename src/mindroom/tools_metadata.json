@@ -517,7 +517,6 @@
       "docs_url": "https://docs.agno.com/tools/toolkits/social/slack",
       "function_names": [
         "download_file",
-        "download_file_bytes",
         "get_channel_history",
         "get_channel_info",
         "get_thread",
@@ -835,8 +834,7 @@
       "function_names": [
         "get_call_details",
         "list_messages",
-        "send_sms",
-        "validate_phone_number"
+        "send_sms"
       ],
       "helper_text": null,
       "icon": "SiTwilio",
@@ -2376,12 +2374,12 @@
         },
         {
           "authored_override": true,
-          "default": "PYTHON",
-          "description": "Primary language for the sandbox (PYTHON, JAVASCRIPT, TYPESCRIPT)",
+          "default": "python",
+          "description": "Primary language for the sandbox (python, javascript, typescript)",
           "label": "Sandbox Language",
           "name": "sandbox_language",
           "options": null,
-          "placeholder": "PYTHON",
+          "placeholder": "python",
           "required": false,
           "type": "text",
           "validation": null
@@ -2485,7 +2483,7 @@
         {
           "authored_override": true,
           "default": true,
-          "description": "Automatically create sandbox if none exists",
+          "description": "Create a fallback sandbox after a sandbox-management error",
           "label": "Auto Create Sandbox",
           "name": "auto_create_sandbox",
           "options": null,
@@ -2509,7 +2507,7 @@
         {
           "authored_override": true,
           "default": true,
-          "description": "Whether to reuse the same sandbox across agent sessions",
+          "description": "Whether to reuse the same sandbox within the current agent session",
           "label": "Persistent",
           "name": "persistent",
           "options": null,
@@ -4562,7 +4560,7 @@
         {
           "authored_override": true,
           "default": "mp4",
-          "description": "The type of file to generate (mp4, gif, or mp3)",
+          "description": "The type of file to generate (png, jpg, mp4, gif, mp3, or wav)",
           "label": "File Type",
           "name": "file_type",
           "options": null,
@@ -4649,7 +4647,7 @@
       "dependencies": [
         "requests"
       ],
-      "description": "AI model marketplace for generating videos, audio, and GIFs from text prompts",
+      "description": "AI model marketplace for generating images, videos, audio, and GIFs from text prompts",
       "display_name": "ModelsLabs",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/models_labs",
       "function_names": [
@@ -6846,19 +6844,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Proxies",
-          "name": "proxies",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         }
       ],
@@ -6873,8 +6859,7 @@
       "function_names": [
         "get_video_timestamps",
         "get_youtube_video_captions",
-        "get_youtube_video_data",
-        "get_youtube_video_id"
+        "get_youtube_video_data"
       ],
       "helper_text": null,
       "icon": "SiYoutube",
@@ -8104,18 +8089,6 @@
           "authored_override": true,
           "default": null,
           "description": null,
-          "label": "Config",
-          "name": "config",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
           "label": "API Key",
           "name": "api_key",
           "options": null,
@@ -9200,7 +9173,6 @@
       "function_names": [
         "add_zep_message",
         "get_zep_memory",
-        "initialize",
         "search_zep_memory"
       ],
       "helper_text": null,
@@ -11461,9 +11433,6 @@
       "display_name": "PubMed",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/pubmed",
       "function_names": [
-        "fetch_details",
-        "fetch_pubmed_ids",
-        "parse_details",
         "search_pubmed"
       ],
       "helper_text": null,
@@ -11561,18 +11530,6 @@
           "placeholder": null,
           "required": false,
           "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Headers",
-          "name": "headers",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
           "validation": null
         },
         {
@@ -12985,7 +12942,6 @@
       "function_names": [
         "create_post",
         "get_home_timeline",
-        "get_my_info",
         "get_user_info",
         "reply_to_post",
         "search_posts",

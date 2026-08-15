@@ -373,8 +373,9 @@ Config-adjacent `.env` files are intentionally masked as files inside those Dock
 A filtered public startup-runtime env payload can still propagate from exported env vars and allowed `.env` values.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
-That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
-OAuth-backed remote MCP tools use requester-scoped OAuth credentials and can be used with `worker_scope: user` or `worker_scope: user_agent`.
+That list includes `spotify` and `homeassistant`.
+Configured `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow the configured scope, while non-OAuth servers use the shared MCP session without requester credentials.
+Use `worker_scope: user` or `worker_scope: user_agent` when OAuth-backed remote MCP state must be requester-isolated.
 Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
 `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` also always stay local.
 `spotify` can still be proxied through the sandbox.
@@ -627,8 +628,8 @@ Agent and team names must be distinct — the same key cannot appear in both `ag
 
 ## Defaults
 
-The `defaults` section sets fallback values for all agents.
-Any agent that omits a setting inherits the value from here.
+The `defaults` section sets fallback values for supported per-agent override fields and global-only agent behavior.
+Supported override fields inherit when omitted, `defaults.tools` is merged only when `include_default_tools` is true, and global-only defaults apply to every agent.
 
 ```yaml
 defaults:

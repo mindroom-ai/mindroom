@@ -54,7 +54,7 @@ If you want worker-routed execution tools like `coding`, `docker`, `file`, `pyth
 ### NixOS LXC container (preferred alternative, agent-controlled machine)
 
 Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, Element, Caddy) plus Docker and `ragenix`-based secrets wiring, so the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
+The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with MindRoom, Tuwunel, MindRoom Chat, and Caddy plus Docker and `ragenix`-based secrets wiring, so the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
 It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
 It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/); see the repo README for the full setup.
 
@@ -73,8 +73,10 @@ cd mindroom-stack
 cp .env.example .env
 $EDITOR .env  # add at least one AI provider key
 
-docker compose up -d
+./scripts/quickstart.py
 ```
+
+Raw `docker compose up -d` remains a manual fallback; the quickstart validates provider configuration, waits for readiness, and diagnoses common port and startup failures.
 
 The stack exposes MindRoom at `http://localhost:8765`, the MindRoom client at `http://localhost:8080`, and Matrix at `http://localhost:8008`.
 The stack uses published `mindroom`, `mindroom-chat`, and `mindroom-tuwunel` images by default.
@@ -119,14 +121,14 @@ Full stack:
 
 ```bash
 # .env in the full stack repo
-OPENAI_API_KEY=sk-...
-# Add other providers as needed
+ANTHROPIC_API_KEY=sk-ant-...
+# The default stack model uses Anthropic; selecting another provider also requires changing the model config.
 ```
 
 Direct and single-container deployments:
 
-1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` (must allow open registration for agent accounts)
-2. **AI provider keys** - At least one of `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, etc.
+1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` and configure hosted provisioning, a registration/shared-secret token, or intentionally open registration for managed agent accounts
+2. **Model credentials** - Configure credentials that match the selected provider, using an API key or a supported CLI login; containers must mount or provide the corresponding auth state
 3. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
 
 See the [Docker guide](https://docs.mindroom.chat/deployment/docker/#environment-variables) for the complete environment variable reference.

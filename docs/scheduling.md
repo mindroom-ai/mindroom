@@ -120,7 +120,8 @@ Edits are state-only Matrix writes.
 
 Running tasks pick up edited state on their next poll instead of relying on caller-supplied cache or restart hooks.
 
-Past one-time tasks are automatically skipped during restoration.
+Past one-time tasks within the recovery grace window are queued and started in order after Matrix sync is ready.
+Older missed one-time tasks are marked failed instead of executing unexpectedly.
 
 Only the router restores persisted schedules after startup — individual agents do not restore their own.
 

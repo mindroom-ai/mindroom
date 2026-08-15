@@ -119,6 +119,7 @@ This makes `wikipedia` a simple direct lookup tool by default, with an advanced 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `knowledge` | `text` | `no` | `null` | Advanced upstream hook for injecting a `Knowledge` object. In typical MindRoom YAML usage you leave this unset and use direct summary search. |
+| `auto_suggest` | `boolean` | `no` | `true` | Let Wikipedia suggest or correct the requested title before summary lookup; disable for exact-title-oriented lookup. |
 | `all` | `boolean` | `no` | `false` | Exposed in metadata, but the current upstream implementation does not change behavior for this toolkit. |
 
 ### Example
@@ -146,7 +147,8 @@ search_wikipedia("Matrix protocol")
 
 ### What It Does
 
-`pubmed` exposes `search_pubmed(query, max_results=10)`.
+`pubmed` exposes `search_pubmed(query, max_results=None)`.
+When the call omits `max_results`, the configured toolkit value is used; an explicit call value overrides it.
 It first looks up PubMed IDs through `esearch`, then fetches article XML through `efetch`, and finally returns a JSON list of formatted result strings.
 Default output includes title, publication year, and summary text.
 When `results_expanded` is enabled, each result also includes first author, journal, publication type, DOI, PubMed URL, full-text URL when available, keywords, and MeSH terms.

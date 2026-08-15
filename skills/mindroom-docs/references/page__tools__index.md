@@ -74,7 +74,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 Some entries are config-only presets rather than runtime toolkits.
 `openclaw_compat` expands to a native bundle of MindRoom tools.
 Some tools also imply companion tools through `Config.IMPLIED_TOOLS`.
-Today `matrix_message` implies `attachments`, so the effective tool set includes both even when only `matrix_message` is configured explicitly.
+Today `matrix_message` implies both `attachments` and `matrix_room`, so the effective tool set includes all three even when only `matrix_message` is configured explicitly.
 
 ## Tool Runtime Context
 
@@ -115,14 +115,15 @@ defaults:
 ## Worker-Routed Execution
 
 Some tools default to running in a sandboxed worker container instead of the primary agent process.
-The current worker-routed defaults are `file`, `shell`, `python`, and `coding`.
+The current worker-routed defaults are `file`, `shell`, `python`, `coding`, and `docker`.
 Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for deployment details and worker-scope behavior.
 
 ## Shared-Only Integrations
 
 Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
 The current shared-only integrations are `spotify` and `homeassistant`.
-MCP `mcp_<server_id>` tools work on isolating worker scopes: OAuth-backed servers are requester-scoped, while non-OAuth servers always call through the shared server session without requester credentials.
+MCP `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow that scope, while non-OAuth servers always call through the shared server session without requester credentials.
+Use `user` or `user_agent` when OAuth state must be requester-isolated; `shared` reuses agent-scoped OAuth state.
 
 ## Automatic Dependency Installation
 

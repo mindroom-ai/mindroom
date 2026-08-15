@@ -98,7 +98,7 @@ Notes:
 
 - Pair code is short-lived (10 minutes). Generate a new one if it expires.
 - `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env` by default.
-- Use `--no-persist-env` to export variables only for the current shell session instead of writing to `.env`.
+- Use `--no-persist-env` to print export commands instead of writing `.env`; evaluate or copy those commands into the current shell yourself.
 
 ### 4. Run MindRoom
 
@@ -113,7 +113,7 @@ uvx mindroom run
 **Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools.
 Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.
 
-**Preflight check:** Run `mindroom doctor` before `mindroom run` to verify config, API keys, Matrix connectivity, and storage in one pass.
+**Preflight check:** Run `uvx mindroom doctor` before `uvx mindroom run` to verify config, API keys, Matrix connectivity, and storage in one pass.
 
 For a detailed architecture and credential model, see:
 [Hosted Matrix deployment guide](deployment/hosted-matrix.md).
@@ -121,7 +121,7 @@ For a detailed architecture and credential model, see:
 ## Preferred alternative: NixOS LXC container (agent-controlled machine)
 
 Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, Element, Caddy) plus Docker and `ragenix`-based secrets wiring.
+The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, and Caddy) plus Docker and `ragenix`-based secrets wiring.
 Because the whole virtual machine is declared in the flake, the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
 It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
 It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/).
@@ -230,6 +230,13 @@ defaults:
   tools: [scheduler]
   markdown: true
 
+authorization:
+  global_users:
+    - "@alice:matrix.example.com"
+  agent_reply_permissions:
+    "*":
+      - "@alice:matrix.example.com"
+
 timezone: America/Los_Angeles
 ```
 
@@ -238,8 +245,11 @@ timezone: America/Los_Angeles
 Create a `.env` file with your credentials:
 
 ```bash
-# Matrix homeserver (must allow open registration for agent accounts)
+# Matrix homeserver must allow managed account provisioning.
 MATRIX_HOMESERVER=https://matrix.example.com
+
+# Recommended when the homeserver supports token-gated registration.
+# MATRIX_REGISTRATION_TOKEN=your-registration-token
 
 # Optional: For self-signed certificates (development)
 # MATRIX_SSL_VERIFY=false
@@ -273,7 +283,9 @@ uv run mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/ma
 This starts Synapse from the `mindroom-stack` compose files, starts a MindRoom Chat container, waits for both services to be healthy, and by default writes local Matrix settings to `.env` next to your active `config.yaml`.
 
 > [!NOTE]
-> MindRoom automatically creates Matrix user accounts for each agent. Your Matrix homeserver must allow open registration, or you need to configure it to allow registration from localhost. If registration fails, check your homeserver's registration settings.
+> MindRoom automatically creates Matrix user accounts for each agent.
+> Configure one supported provisioning path: hosted provisioning, `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, or intentionally open registration.
+> If registration fails, check the selected provisioning credentials and homeserver policy.
 
 #### 3. Run MindRoom
 

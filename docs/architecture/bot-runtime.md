@@ -145,7 +145,7 @@ To-device call inputs and desktop pairing receivers also remain best-effort beca
 
 ### Ordering identities
 
-Receipt ordering, batching, and response serialization use three different identities because they protect different invariants.
+Receipt ordering, batching, and response serialization use five different identities because they protect different invariants.
 
 - Physical sender: the Matrix user ID that physically sent the event.
 - Effective requester: the trusted user ID the turn is attributed to after ingress validation; trusted-relay promotion can make it differ from the physical sender.
