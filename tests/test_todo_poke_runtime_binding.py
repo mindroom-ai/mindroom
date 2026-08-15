@@ -54,7 +54,11 @@ def _coordinator(
 def _bot(**overrides: object) -> MagicMock:
     bot = MagicMock()
     bot.running = overrides.get("running", True)
-    bot.client = overrides.get("client", object())
+    if "client" in overrides:
+        bot.client = overrides["client"]
+    else:
+        bot.client = MagicMock()
+        bot.client.rooms = {"!room:localhost": MagicMock()}
     bot.in_flight_response_count = overrides.get("in_flight_response_count", 0)
     return bot
 
@@ -106,7 +110,7 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
             return_value="@mindroom_user:localhost",
         ),
     ):
-        pending = await coordinator._schedule_query("code", "!room:localhost")
+        pending = await coordinator._schedule_query("!room:localhost", ("code",))
         event_id = await coordinator._send_poke(
             "code",
             "!room:localhost",
@@ -129,12 +133,41 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_schedule_query_uses_joined_candidate_for_shared_room(tmp_path: Path) -> None:
+    """A same-room assignee without membership must not hide a later joined assignee."""
+    unjoined_client = MagicMock()
+    unjoined_client.rooms = {}
+    joined_client = MagicMock()
+    joined_client.rooms = {"!room:localhost": MagicMock()}
+    coordinator = _coordinator(
+        test_runtime_paths(tmp_path),
+        _config(tmp_path),
+        {
+            "code": _bot(client=unjoined_client),
+            "reviewer": _bot(client=joined_client),
+        },
+    )
+
+    with patch(
+        "mindroom.orchestration.todo_poke_runtime.get_pending_schedule_thread_ids_for_room",
+        new=AsyncMock(return_value=frozenset({"$scheduled"})),
+    ) as schedule_query:
+        pending = await coordinator._schedule_query(
+            "!room:localhost",
+            ("code", "reviewer"),
+        )
+
+    assert pending == frozenset({"$scheduled"})
+    schedule_query.assert_awaited_once_with(joined_client, "!room:localhost")
+
+
+@pytest.mark.asyncio
 async def test_adapters_skip_when_runtime_is_unavailable(tmp_path: Path) -> None:
     """Unavailable idle, schedule, and sender adapters conservatively skip the tick."""
     coordinator = _coordinator(test_runtime_paths(tmp_path), _config(tmp_path), {})
 
     assert coordinator._agent_is_idle("code") is False
-    assert await coordinator._schedule_query("code", "!room:localhost") is None
+    assert await coordinator._schedule_query("!room:localhost", ("code",)) is None
     assert (
         await coordinator._send_poke(
             "code",
@@ -162,7 +195,7 @@ async def test_schedule_adapter_preserves_read_errors(tmp_path: Path) -> None:
         ),
         pytest.raises(RuntimeError, match="state unavailable"),
     ):
-        await coordinator._schedule_query("code", "!room:localhost")
+        await coordinator._schedule_query("!room:localhost", ("code",))
 
 
 @pytest.mark.asyncio

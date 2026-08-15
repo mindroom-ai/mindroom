@@ -42,7 +42,7 @@ __all__ = [
     "todo_poke_policy",
 ]
 
-type _TodoScheduleQuery = Callable[[str, str], Awaitable[frozenset[str | None] | None]]
+type _TodoScheduleQuery = Callable[[str, tuple[str, ...]], Awaitable[frozenset[str | None] | None]]
 type _TodoPokeSender = Callable[[str, str, str, str | None], Awaitable[str | None]]
 type _StateWarningKey = tuple[str, str]
 
@@ -538,12 +538,12 @@ async def _pending_schedules_by_room(
     schedule_query: _TodoScheduleQuery,
 ) -> dict[str, frozenset[str | None]] | None:
     pending_by_room: dict[str, frozenset[str | None]] = {}
-    query_agent_by_room: dict[str, str] = {}
+    query_agents_by_room: dict[str, set[str]] = {}
     for scope in scopes:
-        query_agent_by_room.setdefault(scope.room_id, scope.assigned_agent)
-    for room_id, agent_name in sorted(query_agent_by_room.items()):
+        query_agents_by_room.setdefault(scope.room_id, set()).add(scope.assigned_agent)
+    for room_id, agent_names in sorted(query_agents_by_room.items()):
         try:
-            pending_threads = await schedule_query(agent_name, room_id)
+            pending_threads = await schedule_query(room_id, tuple(sorted(agent_names)))
         except Exception as exc:
             logger.warning(
                 "todo_poke_schedule_query_failed",

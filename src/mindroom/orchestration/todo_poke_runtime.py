@@ -91,15 +91,20 @@ class TodoPokeRuntimeCoordinator:
             return None
         return agent_bot
 
-    async def _schedule_query(self, agent_name: str, room_id: str) -> frozenset[str | None] | None:
-        """Return pending schedule scopes, or None while assigned-agent I/O is unavailable."""
-        agent_bot = self._agent_bot(agent_name)
-        if agent_bot is None:
-            return None
-        client = agent_bot.client
-        if client is None:
-            return None
-        return await get_pending_schedule_thread_ids_for_room(client, room_id)
+    async def _schedule_query(
+        self,
+        room_id: str,
+        agent_names: tuple[str, ...],
+    ) -> frozenset[str | None] | None:
+        """Return pending schedule scopes through one assigned agent joined to the room."""
+        for agent_name in agent_names:
+            agent_bot = self._agent_bot(agent_name)
+            if agent_bot is None:
+                continue
+            client = agent_bot.client
+            if client is not None and room_id in client.rooms:
+                return await get_pending_schedule_thread_ids_for_room(client, room_id)
+        return None
 
     async def _send_poke(
         self,

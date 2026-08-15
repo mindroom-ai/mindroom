@@ -94,7 +94,7 @@ def _deps(
     sent: list[tuple[str, str, str | None]] = []
     remaining_results = list(send_results) if send_results is not None else []
 
-    async def schedule_query(_agent_name: str, room_id: str) -> frozenset[str | None] | None:
+    async def schedule_query(room_id: str, _agent_names: tuple[str, ...]) -> frozenset[str | None] | None:
         queried_rooms.append(room_id)
         if schedule_error is not None:
             raise schedule_error
@@ -160,14 +160,21 @@ async def test_scan_skips_malformed_unassigned_and_unconfigured_items(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_scan_routes_schedule_reads_and_delivery_through_assigned_agent(tmp_path: Path) -> None:
-    """Each poke carries its assignee to I/O so room membership is resolved by the owning bot."""
+    """One room query gets every assignee candidate while each poke keeps its owner."""
     todo_root = tmp_path / "todo"
-    _write_thread(todo_root, "scope", items=[_item("ready", assigned_agent="code")])
-    schedule_calls: list[tuple[str, str]] = []
+    _write_thread(
+        todo_root,
+        "scope",
+        items=[
+            _item("ready", assigned_agent="code"),
+            _item("review", assigned_agent="reviewer"),
+        ],
+    )
+    schedule_calls: list[tuple[str, tuple[str, ...]]] = []
     send_calls: list[tuple[str, str, str, str | None]] = []
 
-    async def schedule_query(agent_name: str, room_id: str) -> frozenset[str | None]:
-        schedule_calls.append((agent_name, room_id))
+    async def schedule_query(room_id: str, agent_names: tuple[str, ...]) -> frozenset[str | None]:
+        schedule_calls.append((room_id, agent_names))
         return frozenset()
 
     async def sender(
@@ -187,10 +194,11 @@ async def test_scan_routes_schedule_reads_and_delivery_through_assigned_agent(tm
         clock=lambda: _NOW,
     )
 
-    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
-    assert schedule_calls == [("code", "!room:localhost")]
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 2
+    assert schedule_calls == [("!room:localhost", ("code", "reviewer"))]
     assert [(agent, room, thread) for agent, room, _body, thread in send_calls] == [
         ("code", "!room:localhost", "$thread"),
+        ("reviewer", "!room:localhost", "$thread"),
     ]
 
 
@@ -490,9 +498,12 @@ async def test_delivery_outcome_time_owns_cooldown_and_backstop_windows(tmp_path
     current_time = [_NOW]
     base_deps, queried_rooms, sent = _deps(todo_root, clock=lambda: current_time[0])
 
-    async def delayed_schedule_query(agent_name: str, room_id: str) -> frozenset[str | None] | None:
+    async def delayed_schedule_query(
+        room_id: str,
+        agent_names: tuple[str, ...],
+    ) -> frozenset[str | None] | None:
         current_time[0] += timedelta(minutes=10)
-        return await base_deps.schedule_query(agent_name, room_id)
+        return await base_deps.schedule_query(room_id, agent_names)
 
     async def delayed_sender(
         agent_name: str,
