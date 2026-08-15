@@ -105,6 +105,7 @@ class MCPServerState:
     refresh_task: asyncio.Task[None] | None = None
     refresh_revision: int = 0
     oauth_access_token_hash: str | None = None
+    oauth_session_access_token_hash: str | None = None
     retired: bool = False
 
     def __post_init__(self) -> None:

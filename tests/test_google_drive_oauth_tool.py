@@ -16,6 +16,7 @@ from agno.agent._tools import parse_tools
 from agno.models.base import Model
 from agno.models.response import ModelResponse
 from agno.tools.function import Function
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
@@ -122,8 +123,16 @@ class _FakeDriveService:
         return self.files_resource
 
 
-class _ValidCredentials:
-    valid = True
+def _valid_credentials() -> GoogleOAuthCredentials:
+    return GoogleOAuthCredentials(
+        token="valid-access-token",  # noqa: S106
+        refresh_token="valid-refresh-token",  # noqa: S106
+        token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        scopes=("scope",),
+        expiry=datetime(2100, 1, 1, tzinfo=UTC),
+    )
 
 
 class _FakeMediaIoBaseDownload:
@@ -155,7 +164,7 @@ def _google_drive_download_tool(
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         download_file=True,
         tool_output_workspace_root=download_dir or tmp_path,
     )
@@ -174,7 +183,7 @@ def _google_drive_write_tool(
     tool = GoogleDriveTools(
         runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         tool_output_workspace_root=workspace_root,
     )
     service = _FakeDriveService()
@@ -368,7 +377,7 @@ def test_google_drive_download_confines_truthy_non_bool_flag(tmp_path: Path) -> 
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         download_file="true",
         tool_output_workspace_root=tmp_path,
     )
@@ -757,7 +766,7 @@ def test_google_drive_search_includes_shared_drive_parameters(tmp_path: Path) ->
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
     )
     service = _FakeDriveService()
     tool.service = service
@@ -854,7 +863,7 @@ def test_google_drive_upload_requires_workspace(
     tool = GoogleDriveTools(
         runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         tool_output_workspace_root=None,
     )
     service = _FakeDriveService()
@@ -932,7 +941,7 @@ def test_google_drive_read_metadata_supports_shared_drive_files(tmp_path: Path) 
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
     )
     service = _FakeDriveService()
     tool.service = service
@@ -952,7 +961,7 @@ def test_google_drive_read_media_supports_shared_drive_files(tmp_path: Path) -> 
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
     )
     service = _FakeDriveService()
     service.files_resource.file_metadata = {
@@ -979,7 +988,7 @@ def test_google_drive_large_file_error_names_exposed_download_function(tmp_path:
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         max_read_size=4,
     )
     service = _FakeDriveService()

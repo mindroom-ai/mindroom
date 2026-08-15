@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import threading
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum, auto
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport import requests as google_requests
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
@@ -86,6 +88,14 @@ class _GoogleRefreshState:
     last_failure: _GoogleRefreshFailure | None = None
 
 
+class _OAuthClientThreadState(threading.local):
+    """Per-worker OAuth result state."""
+
+    def __init__(self) -> None:
+        self.connection_required = False
+        self.connection_reason: str | None = None
+
+
 class _AuthDescriptor(Protocol):
     """Descriptor contract for unbound tool auth methods."""
 
@@ -103,12 +113,17 @@ class ScopedOAuthClientMixin:
     _creds_manager: CredentialsManager
     _worker_target: ResolvedWorkerTarget | None
     _authorization: AuthorizationConfig | None
-    _oauth_credential_revision: tuple[OAuthCredentialContext, str] | None
     _provided_creds: bool
+    _provided_credentials: GoogleOAuthCredentials | None
+    _provided_credentials_lock: threading.RLock
+    _oauth_quota_project_id: str | None
     _defer_to_original_auth: bool
     _original_auth_completed: bool
     _original_auth: Callable[[], None]
+    _oauth_call_state: _OAuthClientThreadState
     creds: Any | None
+    service: Any | None
+    _google_credential_key: object | None
 
     def _apply_runtime_original_auth_kwargs(self, kwargs: dict[str, Any]) -> bool:
         """Populate upstream Google auth kwargs from the resolved runtime env."""
@@ -130,19 +145,24 @@ class ScopedOAuthClientMixin:
         provided_creds: Any,  # noqa: ANN401
         logger: BoundLogger,
         defer_to_original_auth: bool = False,
+        quota_project_id: str | None = None,
     ) -> Any:  # noqa: ANN401
         """Prepare OAuth state and initial credentials for the tool."""
         self._worker_target = worker_target
         self._authorization = authorization
-        self._oauth_credential_revision = None
         self._provided_creds = provided_creds is not None
+        self._provided_credentials_lock = threading.RLock()
+        self._oauth_quota_project_id = quota_project_id
+        self._provided_credentials = (
+            self._copy_supplied_google_credentials(provided_creds) if provided_creds is not None else None
+        )
         self._oauth_logger = logger
         self.functions = {}
         self._defer_to_original_auth = defer_to_original_auth
         self._original_auth_completed = False
-        self._oauth_call_state = threading.local()
-        if provided_creds is not None:
-            return provided_creds
+        self._oauth_call_state = _OAuthClientThreadState()
+        if self._provided_credentials is not None:
+            return self._provided_credentials
         if defer_to_original_auth:
             return None
         return self._load_stored_credentials()
@@ -164,26 +184,69 @@ class ScopedOAuthClientMixin:
                 _entrypoint: Callable[..., object] = entrypoint,
                 **kwargs: object,
             ) -> object:
-                self._clear_oauth_connection_required()
-                try:
-                    if result := self._ensure_structured_auth():
-                        return result
-                    result = _entrypoint(*args, **kwargs)
-                except RefreshError:
-                    required, reason = self._consume_oauth_connection_required()
-                    if required:
-                        return self._structured_auth_failure(self._connection_required(reason=reason))
-                    raise
-                else:
-                    required, reason = self._consume_oauth_connection_required()
-                    if required:
-                        return self._structured_auth_failure(self._connection_required(reason=reason))
-                    return result
-                finally:
-                    self._clear_oauth_connection_required()
+                if self._provided_creds:
+                    with self._provided_credentials_lock:
+                        return self._run_oauth_entrypoint(_entrypoint, args, kwargs)
+                return self._run_oauth_entrypoint(_entrypoint, args, kwargs)
 
             function.entrypoint = oauth_entrypoint
             setattr(self, function.name, oauth_entrypoint)
+
+    def _run_oauth_entrypoint(
+        self,
+        entrypoint: Callable[..., object],
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> object:
+        """Run one wrapped call while retaining its thread-local auth outcome."""
+        self._clear_oauth_connection_required()
+        try:
+            if result := self._ensure_structured_auth():
+                return result
+            result = entrypoint(*args, **kwargs)
+        except RefreshError:
+            required, reason = self._consume_oauth_connection_required()
+            if required:
+                return self._structured_auth_failure(self._connection_required(reason=reason))
+            raise
+        else:
+            required, reason = self._consume_oauth_connection_required()
+            if required:
+                return self._structured_auth_failure(self._connection_required(reason=reason))
+            return result
+        finally:
+            self._clear_oauth_connection_required()
+
+    def _copy_supplied_google_credentials(self, credentials: Any) -> GoogleOAuthCredentials:  # noqa: ANN401
+        """Copy supported caller credentials into private blocking credentials."""
+        if type(credentials) is not GoogleOAuthCredentials:
+            msg = "Google creds must be an exact google.oauth2.credentials.Credentials instance"
+            raise TypeError(msg)
+        if credentials.refresh_handler is not None:
+            msg = "Google creds with refresh_handler are not supported"
+            raise ValueError(msg)
+        if credentials._enable_reauth_refresh:
+            msg = "Google creds with reauth refresh are not supported"
+            raise ValueError(msg)
+        return GoogleOAuthCredentials(
+            token=credentials.token,
+            refresh_token=credentials.refresh_token,
+            id_token=credentials.id_token,
+            token_uri=credentials.token_uri,
+            client_id=credentials.client_id,
+            client_secret=credentials.client_secret,
+            scopes=tuple(credentials.scopes) if credentials.scopes is not None else None,
+            default_scopes=tuple(credentials.default_scopes) if credentials.default_scopes is not None else None,
+            quota_project_id=self._oauth_quota_project_id or credentials.quota_project_id,
+            expiry=credentials.expiry,
+            rapt_token=credentials.rapt_token,
+            refresh_handler=None,
+            enable_reauth_refresh=False,
+            granted_scopes=tuple(credentials.granted_scopes) if credentials.granted_scopes is not None else None,
+            trust_boundary=deepcopy(credentials._trust_boundary),
+            universe_domain=credentials.universe_domain,
+            account=credentials.account,
+        )
 
     def _load_token_data(self) -> dict[str, Any] | None:
         """Load OAuth credentials for the current execution scope."""
@@ -245,8 +308,6 @@ class ScopedOAuthClientMixin:
     def _raw_credentials_from_token_data(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401
         """Create an unwrapped Google credential adapter from stored token data."""
         ensure_tool_deps(_GOOGLE_OAUTH_DEPS, self._oauth_tool_name, self._runtime_paths)
-        from google.oauth2.credentials import Credentials as GoogleOAuthCredentials  # noqa: PLC0415
-
         client_config = self._oauth_provider.client_config(self._runtime_paths)
         if client_config is None:
             msg = f"{self._oauth_provider.display_name} OAuth client config is missing."
@@ -264,6 +325,7 @@ class ScopedOAuthClientMixin:
             client_id=token_data.get("client_id") or client_config.client_id,
             client_secret=client_config.client_secret,
             scopes=scopes,
+            quota_project_id=self._oauth_quota_project_id,
             expiry=self._token_expiry(token_data),
         )
 
@@ -331,7 +393,7 @@ class ScopedOAuthClientMixin:
         credentials.refresh_token = refreshed.refresh_token
         state.snapshot.clear()
         state.snapshot.update(result.credentials)
-        self._oauth_credential_revision = (context, result.generation)
+        self._google_credential_key = (context, result.generation)
         state.last_succeeded = True
 
     def _raise_google_refresh_failure(self, failure: _GoogleRefreshFailure) -> NoReturn:
@@ -380,8 +442,8 @@ class ScopedOAuthClientMixin:
         return refreshed
 
     def _consume_oauth_connection_required(self) -> tuple[bool, str | None]:
-        required = bool(getattr(self._oauth_call_state, "connection_required", False))
-        reason = getattr(self._oauth_call_state, "connection_reason", None)
+        required = self._oauth_call_state.connection_required
+        reason = self._oauth_call_state.connection_reason
         self._clear_oauth_connection_required()
         if required:
             self.creds = None
@@ -400,7 +462,7 @@ class ScopedOAuthClientMixin:
         """Load stored credentials for the current execution scope."""
         context = self._oauth_credential_context()
         snapshot = load_oauth_credentials_snapshot_sync(context)
-        self._oauth_credential_revision = (context, snapshot.generation)
+        self._google_credential_key = (context, snapshot.generation)
         token_data = snapshot.credentials
         if not token_data:
             return None
@@ -436,7 +498,11 @@ class ScopedOAuthClientMixin:
 
     def _should_skip_auth(self) -> bool:
         """Return whether tool auth can return early with already-valid provided credentials."""
-        return bool(self._provided_creds and self.creds and self.creds.valid)
+        if self._provided_credentials is None:
+            return False
+        self.creds = self._provided_credentials
+        self._google_credential_key = None
+        return True
 
     def _select_auth_source(self) -> _OAuthAuthSource:
         """Select the credential source according to the tool auth priority contract."""
@@ -450,7 +516,7 @@ class ScopedOAuthClientMixin:
         return _OAuthAuthSource.STORED_OAUTH
 
     def _drop_stale_managed_oauth_credentials(self) -> None:
-        """Discard cached credentials when reset generation or canonical scope changes."""
+        """Discard this worker's credentials and service when their full key changes."""
         context = self._oauth_credential_context()
         try:
             revision = (context, oauth_credential_generation(context))
@@ -458,14 +524,10 @@ class ScopedOAuthClientMixin:
             self.creds = None
             self.service = None
             raise self._connection_required() from exc
-        if self._oauth_credential_revision is None:
-            self._oauth_credential_revision = revision
-            return
-        if revision == self._oauth_credential_revision:
-            return
-        self._oauth_credential_revision = revision
-        self.creds = None
-        self.service = None
+        if self._google_credential_key != revision:
+            self.creds = None
+            self.service = None
+            self._google_credential_key = revision
 
     def _auth_with_original_fallback(self) -> None:
         """Authenticate through the wrapped tool's original auth flow."""
@@ -484,7 +546,6 @@ class ScopedOAuthClientMixin:
                 context,
                 lambda current: self._refresh_google_token_data(current, google_requests.Request()),
             )
-            self._oauth_credential_revision = (context, result.generation)
             token_data = result.credentials
             if (
                 not token_data
@@ -496,9 +557,12 @@ class ScopedOAuthClientMixin:
                 )
             ):
                 self._raise_connection_required()
-            self.creds = self._credentials_from_token_data(token_data)
-            if not self.creds.valid:
+            credentials = self._credentials_from_token_data(token_data)
+            if not credentials.valid:
                 self._raise_connection_required()
+            self.creds = credentials
+            self.service = None
+            self._google_credential_key = (context, result.generation)
             self._oauth_logger.info("oauth_authentication_succeeded", tool_name=self._oauth_tool_name)
         except OAuthConnectionRequired:
             raise

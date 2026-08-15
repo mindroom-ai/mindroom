@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -51,6 +53,11 @@ class _FakeUser:
 class _FakeGithub:
     def get_user(self) -> _FakeUser:
         return _FakeUser()
+
+
+@dataclass(frozen=True)
+class _TokenGithub:
+    token: str
 
 
 class _FakeIssueSearchResults:
@@ -367,6 +374,55 @@ def test_requesters_cannot_use_each_others_github_oauth_credentials(tmp_path: Pa
 
     assert json.loads(alice.list_repositories()) == ["example/project"]
     assert json.loads(bob.list_repositories())["oauth_connection_required"] is True
+
+
+def test_github_workers_keep_token_and_client_ownership_thread_local(tmp_path: Path) -> None:
+    """An old call cannot overwrite a newer worker's authoritative token client."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    oauth_target = _oauth_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("account-a-token"),
+        credentials_manager=manager,
+        worker_target=oauth_target,
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    tool.authenticate = lambda: _TokenGithub(tool.access_token)
+    old_ready = threading.Event()
+    release_old = threading.Event()
+
+    def old_call() -> tuple[str, str]:
+        tool._ensure_authenticated()
+        old_ready.set()
+        assert release_old.wait(timeout=5)
+        return tool.access_token, tool.g.token
+
+    def current_state() -> tuple[str, str]:
+        tool._ensure_authenticated()
+        return tool.access_token, tool.g.token
+
+    with (
+        ThreadPoolExecutor(max_workers=1) as old_worker,
+        ThreadPoolExecutor(max_workers=1) as new_worker,
+    ):
+        old_future = old_worker.submit(old_call)
+        assert old_ready.wait(timeout=5)
+        save_scoped_credentials(
+            "github_oauth",
+            _oauth_credentials("account-b-token"),
+            credentials_manager=manager,
+            worker_target=oauth_target,
+        )
+        new_state = new_worker.submit(current_state).result(timeout=5)
+        release_old.set()
+        old_state = old_future.result(timeout=5)
+        retained_new_state = new_worker.submit(current_state).result(timeout=5)
+
+    assert old_state == ("account-a-token", "account-a-token")
+    assert new_state == ("account-b-token", "account-b-token")
+    assert retained_new_state == new_state
 
 
 def test_active_requester_overrides_tool_construction_identity(tmp_path: Path) -> None:

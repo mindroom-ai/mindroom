@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from functools import wraps
 from html import unescape
 from typing import TYPE_CHECKING, Protocol, cast
@@ -44,6 +45,14 @@ logger = get_logger(__name__)
 _PENDING_ACCESS_TOKEN = "mindroom-oauth-connection-pending"  # noqa: S105
 
 
+class _GithubThreadState(threading.local):
+    """Credential and PyGithub client owned by one worker thread."""
+
+    def __init__(self) -> None:
+        self.access_token: str | None = None
+        self.client: Github | None = None
+
+
 class _ContentWriteResult(Protocol):
     path: str
     sha: str
@@ -78,6 +87,34 @@ def _is_github_authentication_error(result: object) -> bool:
 class GithubTools(AgnoGithubTools):
     """Agno GitHub tools authenticated by explicit or requester-scoped credentials."""
 
+    def _github_state(self) -> _GithubThreadState:
+        state = self.__dict__.setdefault("_github_thread_state", _GithubThreadState())
+        return cast("_GithubThreadState", state)
+
+    @property
+    def access_token(self) -> str | None:
+        """Return token installed for current worker thread."""
+        return self._github_state().access_token
+
+    @access_token.setter
+    def access_token(self, value: str | None) -> None:
+        state = self._github_state()
+        if state.access_token != value:
+            state.client = None
+        state.access_token = value
+
+    @property
+    def g(self) -> Github:
+        """Return PyGithub client installed for current worker thread."""
+        client = self._github_state().client
+        if client is None:
+            raise self._connection_required()
+        return client
+
+    @g.setter
+    def g(self, value: Github | None) -> None:
+        self._github_state().client = value
+
     def __init__(
         self,
         access_token: str | None = None,
@@ -98,8 +135,8 @@ class GithubTools(AgnoGithubTools):
             runtime_paths.env_value("GITHUB_ACCESS_TOKEN"),
         )
         self._explicit_access_token = bool(explicit_access_token)
+        self._explicit_access_token_value = explicit_access_token
         initial_access_token = explicit_access_token or self._stored_access_token() or _PENDING_ACCESS_TOKEN
-        self._active_access_token = initial_access_token
         super().__init__(access_token=initial_access_token, base_url=base_url, **kwargs)
         self._wrap_oauth_function_entrypoints()
 
@@ -139,6 +176,12 @@ class GithubTools(AgnoGithubTools):
 
     def _ensure_authenticated(self) -> None:
         if self._explicit_access_token:
+            token = self._explicit_access_token_value
+            if token is None:
+                raise self._connection_required()
+            if self.access_token != token or self._github_state().client is None:
+                self.access_token = token
+                self.g = self.authenticate()
             return
         try:
             credentials = self._refresh_oauth_credentials()
@@ -157,10 +200,9 @@ class GithubTools(AgnoGithubTools):
         )
         if token is None:
             raise self._connection_required()
-        if token == self._active_access_token:
+        if token == self.access_token and self._github_state().client is not None:
             return
         self.access_token = token
-        self._active_access_token = token
         self.g = self.authenticate()
 
     def _wrap_oauth_function_entrypoints(self) -> None:

@@ -305,6 +305,34 @@ async def test_callback_waits_for_refresh_and_preserves_rotated_refresh_token(tm
 
 
 @pytest.mark.asyncio
+async def test_callback_advances_revision_and_rejects_second_callback_for_consumed_revision(tmp_path: Path) -> None:
+    """One issued revision authorizes exactly one successful credential replacement."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    issued_revision = credential_lifecycle.oauth_credential_generation(context)
+
+    stored = await exchange_and_store_oauth_credentials(
+        context,
+        "first-code",
+        None,
+        expected_generation=issued_revision,
+    )
+
+    assert stored["token"] == "callback-access"  # noqa: S105
+    assert credential_lifecycle.oauth_credential_generation(context) != issued_revision
+    with pytest.raises(OAuthProviderError, match="credential changed"):
+        await exchange_and_store_oauth_credentials(
+            context,
+            "second-code",
+            None,
+            expected_generation=issued_revision,
+        )
+
+
+@pytest.mark.asyncio
 async def test_refresh_cancellation_while_waiting_for_lock_does_not_call_provider(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -380,7 +408,7 @@ async def test_reset_generation_rejects_a_callback_that_was_issued_before_reset(
     stale_generation = credential_lifecycle.oauth_credential_generation(context)
 
     assert await credential_lifecycle.reset_oauth_credentials(context) is True
-    with pytest.raises(OAuthProviderError, match="credential was reset"):
+    with pytest.raises(OAuthProviderError, match="credential changed"):
         await exchange_and_store_oauth_credentials(
             context,
             "stale-code",

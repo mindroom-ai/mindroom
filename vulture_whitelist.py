@@ -202,6 +202,7 @@ _reset_primary_worker_manager  # unused function (src/mindroom/workers/runtime.p
 _reset_visible_voice_echo_barriers  # unused function (src/mindroom/visible_voice_echo.py)
 _.read_file_chunk  # unused method (src/mindroom/tools/file.py)
 _.download_file  # unused method (src/mindroom/custom_tools/google_drive.py)
+_._build_service  # Agno Google auth decorator calls this override dynamically (src/mindroom/custom_tools/google_drive.py)
 _.reject_legacy_defaults_fields  # unused method (src/mindroom/config/models.py)
 _.normalize_tool_filters  # unused method (src/mindroom/mcp/config.py)
 _.normalize_description  # unused method (src/mindroom/mcp/config.py)

@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
@@ -24,8 +26,16 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
-class _ValidCredentials:
-    valid = True
+def _valid_credentials() -> GoogleOAuthCredentials:
+    return GoogleOAuthCredentials(
+        token="valid-access-token",  # noqa: S106
+        refresh_token="valid-refresh-token",  # noqa: S106
+        token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        scopes=("scope",),
+        expiry=datetime(2100, 1, 1, tzinfo=UTC),
+    )
 
 
 class _FakeDocsRequest:
@@ -133,7 +143,7 @@ def _connected_tool(tmp_path: Path) -> tuple[GoogleDocsTools, _FakeDocsService]:
         runtime_paths=_runtime_paths(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         worker_target=None,
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
     )
     service = _FakeDocsService()
     tool.service = service
@@ -327,7 +337,7 @@ def test_google_docs_config_flags_control_registered_functions(tmp_path: Path) -
         runtime_paths=_runtime_paths(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         worker_target=None,
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         create_document=False,
         read_document=True,
         edit_document=False,

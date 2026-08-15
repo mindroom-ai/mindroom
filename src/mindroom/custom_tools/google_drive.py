@@ -12,6 +12,9 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
 from agno.tools.google.drive import MediaIoBaseDownload, WorkspaceType, authenticate
 from agno.utils.log import log_error
+from google.auth.credentials import CredentialsWithQuotaProject
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
+from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
@@ -127,6 +130,12 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 kwargs["download_dir"] = tool_output_workspace_root / "google-drive-downloads"
         kwargs["upload_file"] = False
         kwargs.setdefault("scopes", [GOOGLE_DRIVE_WRITE_SCOPE])
+        quota_project_id = kwargs.get("quota_project_id") or runtime_paths.env_value(
+            "GOOGLE_CLOUD_QUOTA_PROJECT_ID",
+        )
+        if quota_project_id is not None and not isinstance(quota_project_id, str):
+            msg = "Google Drive quota_project_id must be a string"
+            raise TypeError(msg)
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
         self._workspace_root = tool_output_workspace_root
@@ -137,6 +146,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             provided_creds=provided_creds,
             logger=logger,
             defer_to_original_auth=defer_to_original_auth,
+            quota_project_id=quota_project_id,
         )
         super().__init__(creds=creds, **kwargs)
         if write:
@@ -145,6 +155,22 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         self._wrap_oauth_function_entrypoints()
         self._wrap_write_scope_entrypoints()
         apply_toolkit_function_aliases(self, _MODEL_FUNCTION_NAME_ALIASES)
+
+    def _build_service(self) -> Any:  # noqa: ANN401
+        """Build Drive without cloning MindRoom's tracked OAuth credential."""
+        credentials = self.creds
+        if credentials is None:
+            msg = "Google Drive credentials are missing"
+            raise RuntimeError(msg)
+        if (
+            self.quota_project_id
+            and type(credentials) is not GoogleOAuthCredentials
+            and isinstance(credentials, CredentialsWithQuotaProject)
+            and credentials.quota_project_id != self.quota_project_id
+        ):
+            credentials = credentials.with_quota_project(self.quota_project_id)
+            self.creds = credentials
+        return build("drive", "v3", credentials=credentials)
 
     def _register_write_tools(self) -> None:
         sync_tools = (

@@ -22,8 +22,12 @@ One lifecycle module submits asynchronous callers and synchronous provider adapt
 - Complete remote-token-producing operations locally before propagating cancellation.
 - Perform fallible MCP teardown before destructive credential deletion.
 - Fence retired MCP requester-session generations until credential deletion commits.
-- Bind browser callbacks to a durable credential generation advanced by reset.
-- Pass authorization explicitly into OAuth-backed toolkit construction and revalidate cached credential revisions before every managed call.
+- Bind browser callbacks to a durable credential revision advanced by callback success, reset, and terminal invalidation.
+- Pass authorization explicitly into OAuth-backed toolkit construction and revalidate the full canonical context plus durable revision before every managed call.
+- Keep managed Google credentials and services together in worker-thread-local state.
+- Copy supported supplied Google credentials into private blocking state and serialize their complete provider calls with one reentrant toolkit lock.
+- Keep GitHub tokens and PyGithub clients together in worker-thread-local state.
+- Bind every authenticated MCP connection and call to an authoritative token-hash lease.
 - Use structured provider error codes and never log provider-controlled descriptions or token values.
 - Keep reset approval bound to the exact provider, service, scope, worker key, and routing agent.
 - Require every provider token credential service to end with `_oauth` so storage policy cannot misclassify plugin tokens.
@@ -221,8 +225,8 @@ Preserve safe logs and MCP refreshed-result observability.
 Remove direct advisory-lock acquisition, direct credential deletion, the second lock, and lock-held state tracking from `ScopedOAuthClientMixin`.
 Use `refresh_oauth_credentials_sync()` for eager and provider-driven lazy refresh.
 Pass `AuthorizationConfig` through managed tool construction instead of depending on an ambient runtime context for alias resolution.
-Read eager credentials and their generation under the operation lock, then compare canonical context plus generation before every managed call that could reuse cached credentials.
-Advance generation before terminal credential invalidation so all materialized clients discard the rejected grant.
+Read eager credentials and their durable revision under the operation lock, then compare canonical context plus revision before every managed call that could reuse cached credentials.
+Advance revision before terminal credential invalidation so all materialized clients discard the rejected grant.
 Serialize provider-driven refresh per materialized Google client and publish its snapshot, token, expiry, refresh token, and outcome before releasing concurrent callers.
 Keep Google-specific structured `RefreshError` classification in the adapter.
 Translate terminal Google rejection to `OAuthRefreshRejectedError`, let lifecycle deletion occur under the operation lock, and return the shared reconnect payload.
@@ -285,7 +289,51 @@ If teardown or lifecycle reset raises an ordinary exception, log one bounded lif
 If teardown is cancelled, propagate cancellation while credentials remain intact.
 After deletion, release only the in-memory retirement fence before building the receipt.
 
-### Task 4: Remove obsolete behavior and align documentation
+### Task 4: Consolidate materialized client ownership
+
+**Files:**
+
+- Modify: `src/mindroom/oauth/client.py`
+- Modify: `src/mindroom/custom_tools/google_service.py`
+- Modify: `src/mindroom/custom_tools/google_drive.py`
+- Modify: `src/mindroom/custom_tools/github.py`
+- Modify: `src/mindroom/mcp/manager.py`
+- Modify: `src/mindroom/mcp/types.py`
+- Modify: `tests/test_google_tool_wrappers.py`
+- Modify: `tests/test_github_oauth_tool.py`
+- Modify: `tests/test_mcp_manager.py`
+
+- [ ] **Step 1: Make Google credentials and services thread-local**
+
+Store credentials, googleapiclient service, and the full canonical context plus durable revision in one worker-thread-local state.
+Clear both credentials and service whenever that key changes.
+Let calls begun before revision mutation finish, but require every later managed entrypoint to load the new authoritative snapshot.
+
+- [ ] **Step 2: Isolate supplied Google credentials**
+
+Accept only the exact pinned `google.oauth2.credentials.Credentials` type.
+Reject refresh handlers, reauth mode, subclasses, and arbitrary objects.
+Copy supported scalar fields and independent immutable scope tuples into a private credential with nonblocking refresh disabled.
+Hold one per-tool `threading.RLock` from private credential installation through the complete provider call so nested Drive calls reenter safely while different workers serialize.
+
+- [ ] **Step 3: Preserve Google Drive lifecycle refresh under quota configuration**
+
+Apply quota project configuration while creating managed or private credentials.
+Pass the exact managed credential into googleapiclient service construction instead of calling `with_quota_project()` and losing the instance refresh hook.
+
+- [ ] **Step 4: Make GitHub client ownership thread-local**
+
+Store the access token and PyGithub client together per worker thread.
+Reload managed credentials on every execution thread and rebuild only that thread's client when its authoritative token changes.
+
+- [ ] **Step 5: Bind authenticated MCP sessions to token-hash leases**
+
+Track the desired token hash and the token hash that created the connected session separately.
+Validate the expected hash before connection, before candidate publication, and under the call read lock immediately before remote use.
+Close stale candidates and restart authoritative credential acquisition when a lease changes.
+Treat cached catalogs as schema only and never as authorization for a call.
+
+### Task 5: Remove obsolete behavior and align documentation
 
 **Files:**
 
@@ -299,7 +347,7 @@ After deletion, release only the in-memory retirement fence before building the 
 
 **Interfaces:**
 
-- Consumes: final lifecycle semantics from Tasks 1 through 3.
+- Consumes: final lifecycle semantics from Tasks 1 through 4.
 - Produces: focused tests and documentation matching serialized ownership.
 
 - [ ] **Step 1: Delete obsolete tests and assertions**
@@ -322,11 +370,11 @@ uv run .github/scripts/generate_skill_references.py
 
 Verify generated references contain the same local-only tool lists as `docs/deployment/sandbox-proxy.md`.
 
-### Task 5: Static verification, base reconciliation, and delivery
+### Task 6: Static verification, base reconciliation, and delivery
 
 **Files:**
 
-- Verify every file changed by Tasks 1 through 4.
+- Verify every file changed by Tasks 1 through 5.
 - Reconcile current `origin/main` into `bas/oauth-reset-recovery` when the worktree is clean.
 
 **Interfaces:**

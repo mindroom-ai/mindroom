@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import threading
 import time
@@ -44,7 +45,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.mcp.types import MCPServerState
+    from mindroom.mcp.types import MCPServerCatalog, MCPServerState
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
 
@@ -503,6 +504,62 @@ async def test_mcp_manager_uses_requester_oauth_bearer_token(
     assert [tool.remote_name for tool in catalog.tools] == ["echo"]
     assert result.content == "pong"
     assert _FakeClientSession.transport_extra_headers == [{"Authorization": "Bearer alice-token"}]
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_rejects_stale_oauth_session_publication_and_retries_current_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A candidate built with stale headers must close before catalog publication or tool use."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.planned_tool_results = [
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="pong-b")]),
+    ]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "account-a-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    original_connect = manager._connect_and_discover
+    changed_during_first_connect = False
+
+    async def connect_with_authorization_change(
+        state: MCPServerState,
+        *,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> MCPServerCatalog:
+        nonlocal changed_during_first_connect
+        catalog = await original_connect(state, auth_headers=auth_headers)
+        if not changed_during_first_connect:
+            changed_during_first_connect = True
+            _save_mcp_oauth_credentials(runtime_paths, worker_target, "account-b-token")
+            state.oauth_access_token_hash = hashlib.sha256(b"account-b-token").hexdigest()
+        return catalog
+
+    monkeypatch.setattr(manager, "_connect_and_discover", connect_with_authorization_change)
+
+    result = await manager.call_tool(
+        "demo",
+        "echo",
+        {},
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    request_state = next(iter(manager._scoped_states.values()))
+    account_b_hash = hashlib.sha256(b"account-b-token").hexdigest()
+    assert result.content == "pong-b"
+    assert _FakeClientSession.transport_extra_headers == [
+        {"Authorization": "Bearer account-a-token"},
+        {"Authorization": "Bearer account-b-token"},
+    ]
+    assert _FakeClientSession.sessions[0].closed is True
+    assert _FakeClientSession.call_tool_invocation_count == 1
+    assert request_state.oauth_access_token_hash == account_b_hash
+    assert request_state.oauth_session_access_token_hash == account_b_hash
 
 
 @pytest.mark.asyncio
@@ -999,8 +1056,9 @@ async def test_mcp_manager_serializes_requester_oauth_token_resolution(
     first_result, second_result = await asyncio.gather(first_call, second_call)
 
     assert first_result[0] is second_result[0]
-    assert first_result[1] == {"Authorization": "Bearer alice-token"}
-    assert second_result[1] == {"Authorization": "Bearer alice-token"}
+    assert first_result[1].headers == {"Authorization": "Bearer alice-token"}
+    assert second_result[1].headers == {"Authorization": "Bearer alice-token"}
+    assert first_result[1].token_hash == second_result[1].token_hash
     assert max_active_token_resolutions == 1
 
 
@@ -1173,6 +1231,8 @@ async def test_mcp_manager_retirement_fences_captured_state_and_new_requesters(
     )
     captured_state = next(iter(manager._scoped_states.values()))
     captured_headers = {"Authorization": "Bearer alice-token"}
+    captured_token_hash = captured_state.oauth_access_token_hash
+    assert captured_token_hash is not None
 
     async with manager.retire_request_session("demo", worker_target=worker_target):
         assert captured_state.retired is True
@@ -1181,6 +1241,7 @@ async def test_mcp_manager_retirement_fences_captured_state_and_new_requesters(
                 captured_state,
                 notify=False,
                 auth_headers=captured_headers,
+                expected_oauth_token_hash=captured_token_hash,
             )
         with pytest.raises(OAuthConnectionRequired):
             await manager.get_request_catalog(

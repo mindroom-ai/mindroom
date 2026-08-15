@@ -275,7 +275,7 @@ class OAuthCredentialsRefreshResult:
 
 @dataclass(frozen=True, slots=True)
 class _OAuthCredentialsSnapshot:
-    """Credential data and reset generation read under one operation lock."""
+    """Credential data and durable revision read under one operation lock."""
 
     credentials: dict[str, Any] | None
     generation: str
@@ -354,7 +354,7 @@ def load_oauth_credentials(context: OAuthCredentialContext) -> dict[str, Any] | 
 
 
 def oauth_credential_generation(context: OAuthCredentialContext) -> str:
-    """Return the durable generation that fences callbacks across credential resets."""
+    """Return the durable revision fencing callbacks and materialized clients."""
     path = _credential_generation_path(context)
     if not path.exists():
         return _INITIAL_CREDENTIAL_GENERATION
@@ -371,7 +371,7 @@ def oauth_credential_generation(context: OAuthCredentialContext) -> str:
 
 
 def load_oauth_credentials_snapshot_sync(context: OAuthCredentialContext) -> _OAuthCredentialsSnapshot:
-    """Load credentials and their reset generation under one operation lock."""
+    """Load credentials and their durable revision under one operation lock."""
     return _run_oauth_transaction_sync(_load_oauth_credentials_snapshot_transaction(context))
 
 
@@ -482,7 +482,7 @@ async def _exchange_and_store_oauth_credentials_transaction(
 ) -> dict[str, Any]:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
         if oauth_credential_generation(context) != expected_generation:
-            msg = "OAuth connection state is stale because this credential was reset"
+            msg = "OAuth connection state is stale because this credential changed"
             raise OAuthProviderError(msg)
         return await _exchange_and_store_oauth_credentials_locked(context, code, code_verifier)
 
@@ -503,6 +503,7 @@ async def _exchange_and_store_oauth_credentials_locked(
         load_oauth_credentials(context),
         safe_result.token_data,
     )
+    _advance_oauth_credential_generation(context)
     save_scoped_credentials(
         context.provider.credential_service,
         token_data,

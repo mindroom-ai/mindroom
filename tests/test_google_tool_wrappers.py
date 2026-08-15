@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from agno.tools.function import Function
 from google.auth.exceptions import RefreshError, TransportError
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -34,22 +35,31 @@ from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     OAuthCredentialsRefreshResult,
+    exchange_and_store_oauth_credentials,
+    oauth_credential_generation,
     reset_oauth_credentials,
 )
-from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.oauth.providers import OAuthConnectionRequired, OAuthTokenResult
 from mindroom.oauth.service import oauth_credentials_worker_target
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
 
 
-class ValidCredentials:
-    """Minimal valid credential object for constructor tests."""
-
-    valid = True
+def _valid_credentials(*, token: str = "valid-access-token") -> GoogleOAuthCredentials:  # noqa: S107
+    """Build exact supported credentials for constructor tests."""
+    return GoogleOAuthCredentials(
+        token=token,
+        refresh_token="valid-refresh-token",  # noqa: S106
+        token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        scopes=("scope",),
+        expiry=datetime(2100, 1, 1, tzinfo=UTC),
+    )
 
 
 @pytest.fixture
@@ -123,7 +133,7 @@ def test_google_service_cache_is_isolated_per_thread(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         worker_target=None,
-        creds=ValidCredentials(),
+        creds=_valid_credentials(),
     )
     barrier = threading.Barrier(2)
 
@@ -146,7 +156,9 @@ def test_google_service_state_first_access_is_thread_safe(monkeypatch: pytest.Mo
         pass
 
     class RaceLocal:
+        creds: Any | None = None
         service: Any | None = None
+        credential_key: object | None = None
 
     tool = Tool()
     creation_barrier = threading.Barrier(2)
@@ -514,6 +526,7 @@ def test_google_lazy_refresh_reuses_rotation_committed_for_a_stale_client(
             runtime_paths=runtime_paths,
             credentials_manager=credentials_manager,
             worker_target=worker_target,
+            quota_project_id="billing-project",
         )
         for _ in range(2)
     ]
@@ -527,13 +540,29 @@ def test_google_lazy_refresh_reuses_rotation_committed_for_a_stale_client(
         credentials.expiry = datetime.fromtimestamp(4_102_444_800.0, tz=UTC)  # type: ignore[attr-defined]
 
     monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", rotate)
+    built_credentials: list[GoogleOAuthCredentials] = []
+
+    def build_drive_service(
+        _service_name: str,
+        _version: str,
+        *,
+        credentials: GoogleOAuthCredentials,
+    ) -> object:
+        built_credentials.append(credentials)
+        return object()
+
+    monkeypatch.setattr("mindroom.custom_tools.google_drive.build", build_drive_service)
 
     tools[0].creds.refresh(object())
     tools[1].creds.refresh(object())
+    tools[0]._build_service()
 
     assert provider_calls == 1
     assert tools[0].creds.token == rotated_access
     assert tools[1].creds.token == rotated_access
+    assert built_credentials == [tools[0].creds]
+    assert built_credentials[0].quota_project_id == "billing-project"
+    assert "refresh" in built_credentials[0].__dict__
 
 
 def test_google_lazy_refresh_serializes_local_snapshot_publication(  # noqa: PLR0915
@@ -689,6 +718,154 @@ def test_google_wrapper_constructor_canonicalizes_alias_without_runtime_context(
 
 
 @pytest.mark.asyncio
+async def test_google_wrapper_reloads_callback_replacement_in_materialized_worker(
+    runtime_paths: RuntimePaths,
+) -> None:
+    """A successful reconnect must invalidate credentials and services already materialized by a worker."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "account-a-access-token",
+            "refresh_token": "account-a-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    def exchange_account_b(
+        *_args: object,
+    ) -> OAuthTokenResult:
+        return OAuthTokenResult(
+            token_data={
+                "token": "account-b-access-token",
+                "refresh_token": "account-b-refresh-token",
+                "expires_at": 4_102_444_800.0,
+                "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            },
+            claims={"sub": "account-b"},
+            claims_verified=True,
+        )
+
+    callback_provider = replace(
+        GoogleDriveTools._oauth_provider,
+        token_exchanger=exchange_account_b,
+        claim_validator=None,
+        runtime_bootstrapper=None,
+    )
+    callback_context = replace(tool._oauth_credential_context(), provider=callback_provider)
+    issued_revision = oauth_credential_generation(callback_context)
+    worker = ThreadPoolExecutor(max_workers=1)
+    try:
+
+        def materialize_account_a_service() -> None:
+            assert tool._ensure_structured_auth() is None
+            tool.service = object()
+
+        await asyncio.wrap_future(worker.submit(materialize_account_a_service))
+        await exchange_and_store_oauth_credentials(
+            callback_context,
+            "account-b-code",
+            "pkce-verifier",
+            expected_generation=issued_revision,
+        )
+
+        def revalidate_materialized_service() -> tuple[str | None, str, object | None]:
+            result = tool._ensure_structured_auth()
+            return result, tool.creds.token, tool.service
+
+        result, token, service = await asyncio.wrap_future(worker.submit(revalidate_materialized_service))
+    finally:
+        worker.shutdown(wait=True)
+
+    assert oauth_credential_generation(callback_context) != issued_revision
+    assert result is None
+    assert token == "account-b-access-token"  # noqa: S105
+    assert service is None
+
+
+def test_google_wrapper_full_context_key_clears_persistent_worker_between_requesters(
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Equal initial revisions for different requesters must not share one worker cache."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    bob_identity = replace(alice_identity, requester_id="@bob:example.org")
+    alice_target = resolve_worker_target("user_agent", "general", execution_identity=alice_identity)
+    bob_target = resolve_worker_target("user_agent", "general", execution_identity=bob_identity)
+    for target, token in ((alice_target, "alice-token"), (bob_target, "bob-token")):
+        save_scoped_credentials(
+            GoogleDriveTools._oauth_provider.credential_service,
+            {
+                "token": token,
+                "refresh_token": f"{token}-refresh",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "client-id",
+                "expires_at": 4_102_444_800.0,
+                "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+                "_source": "oauth",
+                "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+            },
+            credentials_manager=credentials_manager,
+            worker_target=target,
+        )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=alice_target,
+    )
+
+    def authenticate(identity: ToolExecutionIdentity, *, install_service: bool) -> tuple[str, bool]:
+        with tool_execution_identity(identity):
+            assert tool._ensure_structured_auth() is None
+            service_cleared = tool.service is None
+            if install_service:
+                tool.service = object()
+            return tool.creds.token, service_cleared
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        alice_token, _ = executor.submit(authenticate, alice_identity, install_service=True).result(timeout=5)
+        bob_token, bob_service_cleared = executor.submit(
+            authenticate,
+            bob_identity,
+            install_service=False,
+        ).result(timeout=5)
+
+    assert alice_token == "alice-token"  # noqa: S105
+    assert bob_token == "bob-token"  # noqa: S105
+    assert bob_service_cleared is True
+
+
+@pytest.mark.asyncio
 async def test_google_wrapper_drops_valid_cached_credentials_after_reset(
     runtime_paths: RuntimePaths,
 ) -> None:
@@ -732,6 +909,80 @@ async def test_google_wrapper_drops_valid_cached_credentials_after_reset(
     assert payload["oauth_connection_required"] is True
     assert tool.creds is None
     assert tool.service is None
+
+
+@pytest.mark.asyncio
+async def test_google_wrapper_drops_cached_services_in_every_worker_after_reset(
+    runtime_paths: RuntimePaths,
+) -> None:
+    """One worker observing reset must not acknowledge another worker's cached service."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "valid-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    workers_ready = threading.Event()
+    workers_ready_lock = threading.Lock()
+    ready_count = 0
+    reset_complete = threading.Event()
+    first_worker_revalidated = threading.Event()
+
+    def worker_call(worker_index: int) -> tuple[bool, bool]:
+        nonlocal ready_count
+        assert tool._ensure_structured_auth() is None
+        tool.service = object()
+        with workers_ready_lock:
+            ready_count += 1
+            if ready_count == 2:
+                workers_ready.set()
+        assert reset_complete.wait(timeout=5)
+        if worker_index == 1:
+            assert first_worker_revalidated.wait(timeout=5)
+        try:
+            payload = json.loads(tool._ensure_structured_auth() or "{}")
+            return payload.get("oauth_connection_required") is True, tool.service is None
+        finally:
+            if worker_index == 0:
+                first_worker_revalidated.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(worker_call, worker_index) for worker_index in range(2)]
+        try:
+            assert await asyncio.to_thread(workers_ready.wait, 5)
+            assert await reset_oauth_credentials(tool._oauth_credential_context()) is True
+            reset_complete.set()
+            results = await asyncio.gather(*(asyncio.wrap_future(future) for future in futures))
+        finally:
+            reset_complete.set()
+            first_worker_revalidated.set()
+
+    assert results == [(True, True), (True, True)]
 
 
 @pytest.mark.asyncio
@@ -1026,6 +1277,7 @@ def test_google_wrapper_service_account_fallback_wins_over_valid_cached_oauth(
     tool = object.__new__(GoogleDriveTools)
     tool._runtime_paths = runtime_paths
     tool._provided_creds = False
+    tool._provided_credentials = None
     tool._defer_to_original_auth = True
     tool._original_auth_completed = False
     tool.service_account_path = str(tmp_path / "service-account.json")
@@ -1049,17 +1301,14 @@ def test_google_wrapper_valid_provided_creds_skip_service_account_fallback(
     tmp_path: Path,
 ) -> None:
     """Explicit valid credentials should keep Agno's no-auth constructor contract."""
-
-    class ValidProvidedCreds:
-        valid = True
-
     tool = object.__new__(GoogleDriveTools)
     tool._runtime_paths = runtime_paths
     tool._provided_creds = True
+    tool._provided_credentials = _valid_credentials()
     tool._defer_to_original_auth = True
     tool._original_auth_completed = False
     tool.service_account_path = str(tmp_path / "service-account.json")
-    tool.creds = ValidProvidedCreds()
+    tool.creds = tool._provided_credentials
     calls: list[str] = []
 
     def original_auth() -> None:
@@ -1069,6 +1318,166 @@ def test_google_wrapper_valid_provided_creds_skip_service_account_fallback(
 
     assert tool._ensure_structured_auth() is None
     assert calls == []
+
+
+def test_google_wrapper_copies_supplied_credentials_and_mutable_scopes(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Caller mutation and refresh workers cannot alter private toolkit credentials."""
+    scopes = ["scope-a"]
+    granted_scopes = ["scope-a"]
+    supplied = GoogleOAuthCredentials(
+        token="caller-token",  # noqa: S106
+        refresh_token="caller-refresh",  # noqa: S106
+        token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        scopes=scopes,
+        granted_scopes=granted_scopes,
+        quota_project_id="caller-project",
+        expiry=datetime(2100, 1, 1, tzinfo=UTC),
+    )
+    supplied.with_non_blocking_refresh()
+
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=supplied,
+        quota_project_id="tool-project",
+    )
+    private = tool.creds
+    supplied.token = "mutated-token"  # noqa: S105
+    scopes.append("scope-b")
+    granted_scopes.append("scope-b")
+
+    assert private is not supplied
+    assert private.token == "caller-token"  # noqa: S105
+    assert private.scopes == ("scope-a",)
+    assert private.granted_scopes == ("scope-a",)
+    assert private.quota_project_id == "tool-project"
+    assert private.refresh_handler is None
+    assert private._use_non_blocking_refresh is False
+
+
+def test_google_wrapper_rejects_supplied_refresh_handler(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Caller-controlled token brokers must not cross toolkit ownership."""
+    supplied = _valid_credentials()
+    supplied.refresh_handler = lambda _request, _scopes: ("token", datetime(2100, 1, 1, tzinfo=UTC))
+
+    with pytest.raises(ValueError, match="refresh_handler"):
+        GoogleDriveTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=supplied,
+        )
+
+
+def test_google_wrapper_rejects_supplied_reauth_credentials(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Gcloud-only reauth semantics are outside supported supplied credentials."""
+    supplied = GoogleOAuthCredentials(
+        token="token",  # noqa: S106
+        enable_reauth_refresh=True,
+        expiry=datetime(2100, 1, 1, tzinfo=UTC),
+    )
+
+    with pytest.raises(ValueError, match="reauth refresh"):
+        GoogleDriveTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=supplied,
+        )
+
+
+def test_google_wrapper_rejects_supplied_subclass_and_arbitrary_object(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Only pinned concrete Google credentials enter the supplied credential boundary."""
+
+    class CredentialSubclass(GoogleOAuthCredentials):
+        pass
+
+    rejected = (
+        CredentialSubclass(token="token", expiry=datetime(2100, 1, 1, tzinfo=UTC)),  # noqa: S106
+        object(),
+    )
+    for supplied in rejected:
+        with pytest.raises(TypeError, match=r"exact google\.oauth2\.credentials\.Credentials"):
+            GoogleDriveTools(
+                runtime_paths=runtime_paths,
+                credentials_manager=CredentialsManager(tmp_path / "credentials"),
+                creds=supplied,
+            )
+
+
+def test_google_wrapper_supplied_credentials_lock_is_reentrant_and_serializes_workers(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Nested Drive calls reenter while independent supplied-credential calls serialize."""
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_valid_credentials(),
+    )
+    tool.functions = {
+        "inner": Function(name="inner", entrypoint=lambda: "inner"),
+        "outer": Function(name="outer", entrypoint=lambda: tool.inner()),
+    }
+    tool._wrap_oauth_function_entrypoints()
+
+    with ThreadPoolExecutor(max_workers=1) as nested_executor:
+        assert nested_executor.submit(tool.outer).result(timeout=5) == "inner"
+
+    active_calls = 0
+    max_active_calls = 0
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    second_started = threading.Event()
+    release_first = threading.Event()
+    call_count = 0
+
+    def serialized_call() -> str:
+        nonlocal active_calls, max_active_calls, call_count
+        call_count += 1
+        active_calls += 1
+        max_active_calls = max(max_active_calls, active_calls)
+        if call_count == 1:
+            first_entered.set()
+            assert release_first.wait(timeout=5)
+        else:
+            second_entered.set()
+        active_calls -= 1
+        return "done"
+
+    tool.functions = {"serialized": Function(name="serialized", entrypoint=serialized_call)}
+    tool._wrap_oauth_function_entrypoints()
+
+    def second_call() -> str:
+        second_started.set()
+        return tool.serialized()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(tool.serialized)
+        assert first_entered.wait(timeout=5)
+        second = executor.submit(second_call)
+        assert second_started.wait(timeout=5)
+        try:
+            assert not second_entered.wait(timeout=0.1)
+            assert max_active_calls == 1
+        finally:
+            release_first.set()
+        assert first.result(timeout=5) == "done"
+        assert second.result(timeout=5) == "done"
+
+    assert max_active_calls == 1
 
 
 @pytest.mark.parametrize(
@@ -1090,7 +1499,7 @@ def test_google_drive_constructor_coerces_optional_max_read_size(
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=ValidCredentials(),
+        creds=_valid_credentials(),
         max_read_size=max_read_size,
     )
 
@@ -1118,6 +1527,6 @@ def test_google_drive_constructor_rejects_invalid_max_read_size_with_current_err
         GoogleDriveTools(
             runtime_paths=runtime_paths,
             credentials_manager=CredentialsManager(tmp_path / "credentials"),
-            creds=ValidCredentials(),
+            creds=_valid_credentials(),
             max_read_size=max_read_size,
         )

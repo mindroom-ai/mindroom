@@ -29,10 +29,15 @@ OAuth operations are rare enough that this concurrency is not worth the correctn
 11. Provider adapters classify structured terminal refresh errors as `OAuthRefreshRejectedError` without exposing provider-controlled text.
 12. All consumers build connection and reconnection responses through one factory.
 13. Approval continuations persist and revalidate the exact credential target descriptor before execution.
-14. Every browser callback carries the credential generation observed at authorization and cannot publish after that generation is reset.
+14. Every browser callback carries the durable credential revision observed at authorization, and one successful callback advances that revision before publishing credentials so the same authorization revision cannot publish twice.
 15. Agent approval continuations install their persisted requester context before reconstructing OAuth-backed toolkits.
 16. Every provider token service ends with `_oauth`, making primary-runtime placement and worker-grant rejection structural.
-17. OAuth-backed toolkit construction receives authorization explicitly, and every managed call revalidates its canonical credential scope and durable generation before reusing cached credentials.
+17. OAuth-backed toolkit construction receives authorization explicitly, and every managed call revalidates its canonical credential scope and durable revision before reusing cached credentials.
+18. Managed Google credentials and services are owned together by one worker thread and keyed by the full canonical credential context plus durable revision.
+19. Caller-supplied Google credentials are accepted only as the exact supported concrete type, copied into private blocking credentials, and serialized for the whole provider call by one reentrant toolkit lock.
+20. Google Drive applies quota configuration before lifecycle refresh wrapping and never clones a managed tracked credential while building a service.
+21. GitHub access tokens and PyGithub clients are owned together by one worker thread, while every managed call reloads authoritative credentials on its execution thread.
+22. OAuth-backed MCP connections publish and use sessions only when their desired token hash, connected-session token hash, and request authorization lease match.
 
 ## Architecture
 
@@ -62,6 +67,16 @@ It translates structured OAuth error codes into `OAuthRefreshRejectedError` for 
 
 `src/mindroom/oauth/client.py` adapts synchronous Google credential refresh to the same lifecycle transaction.
 Google-specific `RefreshError` parsing remains in the adapter, but persistence, locking, invalidation, and reconnect classification do not.
+Managed Google credentials and googleapiclient services remain in one thread-local state because Agno executes provider calls in worker threads.
+The state key contains the full canonical credential context and durable revision, so equal revision strings from different requesters cannot share credentials.
+Supplied credentials cross a stricter boundary: MindRoom copies the exact concrete Google credential into private blocking state and holds one reentrant lock from credential installation through the complete nested provider call.
+Google Drive constructs managed credentials with quota configuration already present and passes the exact tracked object to googleapiclient instead of cloning away its lifecycle refresh hook.
+
+`src/mindroom/custom_tools/github.py` reloads managed credentials for every call and stores each worker thread's token and PyGithub client together.
+An older call may finish on its own thread, but it cannot overwrite another worker's newer client.
+
+`src/mindroom/mcp/manager.py` treats an OAuth token hash as an authorization lease.
+It tracks both the desired hash and the hash that built the connected session, validates both immediately before catalog publication and tool use, and reacquires authoritative credentials when either changes.
 
 ### Reset authorization
 
@@ -92,15 +107,15 @@ Different credential scopes continue concurrently because their lock paths diffe
 
 ### OAuth callback
 
-1. Authenticate the browser user and validate the opaque pending state, target binding, and credential generation.
+1. Authenticate the browser user and validate the opaque pending state, target binding, and durable credential revision.
 2. Start a cancellation-safe lifecycle operation.
 3. Acquire the same operation lock used by refresh.
-4. Reject the callback if reset advanced the durable credential generation after authorization.
+4. Reject the callback if reset, terminal invalidation, or another successful callback advanced the durable credential revision after authorization.
 5. Exchange the authorization code.
 6. Validate and sanitize claims.
 7. Preserve an existing refresh token only when the current locked snapshot has the same verified external identity and OAuth client.
-8. Save the new credential snapshot and release the lock.
-9. Propagate cancellation only after the local commit completes.
+8. Advance the durable credential revision and durably save the new credential snapshot while retaining the lock.
+9. Release the lock and propagate cancellation only after the local commit completes.
 
 The callback cannot preserve a refresh token that another operation rotated concurrently because exchange and refresh cannot overlap for one scope.
 
@@ -112,7 +127,7 @@ The callback cannot preserve a refresh token that another operation rotated conc
 4. Close the retired session and keep its key fenced against new sessions.
 5. If retirement fails or is cancelled, retain credentials and restore the tracked generation when possible.
 6. Submit credential deletion to the transaction loop and wait cancellably for the operation lock.
-7. Advance the durable credential generation and durably delete the credential under the operation lock without another suspension point.
+7. Advance the durable credential revision and durably delete the credential under the operation lock without another suspension point.
 8. Release the in-memory MCP retirement fence and return the receipt even if cancellation arrived after commit.
 
 Dashboard disconnect uses the same transaction and fails without deleting credentials if MCP teardown cannot complete.
@@ -120,8 +135,8 @@ Dashboard disconnect uses the same transaction and fails without deleting creden
 ### Provider call failure
 
 1. Provider adapters convert terminal structured codes into `OAuthRefreshRejectedError`.
-2. The lifecycle transaction advances the durable credential generation and deletes only the credential held under its operation lock.
-3. Other materialized clients observe the new generation before their next managed call and discard cached credentials and services.
+2. The lifecycle transaction advances the durable credential revision and deletes only the credential held under its operation lock.
+3. Other materialized clients observe the new revision before their next managed call and discard cached credentials and services.
 4. Consumers convert the canonical error through `oauth_connection_required(reason="refresh_rejected")`.
 5. Logs contain only allowlisted error codes and bounded metadata.
 
@@ -134,7 +149,7 @@ Refresh becomes cancellation-safe after its operation lock is acquired because a
 Callback operation-lock wait, exchange, and save are cancellation-safe after pending state is consumed because the one-time state and authorization code cannot be replayed safely.
 Reset teardown remains cancellable because credentials are still intact at that point.
 Operation-lock waiting remains cancellable and does not mutate credentials.
-Generation advancement plus deletion is the reset commit point, and the only following work releases the in-memory retirement fence without provider or transport I/O.
+Revision advancement plus deletion is the reset commit point, and the only following work releases the in-memory retirement fence without provider or transport I/O.
 Cancellation after that commit is consumed so the approved destructive tool can return its reconnect receipt.
 
 ## Testing
@@ -150,7 +165,8 @@ Focused tests cover observable lifecycle behavior rather than private lock chore
 - Different credential scopes refresh concurrently.
 - A synchronous refresh invoked from an event-loop thread cannot deadlock behind an asynchronous same-scope transaction.
 - Retired MCP generations cannot reconnect with captured stale authorization headers or create a replacement session before deletion commits.
-- Callback state issued before a reset cannot republish credentials after the durable generation advances.
+- Callback state issued before a reset cannot republish credentials after the durable revision advances.
+- Callback success advances the durable revision, and a second callback bound to the consumed revision is rejected.
 - Reset cancellation before operation-lock ownership preserves credentials, while cancellation after deletion still returns the committed receipt.
 - Reset success is reported only after the credential unlink and parent-directory update are flushed.
 - Refresh cancellation before operation-lock ownership never calls the provider, while cancellation after ownership waits for local publication.
@@ -163,6 +179,12 @@ Focused tests cover observable lifecycle behavior rather than private lock chore
 - Agent approval continuation reconstructs OAuth-backed toolkits inside the same runtime and execution-identity context used for resumed calls.
 - Agent and voice toolkit construction receive authorization explicitly, so alias canonicalization does not depend on an ambient call context.
 - Long-lived Google clients discard valid cached access tokens after reset, disconnect, terminal invalidation, or canonical scope change.
+- Persistent Google workers independently discard their own credentials and services after revision change, and requester changes invalidate the cache even when both scopes use the initial revision string.
+- A successful callback replacing account A with account B invalidates already-materialized account A services before their next managed call.
+- Supplied Google credentials are privately copied, reject caller-controlled refresh hooks, reauth modes, subclasses, and arbitrary objects, and serialize nested provider calls with a reentrant lock.
+- Google Drive quota configuration preserves the exact lifecycle-tracked credential and concurrent lazy refresh still publishes one rotation.
+- GitHub workers keep tokens and PyGithub clients thread-local across old-call and new-token interleavings.
+- MCP sessions built with stale authorization headers close before publication or use and retry with a fresh authoritative token lease.
 - Plugin providers without the `_oauth` token-service suffix fail registration before any credential can be stored.
 
 Existing tests that require reconnect writes to bypass an in-flight refresh or assert stale-retry branches are removed because those behaviors violate the serialized transaction model.

@@ -83,6 +83,18 @@ class _MCPSessionKey:
     worker_key: str
 
 
+@dataclass(frozen=True)
+class _MCPAuthorizationLease:
+    """Authorization material and identity for one requester operation."""
+
+    headers: Mapping[str, str]
+    token_hash: str
+
+
+class _MCPAuthorizationChangedError(RuntimeError):
+    """Signal that a requester must reacquire authoritative authorization."""
+
+
 class MCPServerManager:
     """Own one live MCP session per configured server."""
 
@@ -204,28 +216,38 @@ class MCPServerManager:
         """Call one remote MCP tool through the cached session."""
         state = self._require_state(server_id)
         if state.config.auth is not None:
-            request_state, auth_headers = await self._request_state_and_headers(
-                server_id,
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-                authorization=authorization,
-            )
-            if (
-                request_state.catalog is None
-                or request_state.session is None
-                or request_state.stale
-                or request_state.last_error is not None
-                or not request_state.connected
-            ):
-                await self._refresh_server_catalog(request_state, notify=False, auth_headers=auth_headers)
-            self._require_catalog_tool(request_state, remote_tool_name)
-            return await self._call_tool_once_or_reconnect(
-                request_state,
-                remote_tool_name,
-                arguments,
-                timeout_seconds=timeout_seconds or request_state.config.call_timeout_seconds,
-                auth_headers=auth_headers,
-            )
+            while True:
+                request_state, authorization_lease = await self._request_state_and_headers(
+                    server_id,
+                    credentials_manager=credentials_manager,
+                    worker_target=worker_target,
+                    authorization=authorization,
+                )
+                try:
+                    if (
+                        request_state.catalog is None
+                        or request_state.session is None
+                        or request_state.stale
+                        or request_state.last_error is not None
+                        or not request_state.connected
+                    ):
+                        await self._refresh_server_catalog(
+                            request_state,
+                            notify=False,
+                            auth_headers=authorization_lease.headers,
+                            expected_oauth_token_hash=authorization_lease.token_hash,
+                        )
+                    self._require_catalog_tool(request_state, remote_tool_name)
+                    return await self._call_tool_once_or_reconnect(
+                        request_state,
+                        remote_tool_name,
+                        arguments,
+                        timeout_seconds=timeout_seconds or request_state.config.call_timeout_seconds,
+                        auth_headers=authorization_lease.headers,
+                        expected_oauth_token_hash=authorization_lease.token_hash,
+                    )
+                except _MCPAuthorizationChangedError:
+                    continue
 
         if state.catalog is None or state.session is None or not state.connected:
             await self._refresh_server_catalog(state, notify=False)
@@ -245,21 +267,25 @@ class MCPServerManager:
         worker_target: ResolvedWorkerTarget | None,
         authorization: AuthorizationConfig | None = None,
     ) -> MCPServerCatalog:
-        """Return a worker-scoped catalog for one OAuth-backed MCP server."""
-        state, auth_headers = await self._request_state_and_headers(
-            server_id,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-            authorization=authorization,
-        )
-        if state.catalog is None or state.stale or state.last_error is not None or not state.connected:
-            await self._refresh_server_catalog(state, notify=False, auth_headers=auth_headers)
-        if state.catalog is not None:
-            return state.catalog
-        if state.last_error is not None:
-            raise state.last_error
-        msg = f"MCP server '{server_id}' is not connected"
-        raise MCPConnectionError(server_id, msg)
+        """Return a requester-scoped catalog for one OAuth-backed MCP server."""
+        while True:
+            state, authorization_lease = await self._request_state_and_headers(
+                server_id,
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+                authorization=authorization,
+            )
+            try:
+                if state.catalog is None or state.stale or state.last_error is not None or not state.connected:
+                    await self._refresh_server_catalog(
+                        state,
+                        notify=False,
+                        auth_headers=authorization_lease.headers,
+                        expected_oauth_token_hash=authorization_lease.token_hash,
+                    )
+                return await self._request_catalog_with_lock(state, authorization_lease.token_hash)
+            except _MCPAuthorizationChangedError:
+                continue
 
     def cached_request_catalog(
         self,
@@ -450,7 +476,7 @@ class MCPServerManager:
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
         authorization: AuthorizationConfig | None = None,
-    ) -> tuple[MCPServerState, Mapping[str, str]]:
+    ) -> tuple[MCPServerState, _MCPAuthorizationLease]:
         base_state = self._require_state(server_id)
         if base_state.config.auth is None:
             msg = f"MCP server '{server_id}' is not OAuth-backed"
@@ -491,7 +517,10 @@ class MCPServerManager:
                     state.last_error = None
                     state.stale = True
                     state.oauth_access_token_hash = token_hash
-        return state, {"Authorization": f"Bearer {access_token}"}
+        return state, _MCPAuthorizationLease(
+            headers={"Authorization": f"Bearer {access_token}"},
+            token_hash=token_hash,
+        )
 
     async def _call_tool_once_or_reconnect(
         self,
@@ -501,11 +530,18 @@ class MCPServerManager:
         *,
         timeout_seconds: float,
         auth_headers: Mapping[str, str] | None = None,
+        expected_oauth_token_hash: str | None = None,
     ) -> ToolResult:
         self._require_active_state(state)
         refresh_revision = state.refresh_revision
         try:
-            return await self._call_tool_with_lock(state, remote_tool_name, arguments, timeout_seconds=timeout_seconds)
+            return await self._call_tool_with_lock(
+                state,
+                remote_tool_name,
+                arguments,
+                timeout_seconds=timeout_seconds,
+                expected_oauth_token_hash=expected_oauth_token_hash,
+            )
         except (MCPToolCallError, MCPProtocolError):
             raise
         except (MCPConnectionError, MCPTimeoutError):
@@ -519,9 +555,16 @@ class MCPServerManager:
             notify=True,
             expected_refresh_revision=refresh_revision,
             auth_headers=auth_headers,
+            expected_oauth_token_hash=expected_oauth_token_hash,
         )
         self._require_catalog_tool(state, remote_tool_name)
-        return await self._call_tool_with_lock(state, remote_tool_name, arguments, timeout_seconds=timeout_seconds)
+        return await self._call_tool_with_lock(
+            state,
+            remote_tool_name,
+            arguments,
+            timeout_seconds=timeout_seconds,
+            expected_oauth_token_hash=expected_oauth_token_hash,
+        )
 
     async def _call_tool_with_lock(
         self,
@@ -530,9 +573,11 @@ class MCPServerManager:
         arguments: dict[str, object],
         *,
         timeout_seconds: float,
+        expected_oauth_token_hash: str | None = None,
     ) -> ToolResult:
         async with state.semaphore, state.call_lock.read():
             self._require_active_state(state)
+            self._require_oauth_lease(state, expected_oauth_token_hash)
             if state.session is None or state.catalog is None or not state.connected:
                 if state.last_error is not None:
                     raise state.last_error
@@ -544,6 +589,22 @@ class MCPServerManager:
                 arguments,
                 timeout_seconds=timeout_seconds,
             )
+
+    async def _request_catalog_with_lock(
+        self,
+        state: MCPServerState,
+        expected_oauth_token_hash: str,
+    ) -> MCPServerCatalog:
+        """Return catalog only while its connected authorization lease is current."""
+        async with state.call_lock.read():
+            self._require_active_state(state)
+            self._require_oauth_lease(state, expected_oauth_token_hash)
+            if state.catalog is not None and state.connected:
+                return state.catalog
+            if state.last_error is not None:
+                raise state.last_error
+            msg = f"MCP server '{state.server_id}' is not connected"
+            raise MCPConnectionError(state.server_id, msg)
 
     async def _call_tool_once(
         self,
@@ -574,6 +635,7 @@ class MCPServerManager:
         notify: bool,
         expected_refresh_revision: int | None = None,
         auth_headers: Mapping[str, str] | None = None,
+        expected_oauth_token_hash: str | None = None,
     ) -> bool:
         self._require_active_state(state)
         should_notify_catalog_change = False
@@ -581,11 +643,13 @@ class MCPServerManager:
             self._require_active_state(state)
             if expected_refresh_revision is not None and state.refresh_revision != expected_refresh_revision:
                 return False
+            self._require_desired_oauth_lease(state, expected_oauth_token_hash)
             state.refresh_revision += 1
             state.stale = False
             async with state.call_lock.write():
                 previous_hash = state.catalog.catalog_hash if state.catalog is not None else None
                 await self._disconnect_state(state)
+                self._require_desired_oauth_lease(state, expected_oauth_token_hash)
                 try:
                     catalog = await self._connect_and_discover(state, auth_headers=auth_headers)
                 except MCPError as exc:
@@ -604,15 +668,20 @@ class MCPServerManager:
                         affected_entities=sorted(self._entities_referencing_server(state.server_id)),
                         consecutive_failures=state.consecutive_failures,
                     )
-                    self._schedule_refresh_task(
-                        state,
-                        delay_seconds=_discovery_retry_delay_seconds(state.consecutive_failures),
-                    )
+                    if state.config.auth is None:
+                        self._schedule_refresh_task(
+                            state,
+                            delay_seconds=_discovery_retry_delay_seconds(state.consecutive_failures),
+                        )
                     return False
 
+                if expected_oauth_token_hash is not None and state.oauth_access_token_hash != expected_oauth_token_hash:
+                    await self._disconnect_state(state)
+                    raise _MCPAuthorizationChangedError
                 if state.retired:
                     await self._disconnect_state(state)
                     self._require_active_state(state)
+                state.oauth_session_access_token_hash = expected_oauth_token_hash
                 state.catalog = catalog
                 state.connected = True
                 state.last_error = None
@@ -901,6 +970,7 @@ class MCPServerManager:
             )
         state.session = None
         state.connected = False
+        state.oauth_session_access_token_hash = None
         if close_error is not None:
             raise close_error
 
@@ -922,6 +992,19 @@ class MCPServerManager:
         if remote_tool_name not in {tool.remote_name for tool in catalog.tools}:
             msg = f"MCP tool '{remote_tool_name}' is not in the cached catalog for server '{state.server_id}'"
             raise MCPProtocolError(state.server_id, msg)
+
+    @staticmethod
+    def _require_desired_oauth_lease(state: MCPServerState, expected_token_hash: str | None) -> None:
+        if state.config.auth is not None and expected_token_hash is None:
+            raise _MCPAuthorizationChangedError
+        if expected_token_hash is not None and state.oauth_access_token_hash != expected_token_hash:
+            raise _MCPAuthorizationChangedError
+
+    @classmethod
+    def _require_oauth_lease(cls, state: MCPServerState, expected_token_hash: str | None) -> None:
+        cls._require_desired_oauth_lease(state, expected_token_hash)
+        if expected_token_hash is not None and state.oauth_session_access_token_hash != expected_token_hash:
+            raise _MCPAuthorizationChangedError
 
     @staticmethod
     def _require_active_state(state: MCPServerState) -> None:
