@@ -31,8 +31,8 @@ SKIP_CONFIG_FIELD_VALIDATION = {
 # host runs this suite without it.
 OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph", "telegram"})
 IGNORED_AGNO_PARAMS = {
-    # AgentRepositoryTools accepts a typed broker seam for trusted control-plane fakes, never authored config.
-    "agent_repository": {"broker"},
+    # AgentRepositoryTools accepts typed broker/preparer seams for trusted control-plane fakes, never authored config.
+    "agent_repository": {"broker", "worker_preparer"},
     # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
     "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
     # Mapping-only inputs have no safe authored ConfigField representation.

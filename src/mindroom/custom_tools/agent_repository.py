@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from asyncio import Lock, to_thread
+from collections.abc import Callable  # noqa: TC003 - toolkit introspection evaluates constructor annotations.
 from functools import partial
 from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constructor annotations.
 from typing import TYPE_CHECKING
@@ -27,8 +28,6 @@ from mindroom.tool_system.sandbox_proxy import ensure_worker_target_ready
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
