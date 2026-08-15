@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import ctypes
 import hashlib
 import json
 import os
@@ -9,6 +11,7 @@ import re
 import secrets
 import stat
 import subprocess
+import sys
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -58,6 +61,8 @@ _DEFAULT_AGENT_VAULT_NAME_PREFIX = "agent-vault"
 _AGENT_VAULT_PREFLIGHT_TIMEOUT_SECONDS = 30
 _AGENT_VAULT_ENSURE_TIMEOUT_SECONDS = 5 * 60
 _BROKER_HTTP_TIMEOUT_SECONDS = _AGENT_VAULT_PREFLIGHT_TIMEOUT_SECONDS + _AGENT_VAULT_ENSURE_TIMEOUT_SECONDS + 15.0
+_MAX_BROKER_RESPONSE_BYTES = 64 * 1024
+_MAX_GITHUB_REPOSITORY_ID_DIGITS = 20
 _MAX_GIT_CONFIG_BYTES = 1024 * 1024
 _GIT_CONFIG_PARSE_TIMEOUT_SECONDS = 5.0
 
@@ -168,7 +173,7 @@ class AgentVaultRepositoryBroker:
         )
 
     def _client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(timeout=_BROKER_HTTP_TIMEOUT_SECONDS)
+        return httpx.AsyncClient(timeout=_BROKER_HTTP_TIMEOUT_SECONDS, trust_env=False)
 
     def _token(self) -> str:
         try:
@@ -198,20 +203,30 @@ class AgentVaultRepositoryBroker:
             "repository_name": request.repository_name,
         }
         try:
-            async with self._client() as client:
-                response = await client.post(
-                    f"{self._broker_url}{_AGENT_VAULT_ENSURE_PATH}",
-                    headers=headers,
-                    json=payload,
-                )
-        except httpx.HTTPError as exc:
+            async with asyncio.timeout(_BROKER_HTTP_TIMEOUT_SECONDS):
+                async with self._client() as client:
+                    async with client.stream(
+                        "POST",
+                        f"{self._broker_url}{_AGENT_VAULT_ENSURE_PATH}",
+                        headers=headers,
+                        json=payload,
+                    ) as response:
+                        if response.status_code not in {200, 201}:
+                            msg = f"Agent repository broker returned HTTP {response.status_code}"
+                            raise RepositoryBrokerError(msg)
+                        response_chunks: list[bytes] = []
+                        response_size = 0
+                        async for chunk in response.aiter_bytes():
+                            response_size += len(chunk)
+                            if response_size > _MAX_BROKER_RESPONSE_BYTES:
+                                msg = "Agent repository broker response is too large"
+                                raise RepositoryBrokerError(msg)
+                            response_chunks.append(chunk)
+        except (TimeoutError, httpx.HTTPError) as exc:
             msg = "Agent repository broker request failed"
             raise RepositoryBrokerError(msg) from exc
-        if response.status_code not in {200, 201}:
-            msg = f"Agent repository broker returned HTTP {response.status_code}"
-            raise RepositoryBrokerError(msg)
         try:
-            response_payload = response.json()
+            response_payload = json.loads(b"".join(response_chunks))
         except (json.JSONDecodeError, UnicodeError) as exc:
             msg = "Agent repository broker returned invalid JSON"
             raise RepositoryBrokerError(msg) from exc
@@ -312,7 +327,13 @@ def derive_repository_name(*, prefix: str, worker_target: ResolvedWorkerTarget) 
 
 
 def _is_canonical_repository_id(value: object) -> bool:
-    return isinstance(value, str) and value.isascii() and value.isdecimal() and not value.startswith("0")
+    return (
+        isinstance(value, str)
+        and len(value) <= _MAX_GITHUB_REPOSITORY_ID_DIGITS
+        and value.isascii()
+        and value.isdecimal()
+        and not value.startswith("0")
+    )
 
 
 def _validate_lease(request: RepositoryEnsureRequest, lease: RepositoryLease) -> None:
@@ -487,21 +508,11 @@ def _open_workspace_directory(workspace: Path) -> tuple[Path, int]:
     return absolute_workspace, current_fd
 
 
-def _open_git_directory(workspace_fd: int) -> tuple[int, bool]:
+def _open_existing_git_directory(workspace_fd: int) -> int | None:
     try:
-        return os.open(".git", _directory_open_flags(), dir_fd=workspace_fd), False
+        return os.open(".git", _directory_open_flags(), dir_fd=workspace_fd)
     except FileNotFoundError:
-        created = False
-        try:
-            os.mkdir(".git", mode=0o755, dir_fd=workspace_fd)
-            created = True
-        except FileExistsError:
-            pass
-        try:
-            return os.open(".git", _directory_open_flags(), dir_fd=workspace_fd), created
-        except OSError as exc:
-            msg = "Agent repository workspace Git metadata must be a local directory"
-            raise RepositoryBindingError(msg) from exc
+        return None
     except OSError as exc:
         msg = "Agent repository workspace Git metadata must be a local directory"
         raise RepositoryBindingError(msg) from exc
@@ -540,6 +551,29 @@ def _write_all(file_fd: int, payload: bytes) -> None:
         remaining = remaining[written:]
 
 
+def _rename_at_no_replace(source_fd: int, source: str, destination_fd: int, destination: str) -> None:
+    """Atomically publish one directory entry without replacing an existing path."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if sys.platform == "darwin":
+        rename = libc.renameatx_np
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source_fd, source_bytes, destination_fd, destination_bytes, 0x00000004)
+    elif sys.platform.startswith("linux"):
+        rename = libc.renameat2
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source_fd, source_bytes, destination_fd, destination_bytes, 1)
+    else:
+        msg = "Atomic agent repository workspace publication is unsupported on this platform"
+        raise RepositoryBindingError(msg)
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), destination)
+
+
 def _remote_origin_config(clone_url: str) -> bytes:
     return (f'[remote "origin"]\n\turl = {clone_url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n').encode()
 
@@ -565,6 +599,55 @@ def _initialize_git_directory(git_fd: int, clone_url: str) -> None:
     ) + _remote_origin_config(clone_url)
     _atomic_write_at(git_fd, "HEAD", b"ref: refs/heads/main\n", mode=0o644)
     _atomic_write_at(git_fd, "config", config, mode=0o644)
+
+
+def _remove_unpublished_git_directory(workspace_fd: int, staging_name: str, git_fd: int) -> None:
+    for name in ("HEAD", "config"):
+        with suppress(FileNotFoundError):
+            os.unlink(name, dir_fd=git_fd)
+    for parent_name, child_names in (("objects", ("info", "pack")), ("refs", ("heads", "tags"))):
+        try:
+            parent_fd = os.open(parent_name, _directory_open_flags(), dir_fd=git_fd)
+        except FileNotFoundError:
+            continue
+        try:
+            for child_name in child_names:
+                with suppress(FileNotFoundError):
+                    os.rmdir(child_name, dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+        with suppress(FileNotFoundError):
+            os.rmdir(parent_name, dir_fd=git_fd)
+    if _directory_entry_matches(workspace_fd, staging_name, git_fd):
+        os.rmdir(staging_name, dir_fd=workspace_fd)
+
+
+def _initialize_git_directory_atomically(workspace_fd: int, clone_url: str) -> int:
+    staging_name = f".git.mindroom-{secrets.token_hex(8)}"
+    try:
+        os.mkdir(staging_name, mode=0o755, dir_fd=workspace_fd)
+        git_fd = os.open(staging_name, _directory_open_flags(), dir_fd=workspace_fd)
+    except OSError as exc:
+        msg = "Could not stage agent repository workspace Git metadata"
+        raise RepositoryBindingError(msg) from exc
+    try:
+        _initialize_git_directory(git_fd, clone_url)
+        os.fsync(git_fd)
+        try:
+            _rename_at_no_replace(workspace_fd, staging_name, workspace_fd, ".git")
+        except OSError as exc:
+            msg = "Agent repository workspace Git metadata changed during configuration"
+            raise RepositoryBindingError(msg) from exc
+    except Exception:
+        _remove_unpublished_git_directory(workspace_fd, staging_name, git_fd)
+        os.close(git_fd)
+        raise
+    try:
+        os.fsync(workspace_fd)
+    except Exception:
+        os.close(git_fd)
+        raise
+    return git_fd
 
 
 def _open_git_config(git_fd: int) -> int:
@@ -692,21 +775,37 @@ def _require_complete_git_directory(git_fd: int) -> None:
             raise RepositoryBindingError(msg)
 
 
-def _git_directory_is_current(workspace_fd: int, git_fd: int) -> bool:
+def _directory_entry_matches(parent_fd: int, name: str, directory_fd: int) -> bool:
     try:
-        current_stat = os.stat(".git", dir_fd=workspace_fd, follow_symlinks=False)
+        current_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except OSError:
         return False
-    opened_stat = os.fstat(git_fd)
+    opened_stat = os.fstat(directory_fd)
     return stat.S_ISDIR(current_stat.st_mode) and (current_stat.st_dev, current_stat.st_ino) == (
         opened_stat.st_dev,
         opened_stat.st_ino,
     )
 
 
-def _git_config_is_current(git_fd: int, config_fd: int) -> bool:
+def _git_directory_is_current(workspace_fd: int, git_fd: int) -> bool:
+    return _directory_entry_matches(workspace_fd, ".git", git_fd)
+
+
+def _workspace_directory_is_current(workspace_path: Path, workspace_fd: int) -> bool:
     try:
-        current_stat = os.stat("config", dir_fd=git_fd, follow_symlinks=False)
+        current_stat = workspace_path.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    opened_stat = os.fstat(workspace_fd)
+    return stat.S_ISDIR(current_stat.st_mode) and (current_stat.st_dev, current_stat.st_ino) == (
+        opened_stat.st_dev,
+        opened_stat.st_ino,
+    )
+
+
+def _regular_file_descriptor_matches(git_fd: int, name: str, config_fd: int) -> bool:
+    try:
+        current_stat = os.stat(name, dir_fd=git_fd, follow_symlinks=False)
     except OSError:
         return False
     opened_stat = os.fstat(config_fd)
@@ -718,19 +817,79 @@ def _git_config_is_current(git_fd: int, config_fd: int) -> bool:
     )
 
 
-def _restore_git_config(config_fd: int, payload: bytes) -> None:
-    os.ftruncate(config_fd, 0)
-    os.lseek(config_fd, 0, os.SEEK_SET)
-    _write_all(config_fd, payload)
-    os.fsync(config_fd)
+def _git_config_is_current(git_fd: int, config_fd: int) -> bool:
+    return _regular_file_descriptor_matches(git_fd, "config", config_fd)
 
 
-def _append_and_verify_git_config(git_fd: int, config_fd: int, appended: bytes, expected: bytes) -> None:
-    _write_all(config_fd, appended)
-    os.fsync(config_fd)
-    if not _git_config_is_current(git_fd, config_fd) or _read_git_config_payload(config_fd) != expected:
-        msg = "Agent repository workspace Git config changed during configuration"
-        raise RepositoryBindingError(msg)
+def _stage_git_config(git_fd: int, payload: bytes) -> tuple[str, int]:
+    staging_name = f".config.mindroom-{secrets.token_hex(8)}"
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    try:
+        staging_fd = os.open(staging_name, flags, 0o644, dir_fd=git_fd)
+        try:
+            _write_all(staging_fd, payload)
+            os.fsync(staging_fd)
+        except Exception:
+            os.close(staging_fd)
+            raise
+    except Exception:
+        with suppress(FileNotFoundError):
+            os.unlink(staging_name, dir_fd=git_fd)
+        raise
+    return staging_name, staging_fd
+
+
+def _restore_git_config_backup(git_fd: int, backup_name: str) -> bool:
+    try:
+        _rename_at_no_replace(git_fd, backup_name, git_fd, "config")
+    except OSError:
+        return False
+    os.fsync(git_fd)
+    return True
+
+
+def _replace_git_config_if_unchanged(
+    git_fd: int,
+    config_fd: int,
+    original: bytes,
+    replacement: bytes,
+) -> None:
+    staging_name, staging_fd = _stage_git_config(git_fd, replacement)
+    backup_name = f".config.mindroom-backup-{secrets.token_hex(8)}"
+    backup_exists = False
+    published = False
+    try:
+        os.rename("config", backup_name, src_dir_fd=git_fd, dst_dir_fd=git_fd)
+        backup_exists = True
+        if (
+            not _regular_file_descriptor_matches(git_fd, backup_name, config_fd)
+            or _read_git_config_payload(config_fd) != original
+        ):
+            if _restore_git_config_backup(git_fd, backup_name):
+                backup_exists = False
+            msg = "Agent repository workspace Git config changed during configuration"
+            raise RepositoryBindingError(msg)
+        try:
+            _rename_at_no_replace(git_fd, staging_name, git_fd, "config")
+        except OSError as exc:
+            if _restore_git_config_backup(git_fd, backup_name):
+                backup_exists = False
+            msg = "Agent repository workspace Git config changed during configuration"
+            raise RepositoryBindingError(msg) from exc
+        published = True
+        if not _git_config_is_current(git_fd, staging_fd) or _read_git_config_payload(staging_fd) != replacement:
+            msg = "Agent repository workspace Git config changed during configuration"
+            raise RepositoryBindingError(msg)
+        os.unlink(backup_name, dir_fd=git_fd)
+        backup_exists = False
+        os.fsync(git_fd)
+    finally:
+        os.close(staging_fd)
+        if not published:
+            with suppress(FileNotFoundError):
+                os.unlink(staging_name, dir_fd=git_fd)
+        if backup_exists:
+            os.fsync(git_fd)
 
 
 def _append_origin_to_git_config(git_fd: int, config_fd: int, clone_url: str) -> None:
@@ -740,37 +899,12 @@ def _append_origin_to_git_config(git_fd: int, config_fd: int, clone_url: str) ->
         msg = "Agent repository workspace origin changed during configuration"
         raise RepositoryOriginConflictError(msg)
     separator = b"\n" if config and not config.endswith(b"\n") else b""
-    appended = separator + _remote_origin_config(clone_url)
-    expected = config + appended
+    expected = config + separator + _remote_origin_config(clone_url)
     if len(expected) > _MAX_GIT_CONFIG_BYTES:
         msg = "Agent repository workspace Git config is too large"
         raise RepositoryBindingError(msg)
 
-    try:
-        write_fd = os.open("config", os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW, dir_fd=git_fd)
-    except OSError as exc:
-        msg = "Agent repository workspace Git config changed during configuration"
-        raise RepositoryBindingError(msg) from exc
-    try:
-        if not _git_config_is_current(git_fd, write_fd):
-            msg = "Agent repository workspace Git config changed during configuration"
-            raise RepositoryBindingError(msg)
-        opened_stat = os.fstat(config_fd)
-        write_stat = os.fstat(write_fd)
-        if (opened_stat.st_dev, opened_stat.st_ino) != (write_stat.st_dev, write_stat.st_ino):
-            msg = "Agent repository workspace Git config changed during configuration"
-            raise RepositoryBindingError(msg)
-        if _read_git_config_payload(write_fd) != config:
-            msg = "Agent repository workspace Git config changed during configuration"
-            raise RepositoryBindingError(msg)
-
-        try:
-            _append_and_verify_git_config(git_fd, write_fd, appended, expected)
-        except Exception:
-            _restore_git_config(write_fd, config)
-            raise
-    finally:
-        os.close(write_fd)
+    _replace_git_config_if_unchanged(git_fd, config_fd, config, expected)
 
 
 def _github_transport_and_path(url: str) -> tuple[str, str] | None:
@@ -818,6 +952,74 @@ def _normalized_github_repository(url: str) -> tuple[str, str, str] | None:
     return transport, organization.casefold(), repository.casefold()
 
 
+def _require_expected_origin(
+    entries: tuple[tuple[str, str], ...],
+    expected: tuple[str, str, str],
+) -> bool:
+    fetch_urls, push_urls, has_origin = _origin_urls_from_config(entries)
+    actual_urls = [*fetch_urls, *(push_urls or fetch_urls)]
+    if has_origin and (not fetch_urls or any(_normalized_github_repository(url) != expected for url in actual_urls)):
+        msg = "Agent repository workspace has an origin for a different repository"
+        raise RepositoryOriginConflictError(msg)
+    return has_origin
+
+
+def _read_current_git_config_entries(git_fd: int, config_fd: int) -> tuple[tuple[str, str], ...]:
+    entries = _read_git_config_entries(config_fd)
+    if (
+        not _git_config_is_current(git_fd, config_fd)
+        or _parse_git_config_entries(_read_git_config_payload(config_fd)) != entries
+        or not _git_config_is_current(git_fd, config_fd)
+    ):
+        msg = "Agent repository workspace Git config changed during configuration"
+        raise RepositoryBindingError(msg)
+    return entries
+
+
+def _configure_git_origin(
+    workspace_fd: int,
+    git_fd: int,
+    clone_url: str,
+    expected: tuple[str, str, str],
+) -> None:
+    config_fd = _open_git_config(git_fd)
+    try:
+        has_origin = _require_expected_origin(_read_current_git_config_entries(git_fd, config_fd), expected)
+        if not has_origin:
+            if not _git_directory_is_current(workspace_fd, git_fd):
+                msg = "Agent repository workspace Git metadata changed during configuration"
+                raise RepositoryBindingError(msg)
+            _append_origin_to_git_config(git_fd, config_fd, clone_url)
+    finally:
+        os.close(config_fd)
+
+
+def _verify_configured_git_workspace(
+    workspace_path: Path,
+    workspace_fd: int,
+    git_fd: int,
+    expected: tuple[str, str, str],
+) -> None:
+    _reject_indirect_git_configuration(git_fd)
+    _require_complete_git_directory(git_fd)
+    if not _git_directory_is_current(workspace_fd, git_fd):
+        msg = "Agent repository workspace Git metadata changed during configuration"
+        raise RepositoryBindingError(msg)
+    config_fd = _open_git_config(git_fd)
+    try:
+        if not _require_expected_origin(_read_current_git_config_entries(git_fd, config_fd), expected):
+            msg = "Agent repository workspace has an origin for a different repository"
+            raise RepositoryOriginConflictError(msg)
+    finally:
+        os.close(config_fd)
+    if not _git_directory_is_current(workspace_fd, git_fd):
+        msg = "Agent repository workspace Git metadata changed during configuration"
+        raise RepositoryBindingError(msg)
+    if not _workspace_directory_is_current(workspace_path, workspace_fd):
+        msg = "Agent repository workspace path changed during configuration"
+        raise RepositoryBindingError(msg)
+
+
 def configure_repository_workspace(
     *,
     workspace: Path,
@@ -833,37 +1035,14 @@ def configure_repository_workspace(
     with advisory_file_lock(lock_path):
         workspace_path, workspace_fd = _open_workspace_directory(workspace)
         try:
-            git_fd, created = _open_git_directory(workspace_fd)
+            git_fd = _open_existing_git_directory(workspace_fd)
+            if git_fd is None:
+                git_fd = _initialize_git_directory_atomically(workspace_fd, clone_url)
             try:
                 _reject_indirect_git_configuration(git_fd)
-                if created:
-                    _initialize_git_directory(git_fd, clone_url)
-                else:
-                    _require_complete_git_directory(git_fd)
-                    config_fd = _open_git_config(git_fd)
-                    try:
-                        fetch_urls, push_urls, has_origin = _origin_urls_from_config(
-                            _read_git_config_entries(config_fd),
-                        )
-                        if has_origin:
-                            actual_urls = [*fetch_urls, *(push_urls or fetch_urls)]
-                            if not fetch_urls or any(
-                                _normalized_github_repository(url) != expected for url in actual_urls
-                            ):
-                                msg = "Agent repository workspace has an origin for a different repository"
-                                raise RepositoryOriginConflictError(msg)
-                        else:
-                            if not _git_directory_is_current(workspace_fd, git_fd):
-                                msg = "Agent repository workspace Git metadata changed during configuration"
-                                raise RepositoryBindingError(msg)
-                            _append_origin_to_git_config(git_fd, config_fd, clone_url)
-                    finally:
-                        os.close(config_fd)
-
-                _reject_indirect_git_configuration(git_fd)
-                if not _git_directory_is_current(workspace_fd, git_fd):
-                    msg = "Agent repository workspace Git metadata changed during configuration"
-                    raise RepositoryBindingError(msg)
+                _require_complete_git_directory(git_fd)
+                _configure_git_origin(workspace_fd, git_fd, clone_url, expected)
+                _verify_configured_git_workspace(workspace_path, workspace_fd, git_fd, expected)
                 return workspace_path
             finally:
                 os.close(git_fd)

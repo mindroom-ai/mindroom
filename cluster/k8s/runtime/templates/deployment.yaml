@@ -587,10 +587,10 @@ spec:
         {{- if .Values.agentRepositories.enabled }}
         - name: {{ include "mindroom-runtime.agentRepositoryBrokerVolumeName" . }}
           secret:
-            secretName: {{ .Values.agentRepositories.brokerTokenSecret.name }}
+            secretName: {{ .Values.agentRepositories.brokerTokenSecret.name | quote }}
             items:
-              - key: {{ .Values.agentRepositories.brokerTokenSecret.key }}
-                path: {{ .Values.agentRepositories.brokerTokenSecret.key }}
+              - key: {{ .Values.agentRepositories.brokerTokenSecret.key | quote }}
+                path: {{ .Values.agentRepositories.brokerTokenSecret.key | quote }}
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}

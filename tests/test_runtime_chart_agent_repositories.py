@@ -16,7 +16,10 @@ RUNTIME_CHART_DIR = REPO_ROOT / "cluster" / "k8s" / "runtime"
 BROKER_MOUNT_DIRECTORY = "/etc/agent-repository-broker"
 
 
-def _render_runtime_chart(*set_args: str) -> list[dict[str, Any]]:
+def _render_runtime_chart(
+    *set_args: str,
+    set_string_args: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
     helm = shutil.which("helm")
     if helm is None:
         pytest.skip("helm is required for rendered chart checks")
@@ -27,6 +30,7 @@ def _render_runtime_chart(*set_args: str) -> list[dict[str, Any]]:
             "mindroom-demo",
             str(RUNTIME_CHART_DIR),
             *(argument for value in set_args for argument in ("--set", value)),
+            *(argument for value in set_string_args for argument in ("--set-string", value)),
         ],
         check=True,
         capture_output=True,
@@ -112,6 +116,25 @@ def test_enabled_agent_repositories_render_only_to_control_plane() -> None:
         assert "agent-repository-broker" not in {mount["name"] for mount in container.get("volumeMounts", [])}
 
 
+def test_secret_reference_strings_remain_strings_after_render() -> None:
+    """Boolean-like Secret names and keys must remain Kubernetes string fields."""
+    pod_spec = _deployment(
+        _render_runtime_chart(
+            *_enabled_values(),
+            set_string_args=(
+                "agentRepositories.brokerTokenSecret.name=true",
+                "agentRepositories.brokerTokenSecret.key=null",
+            ),
+        ),
+    )["spec"]["template"]["spec"]
+    broker_volume = next(volume for volume in pod_spec["volumes"] if volume["name"] == "agent-repository-broker")
+
+    assert broker_volume["secret"] == {
+        "secretName": "true",
+        "items": [{"key": "null", "path": "null"}],
+    }
+
+
 def test_agent_repositories_validation_rejects_partial_or_unsafe_policy() -> None:
     """Enabled chart wiring requires the complete fixed policy and Secret reference."""
     helm = shutil.which("helm")
@@ -154,6 +177,10 @@ def test_agent_repositories_validation_rejects_partial_or_unsafe_policy() -> Non
         (
             (*_enabled_values(), f"agentRepositories.brokerTokenSecret.name={'a' * 64}.valid"),
             "agentRepositories.brokerTokenSecret.name must be a valid Kubernetes Secret name",
+        ),
+        (
+            (*_enabled_values(), f"agentRepositories.brokerTokenSecret.key={'a' * 254}"),
+            "agentRepositories.brokerTokenSecret.key must be a valid Kubernetes Secret key",
         ),
         (
             (*_enabled_values(), "workers.backend=static_runner"),

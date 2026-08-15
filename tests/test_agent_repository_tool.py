@@ -17,6 +17,7 @@ import pytest
 import mindroom.agent_repositories as agent_repositories_module
 import mindroom.custom_tools.agent_repository as agent_repository_tool_module
 from mindroom.agent_repositories import (
+    RepositoryBindingError,
     RepositoryBindingStore,
     RepositoryEnsureRequest,
     RepositoryLease,
@@ -605,6 +606,184 @@ async def test_git_config_swap_cannot_redirect_origin_write(
     assert payload["status"] == "error"
     assert inspected_config.read_bytes() == config_before
     assert config_path.read_bytes() == hostile_config
+
+
+@pytest.mark.asyncio
+async def test_matching_origin_config_swap_cannot_return_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config path replacement after approval must invalidate workspace readiness."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    _git(workspace, "remote", "add", "origin", _lease().clone_url)
+    config_path = workspace / ".git" / "config"
+    approved_config = config_path.with_name("config-approved")
+    config_before = config_path.read_bytes()
+    hostile_config = config_before.replace(_lease().clone_url.encode(), b"https://github.com/other/repository.git")
+    original_read_git_config_entries = agent_repositories_module._read_git_config_entries
+    swapped = False
+
+    def swap_after_origin_approval(config_fd: int) -> tuple[tuple[str, str], ...]:
+        nonlocal swapped
+        result = original_read_git_config_entries(config_fd)
+        if not swapped:
+            config_path.rename(approved_config)
+            config_path.write_bytes(hostile_config)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(agent_repositories_module, "_read_git_config_entries", swap_after_origin_approval)
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert swapped
+    assert payload["status"] == "error"
+    assert approved_config.read_bytes() == config_before
+    assert config_path.read_bytes() == hostile_config
+
+
+@pytest.mark.asyncio
+async def test_matching_origin_content_change_cannot_return_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-inode config change after final approval must invalidate readiness."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    _git(workspace, "remote", "add", "origin", _lease().clone_url)
+    config_path = workspace / ".git" / "config"
+    config_inode = config_path.stat().st_ino
+    hostile_config = config_path.read_bytes().replace(
+        _lease().clone_url.encode(),
+        b"https://github.com/other/repository.git",
+    )
+    original_read_git_config_entries = agent_repositories_module._read_git_config_entries
+    inspection_count = 0
+
+    def change_after_final_origin_approval(config_fd: int) -> tuple[tuple[str, str], ...]:
+        nonlocal inspection_count
+        result = original_read_git_config_entries(config_fd)
+        inspection_count += 1
+        if inspection_count == 2:
+            with config_path.open("r+b") as config_file:
+                config_file.truncate()
+                config_file.write(hostile_config)
+                config_file.flush()
+                os.fsync(config_file.fileno())
+        return result
+
+    monkeypatch.setattr(agent_repositories_module, "_read_git_config_entries", change_after_final_origin_approval)
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert inspection_count == 2
+    assert payload["status"] == "error"
+    assert config_path.stat().st_ino == config_inode
+    assert config_path.read_bytes() == hostile_config
+
+
+@pytest.mark.asyncio
+async def test_workspace_path_swap_cannot_return_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Readiness must refer to the workspace path, not a renamed descriptor target."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    _git(workspace, "remote", "add", "origin", _lease().clone_url)
+    original_workspace = tmp_path / "workspace-original"
+    original_git_directory_is_current = agent_repositories_module._git_directory_is_current
+    hostile_origin = "https://github.com/other/repository.git"
+    replacement_config: bytes | None = None
+    swapped = False
+
+    def swap_workspace_before_success(workspace_fd: int, git_fd: int) -> bool:
+        nonlocal replacement_config, swapped
+        result = original_git_directory_is_current(workspace_fd, git_fd)
+        if not swapped:
+            workspace.rename(original_workspace)
+            workspace.mkdir()
+            _git(workspace, "init", "--initial-branch=main")
+            _git(workspace, "remote", "add", "origin", hostile_origin)
+            replacement_config = (workspace / ".git" / "config").read_bytes()
+            swapped = True
+        return result
+
+    monkeypatch.setattr(agent_repositories_module, "_git_directory_is_current", swap_workspace_before_success)
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert swapped
+    assert payload["status"] == "error"
+    assert replacement_config is not None
+    assert (workspace / ".git" / "config").read_bytes() == replacement_config
+    assert _git(workspace, "remote", "get-url", "origin") == hostile_origin
+
+
+@pytest.mark.asyncio
+async def test_failed_git_initialization_leaves_no_partial_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed first initialization must leave a clean retryable workspace."""
+    workspace = tmp_path / "workspace"
+    real_atomic_write_at = agent_repositories_module._atomic_write_at
+
+    def fail_config_write(directory_fd: int, name: str, payload: bytes, *, mode: int) -> None:
+        if name == "config":
+            msg = "injected config write failure"
+            raise OSError(msg)
+        real_atomic_write_at(directory_fd, name, payload, mode=mode)
+
+    monkeypatch.setattr(agent_repositories_module, "_atomic_write_at", fail_config_write)
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert payload["status"] == "error"
+    assert not (workspace / ".git").exists()
+    assert list(workspace.iterdir()) == []
+
+
+def test_concurrent_git_config_write_is_not_erased_during_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed origin publication must preserve bytes written by a concurrent owner."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    config_path = workspace / ".git" / "config"
+    concurrent_change = b"# concurrent owner change\n"
+    original_write_all = agent_repositories_module._write_all
+    concurrent_write_seen = False
+
+    def write_concurrently_during_origin_publication(file_fd: int, payload: bytes) -> None:
+        nonlocal concurrent_write_seen
+        original_write_all(file_fd, payload)
+        if not concurrent_write_seen and _lease().clone_url.encode() in payload:
+            with config_path.open("ab") as config_file:
+                config_file.write(concurrent_change)
+                config_file.flush()
+                os.fsync(config_file.fileno())
+            concurrent_write_seen = True
+
+    monkeypatch.setattr(agent_repositories_module, "_write_all", write_concurrently_during_origin_publication)
+
+    with pytest.raises(RepositoryBindingError, match="changed during configuration"):
+        configure_repository_workspace(
+            workspace=workspace,
+            clone_url=_lease().clone_url,
+            lock_path=tmp_path / "workspace.lock",
+        )
+
+    assert concurrent_write_seen
+    config_after = config_path.read_bytes()
+    assert concurrent_change in config_after
+    assert _lease().clone_url.encode() not in config_after
 
 
 @pytest.mark.asyncio
