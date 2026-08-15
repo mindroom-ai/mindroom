@@ -648,14 +648,15 @@ def _print_pairing_success_with_exports(
     """Print non-persisted exports for local provisioning credentials."""
     console.print("[green]Paired successfully.[/green]")
     console.print("\nExport these variables before running MindRoom:")
-    console.print(f"  export MINDROOM_PROVISIONING_URL={shlex.quote(provisioning_url)}")
-    console.print(f"  export MINDROOM_LOCAL_CLIENT_ID={shlex.quote(client_id)}")
-    console.print(f"  export MINDROOM_LOCAL_CLIENT_SECRET={shlex.quote(client_secret)}")
-    console.print(f"  export MINDROOM_NAMESPACE={shlex.quote(namespace)}")
+    console.print(f"  export MINDROOM_PROVISIONING_URL={shlex.quote(provisioning_url)}", markup=False)
+    console.print(f"  export MINDROOM_LOCAL_CLIENT_ID={shlex.quote(client_id)}", markup=False)
+    console.print(f"  export MINDROOM_LOCAL_CLIENT_SECRET={shlex.quote(client_secret)}", markup=False)
+    console.print(f"  export MINDROOM_NAMESPACE={shlex.quote(namespace)}", markup=False)
     if owner_user_id:
-        console.print(f"  export MINDROOM_OWNER_USER_ID={shlex.quote(owner_user_id)}")
+        console.print(f"  export MINDROOM_OWNER_USER_ID={shlex.quote(owner_user_id)}", markup=False)
         console.print(
             f"\nOwner user ID from pairing: {owner_user_id} (not persisted in --no-persist-env mode).",
+            markup=False,
         )
         console.print(
             "Update your config.yaml owner placeholder(s) manually if you rely on authorization defaults.",

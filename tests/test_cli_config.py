@@ -3717,7 +3717,7 @@ class TestConnect:
                 200,
                 json={
                     "client_id": "client value",
-                    "client_secret": "secret;$(id)",
+                    "client_secret": "[red]secret;$(id)[/red]",
                     "namespace": "a1b2c3d4",
                     "owner_user_id": "@alice:mindroom.chat",
                 },
@@ -3739,7 +3739,7 @@ class TestConnect:
         assert result.exit_code == 0
         assert "export MINDROOM_PROVISIONING_URL='https://x.test/a b'" in result.output
         assert "export MINDROOM_LOCAL_CLIENT_ID='client value'" in result.output
-        assert "export MINDROOM_LOCAL_CLIENT_SECRET='secret;$(id)'" in result.output
+        assert "export MINDROOM_LOCAL_CLIENT_SECRET='[red]secret;$(id)[/red]'" in result.output
         assert "export MINDROOM_NAMESPACE=a1b2c3d4" in result.output
 
     def test_connect_uses_runtime_env_default_provisioning_url(
