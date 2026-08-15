@@ -44,6 +44,11 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
+_SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
+
+
+class _SanitizedGoogleRefreshError(RefreshError):
+    """Refresh failure safe to expose to wrapped toolkit code and logs."""
 
 
 class _OAuthAuthSource(Enum):
@@ -257,7 +262,7 @@ class ScopedOAuthClientMixin:
                             expected_credentials=token_data,
                         )
                     self.service = None
-                raise
+                raise _SanitizedGoogleRefreshError(_SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE) from None
 
         credentials.refresh = tracked_refresh
         return credentials

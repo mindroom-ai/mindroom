@@ -438,9 +438,13 @@ def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
         worker_target=worker_target,
     )
 
+    provider_detail = "refresh rejected with stored-refresh-token"
+
     def fail_refresh(*_args: object, **_kwargs: object) -> None:
-        message = "refresh rejected"
-        raise RefreshError(message, {"error": "invalid_grant"})
+        raise RefreshError(
+            provider_detail,
+            {"error": "invalid_grant", "error_description": provider_detail},
+        )
 
     monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", fail_refresh)
     tool = GoogleDriveTools(
@@ -449,10 +453,13 @@ def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
         worker_target=worker_target,
     )
 
+    captured_log_messages: list[str] = []
+
     def swallowed_failure() -> str:
         try:
             tool.creds.refresh(object())
         except RefreshError as exc:
+            captured_log_messages.append(str(exc))
             return f"Unexpected error: {exc}"
         return "unexpected success"
 
@@ -463,6 +470,8 @@ def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
 
     assert payload["oauth_connection_required"] is True
     assert payload["reason"] == "refresh_rejected"
+    assert captured_log_messages == ["OAuth credential refresh failed"]
+    assert provider_detail not in repr(captured_log_messages)
     assert (
         load_scoped_credentials(
             GoogleDriveTools._oauth_provider.credential_service,

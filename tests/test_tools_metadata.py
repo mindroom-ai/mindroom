@@ -162,6 +162,11 @@ def test_export_tools_metadata_json() -> None:
         assert "managed_init_args" not in first_tool
 
 
+def test_oauth_connections_requires_live_room_context() -> None:
+    """OAuth reset must not be advertised where its approval context cannot exist."""
+    assert TOOL_METADATA["oauth_connections"].requires_room_context is True
+
+
 def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
     """Export should ignore temporary registry contamination from earlier tests."""
     tool_name = "test_leaked_tool"

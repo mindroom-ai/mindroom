@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import math
 import time
 from dataclasses import dataclass
@@ -306,36 +305,13 @@ async def refresh_scoped_oauth_credentials_with_result(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
-    return await asyncio.to_thread(
-        _run_scoped_oauth_credentials_refresh_singleflight,
-        provider,
-        runtime_paths,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-        allowed_shared_services=allowed_shared_services,
-        singleflight_lock_path=singleflight_lock_path,
-    )
-
-
-def _run_scoped_oauth_credentials_refresh_singleflight(
-    provider: OAuthProvider,
-    runtime_paths: RuntimePaths,
-    *,
-    credentials_manager: CredentialsManager,
-    worker_target: ResolvedWorkerTarget | None,
-    allowed_shared_services: frozenset[str] | None,
-    singleflight_lock_path: Path,
-) -> OAuthCredentialsRefreshResult:
-    """Run one refresh in a worker thread so blocking lock wait cannot deadlock the caller loop."""
-    with advisory_file_lock(singleflight_lock_path):
-        return asyncio.run(
-            _refresh_scoped_oauth_credentials_with_result_unserialized(
-                provider,
-                runtime_paths,
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-                allowed_shared_services=allowed_shared_services,
-            ),
+    async with async_exclusive_file_lock(singleflight_lock_path):
+        return await _refresh_scoped_oauth_credentials_with_result_unserialized(
+            provider,
+            runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
         )
 
 

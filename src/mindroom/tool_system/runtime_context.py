@@ -107,14 +107,6 @@ class ToolRuntimeContext:
             raise RuntimeError(msg)
         return self.agent_reply_memberships
 
-    def __post_init__(self) -> None:
-        """Freeze the authorization-canonical requester for every tool ownership decision."""
-        object.__setattr__(
-            self,
-            "requester_id",
-            self.config.authorization.resolve_alias(self.requester_id),
-        )
-
     @property
     def room_id(self) -> str:
         """Return the canonical target room ID."""

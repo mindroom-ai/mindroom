@@ -7314,7 +7314,7 @@
       "icon": "Unplug",
       "icon_color": "text-amber-500",
       "name": "oauth_connections",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },

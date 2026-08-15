@@ -14,16 +14,19 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom import thread_tag_vocabulary
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_tags import ThreadTagsTools
 from mindroom.matrix.room_history_reads import RoomThreadsPageError
 from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsListing, ThreadTagsState
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.authorization_helpers import (
-    make_test_tool_runtime_context,
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    build_execution_identity_from_runtime_context,
+    tool_runtime_context,
 )
+from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -41,10 +44,15 @@ def _make_context(
     room_id: str = "!room:localhost",
     thread_id: str | None = "$thread:localhost",
     reply_to_event_id: str | None = None,
+    requester_id: str = "@user:localhost",
+    aliases: dict[str, list[str]] | None = None,
 ) -> ToolRuntimeContext:
     runtime_root = Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
-        Config(agents={"general": AgentConfig(display_name="General Agent")}),
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            authorization=AuthorizationConfig(aliases=aliases or {}),
+        ),
         test_runtime_paths(runtime_root),
     )
     return make_test_tool_runtime_context(
@@ -54,7 +62,7 @@ def _make_context(
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
         ),
-        requester_id="@user:localhost",
+        requester_id=requester_id,
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
@@ -174,6 +182,44 @@ async def test_tag_thread_defaults_to_context_thread_id() -> None:
         "$ctx-thread:localhost",
         "topic",
         set_by=context.requester_id,
+        note=None,
+        data=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tag_thread_preserves_bridge_actor_while_worker_identity_is_canonical() -> None:
+    """Live Matrix operations need the joined alias while worker ownership uses its canonical principal."""
+    alias = "@telegram_alice:localhost"
+    canonical = "@alice:localhost"
+    tool = ThreadTagsTools()
+    context = _make_context(
+        requester_id=alias,
+        aliases={canonical: [alias]},
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(return_value="$thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_tags.set_thread_tag",
+            new=AsyncMock(return_value=_state("$thread:localhost", topic=_record())),
+        ) as mock_set,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.tag_thread("topic"))
+
+    assert payload["status"] == "ok"
+    assert context.requester_id == alias
+    assert build_execution_identity_from_runtime_context(context).requester_id == canonical
+    mock_set.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$thread:localhost",
+        "topic",
+        set_by=alias,
         note=None,
         data=None,
     )

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     dependencies=["agno"],
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS, ToolManagedInitArg.WORKER_TARGET),
     function_names=("reset_oauth_connection",),
+    requires_room_context=True,
 )
 def oauth_connections_tools() -> type[OAuthConnectionTools]:
     """Return narrow OAuth connection management tools."""
