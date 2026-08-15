@@ -6,7 +6,7 @@
 
 > **Audit note (2026-03-18):** Completion claims in this summary lack PR/commit proof.
 > Alertmanager receiver configuration is still pending.
-> The 6.8→5.8 risk score reduction is stated without supporting methodology.
+> Historical numeric risk scores are omitted because they lack a supporting methodology.
 >
 > **Evidence boundary:** This is a historical repository review, not a deployment attestation.
 > “Present” below means visible in tracked code or configuration unless a dated live-environment result is cited.
@@ -81,7 +81,7 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
 
 - **Completed:** Admin/API hardening, auth monitoring, CSP, GDPR endpoints, per-instance isolation.
 - **Remaining:** Secrets rotation validation, alerting/IR, pod hardening, dependency automation, frontend re-auth.
-- **Risk Reduction:** 6.8/10 (HIGH) → 5.8/10 (MEDIUM-HIGH). Further reduction blocked by outstanding items.
+- **Risk Assessment:** Not quantified; further improvement is blocked by outstanding items.
 - **Next Milestone:** Close High items and re-run the executive review.
 
 ## Recommendations (Pre-Launch)
@@ -96,8 +96,7 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
 
 The platform is trending in the right direction—major blockers are resolved and multi-tenancy controls hold up under review. Nevertheless, the absence of secrets lifecycle verification, monitoring/IR, and pod hardening leaves meaningful exposure. Treat the environment as staging-only until the remaining work lands.
 
-**Initial Risk Level:** ~6.8/10 (HIGH)
-**Current Risk Level:** ~5.8/10 (MEDIUM-HIGH)
+**Current Risk Level:** Not quantified; meaningful exposure remains.
 **Production Ready:** ❌ No – high-priority tasks outstanding
 
 ### Production Deployment Decision
@@ -105,7 +104,7 @@ The platform is trending in the right direction—major blockers are resolved an
 **Status: BLOCKED** 🚫
 
 - **Security Posture:** Improved but missing verified rotation, alerting, and internal hardening.
-- **Risk Level:** Medium-High (5.8/10)
+- **Risk Level:** Meaningful and not quantified
 - **Compliance:** GDPR workflows present; must confirm data-at-rest encryption + retention policies before attesting compliance.
 
 **Recommendation:** Hold production deployment. Re-assess once secrets lifecycle, monitoring/IR, and infrastructure hardening tasks are complete and documented.

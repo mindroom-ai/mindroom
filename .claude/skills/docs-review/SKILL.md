@@ -42,12 +42,14 @@ Compare docs under `docs/configuration/` against the Pydantic models in the `src
 Do not rely on a fixed list of files; discover what exists in both locations and check they match.
 
 ```bash
-# Find all config models
-rg -n "class .*\(BaseModel\)" src/mindroom/config
+# Find every config class declaration, including indirect Pydantic subclasses
+rg -n "^class " src/mindroom/config
 
 # Find all config doc files
 ls docs/configuration/
 ```
+
+Trace inheritance for every discovered class instead of assuming each Pydantic model directly subclasses `BaseModel`.
 
 Check:
 - All config keys documented, types and defaults match code

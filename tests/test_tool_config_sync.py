@@ -33,8 +33,12 @@ OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph", "telegram"})
 IGNORED_AGNO_PARAMS = {
     # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
     "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
+    # Mapping-only inputs have no safe authored ConfigField representation.
+    "mem0": {"config"},
+    "scrapegraph": {"headers"},
     # Agno accepts an SSLContext for Slack, but MindRoom has no safe serialized UI/config path for it.
     "slack": {"ssl"},
+    "youtube": {"proxies"},
     # Agno accepts a live HTTP session object, which MindRoom cannot serialize safely in UI/YAML config.
     "yfinance": {"session"},
 }
@@ -58,6 +62,17 @@ def test_youtube_languages_accepts_authored_string_list() -> None:
     overrides = validate_authored_tool_entry_overrides("youtube", {"languages": ["en", "nl"]})
 
     assert overrides == {"languages": ["en", "nl"]}
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "mapping_field"),
+    [("youtube", "proxies"), ("mem0", "config"), ("scrapegraph", "headers")],
+)
+def test_mapping_only_upstream_fields_are_not_authored(tool_name: str, mapping_field: str) -> None:
+    """Mapping-only upstream inputs should not be exposed as misleading text fields."""
+    authored_names = {field.name for field in TOOL_METADATA[tool_name].config_fields or []}
+
+    assert mapping_field not in authored_names
 
 
 def test_arxiv_download_directory_is_converted_to_path(tmp_path: Path) -> None:

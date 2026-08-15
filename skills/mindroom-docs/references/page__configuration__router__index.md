@@ -61,7 +61,7 @@ A requester-scoped `!desktop` command may instead be owned by an eligible privat
 - `!encrypt [confirm]` - Enable room encryption (irreversible, room admin only)
 - `!e2ee` - Show room encryption diagnostics
 
-Even in single-responder rooms, commands are always processed by the router.
+Except for the requester-scoped `!desktop` case above, commands are processed by the router even in single-responder rooms.
 
 ### Welcome Messages
 

@@ -2376,12 +2376,12 @@
         },
         {
           "authored_override": true,
-          "default": "PYTHON",
-          "description": "Primary language for the sandbox (PYTHON, JAVASCRIPT, TYPESCRIPT)",
+          "default": "python",
+          "description": "Primary language for the sandbox (python, javascript, typescript)",
           "label": "Sandbox Language",
           "name": "sandbox_language",
           "options": null,
-          "placeholder": "PYTHON",
+          "placeholder": "python",
           "required": false,
           "type": "text",
           "validation": null
@@ -4562,7 +4562,7 @@
         {
           "authored_override": true,
           "default": "mp4",
-          "description": "The type of file to generate (mp4, gif, or mp3)",
+          "description": "The type of file to generate (png, jpg, mp4, gif, mp3, or wav)",
           "label": "File Type",
           "name": "file_type",
           "options": null,
@@ -6848,18 +6848,6 @@
           "required": false,
           "type": "string[]",
           "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Proxies",
-          "name": "proxies",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -8100,18 +8088,6 @@
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Config",
-          "name": "config",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
         {
           "authored_override": true,
           "default": null,
@@ -11560,18 +11536,6 @@
           "placeholder": null,
           "required": false,
           "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Headers",
-          "name": "headers",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
           "validation": null
         },
         {
