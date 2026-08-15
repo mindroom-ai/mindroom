@@ -24,6 +24,7 @@ from agno.workflow.types import StepInput, StepOutput
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
@@ -1793,6 +1794,37 @@ def test_dynamic_workflow_tool_rejects_unavailable_room_agent_during_validation(
     """Room-agent participants should match the requester-visible agents in the current room."""
     tool = DynamicWorkflowTools()
     context = _make_multi_agent_context(tmp_path, room_agents=["general"])
+    spec = _workflow_spec(
+        participants=[
+            {
+                "id": "writer",
+                "kind": "room_agent",
+                "agent": "specialist",
+            },
+        ],
+    )
+
+    with tool_runtime_context(context):
+        result = _tool_payload(tool.validate_workflow(spec))
+
+    assert result["status"] == "error"
+    assert "not available to this requester in this room" in result["message"]
+
+
+def test_dynamic_workflow_validation_uses_current_authorization_after_reload(tmp_path: Path) -> None:
+    """A long-lived tool context must reject room agents revoked by a config reload."""
+    tool = DynamicWorkflowTools()
+    context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
+    current_config = context.config.model_copy(
+        update={
+            "authorization": AuthorizationConfig(
+                agent_reply_permissions={
+                    "specialist": AgentReplyPermission(users=[]),
+                },
+            ),
+        },
+    )
+    context = replace(context, config_provider=lambda: current_config)
     spec = _workflow_spec(
         participants=[
             {

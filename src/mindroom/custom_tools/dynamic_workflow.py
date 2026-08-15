@@ -564,6 +564,7 @@ async def _aexecute_room_agent_participant(
     *,
     run_scope: str = "manual",
 ) -> object:
+    context = replace(context, config=context.current_config, config_provider=None)
     agent_name = _validate_room_agent_reference_for_context(context, participant)
     participant_id = _required_participant_text(participant, "id")
     runtime_model = context.config.resolve_runtime_model(
@@ -601,6 +602,7 @@ async def _aexecute_room_agent_participant(
 
 
 def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:
+    context = replace(context, config=context.current_config, config_provider=None)
     room = _candidate_resolution_room(context)
     candidates = responder_candidate_entities_from_cached_room(
         room,
@@ -633,6 +635,7 @@ def _validate_room_agent_reference_for_context(
     context: ToolRuntimeContext,
     participant: dict[str, object],
 ) -> str:
+    context = replace(context, config=context.current_config, config_provider=None)
     raw_agent_name = participant.get("agent") or participant.get("agent_name")
     if not isinstance(raw_agent_name, str) or not raw_agent_name.strip():
         msg = "Room agent participants must declare an 'agent' field."
@@ -905,6 +908,7 @@ def _resolve_participant_model_name(
 
 
 def _validate_workflow_policy_for_context(context: ToolRuntimeContext, spec: dict[str, object]) -> None:
+    context = replace(context, config=context.current_config, config_provider=None)
     caller_models = _caller_allowed_model_refs(context)
     permission_models = _workflow_permission_model_refs(context, spec)
     for participant in _workflow_participants(spec):

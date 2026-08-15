@@ -14,7 +14,7 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.agent_descriptions import describe_agent
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -212,6 +212,27 @@ async def test_agents_list_payload_structure(tmp_path: Path) -> None:
     assert all(set(row) == {"name", "can_delegate", "can_spawn", "description"} for row in payload["agents"])
     assert all(isinstance(row, dict) for row in payload["agents"])
     assert all(row["can_spawn"] is True for row in payload["agents"])
+
+
+@pytest.mark.asyncio
+async def test_agents_list_uses_current_authorization_after_reload(tmp_path: Path) -> None:
+    """A long-lived tool context must not expose agents revoked by a config reload."""
+    original_config = _make_config()
+    current_config = _make_config()
+    current_config.authorization = AuthorizationConfig(
+        agent_reply_permissions={
+            "research": AgentReplyPermission(users=[]),
+        },
+    )
+    ctx = replace(
+        _make_context(tmp_path, config=original_config),
+        config_provider=lambda: current_config,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().agents_list())
+
+    assert [row["name"] for row in payload["agents"]] == ["code"]
 
 
 @pytest.mark.asyncio

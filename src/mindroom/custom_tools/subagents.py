@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from threading import Lock
 from typing import TYPE_CHECKING, Any, cast
@@ -290,6 +291,7 @@ def _cached_target_room(context: ToolRuntimeContext, room_id: str) -> nio.Matrix
 
 
 async def _available_subagent_names(context: ToolRuntimeContext, *, room_id: str | None = None) -> list[str]:
+    context = replace(context, config=context.current_config, config_provider=None)
     target_room_id = room_id or context.room_id
     target_room = _cached_target_room(context, target_room_id)
     if target_room is not None:
@@ -345,6 +347,7 @@ def _agent_id_error(
     agent_id: str | None,
     available_agents: list[str],
 ) -> str | None:
+    context = replace(context, config=context.current_config, config_provider=None)
     if not agent_id:
         return None
     available = ", ".join(available_agents) or "(none)"
@@ -674,6 +677,7 @@ class SubAgentsTools(Toolkit):
         context = _get_context()
         if context is None:
             return _context_error("agents_list")
+        context = replace(context, config=context.current_config, config_provider=None)
 
         caller_name = context.agent_name
         # Missing callers mirror describe_agent's router special case in agent_descriptions.py:19.

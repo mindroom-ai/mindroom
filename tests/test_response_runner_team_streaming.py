@@ -164,6 +164,43 @@ async def test_team_response_rechecks_every_member_before_execution(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_configured_team_response_rechecks_only_the_team_policy(tmp_path: Path) -> None:
+    """A configured team's explicit policy must override its members' policies."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _config_with_team()
+    config.authorization = AuthorizationConfig(
+        default_room_access=True,
+        agent_reply_permissions={
+            "ultimate": AgentReplyPermission(users=["@alice:localhost"]),
+            "general": AgentReplyPermission(users=[]),
+        },
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    with patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="Team answer")) as response:
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+            enable_streaming=False,
+        )
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert event_id is not None
+    response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_path: Path) -> None:
     """Team Matrix targeting context should reach the model through transient enrichment."""
     runtime_paths = _runtime_paths(tmp_path)

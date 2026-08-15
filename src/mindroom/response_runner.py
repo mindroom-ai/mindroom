@@ -198,6 +198,17 @@ def _materialize_matrix_run_metadata(
     return dict(matrix_run_metadata)
 
 
+def _reply_authorization_entity_names(
+    config: Config,
+    owner_entity_name: str,
+    team_member_names: Sequence[str],
+) -> tuple[str, ...]:
+    """Return the policy entities governing one agent or team execution."""
+    if owner_entity_name in config.teams:
+        return (owner_entity_name,)
+    return tuple(dict.fromkeys((owner_entity_name, *team_member_names)))
+
+
 def _agent_has_matrix_messaging_tool(config: Config, agent_name: str, session_id: str | None) -> bool:
     """Return whether one agent can issue Matrix message actions."""
     try:
@@ -1906,7 +1917,11 @@ class ResponseRunner:
             return event_id
         if not is_sender_allowed_for_entity_replies_in_room(
             owned.requester_id,
-            (owned.entity_name, *owned.team_member_names),
+            _reply_authorization_entity_names(
+                self.deps.runtime.config,
+                owned.entity_name,
+                owned.team_member_names,
+            ),
             self.deps.runtime.config,
             owned.room_id,
             self.deps.runtime_paths,
@@ -2407,7 +2422,11 @@ class ResponseRunner:
     ) -> bool:
         """Recheck one requester after serialized lifecycle admission."""
         requester_id = request.response_envelope.requester_id
-        entity_names = tuple(dict.fromkeys((self.deps.agent_name, *reply_entity_names)))
+        entity_names = _reply_authorization_entity_names(
+            self.deps.runtime.config,
+            self.deps.agent_name,
+            reply_entity_names,
+        )
         if is_sender_allowed_for_entity_replies_in_room(
             requester_id,
             entity_names,
