@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _GITHUB_ORGANIZATION_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
+AGENT_REPOSITORY_TOOL_NAME = "agent_repository"
 
 
 class AgentRepositoriesConfig(BaseModel):

@@ -30,7 +30,7 @@ from mindroom.agent_policy import (
     unsupported_team_agent_message,
 )
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
-from mindroom.config.agent_repository import AgentRepositoriesConfig  # noqa: TC001
+from mindroom.config.agent_repository import AGENT_REPOSITORY_TOOL_NAME, AgentRepositoriesConfig
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile
@@ -105,7 +105,6 @@ _RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user"})
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
     {"delegate", "dynamic_tools", "external_trigger_manager", "invite_router", "self_config"},
 )
-_AGENT_REPOSITORY_TOOL_NAME = "agent_repository"
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "shell",
     "coding",
@@ -541,13 +540,13 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_agent_repository_assignments(self) -> Config:
         """Restrict repository capability to explicit shared or private-user-agent owners."""
-        if any(entry.name == _AGENT_REPOSITORY_TOOL_NAME for entry in self.defaults.tools):
+        if any(entry.name == AGENT_REPOSITORY_TOOL_NAME for entry in self.defaults.tools):
             msg = "Tool 'agent_repository' must be assigned directly to an agent, not through defaults.tools"
             raise ValueError(msg)
 
         assigned_agents: list[str] = []
         for agent_name, agent_config in self.agents.items():
-            entries = [entry for entry in agent_config.tools if entry.name == _AGENT_REPOSITORY_TOOL_NAME]
+            entries = [entry for entry in agent_config.tools if entry.name == AGENT_REPOSITORY_TOOL_NAME]
             if not entries:
                 continue
             assigned_agents.append(agent_name)
@@ -1659,13 +1658,13 @@ class Config(BaseModel):
 
     def _agent_tool_runtime_overrides(self, agent_name: str, tool_name: str) -> dict[str, object] | None:
         """Return runtime kwargs derived from one agent's authored tool overrides."""
-        if tool_name == _AGENT_REPOSITORY_TOOL_NAME:
+        if tool_name == AGENT_REPOSITORY_TOOL_NAME:
             policy = self.agent_repositories
             agent_config = self.agents.get(agent_name)
             if (
                 policy is None
                 or agent_config is None
-                or not any(entry.name == _AGENT_REPOSITORY_TOOL_NAME for entry in agent_config.tools)
+                or not any(entry.name == AGENT_REPOSITORY_TOOL_NAME for entry in agent_config.tools)
             ):
                 return None
             return {
