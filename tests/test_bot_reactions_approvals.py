@@ -2063,23 +2063,35 @@ class TestAgentBot(AgentBotTestBase):
         handle_matrix_approval_action.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_unverifiable_legacy_approval_action_does_not_block_later_room_events(
+    @pytest.mark.parametrize("router_is_ready_but_unserved", [False, True])
+    async def test_unverifiable_or_unserved_approval_action_does_not_block_later_room_events(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        *,
+        router_is_ready_but_unserved: bool,
     ) -> None:
-        """A terminal ignored legacy action settles before the room lane advances."""
+        """An unbound approval action settles before the room lane advances."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         dispatched: list[str] = []
+        router = (
+            MagicMock(
+                running=True,
+                client=MagicMock(room_get_event=AsyncMock()),
+                approval_room_ids=frozenset(),
+            )
+            if router_is_ready_but_unserved
+            else None
+        )
 
         try:
             cards = bot._journal_store.principal("router@shared")
             transport = approval_transport.ApprovalMatrixTransport(
                 runtime_paths=runtime_paths,
-                bot_provider=lambda _name: None,
+                bot_provider=lambda _name: router,
                 cards_provider=lambda: cards,
             )
             initialize_approval_store(
@@ -2121,8 +2133,12 @@ class TestAgentBot(AgentBotTestBase):
 
         assert dispatched == [ignored.event_id, later.event_id]
         assert await bot._journal_dispatcher.store.pending() == ()
-        warning.assert_called_once()
-        assert warning.call_args.args == ("unverifiable_legacy_approval_action_ignored",)
+        if router is None:
+            warning.assert_called_once()
+            assert warning.call_args.args == ("unverifiable_legacy_approval_action_ignored",)
+        else:
+            warning.assert_not_called()
+            router.client.room_get_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_interrupted_approval_reply_replay_cannot_become_ai_input(
