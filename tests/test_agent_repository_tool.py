@@ -7,6 +7,7 @@ import inspect
 import json
 import subprocess
 from dataclasses import dataclass, field
+from threading import Event, Timer
 from typing import TYPE_CHECKING
 
 import pytest
@@ -23,6 +24,7 @@ from mindroom.agent_repositories import (
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.agent_repository import AgentRepositoryTools
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.sandbox_proxy import ensure_worker_target_ready
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     resolve_worker_target,
@@ -214,6 +216,72 @@ async def test_worker_preparation_failure_stops_before_broker(tmp_path: Path) ->
     assert payload["status"] == "error"
     assert payload["error"] == "worker unavailable"
     assert broker.requests == []
+
+
+@pytest.mark.parametrize(
+    "process_env",
+    [
+        {"MINDROOM_WORKER_BACKEND": "docker"},
+        {"MINDROOM_WORKER_BACKEND": "kubernetes"},
+    ],
+)
+def test_worker_preparation_requires_kubernetes_agent_vault(
+    tmp_path: Path,
+    process_env: dict[str, str],
+) -> None:
+    """Repository readiness must fail before provisioning without the HTTPS credential path."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env=process_env,
+    )
+
+    with pytest.raises(WorkerBackendError, match="Kubernetes workers with Agent Vault"):
+        ensure_worker_target_ready(runtime_paths, _target())
+
+
+@pytest.mark.asyncio
+async def test_binding_and_workspace_configuration_do_not_block_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Durable binding locks and Git setup must run outside the shared event loop."""
+    release = Event()
+    heartbeat_seen = Event()
+    observed_heartbeat: list[bool] = []
+    real_bind = RepositoryBindingStore.bind
+
+    def blocking_bind(
+        store: RepositoryBindingStore,
+        request: RepositoryEnsureRequest,
+        lease: RepositoryLease,
+    ) -> object:
+        release.wait(timeout=2)
+        return real_bind(store, request, lease)
+
+    monkeypatch.setattr(RepositoryBindingStore, "bind", blocking_bind)
+    tool = _tool(tmp_path, broker=_FakeBroker())
+
+    async def heartbeat() -> None:
+        await asyncio.sleep(0.01)
+        heartbeat_seen.set()
+
+    def observe_heartbeat_and_release() -> None:
+        observed_heartbeat.append(heartbeat_seen.is_set())
+        release.set()
+
+    timer = Timer(0.1, observe_heartbeat_and_release)
+    timer.start()
+    try:
+        ensure_task = asyncio.create_task(tool.ensure_my_repository())
+        heartbeat_task = asyncio.create_task(heartbeat())
+        await ensure_task
+        await heartbeat_task
+    finally:
+        release.set()
+        timer.cancel()
+
+    assert observed_heartbeat == [True]
 
 
 @pytest.mark.asyncio
@@ -597,3 +665,27 @@ def test_tool_builds_from_registry_with_trusted_runtime_inputs(tmp_path: Path) -
     assert isinstance(tool, AgentRepositoryTools)
     assert set(tool.async_functions) == {"ensure_my_repository"}
     assert tool.functions == {}
+    function = tool.async_functions["ensure_my_repository"].model_copy(deep=True)
+    function.process_entrypoint()
+    assert function.parameters["properties"] == {}
+
+
+@pytest.mark.asyncio
+async def test_incomplete_existing_git_directory_fails_without_mutation(tmp_path: Path) -> None:
+    """Interrupted local initialization must not report a repository-ready workspace."""
+    workspace = tmp_path / "workspace"
+    git_directory = workspace / ".git"
+    git_directory.mkdir(parents=True)
+    config = git_directory / "config"
+    config.write_text(
+        '[remote "origin"]\n\turl = https://github.com/example-org/MindRoom-redwood.git\n',
+        encoding="utf-8",
+    )
+    config_before = config.read_bytes()
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert payload["status"] == "error"
+    assert "incomplete Git metadata" in payload["error"]
+    assert config.read_bytes() == config_before
+    assert {path.name for path in git_directory.iterdir()} == {"config"}

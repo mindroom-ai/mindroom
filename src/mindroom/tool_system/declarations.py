@@ -112,6 +112,7 @@ class ToolMetadata:
     setup_type: SetupType = SetupType.NONE
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY
     consumes_workspace_paths: bool = False
+    supports_output_redirection: bool = True
     requires_room_context: bool = False
     icon: str | None = None
     icon_color: str | None = None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -157,6 +158,27 @@ def test_repository_binding_is_idempotent_and_write_once(tmp_path: Path) -> None
     assert replay == first
     with pytest.raises(RepositoryBindingError, match="immutable repository binding"):
         store.bind(request, _lease(repository_id="99"))
+
+
+@pytest.mark.parametrize("invalid_version", [True, 1.0])
+def test_repository_binding_rejects_non_integer_version(tmp_path: Path, invalid_version: object) -> None:
+    """JSON values equal to one must not bypass the exact binding-version type."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={},
+    )
+    target = _target()
+    assert target.worker_key is not None
+    store = RepositoryBindingStore(runtime_paths)
+    store.bind(_request(target, "MindRoom-redwood"), _lease())
+    binding_path = next((runtime_paths.storage_root / "repository_bindings").glob("*.json"))
+    payload = json.loads(binding_path.read_text(encoding="utf-8"))
+    payload["version"] = invalid_version
+    binding_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RepositoryBindingError, match="unsupported version"):
+        store.read(target.worker_key)
 
 
 def test_repository_binding_serializes_concurrent_writers(tmp_path: Path) -> None:

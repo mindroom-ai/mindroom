@@ -32,6 +32,24 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
+def _bind_and_configure_workspace(
+    *,
+    binding_store: RepositoryBindingStore,
+    request: RepositoryEnsureRequest,
+    lease: RepositoryLease,
+    workspace_root: Path,
+    worker_key: str,
+) -> tuple[RepositoryBinding, Path]:
+    """Persist one binding and configure its workspace on a blocking worker thread."""
+    binding = binding_store.bind(request, lease)
+    workspace = configure_repository_workspace(
+        workspace=workspace_root,
+        clone_url=binding.clone_url,
+        lock_path=binding_store.workspace_lock_path(worker_key),
+    )
+    return binding, workspace
+
+
 class AgentRepositoryTools(Toolkit):
     """Ensure the repository bound to the current trusted worker identity."""
 
@@ -82,11 +100,13 @@ class AgentRepositoryTools(Toolkit):
                     repository_name=repository_name,
                 )
                 lease: RepositoryLease = await self._broker.ensure_repository(request)
-                binding: RepositoryBinding = self._binding_store.bind(request, lease)
-                workspace = configure_repository_workspace(
-                    workspace=workspace_root,
-                    clone_url=binding.clone_url,
-                    lock_path=self._binding_store.workspace_lock_path(worker_key),
+                binding, workspace = await to_thread(
+                    _bind_and_configure_workspace,
+                    binding_store=self._binding_store,
+                    request=request,
+                    lease=lease,
+                    workspace_root=workspace_root,
+                    worker_key=worker_key,
                 )
             except RepositoryOriginConflictError as exc:
                 return custom_tool_payload("agent_repository", "origin_conflict", error=str(exc))

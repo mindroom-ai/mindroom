@@ -24,7 +24,7 @@ class AgentRepositoriesConfig(BaseModel):
     def validate_organization(cls, value: str) -> str:
         """Accept one canonical GitHub organization slug."""
         organization = value.strip()
-        if not _GITHUB_ORGANIZATION_PATTERN.fullmatch(organization):
+        if "--" in organization or not _GITHUB_ORGANIZATION_PATTERN.fullmatch(organization):
             msg = "agent_repositories.organization must be a valid GitHub organization slug"
             raise ValueError(msg)
         return organization
