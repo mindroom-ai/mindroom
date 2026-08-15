@@ -26,15 +26,6 @@ class _MatrixDeliveryMigration:
 
 def prepare_matrix_delivery_migration(transaction: Transaction, *, postgres: bool) -> _MatrixDeliveryMigration:
     """Move released legacy tables aside before current DDL is installed."""
-    if _table_exists(transaction, "approval_continuation_calls", postgres=postgres) and not _column_exists(
-        transaction,
-        "approval_continuation_calls",
-        "human_approval_required",
-        postgres=postgres,
-    ):
-        transaction.execute(
-            "ALTER TABLE approval_continuation_calls ADD COLUMN human_approval_required BOOLEAN",
-        )
     if _table_exists(transaction, "matrix_delivery_outbox", postgres=postgres) and (
         not _column_exists(transaction, "matrix_delivery_outbox", "membership_epoch", postgres=postgres)
         or not _column_exists(transaction, "matrix_delivery_outbox", "retired", postgres=postgres)
