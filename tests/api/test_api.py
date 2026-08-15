@@ -2761,6 +2761,25 @@ def test_get_tools_projects_configured_agent_repository_as_operator_managed(test
     assert tool["config_fields"] is None
 
 
+def test_get_tools_marks_agent_repository_unsupported_for_user_scope(test_client: TestClient) -> None:
+    """Requester-wide workers cannot own one repository for a specific agent."""
+    config = Config.model_validate(
+        {
+            "agent_repositories": {"organization": "example-org", "prefix": "MindRoom"},
+            "agents": {"general": {"display_name": "General", "worker_scope": "shared"}},
+        },
+    )
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=[_agent_repository_api_tool()]),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
+
+    assert response.status_code == 200
+    assert response.json()["tools"][0]["execution_scope_supported"] is False
+
+
 def test_get_tools_hides_agent_repository_without_global_policy(test_client: TestClient) -> None:
     """Dashboard cannot safely opt an agent into an absent operator-managed policy."""
     runtime_paths = main._app_runtime_paths(test_client.app)

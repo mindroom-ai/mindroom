@@ -16,6 +16,7 @@ from mindroom.api.dashboard_credential_scope import (
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
+from mindroom.config.agent_repository import AGENT_REPOSITORY_TOOL_NAME
 from mindroom.config.main import Config
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import (
@@ -219,7 +220,9 @@ def _annotate_execution_scope_support(
         ),
     )
     for tool in tools:
-        tool["execution_scope_supported"] = tool["name"] not in unsupported_tools
+        tool["execution_scope_supported"] = tool["name"] not in unsupported_tools and not (
+            tool["name"] == AGENT_REPOSITORY_TOOL_NAME and execution_scope == "user"
+        )
 
 
 def _load_shared_preview_credentials(

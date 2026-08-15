@@ -107,6 +107,9 @@ def test_enabled_agent_repositories_render_only_to_control_plane() -> None:
             continue
         assert all(not entry["name"].startswith("MINDROOM_AGENT_REPOSITORY_") for entry in container.get("env", []))
         assert "agent-repository-broker" not in {mount["name"] for mount in container.get("volumeMounts", [])}
+    for container in pod_spec.get("initContainers", []):
+        assert all(not entry["name"].startswith("MINDROOM_AGENT_REPOSITORY_") for entry in container.get("env", []))
+        assert "agent-repository-broker" not in {mount["name"] for mount in container.get("volumeMounts", [])}
 
 
 def test_agent_repositories_validation_rejects_partial_or_unsafe_policy() -> None:
