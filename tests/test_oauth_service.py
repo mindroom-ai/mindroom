@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -27,7 +28,7 @@ from mindroom.oauth.providers import (
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from pathlib import Path
     from typing import Any
 
@@ -283,7 +284,14 @@ async def test_callback_waits_for_refresh_and_preserves_rotated_refresh_token(tm
 
     refresh_task = asyncio.create_task(refresh_oauth_credentials_with_result(context))
     await asyncio.to_thread(refresh_started.wait)
-    callback_task = asyncio.create_task(exchange_and_store_oauth_credentials(context, "code", None))
+    callback_task = asyncio.create_task(
+        exchange_and_store_oauth_credentials(
+            context,
+            "code",
+            None,
+            expected_generation=credential_lifecycle.oauth_credential_generation(context),
+        ),
+    )
     await asyncio.sleep(0)
     assert not exchange_started.is_set()
 
@@ -323,6 +331,98 @@ async def test_refresh_publishes_rotation_before_propagating_cancellation(tmp_pa
     stored = _load(context)
     assert stored is not None
     assert stored["refresh_token"] == CHAIN_1
+
+
+@pytest.mark.asyncio
+async def test_reset_generation_rejects_a_callback_that_was_issued_before_reset(tmp_path: Path) -> None:
+    """A callback cannot republish credentials after its target generation is reset."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+    stale_generation = credential_lifecycle.oauth_credential_generation(context)
+
+    assert await credential_lifecycle.reset_oauth_credentials(context) is True
+    with pytest.raises(OAuthProviderError, match="credential was reset"):
+        await exchange_and_store_oauth_credentials(
+            context,
+            "stale-code",
+            None,
+            expected_generation=stale_generation,
+        )
+
+    assert _load(context) is None
+
+
+@pytest.mark.asyncio
+async def test_reset_cancellation_while_waiting_for_lock_preserves_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancellation before the reset transaction owns its lock must abort deletion."""
+    lock_waiting = threading.Event()
+    release_lock = threading.Event()
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    @asynccontextmanager
+    async def blocked_lock(_path: Path) -> AsyncIterator[None]:
+        lock_waiting.set()
+        await asyncio.to_thread(release_lock.wait)
+        yield None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    original = _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT)
+    _save(context, original)
+    generation = credential_lifecycle.oauth_credential_generation(context)
+    monkeypatch.setattr(credential_lifecycle, "async_exclusive_file_lock", blocked_lock)
+
+    reset_task = asyncio.create_task(credential_lifecycle.reset_oauth_credentials(context))
+    await asyncio.to_thread(lock_waiting.wait)
+    reset_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reset_task
+    release_lock.set()
+
+    assert _load(context) == original
+    assert credential_lifecycle.oauth_credential_generation(context) == generation
+
+
+@pytest.mark.asyncio
+async def test_reset_cancellation_after_delete_returns_committed_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A committed destructive reset must still return its receipt result when cancelled."""
+    credential_deleted = threading.Event()
+    release_delete = threading.Event()
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+    generation = credential_lifecycle.oauth_credential_generation(context)
+    real_delete = credential_lifecycle.delete_scoped_credentials
+
+    def blocked_delete(*args: object, **kwargs: object) -> None:
+        real_delete(*args, **kwargs)
+        credential_deleted.set()
+        release_delete.wait()
+
+    monkeypatch.setattr(credential_lifecycle, "delete_scoped_credentials", blocked_delete)
+
+    reset_task = asyncio.create_task(credential_lifecycle.reset_oauth_credentials(context))
+    await asyncio.to_thread(credential_deleted.wait)
+    reset_task.cancel()
+    release_delete.set()
+
+    assert await reset_task is True
+    assert _load(context) is None
+    assert credential_lifecycle.oauth_credential_generation(context) != generation
 
 
 @pytest.mark.asyncio

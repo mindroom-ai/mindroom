@@ -28,6 +28,7 @@ OAuth operations are rare enough that this concurrency is not worth the correctn
 10. Provider adapters classify structured terminal refresh errors as `OAuthRefreshRejectedError` without exposing provider-controlled text.
 11. All consumers build connection and reconnection responses through one factory.
 12. Approval continuations persist and revalidate the exact credential target descriptor before execution.
+13. Every browser callback carries the credential generation observed at authorization and cannot publish after that generation is reset.
 
 ## Architecture
 
@@ -87,14 +88,15 @@ Different credential scopes continue concurrently because their lock paths diffe
 
 ### OAuth callback
 
-1. Authenticate the browser user and validate the opaque pending state and target binding.
+1. Authenticate the browser user and validate the opaque pending state, target binding, and credential generation.
 2. Start a cancellation-safe lifecycle operation.
 3. Acquire the same operation lock used by refresh.
-4. Exchange the authorization code.
-5. Validate and sanitize claims.
-6. Preserve an existing refresh token only when the current locked snapshot has the same verified external identity and OAuth client.
-7. Save the new credential snapshot and release the lock.
-8. Propagate cancellation only after the local commit completes.
+4. Reject the callback if reset advanced the durable credential generation after authorization.
+5. Exchange the authorization code.
+6. Validate and sanitize claims.
+7. Preserve an existing refresh token only when the current locked snapshot has the same verified external identity and OAuth client.
+8. Save the new credential snapshot and release the lock.
+9. Propagate cancellation only after the local commit completes.
 
 The callback cannot preserve a refresh token that another operation rotated concurrently because exchange and refresh cannot overlap for one scope.
 
@@ -105,8 +107,9 @@ The callback cannot preserve a refresh token that another operation rotated conc
 3. Mark the matching MCP requester-session generation retired so captured callers cannot reconnect it.
 4. Close the retired session and keep its key fenced against new sessions.
 5. If retirement fails or is cancelled, retain credentials and restore the tracked generation when possible.
-6. Submit credential deletion to the transaction loop and delete under the operation lock.
-7. Release the in-memory MCP retirement fence and return the receipt.
+6. Submit credential deletion to the transaction loop and wait cancellably for the operation lock.
+7. Advance the durable credential generation and delete under the operation lock without another suspension point.
+8. Release the in-memory MCP retirement fence and return the receipt even if cancellation arrived after commit.
 
 Dashboard disconnect uses the same transaction and fails without deleting credentials if MCP teardown cannot complete.
 
@@ -125,7 +128,9 @@ Waiting for an operation lock is cancellable unless pending OAuth state has alre
 Refresh becomes cancellation-safe after its operation lock is acquired because a remote provider may rotate a token during the call.
 Callback operation-lock wait, exchange, and save are cancellation-safe after pending state is consumed because the one-time state and authorization code cannot be replayed safely.
 Reset teardown remains cancellable because credentials are still intact at that point.
-Deletion is the reset commit point, and the only following work releases the in-memory retirement fence without provider or transport I/O.
+Operation-lock waiting remains cancellable and does not mutate credentials.
+Generation advancement plus deletion is the reset commit point, and the only following work releases the in-memory retirement fence without provider or transport I/O.
+Cancellation after that commit is consumed so the approved destructive tool can return its reconnect receipt.
 
 ## Testing
 
@@ -139,6 +144,8 @@ Focused tests cover observable lifecycle behavior rather than private lock chore
 - Different credential scopes refresh concurrently.
 - A synchronous refresh invoked from an event-loop thread cannot deadlock behind an asynchronous same-scope transaction.
 - Retired MCP generations cannot reconnect with captured stale authorization headers or create a replacement session before deletion commits.
+- Callback state issued before a reset cannot republish credentials after the durable generation advances.
+- Reset cancellation before operation-lock ownership preserves credentials, while cancellation after deletion still returns the committed receipt.
 - Google lazy refresh, GitHub refresh, MCP refresh, API status refresh, and dashboard callback all use the same operation-lock path.
 - Bridge aliases canonicalize only for OAuth credential targets, reset links authorize for the alias, and callbacks store in the canonical scope.
 - Terminal refresh rejection returns the same structured reconnect reason and instruction from every consumer.

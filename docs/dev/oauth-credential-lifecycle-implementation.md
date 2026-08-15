@@ -22,6 +22,7 @@ One lifecycle module submits asynchronous callers and synchronous provider adapt
 - Complete remote-token-producing operations locally before propagating cancellation.
 - Perform fallible MCP teardown before destructive credential deletion.
 - Fence retired MCP requester-session generations until credential deletion commits.
+- Bind browser callbacks to a durable credential generation advanced by reset.
 - Use structured provider error codes and never log provider-controlled descriptions or token values.
 - Keep reset approval bound to the exact provider, service, scope, worker key, and routing agent.
 - Do not run tests or CI, per user instruction.
@@ -45,10 +46,11 @@ One lifecycle module submits asynchronous callers and synchronous provider adapt
 - Produces: `oauth_credentials_worker_target(provider, worker_target, execution_identity=None, authorization=None)`.
 - Produces: `resolve_oauth_credential_context(...)` as the OAuth-only alias-canonicalization boundary.
 - Produces: `load_oauth_credentials(context)`.
+- Produces: `oauth_credential_generation(context)` for callback/reset fencing.
 - Produces: `refresh_oauth_credentials(context)` and `refresh_oauth_credentials_with_result(context)`.
 - Produces: `refresh_oauth_credentials_blocking(context)` for synchronous callers of the asynchronous provider contract.
 - Produces: `refresh_oauth_credentials_sync(context, refresh)` for synchronous provider adapters.
-- Produces: `exchange_and_store_oauth_credentials(context, code, code_verifier)`.
+- Produces: `exchange_and_store_oauth_credentials(context, code, code_verifier, expected_generation=...)`.
 - Produces: `reset_oauth_credentials(context)`.
 - Produces: credential validation and sanitization helpers currently housed in `oauth.service`.
 - Consumes: `OAuthProvider`, `RuntimePaths`, `CredentialsManager`, `ResolvedWorkerTarget`, `AuthorizationConfig`, `async_exclusive_file_lock`, and scoped credential storage functions.
@@ -139,10 +141,11 @@ Apply the same missing, unusable, no-refresh-needed, success, terminal rejection
 
 - [ ] **Step 5: Move callback publication and reset into the lifecycle module**
 
-`exchange_and_store_oauth_credentials()` must acquire the operation lock before calling `provider.exchange_code()` and retain it through claim validation, refresh-token preservation, and save.
+`exchange_and_store_oauth_credentials()` must acquire the operation lock, verify the pending callback generation, and retain the lock through exchange, claim validation, refresh-token preservation, and save.
 The API route will wrap the complete lock-wait-through-save coroutine in `run_coroutine_until_complete()` after consuming state.
 
-`reset_oauth_credentials()` must acquire the operation lock and delete the credential snapshot without owning MCP transport cleanup.
+`reset_oauth_credentials()` must wait cancellably for the operation lock, advance the durable credential generation, and delete the credential snapshot without owning MCP transport cleanup.
+Cancellation before lock ownership must abort reset, while cancellation after commit must return the deletion result so the caller can publish its receipt.
 MCP reset callers must enter requester-session retirement before invoking the credential transaction and release only the in-memory fence afterward.
 
 - [ ] **Step 6: Reduce `oauth.service` to connection-flow ownership**

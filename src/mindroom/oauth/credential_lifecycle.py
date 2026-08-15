@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
+import secrets
 import threading
 import time
+from concurrent.futures import Future as ConcurrentFuture
+from contextlib import suppress
 from contextvars import copy_context
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, NoReturn, cast
@@ -18,6 +22,7 @@ from mindroom.credentials import (
     save_scoped_credentials,
     scoped_credentials_path,
 )
+from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import (
@@ -31,7 +36,6 @@ from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Coroutine, Mapping
-    from concurrent.futures import Future as ConcurrentFuture
     from pathlib import Path
 
     from mindroom.config.auth import AuthorizationConfig
@@ -91,6 +95,16 @@ _SCOPE_IMPLICATIONS = {
 }
 
 logger = get_logger(__name__)
+_INITIAL_CREDENTIAL_GENERATION = "initial"
+_CREDENTIAL_GENERATION_KEY = "generation"
+
+
+@dataclass(frozen=True, slots=True)
+class _OAuthTransactionSubmission[Result]:
+    """One transaction result plus cancellation routed to its owner loop."""
+
+    future: ConcurrentFuture[Result]
+    cancel: Callable[[], None]
 
 
 class _OAuthTransactionLoop:
@@ -122,6 +136,47 @@ class _OAuthTransactionLoop:
             "ConcurrentFuture[Result]",
             copy_context().run(asyncio.run_coroutine_threadsafe, coroutine, self._loop),
         )
+
+    def submit_cancellable[Result](
+        self,
+        coroutine: Coroutine[Any, Any, Result],
+    ) -> _OAuthTransactionSubmission[Result]:
+        """Submit work whose source task can be cancelled without losing its final outcome."""
+        if threading.get_ident() == self._thread.ident:
+            msg = "OAuth transactions cannot synchronously submit to their own event loop"
+            raise RuntimeError(msg)
+        result: ConcurrentFuture[Result] = ConcurrentFuture()
+        task: asyncio.Task[Result] | None = None
+        cancel_requested = False
+
+        def complete(completed: asyncio.Task[Result]) -> None:
+            if completed.cancelled():
+                result.cancel()
+                return
+            error = completed.exception()
+            if error is not None:
+                result.set_exception(error)
+                return
+            result.set_result(completed.result())
+
+        def start() -> None:
+            nonlocal task
+            task = self._loop.create_task(coroutine)
+            task.add_done_callback(complete)
+            if cancel_requested:
+                task.cancel()
+
+        def cancel() -> None:
+            def cancel_on_owner() -> None:
+                nonlocal cancel_requested
+                cancel_requested = True
+                if task is not None:
+                    task.cancel()
+
+            self._loop.call_soon_threadsafe(cancel_on_owner)
+
+        self._loop.call_soon_threadsafe(start, context=copy_context())
+        return _OAuthTransactionSubmission(future=result, cancel=cancel)
 
     @property
     def alive(self) -> bool:
@@ -188,6 +243,15 @@ class OAuthCredentialsRefreshResult:
     refreshed: bool
 
 
+@dataclass(slots=True)
+class _OAuthCredentialResetOutcome:
+    """Cross-thread reset commit state used to resolve caller cancellation."""
+
+    committed: bool = False
+    deleted: bool = False
+    error: BaseException | None = None
+
+
 def oauth_credentials_worker_target(
     provider: OAuthProvider,
     worker_target: ResolvedWorkerTarget | None,
@@ -250,6 +314,23 @@ def load_oauth_credentials(context: OAuthCredentialContext) -> dict[str, Any] | 
         worker_target=context.worker_target,
         allowed_shared_services=context.allowed_shared_services,
     )
+
+
+def oauth_credential_generation(context: OAuthCredentialContext) -> str:
+    """Return the durable generation that fences callbacks across credential resets."""
+    path = _credential_generation_path(context)
+    if not path.exists():
+        return _INITIAL_CREDENTIAL_GENERATION
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        msg = "OAuth credential generation state is invalid"
+        raise OAuthProviderError(msg) from exc
+    generation = payload.get(_CREDENTIAL_GENERATION_KEY) if isinstance(payload, dict) else None
+    if not isinstance(generation, str) or not generation:
+        msg = "OAuth credential generation state is invalid"
+        raise OAuthProviderError(msg)
+    return generation
 
 
 async def refresh_oauth_credentials(context: OAuthCredentialContext) -> dict[str, Any] | None:
@@ -324,10 +405,17 @@ async def exchange_and_store_oauth_credentials(
     context: OAuthCredentialContext,
     code: str,
     code_verifier: str | None,
+    *,
+    expected_generation: str,
 ) -> dict[str, Any]:
     """Exchange one code and publish its credential snapshot atomically."""
     return await _run_oauth_transaction(
-        _exchange_and_store_oauth_credentials_transaction(context, code, code_verifier),
+        _exchange_and_store_oauth_credentials_transaction(
+            context,
+            code,
+            code_verifier,
+            expected_generation=expected_generation,
+        ),
     )
 
 
@@ -335,8 +423,13 @@ async def _exchange_and_store_oauth_credentials_transaction(
     context: OAuthCredentialContext,
     code: str,
     code_verifier: str | None,
+    *,
+    expected_generation: str,
 ) -> dict[str, Any]:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
+        if oauth_credential_generation(context) != expected_generation:
+            msg = "OAuth connection state is stale because this credential was reset"
+            raise OAuthProviderError(msg)
         return await _exchange_and_store_oauth_credentials_locked(context, code, code_verifier)
 
 
@@ -368,21 +461,51 @@ async def _exchange_and_store_oauth_credentials_locked(
 async def reset_oauth_credentials(
     context: OAuthCredentialContext,
 ) -> bool:
-    """Delete one credential as a serialized transaction."""
-    return await _run_oauth_transaction(_reset_oauth_credentials_transaction(context))
+    """Delete one credential, cancelling before its lock or returning after its commit."""
+    transaction_loop = await asyncio.to_thread(_get_oauth_transaction_loop)
+    outcome = _OAuthCredentialResetOutcome()
+    submission = transaction_loop.submit_cancellable(_reset_oauth_credentials_transaction(context, outcome))
+    wrapped_future = asyncio.wrap_future(submission.future)
+    try:
+        return await asyncio.shield(wrapped_future)
+    except asyncio.CancelledError as cancellation:
+        submission.cancel()
+        while not wrapped_future.done():
+            try:
+                await asyncio.shield(wrapped_future)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        with suppress(BaseException):
+            wrapped_future.result()
+        if outcome.committed:
+            return outcome.deleted
+        if outcome.error is not None and not isinstance(outcome.error, asyncio.CancelledError):
+            raise cancellation from outcome.error
+        raise
 
 
-async def _reset_oauth_credentials_transaction(context: OAuthCredentialContext) -> bool:
-    async with async_exclusive_file_lock(_operation_lock_path(context)):
-        credentials = load_oauth_credentials(context)
-        if credentials is None:
-            return False
-        delete_scoped_credentials(
-            context.provider.credential_service,
-            credentials_manager=context.credentials_manager,
-            worker_target=context.worker_target,
-        )
-        return True
+async def _reset_oauth_credentials_transaction(
+    context: OAuthCredentialContext,
+    outcome: _OAuthCredentialResetOutcome,
+) -> bool:
+    try:
+        async with async_exclusive_file_lock(_operation_lock_path(context)):
+            credentials = load_oauth_credentials(context)
+            _advance_oauth_credential_generation(context)
+            if credentials is not None:
+                delete_scoped_credentials(
+                    context.provider.credential_service,
+                    credentials_manager=context.credentials_manager,
+                    worker_target=context.worker_target,
+                )
+            outcome.deleted = credentials is not None
+            outcome.committed = True
+            return outcome.deleted
+    except BaseException as exc:
+        outcome.error = exc
+        raise
 
 
 def _operation_lock_path(context: OAuthCredentialContext) -> Path:
@@ -392,6 +515,23 @@ def _operation_lock_path(context: OAuthCredentialContext) -> Path:
         worker_target=context.worker_target,
     )
     return credentials_path.with_name(f"{credentials_path.name}.oauth-operation.lock")
+
+
+def _credential_generation_path(context: OAuthCredentialContext) -> Path:
+    credentials_path = scoped_credentials_path(
+        context.provider.credential_service,
+        credentials_manager=context.credentials_manager,
+        worker_target=context.worker_target,
+    )
+    return credentials_path.with_name(f"{credentials_path.name}.oauth-generation.json")
+
+
+def _advance_oauth_credential_generation(context: OAuthCredentialContext) -> None:
+    write_json_file_durable(
+        _credential_generation_path(context),
+        {_CREDENTIAL_GENERATION_KEY: secrets.token_hex(32)},
+        strict_atomic_replace=True,
+    )
 
 
 def _publish_refresh_result(

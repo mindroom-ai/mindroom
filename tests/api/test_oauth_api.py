@@ -1878,6 +1878,46 @@ def test_callback_uses_stored_oauth_client_config(tmp_path: Path) -> None:
     assert scoped_credentials["token"] == "google_drive-access-token"
 
 
+def test_disconnect_invalidates_oauth_state_issued_before_reset(tmp_path: Path) -> None:
+    """A callback state issued before disconnect cannot recreate the deleted connection."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        tool_config_service="google_drive",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+            stale_state = _state_from_auth_url(connect_response.json()["auth_url"])
+            disconnect_response = client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=stale-code&state={stale_state}",
+                follow_redirects=False,
+            )
+
+    assert connect_response.status_code == 200
+    assert disconnect_response.status_code == 200
+    assert callback_response.status_code == 409
+    manager = get_runtime_credentials_manager(runtime_paths)
+    assert (
+        manager.for_primary_runtime_scope("@alice:example.org", "general").load_credentials(
+            provider.credential_service,
+        )
+        is None
+    )
+
+
 def test_generated_mcp_oauth_routes_store_status_and_disconnect_scoped_credentials(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2504,7 +2544,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
-        payload=None,
+        payload=oauth_api._target_binding_payload(provider, target),
         code_verifier=None,
     )
 

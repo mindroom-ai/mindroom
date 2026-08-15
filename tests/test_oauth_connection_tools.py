@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
@@ -19,6 +20,7 @@ from mindroom.credentials import get_runtime_credentials_manager, load_scoped_cr
 from mindroom.custom_tools import oauth_connections as oauth_connections_module
 from mindroom.custom_tools.oauth_connections import OAuthConnectionTools
 from mindroom.message_target import MessageTarget
+from mindroom.oauth import credential_lifecycle
 from mindroom.oauth import reset as oauth_reset_module
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
@@ -537,4 +539,48 @@ async def test_reset_oauth_connection_cancellation_during_teardown_preserves_cre
             worker_target=worker_target,
         )
         == credentials
+    )
+
+
+@pytest.mark.asyncio
+async def test_reset_oauth_connection_cancellation_after_delete_returns_reconnect_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after the destructive commit must not hide the reconnect receipt."""
+    tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    provider = google_drive_oauth_provider()
+    credentials_manager, worker_target, _credentials = _save_test_credentials(
+        context,
+        worker_target,
+        provider,
+        "post-delete-cancel-refresh-token",
+    )
+    credential_deleted = threading.Event()
+    release_delete = threading.Event()
+    real_delete = credential_lifecycle.delete_scoped_credentials
+
+    def blocked_delete(*args: object, **kwargs: object) -> None:
+        real_delete(*args, **kwargs)
+        credential_deleted.set()
+        release_delete.wait()
+
+    monkeypatch.setattr(credential_lifecycle, "delete_scoped_credentials", blocked_delete)
+
+    with tool_runtime_context(context):
+        reset_task = asyncio.create_task(tool.reset_oauth_connection(provider.id))
+        await asyncio.to_thread(credential_deleted.wait)
+        reset_task.cancel()
+        release_delete.set()
+        result = await reset_task
+
+    assert "OAuth connection reset" in result
+    assert "`connect_url`:" in result
+    assert (
+        load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        is None
     )

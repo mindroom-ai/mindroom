@@ -35,6 +35,7 @@ from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     exchange_and_store_oauth_credentials,
     load_oauth_credentials,
+    oauth_credential_generation,
     refresh_oauth_credentials,
     reset_oauth_credentials,
     resolve_oauth_credential_context,
@@ -264,7 +265,12 @@ async def _issue_authorization_url(
 
 
 def _target_binding_payload(provider: OAuthProvider, target: RequestCredentialsTarget) -> dict[str, str]:
-    return oauth_credential_target_payload(provider, worker_target_for_credentials_target(target))
+    return {
+        **oauth_credential_target_payload(provider, worker_target_for_credentials_target(target)),
+        "credential_generation": oauth_credential_generation(
+            _credential_context(provider, target.runtime_paths, target),
+        ),
+    }
 
 
 def _verify_connect_target_authorized(
@@ -318,6 +324,13 @@ def _verify_pending_target_binding(
 ) -> None:
     if pending_payload != _target_binding_payload(provider, target):
         raise HTTPException(status_code=409, detail="OAuth state no longer matches the requested credential target")
+
+
+def _pending_credential_generation(pending_payload: dict[str, str] | None) -> str:
+    generation = pending_payload.get("credential_generation") if pending_payload is not None else None
+    if not isinstance(generation, str) or not generation:
+        raise HTTPException(status_code=409, detail="OAuth state no longer matches the requested credential target")
+    return generation
 
 
 def _claim_str(credentials: dict[str, Any], key: str) -> str | None:
@@ -448,6 +461,7 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
                 _credential_context(provider, runtime_paths, target),
                 code,
                 pending.code_verifier,
+                expected_generation=_pending_credential_generation(pending.payload),
             ),
         )
     except OAuthClaimValidationError as exc:
