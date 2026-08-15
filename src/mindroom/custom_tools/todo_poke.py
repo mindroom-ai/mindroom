@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = [
+    "TodoPokeDeliveryUnavailableError",
     "TodoPokeDeps",
     "TodoPokePolicy",
     "TodoPokeWorker",
@@ -43,7 +44,7 @@ __all__ = [
 ]
 
 type _TodoScheduleQuery = Callable[[str, tuple[str, ...]], Awaitable[frozenset[str | None] | None]]
-type _TodoPokeSender = Callable[[tuple[str, ...], str, str, str | None], Awaitable[str | None]]
+type _TodoPokeSender = Callable[[str, str, str, str | None], Awaitable[str | None]]
 type _StateWarningKey = tuple[str, str]
 
 _VALID_STATUSES = {"open", *TERMINAL_STATUSES}
@@ -53,6 +54,10 @@ _POKE_STATE_FILENAME = "poke_state.json"
 _VISIBLE_ITEM_LIMIT = 5
 _RETRY_BACKSTOP_SECONDS = 60 * 60
 _MAX_UNCHANGED_REPOKES = 3
+
+
+class TodoPokeDeliveryUnavailableError(RuntimeError):
+    """Signal that the runtime could not attempt a todo poke delivery."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -623,7 +628,6 @@ async def _deliver_pokes(
     delivered = 0
     attempts = 0
     poked_agents: set[str] = set()
-    agent_names_by_room = _agent_names_by_room(scopes)
     for scope in scopes:
         if attempts >= policy.max_pokes_per_scan:
             break
@@ -633,15 +637,23 @@ async def _deliver_pokes(
         if pending_threads is None or scope.thread_id in pending_threads:
             continue
 
-        attempts += 1
         scope_key = _scope_key(scope)
         previous = session_poke_records.get(scope_key) or _poke_record(poke_state, scope)
-        event_id = await deps.sender(
-            agent_names_by_room[scope.room_id],
-            scope.room_id,
-            _format_poke_message(scope),
-            scope.thread_id,
-        )
+        try:
+            event_id = await deps.sender(
+                scope.assigned_agent,
+                scope.room_id,
+                _format_poke_message(scope),
+                scope.thread_id,
+            )
+        except TodoPokeDeliveryUnavailableError:
+            logger.debug(
+                "todo_poke_delivery_skipped_runtime_unavailable",
+                assigned_agent=scope.assigned_agent,
+                room_id=scope.room_id,
+            )
+            continue
+        attempts += 1
         outcome_timestamp = deps.clock().astimezone(UTC).timestamp()
         record = _record_after_attempt(scope, previous, outcome_timestamp, delivered=event_id is not None)
         session_poke_records[scope_key] = record

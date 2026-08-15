@@ -8,7 +8,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from mindroom.constants import ORIGINAL_SENDER_KEY
-from mindroom.custom_tools.todo_poke import TodoPokeDeps, TodoPokeWorker, todo_poke_policy
+from mindroom.custom_tools.todo_poke import (
+    TodoPokeDeliveryUnavailableError,
+    TodoPokeDeps,
+    TodoPokeWorker,
+    todo_poke_policy,
+)
 from mindroom.custom_tools.todo_state import state_root as todo_state_root
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.scheduling import get_pending_schedule_thread_ids_for_room
@@ -119,16 +124,16 @@ class TodoPokeRuntimeCoordinator:
 
     async def _send_poke(
         self,
-        agent_names: tuple[str, ...],
+        agent_name: str,
         room_id: str,
         body: str,
         thread_id: str | None,
     ) -> str | None:
-        """Send one todo poke through a joined candidate into normal dispatch."""
-        agent_bot = self._joined_agent_bot(room_id, agent_names)
+        """Send one assigned-agent todo poke that enters normal dispatch."""
+        agent_bot = self._agent_bot(agent_name)
         config = self.config_provider()
-        if agent_bot is None or config is None:
-            return None
+        if agent_bot is None or config is None or agent_bot.client is None or room_id not in agent_bot.client.rooms:
+            raise TodoPokeDeliveryUnavailableError
 
         original_sender = mindroom_user_id(config, self.runtime_paths)
         extra_content = {ORIGINAL_SENDER_KEY: original_sender} if original_sender is not None else None

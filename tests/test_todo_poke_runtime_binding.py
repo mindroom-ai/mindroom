@@ -11,6 +11,7 @@ import pytest
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.custom_tools.todo_poke import TodoPokeDeliveryUnavailableError
 from mindroom.orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -112,7 +113,7 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
     ):
         pending = await coordinator._schedule_query("!room:localhost", ("code",))
         event_id = await coordinator._send_poke(
-            ("code",),
+            "code",
             "!room:localhost",
             "@code Todo work is ready.",
             "$thread",
@@ -162,8 +163,8 @@ async def test_schedule_query_uses_joined_candidate_for_shared_room(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_send_uses_joined_candidate_for_unjoined_todo_owner(tmp_path: Path) -> None:
-    """A joined same-room assignee transports a poke that targets an unjoined owner."""
+async def test_send_skips_unjoined_todo_owner_without_using_other_candidate(tmp_path: Path) -> None:
+    """Only the todo owner may transport its poke, and it must be joined."""
     unjoined_client = MagicMock()
     unjoined_client.rooms = {}
     joined_client = MagicMock()
@@ -178,20 +179,22 @@ async def test_send_uses_joined_candidate_for_unjoined_todo_owner(tmp_path: Path
         {"code": unjoined_bot, "reviewer": joined_bot},
     )
 
-    with patch(
-        "mindroom.orchestration.todo_poke_runtime.mindroom_user_id",
-        return_value="@mindroom_user:localhost",
+    with (
+        patch(
+            "mindroom.orchestration.todo_poke_runtime.mindroom_user_id",
+            return_value="@mindroom_user:localhost",
+        ),
+        pytest.raises(TodoPokeDeliveryUnavailableError),
     ):
-        event_id = await coordinator._send_poke(
-            ("code", "reviewer"),
+        await coordinator._send_poke(
+            "code",
             "!room:localhost",
             "@code Todo work is ready.",
             "$thread",
         )
 
-    assert event_id == "$event"
     unjoined_bot._hook_send_message.assert_not_awaited()
-    joined_bot._hook_send_message.assert_awaited_once()
+    joined_bot._hook_send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -201,15 +204,13 @@ async def test_adapters_skip_when_runtime_is_unavailable(tmp_path: Path) -> None
 
     assert coordinator._agent_is_idle("code") is False
     assert await coordinator._schedule_query("!room:localhost", ("code",)) is None
-    assert (
+    with pytest.raises(TodoPokeDeliveryUnavailableError):
         await coordinator._send_poke(
-            ("code",),
+            "code",
             "!room:localhost",
             "@code Todo work is ready.",
             "$thread",
         )
-        is None
-    )
 
 
 @pytest.mark.asyncio
