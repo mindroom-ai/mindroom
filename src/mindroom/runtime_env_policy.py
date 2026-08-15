@@ -10,6 +10,7 @@ from typing import cast
 from mindroom.sensitivity import secret_name_suffixes
 
 __all__ = [
+    "AGENT_REPOSITORY_ENV_BY_KEY",
     "AGENT_VAULT_ACCESS_ENV_BY_KEY",
     "AWS_BEDROCK_CLAUDE_ENV_BY_KEY",
     "AZURE_OPENAI_ENV_BY_KEY",
@@ -50,6 +51,13 @@ __all__ = [
     "shell_passthrough_env",
     "worker_extra_env",
 ]
+
+AGENT_REPOSITORY_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
+    {
+        "broker_url": "MINDROOM_AGENT_REPOSITORY_BROKER_URL",
+        "broker_token_file": "MINDROOM_AGENT_REPOSITORY_BROKER_TOKEN_FILE",
+    },
+)
 
 SANDBOX_STARTUP_MANIFEST_PATH_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"
 CREDENTIAL_SEEDS_JSON_ENV = "MINDROOM_CREDENTIAL_SEEDS_JSON"
@@ -290,6 +298,7 @@ _WORKER_EXTRA_ENV_GENERATED_NAMES = frozenset(
 )
 _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
     {
+        *AGENT_REPOSITORY_ENV_BY_KEY.values(),
         *_CREDENTIAL_SEED_DECLARATION_ENV_NAMES,
         CREDENTIALS_ENCRYPTION_KEY_ENV,
         CONTROL_STATE_PATH_ENV,
@@ -316,6 +325,7 @@ _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
 )
 _NON_SANDBOX_RUNTIME_CONTROL_ENV_NAMES = frozenset(
     {
+        *AGENT_REPOSITORY_ENV_BY_KEY.values(),
         CREDENTIALS_ENCRYPTION_KEY_ENV,
         CONTROL_STATE_PATH_ENV,
         SESSION_STORAGE_PATH_ENV,

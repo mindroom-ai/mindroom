@@ -16,6 +16,45 @@
 {{- if and (eq .Values.matrix.managedAccountAuth "appservice") .Values.matrix.registrationToken.existingSecret -}}
 {{- fail "matrix.registrationToken cannot be set when matrix.managedAccountAuth=appservice" -}}
 {{- end -}}
+{{- if .Values.agentRepositories.enabled -}}
+{{- if not .Values.agentRepositories.organization -}}
+{{- fail "agentRepositories.organization is required when agentRepositories.enabled=true" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$" .Values.agentRepositories.organization) -}}
+{{- fail "agentRepositories.organization must be a valid GitHub organization slug" -}}
+{{- end -}}
+{{- if ne .Values.agentRepositories.prefix "MindRoom" -}}
+{{- fail "agentRepositories.prefix must be MindRoom" -}}
+{{- end -}}
+{{- if not (regexMatch "^https?://[A-Za-z0-9]([-A-Za-z0-9.]*[A-Za-z0-9])?(:[0-9]+)?/?$" .Values.agentRepositories.brokerUrl) -}}
+{{- fail "agentRepositories.brokerUrl must be an uncredentialed HTTP(S) base URL" -}}
+{{- end -}}
+{{- $brokerPortMatch := regexFind ":[0-9]+/?$" .Values.agentRepositories.brokerUrl -}}
+{{- if $brokerPortMatch -}}
+{{- $brokerPort := atoi (trimSuffix "/" (trimPrefix ":" $brokerPortMatch)) -}}
+{{- if or (lt $brokerPort 1) (gt $brokerPort 65535) -}}
+{{- fail "agentRepositories.brokerUrl port must be between 1 and 65535" -}}
+{{- end -}}
+{{- end -}}
+{{- if not .Values.agentRepositories.brokerTokenSecret.name -}}
+{{- fail "agentRepositories.brokerTokenSecret.name is required when agentRepositories.enabled=true" -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" .Values.agentRepositories.brokerTokenSecret.name) -}}
+{{- fail "agentRepositories.brokerTokenSecret.name must be a valid Kubernetes Secret name" -}}
+{{- end -}}
+{{- if not .Values.agentRepositories.brokerTokenSecret.key -}}
+{{- fail "agentRepositories.brokerTokenSecret.key is required when agentRepositories.enabled=true" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9][-._A-Za-z0-9]*$" .Values.agentRepositories.brokerTokenSecret.key) -}}
+{{- fail "agentRepositories.brokerTokenSecret.key must be a valid Kubernetes Secret key" -}}
+{{- end -}}
+{{- if ne .Values.workers.backend "kubernetes" -}}
+{{- fail "agentRepositories.enabled requires workers.backend=kubernetes" -}}
+{{- end -}}
+{{- if not .Values.workers.kubernetes.agentVault.enabled -}}
+{{- fail "agentRepositories.enabled requires workers.kubernetes.agentVault.enabled=true" -}}
+{{- end -}}
+{{- end -}}
 {{- $configSource := include "mindroom-runtime.configSource" . -}}
 {{- if not (or (eq $configSource "configMap") (eq $configSource "file")) -}}
 {{- fail "config.source must be either configMap or file" -}}

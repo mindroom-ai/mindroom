@@ -2726,6 +2726,54 @@ def test_get_tools_includes_openclaw_compat_metadata(test_client: TestClient) ->
     assert tool["display_name"] == "OpenClaw Compat"
 
 
+def _agent_repository_api_tool() -> dict[str, object]:
+    return {
+        "name": "agent_repository",
+        "display_name": "Agent Repository",
+        "description": "Repository",
+        "category": "development",
+        "status": "requires_config",
+        "setup_type": "special",
+        "config_fields": [
+            {"name": "organization", "required": True},
+            {"name": "prefix", "required": True},
+        ],
+    }
+
+
+def test_get_tools_projects_configured_agent_repository_as_operator_managed(test_client: TestClient) -> None:
+    """Global policy should expose the tool without a bogus credential setup surface."""
+    config = Config.model_validate(
+        {"agent_repositories": {"organization": "example-org", "prefix": "MindRoom"}},
+    )
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=[_agent_repository_api_tool()]),
+    ):
+        response = test_client.get("/api/tools/")
+
+    assert response.status_code == 200
+    tool = response.json()["tools"][0]
+    assert tool["name"] == "agent_repository"
+    assert tool["status"] == "available"
+    assert tool["setup_type"] == "none"
+    assert tool["config_fields"] is None
+
+
+def test_get_tools_hides_agent_repository_without_global_policy(test_client: TestClient) -> None:
+    """Dashboard cannot safely opt an agent into an absent operator-managed policy."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(Config(), runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=[_agent_repository_api_tool()]),
+    ):
+        response = test_client.get("/api/tools/")
+
+    assert response.status_code == 200
+    assert "agent_repository" not in {tool["name"] for tool in response.json()["tools"]}
+
+
 def test_get_rooms(test_client: TestClient) -> None:
     """Test getting all rooms."""
     # Load config first

@@ -236,6 +236,18 @@ providerCredentials: []
 #     existingSecret: my-llm-secret
 #     key: anthropic-api-key
 
+# Trusted control-plane broker for one immutable private repository per enabled
+# agent worker. The organization and prefix must match the agent_repositories
+# policy in the runtime config when config.source=file or config.data is set.
+agentRepositories:
+  enabled: false
+  organization: ""
+  prefix: MindRoom
+  brokerUrl: http://agent-vault:14321
+  brokerTokenSecret:
+    name: ""
+    key: token
+
 env:
   # Raw Kubernetes EnvVar entries appended to the MindRoom container.
   extra: []

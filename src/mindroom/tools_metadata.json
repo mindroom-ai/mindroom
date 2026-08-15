@@ -1136,6 +1136,56 @@
       "category": "development",
       "config_fields": [
         {
+          "authored_override": false,
+          "default": null,
+          "description": "Trusted global policy; agents cannot override it.",
+          "label": "Organization",
+          "name": "organization",
+          "options": null,
+          "placeholder": null,
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": false,
+          "default": null,
+          "description": "Trusted global policy; agents cannot override it.",
+          "label": "Repository Prefix",
+          "name": "prefix",
+          "options": null,
+          "placeholder": null,
+          "required": true,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": true,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno",
+        "httpx"
+      ],
+      "description": "Ensure the one private GitHub repository bound to this agent worker",
+      "display_name": "Agent Repository",
+      "docs_url": null,
+      "function_names": [
+        "ensure_my_repository"
+      ],
+      "helper_text": null,
+      "icon": "GitBranch",
+      "icon_color": "text-slate-700",
+      "name": "agent_repository",
+      "requires_room_context": false,
+      "setup_type": "special",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": [
+        {
           "authored_override": true,
           "default": null,
           "description": null,

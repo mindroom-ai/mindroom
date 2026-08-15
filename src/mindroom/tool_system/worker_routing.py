@@ -36,6 +36,7 @@ _SHARED_ONLY_INTEGRATION_NAMES = frozenset(
 )
 _LOCAL_ONLY_TOOL_NAMES = frozenset(
     {
+        "agent_repository",
         "approved_egress",
         "attachments",
         "callback_manager",

@@ -25,6 +25,7 @@ from mindroom.tools import (
     report_publishing,  # noqa: F401
     self_config,  # noqa: F401
 )
+from mindroom.tools.agent_repository import agent_repository_tools
 from mindroom.tools.agentql import agentql_tools
 from mindroom.tools.airflow import airflow_tools
 from mindroom.tools.apify import apify_tools
@@ -157,6 +158,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "agent_repository_tools",
     "agentql_tools",
     "airflow_tools",
     "apify_tools",
