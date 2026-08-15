@@ -92,6 +92,7 @@ class _GoogleRefreshState:
     connection_generation: str
     snapshot: dict[str, Any]
     lock: threading.RLock = field(default_factory=threading.RLock)
+    refresh_completion_generation: int = 0
     last_succeeded: bool = False
     last_failure: _GoogleRefreshFailure | None = None
 
@@ -439,15 +440,19 @@ class ScopedOAuthClientMixin:
         request: object,
     ) -> None:
         """Serialize one client's provider refresh and local credential publication."""
-        joined_inflight_refresh = not state.lock.acquire(blocking=False)
-        if joined_inflight_refresh:
+        observed_completion_generation = state.refresh_completion_generation
+        if not state.lock.acquire(blocking=False):
             state.lock.acquire()
         try:
-            if joined_inflight_refresh and state.last_succeeded:
-                return
-            if joined_inflight_refresh and state.last_failure is not None:
-                self._raise_google_refresh_failure(state.last_failure)
-            self._refresh_google_credentials_locked(credentials, state, request)
+            if state.refresh_completion_generation != observed_completion_generation:
+                if state.last_succeeded:
+                    return
+                if state.last_failure is not None:
+                    self._raise_google_refresh_failure(state.last_failure)
+            try:
+                self._refresh_google_credentials_locked(credentials, state, request)
+            finally:
+                state.refresh_completion_generation += 1
         finally:
             state.lock.release()
 
@@ -494,7 +499,7 @@ class ScopedOAuthClientMixin:
             self._raise_google_refresh_failure(state.last_failure)
         credentials.token = refreshed.token
         credentials.expiry = refreshed.expiry
-        credentials.refresh_token = refreshed.refresh_token
+        credentials._refresh_token = refreshed.refresh_token
         state.snapshot.clear()
         state.snapshot.update(result.credentials)
         state.connection_generation = result.connection_generation

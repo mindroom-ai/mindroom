@@ -63,7 +63,7 @@ def _valid_credentials(*, token: str = "valid-access-token") -> GoogleOAuthCrede
         client_id="client-id",
         client_secret="client-secret",  # noqa: S106
         scopes=("scope",),
-        expiry=datetime(2100, 1, 1, tzinfo=UTC),
+        expiry=datetime(2100, 1, 1),  # noqa: DTZ001
     )
 
 
@@ -311,6 +311,7 @@ def test_google_wrapper_build_credentials_uses_provider_scopes(
     tool._oauth_tool_name = tool_class._oauth_tool_name
     tool._oauth_provider = tool_class._oauth_provider
     tool._runtime_paths = runtime_paths
+    tool._oauth_quota_project_id = None
     creds = tool._raw_credentials_from_token_data(
         {
             "token": "token",
@@ -395,6 +396,7 @@ def test_scoped_oauth_client_connection_required_uses_shared_instruction(
     tool._oauth_provider = GoogleDriveTools._oauth_provider
     tool._runtime_paths = runtime_paths
     tool._worker_target = None
+    tool._authorization = None
     tool._creds_manager = get_runtime_credentials_manager(runtime_paths)
 
     seen: list[object] = []
@@ -895,7 +897,7 @@ def test_google_forced_refresh_rejects_unchanged_readonly_bearer(
     rotated_refresh_token = "rotated-refresh-token"  # noqa: S105
 
     def rotate_refresh_grant(credentials: GoogleOAuthCredentials, _request: object) -> None:
-        credentials.refresh_token = rotated_refresh_token
+        credentials._refresh_token = rotated_refresh_token
         credentials.expiry = datetime(2100, 1, 1, tzinfo=UTC)
 
     monkeypatch.setattr(GoogleOAuthCredentials, "refresh", rotate_refresh_grant)
@@ -1263,6 +1265,120 @@ def test_google_before_request_serializes_validity_check_with_refresh(
     assert credentials.token == rotated_access_token
 
 
+def test_google_forced_refresh_waiting_on_valid_request_does_not_reuse_old_success(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """A forced refresh blocked by normal auth work must still replace its rejected bearer."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "expired-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 1.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    valid_request_entered = threading.Event()
+    release_valid_request = threading.Event()
+
+    def block_valid_request(
+        _credentials: GoogleOAuthCredentials,
+        _request: object,
+        _method: str,
+        _url: str,
+        _headers: dict[str, str],
+    ) -> None:
+        valid_request_entered.set()
+        assert release_valid_request.wait(timeout=5)
+
+    monkeypatch.setattr(GoogleOAuthCredentials, "before_request", block_valid_request)
+    real_refresh_state = oauth_client_module._GoogleRefreshState
+    refresh_states: list[Any] = []
+
+    def capture_refresh_state(*args: object, **kwargs: object) -> Any:  # noqa: ANN401
+        state = real_refresh_state(*args, **kwargs)
+        refresh_states.append(state)
+        return state
+
+    monkeypatch.setattr(oauth_client_module, "_GoogleRefreshState", capture_refresh_state)
+    provider_calls = 0
+
+    def rotate(credentials: object, _request: object) -> None:
+        nonlocal provider_calls
+        provider_calls += 1
+        credentials.token = f"rotated-access-token-{provider_calls}"  # type: ignore[attr-defined]
+        credentials.expiry = datetime.fromtimestamp(4_102_444_800.0, tz=UTC)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(GoogleOAuthCredentials, "refresh", rotate)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    credentials = tool.creds
+    credentials.refresh(object())
+    assert provider_calls == 1
+
+    class ObservedRLock:
+        def __init__(self) -> None:
+            self._lock = threading.RLock()
+            self.failed_nonblocking_acquire = threading.Event()
+
+        def acquire(self, blocking: bool = True) -> bool:
+            acquired = self._lock.acquire(blocking)
+            if not blocking and not acquired:
+                self.failed_nonblocking_acquire.set()
+            return acquired
+
+        def release(self) -> None:
+            self._lock.release()
+
+        def __enter__(self) -> ObservedRLock:
+            self.acquire()
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.release()
+
+    observed_lock = ObservedRLock()
+    refresh_states[0].lock = observed_lock
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        valid_request = executor.submit(
+            credentials.before_request,
+            object(),
+            "GET",
+            "https://example.test",
+            {},
+        )
+        assert valid_request_entered.wait(timeout=5)
+        forced_refresh = executor.submit(credentials.refresh, object())
+        assert observed_lock.failed_nonblocking_acquire.wait(timeout=5)
+        release_valid_request.set()
+        valid_request.result(timeout=5)
+        forced_refresh.result(timeout=5)
+
+    assert provider_calls == 2
+    assert credentials.token == "rotated-access-token-2"  # noqa: S105
+
+
 def test_google_wrapper_constructor_canonicalizes_alias_without_runtime_context(
     runtime_paths: RuntimePaths,
 ) -> None:
@@ -1577,7 +1693,7 @@ async def test_google_wrapper_drops_valid_cached_credentials_after_reset(
     tool.service = object()
 
     assert await reset_oauth_credentials(tool._oauth_credential_context()) is True
-    payload = json.loads(await asyncio.to_thread(tool._ensure_structured_auth))
+    payload = json.loads(tool._ensure_structured_auth() or "{}")
 
     assert payload["oauth_connection_required"] is True
     assert tool.creds is None

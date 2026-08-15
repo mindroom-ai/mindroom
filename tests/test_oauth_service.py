@@ -425,6 +425,58 @@ async def test_reset_deletes_unreadable_scoped_file_and_allows_reconnect(
 
 
 @pytest.mark.asyncio
+async def test_wrong_encryption_key_does_not_poison_legacy_oauth_adoption(tmp_path: Path) -> None:
+    """An unreadable legacy credential must remain adoptable after the correct key is restored."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    correct_key = base64.urlsafe_b64encode(b"a" * 32).decode()
+    wrong_key = base64.urlsafe_b64encode(b"b" * 32).decode()
+    provider = cast("OAuthProvider", _FakeOAuthProvider(unused_refresh))
+    worker_target = _worker_target()
+    correct_runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={"MINDROOM_CREDENTIALS_ENCRYPTION_KEY": correct_key},
+    )
+    correct_context = OAuthCredentialContext(
+        provider=provider,
+        runtime_paths=correct_runtime_paths,
+        credentials_manager=get_runtime_credentials_manager(correct_runtime_paths),
+        worker_target=worker_target,
+    )
+    legacy_credentials = _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT)
+    _save(correct_context, legacy_credentials)
+    credentials_path = scoped_credentials_path(
+        provider.credential_service,
+        credentials_manager=correct_context.credentials_manager,
+        worker_target=worker_target,
+    )
+    generation_path = credential_lifecycle._credential_generation_path(correct_context)
+    original_payload = credentials_path.read_bytes()
+    assert not generation_path.exists()
+
+    wrong_runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={"MINDROOM_CREDENTIALS_ENCRYPTION_KEY": wrong_key},
+    )
+    wrong_context = OAuthCredentialContext(
+        provider=provider,
+        runtime_paths=wrong_runtime_paths,
+        credentials_manager=get_runtime_credentials_manager(wrong_runtime_paths),
+        worker_target=worker_target,
+    )
+    with pytest.raises(OAuthProviderError, match="credentials could not be loaded"):
+        await load_oauth_credentials_snapshot(wrong_context)
+
+    assert credentials_path.read_bytes() == original_payload
+    assert not generation_path.exists()
+    snapshot = await load_oauth_credentials_snapshot(correct_context)
+    assert snapshot.credentials == legacy_credentials
+    assert generation_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_completed_reset_operation_cannot_delete_later_callback_credentials(tmp_path: Path) -> None:
     """A stale recovery retry must return its original result without resetting a newer account."""
 

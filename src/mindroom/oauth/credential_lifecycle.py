@@ -695,6 +695,8 @@ def _finish_pending_resets_locked(
 def _reconcile_oauth_credential_publication_locked(
     context: OAuthCredentialContext,
     state: _OAuthCredentialState,
+    *,
+    allow_unreadable_credentials: bool = False,
 ) -> _OAuthCredentialState:
     """Repair a credentials-first commit after its state-file publication was interrupted."""
     if _pending_reset_operations(state):
@@ -702,11 +704,11 @@ def _reconcile_oauth_credential_publication_locked(
         raise OAuthProviderError(msg)
     credentials = _load_raw_oauth_credentials(context)
     if credentials is None:
-        if state.schema_version >= _OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION:
-            return state
-        upgraded = replace(state, schema_version=_OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION)
-        _write_oauth_credential_state(context, upgraded)
-        return upgraded
+        return _reconcile_missing_oauth_credential_locked(
+            context,
+            state,
+            allow_unreadable_credentials=allow_unreadable_credentials,
+        )
     publication = _oauth_credential_publication(credentials)
     if publication is None:
         if state.schema_version >= _OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION:
@@ -746,6 +748,30 @@ def _reconcile_oauth_credential_publication_locked(
     )
     _write_oauth_credential_state(context, reconciled)
     return reconciled
+
+
+def _reconcile_missing_oauth_credential_locked(
+    context: OAuthCredentialContext,
+    state: _OAuthCredentialState,
+    *,
+    allow_unreadable_credentials: bool,
+) -> _OAuthCredentialState:
+    """Distinguish a missing credential from an unreadable exact credential file."""
+    credentials_path = scoped_credentials_path(
+        context.provider.credential_service,
+        credentials_manager=context.credentials_manager,
+        worker_target=context.worker_target,
+    )
+    if credentials_path.exists() or credentials_path.is_symlink():
+        if allow_unreadable_credentials:
+            return state
+        msg = "Stored OAuth credentials could not be loaded"
+        raise OAuthProviderError(msg)
+    if state.schema_version >= _OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION:
+        return state
+    upgraded = replace(state, schema_version=_OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION)
+    _write_oauth_credential_state(context, upgraded)
+    return upgraded
 
 
 def _prepare_oauth_credential_state_locked(
@@ -996,7 +1022,11 @@ async def _reset_oauth_credentials_transaction(
             return outcome.deleted
         if _pending_reset_operations(state):
             state = _finish_pending_resets_locked(context, state)
-        state = _reconcile_oauth_credential_publication_locked(context, state)
+        state = _reconcile_oauth_credential_publication_locked(
+            context,
+            state,
+            allow_unreadable_credentials=True,
+        )
         existing = state.reset_operations.get(operation_id)
         if existing is not None and existing.status == "completed":
             outcome.deleted = existing.credential_existed

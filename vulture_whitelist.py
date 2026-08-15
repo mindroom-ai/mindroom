@@ -59,6 +59,7 @@ last_flushed_session_updated_at  # unused variable (src/mindroom/memory/auto_flu
 consecutive_failures  # unused variable (src/mindroom/memory/auto_flush.py)
 priority_boost_at  # unused variable (src/mindroom/memory/auto_flush.py)
 instance  # unused variable (src/mindroom/oauth/client.py)
+_._refresh_token  # google-auth stores refresh token in a read-only-property backing field (src/mindroom/oauth/client.py)
 _.add_session_summary_to_context  # unused attribute (src/mindroom/teams.py)
 set_at  # unused variable (src/mindroom/thread_tags.py)
 get_thread_tags  # unused function (src/mindroom/thread_tags.py)
