@@ -1225,7 +1225,7 @@ class ResponseRunner:
         """Deliver a proved reset receipt for the active lifecycle to finalize exactly once."""
         from mindroom.oauth.reset_execution import execute_oauth_connection_reset  # noqa: PLC0415
 
-        recovery = self._oauth_reset_recovery(claimed)
+        recovery = await self._oauth_reset_recovery(claimed)
         if recovery is None:
             return None
         completed = oauth_reset_operation_result(
@@ -1242,7 +1242,7 @@ class ResponseRunner:
                 runtime_paths=self.deps.runtime_paths,
                 execution_identity=recovery.execution_identity,
                 operation_id=recovery.operation.operation_id,
-                expected_generation=recovery.operation.credential_generation,
+                expected_connection_generation=recovery.operation.connection_generation,
             )
         except Exception as exc:
             msg = "Completed OAuth reset receipt recovery remains pending"
@@ -1290,7 +1290,7 @@ class ResponseRunner:
             ),
         )
 
-    def _oauth_reset_recovery(self, claimed: ApprovalContinuation) -> _OAuthResetRecovery | None:
+    async def _oauth_reset_recovery(self, claimed: ApprovalContinuation) -> _OAuthResetRecovery | None:
         """Validate exact approved call identity and resolve its current credential slot."""
         if len(claimed.calls) != 1:
             return None
@@ -1305,11 +1305,15 @@ class ResponseRunner:
         reset_target = cast("dict[str, object]", reset_binding) if isinstance(reset_binding, dict) else None
         provider_id = reset_target.get("provider_id") if reset_target is not None else None
         credential_generation = reset_target.get("credential_generation") if reset_target is not None else None
+        connection_generation = reset_target.get("connection_generation") if reset_target is not None else None
         if not isinstance(provider_id, str) or not provider_id:
             msg = "Approved OAuth credential target is missing; run the reset again."
             raise RuntimeError(msg)
         if not isinstance(credential_generation, str) or not credential_generation:
             msg = "Approved OAuth credential generation is missing; run the reset again."
+            raise RuntimeError(msg)
+        if not isinstance(connection_generation, str) or not connection_generation:
+            msg = "Approved OAuth connection generation is missing; run the reset again."
             raise RuntimeError(msg)
         if (
             binding.get("tool_name") != call.tool_name
@@ -1319,12 +1323,13 @@ class ResponseRunner:
             msg = "Approved OAuth reset call changed; run the reset again."
             raise RuntimeError(msg)
         execution_identity = self._approval_continuation_execution_identity(claimed)
-        self._validate_oauth_reset_recovery(claimed, allow_credential_generation_drift=True)
+        await self._validate_oauth_reset_recovery(claimed, allow_connection_generation_drift=True)
         operation = ApprovalToolOperation(
             approval_id=claimed.approval_id,
             generation=claimed.generation,
             tool_call_id=call.tool_call_id,
             credential_generation=credential_generation,
+            connection_generation=connection_generation,
         )
         resolved_target = resolve_oauth_reset_target(
             provider_id,
@@ -1341,21 +1346,21 @@ class ResponseRunner:
             credential_context=resolved_target.credential_context,
         )
 
-    def _validate_oauth_reset_recovery(
+    async def _validate_oauth_reset_recovery(
         self,
         claimed: ApprovalContinuation,
         *,
-        allow_credential_generation_drift: bool,
+        allow_connection_generation_drift: bool,
     ) -> None:
         """Validate stored target binding against current config and canonical identity."""
         call = claimed.calls[0]
-        validate_oauth_reset_approval_bindings(
+        await validate_oauth_reset_approval_bindings(
             calls=((call.tool_call_id, call.tool_name, call.invoking_agent, True),),
             bindings=claimed.tool_bindings,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             execution_identity=self._approval_continuation_execution_identity(claimed),
-            allow_credential_generation_drift=allow_credential_generation_drift,
+            allow_connection_generation_drift=allow_connection_generation_drift,
         )
 
     async def _finalize_recovered_oauth_reset_receipt(
@@ -1668,7 +1673,7 @@ class ResponseRunner:
         if tool_dispatch.execution_identity != execution_identity:
             msg = "Approval continuation execution identity no longer matches its target"
             raise RuntimeError(msg)
-        validate_oauth_reset_approval_bindings(
+        await validate_oauth_reset_approval_bindings(
             calls=tuple(
                 (
                     call.tool_call_id,
@@ -1749,14 +1754,19 @@ class ResponseRunner:
         reset_binding = binding.get("oauth_reset") if binding is not None else None
         reset_target = cast("Mapping[str, object]", reset_binding) if isinstance(reset_binding, dict) else None
         credential_generation = reset_target.get("credential_generation") if reset_target is not None else None
+        connection_generation = reset_target.get("connection_generation") if reset_target is not None else None
         if not isinstance(credential_generation, str) or not credential_generation:
             msg = "Approved OAuth credential generation is missing; run the reset again."
+            raise RuntimeError(msg)
+        if not isinstance(connection_generation, str) or not connection_generation:
+            msg = "Approved OAuth connection generation is missing; run the reset again."
             raise RuntimeError(msg)
         operation = ApprovalToolOperation(
             approval_id=continuation.approval_id,
             generation=continuation.generation,
             tool_call_id=call.tool_call_id,
             credential_generation=credential_generation,
+            connection_generation=connection_generation,
         )
         return replace(
             tool_dispatch,

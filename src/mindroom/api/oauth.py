@@ -33,8 +33,7 @@ from mindroom.oauth import (
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     exchange_and_store_oauth_credentials,
-    load_oauth_credentials,
-    oauth_credential_generation,
+    load_oauth_credentials_snapshot,
     refresh_oauth_credentials,
     resolve_oauth_credential_context,
 )
@@ -214,7 +213,7 @@ async def _issue_authorization_url(
             request,
             provider.id,
             agent_name,
-            payload=_target_binding_payload(provider, target),
+            payload=await _target_binding_payload(provider, target),
             code_verifier=code_verifier,
         )
         try:
@@ -246,7 +245,7 @@ async def _issue_authorization_url(
             request,
             provider.id,
             agent_name,
-            payload=_target_binding_payload(provider, target),
+            payload=await _target_binding_payload(provider, target),
             code_verifier=code_verifier,
         )
         auth_url = await provider.authorization_uri_async(
@@ -263,12 +262,13 @@ async def _issue_authorization_url(
     )
 
 
-def _target_binding_payload(provider: OAuthProvider, target: RequestCredentialsTarget) -> dict[str, str]:
+async def _target_binding_payload(provider: OAuthProvider, target: RequestCredentialsTarget) -> dict[str, str]:
+    snapshot = await load_oauth_credentials_snapshot(
+        _credential_context(provider, target.runtime_paths, target),
+    )
     return {
         **oauth_credential_target_payload(provider, worker_target_for_credentials_target(target)),
-        "credential_generation": oauth_credential_generation(
-            _credential_context(provider, target.runtime_paths, target),
-        ),
+        "connection_generation": snapshot.connection_generation,
     }
 
 
@@ -307,7 +307,7 @@ def _verify_connect_target_binding(
     connect_target: OAuthConnectTarget,
     target: RequestCredentialsTarget,
 ) -> None:
-    expected = _target_binding_payload(provider, target)
+    expected = oauth_credential_target_payload(provider, worker_target_for_credentials_target(target))
     if (
         connect_target.agent_name != (expected["agent_name"] or None)
         or connect_target.worker_scope != expected["worker_scope"]
@@ -316,17 +316,17 @@ def _verify_connect_target_binding(
         raise HTTPException(status_code=400, detail="OAuth connect link target does not match this request")
 
 
-def _verify_pending_target_binding(
+async def _verify_pending_target_binding(
     provider: OAuthProvider,
     pending_payload: dict[str, str] | None,
     target: RequestCredentialsTarget,
 ) -> None:
-    if pending_payload != _target_binding_payload(provider, target):
+    if pending_payload != await _target_binding_payload(provider, target):
         raise HTTPException(status_code=409, detail="OAuth state no longer matches the requested credential target")
 
 
-def _pending_credential_generation(pending_payload: dict[str, str] | None) -> str:
-    generation = pending_payload.get("credential_generation") if pending_payload is not None else None
+def _pending_connection_generation(pending_payload: dict[str, str] | None) -> str:
+    generation = pending_payload.get("connection_generation") if pending_payload is not None else None
     if not isinstance(generation, str) or not generation:
         raise HTTPException(status_code=409, detail="OAuth state no longer matches the requested credential target")
     return generation
@@ -452,7 +452,7 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
         execution_scope_override_provided=pending.execution_scope_override_provided,
         execution_scope_override=pending.execution_scope_override,
     )
-    _verify_pending_target_binding(provider, pending.payload, target)
+    await _verify_pending_target_binding(provider, pending.payload, target)
 
     try:
         await run_coroutine_until_complete(
@@ -460,7 +460,7 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
                 _credential_context(provider, runtime_paths, target),
                 code,
                 pending.code_verifier,
-                expected_generation=_pending_credential_generation(pending.payload),
+                expected_connection_generation=_pending_connection_generation(pending.payload),
             ),
         )
     except OAuthClaimValidationError as exc:
@@ -489,7 +489,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         agent_name=agent_name,
     )
     context = _credential_context(provider, runtime_paths, target)
-    credentials = load_oauth_credentials(context) or {}
+    credentials = (await load_oauth_credentials_snapshot(context)).credentials or {}
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
     client_config_resolution = (
         provider.client_config_resolution(runtime_paths)
@@ -512,7 +512,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
                 provider_id=provider.id,
                 error_type=type(exc).__name__,
             )
-            credentials = load_oauth_credentials(context) or {}
+            credentials = (await load_oauth_credentials_snapshot(context)).credentials or {}
             credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
         else:
             credentials = refreshed_credentials or {}

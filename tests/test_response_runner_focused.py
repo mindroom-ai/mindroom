@@ -2805,6 +2805,7 @@ async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agn
                 "oauth_reset": {
                     "provider_id": "google",
                     "credential_generation": "credential-generation-1",
+                    "connection_generation": "connection-generation-1",
                 },
             },
         },
@@ -2821,7 +2822,10 @@ async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agn
     with (
         patch.object(runner, "_recover_frozen_approval_final", new=AsyncMock(return_value=(False, None))),
         patch.object(runner, "_approval_continuation_execution_identity", return_value=identity),
-        patch("mindroom.response_runner.validate_oauth_reset_approval_bindings"),
+        patch(
+            "mindroom.response_runner.validate_oauth_reset_approval_bindings",
+            new=AsyncMock(),
+        ),
         patch("mindroom.response_runner.resolve_oauth_reset_target") as resolve_reset_target,
         patch("mindroom.response_runner.oauth_reset_operation_result", return_value=True),
         patch(
@@ -2846,7 +2850,7 @@ async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agn
 
     assert event_id == "$waiting"
     assert execute_reset.await_args.kwargs["operation_id"] == "approval-reset-recovery:3:reset-call"
-    assert execute_reset.await_args.kwargs["expected_generation"] == "credential-generation-1"
+    assert execute_reset.await_args.kwargs["expected_connection_generation"] == "connection-generation-1"
     continue_entity.assert_not_awaited()
     settle_failure.assert_not_awaited()
     lifecycle.finalize.assert_awaited_once()
@@ -3117,6 +3121,7 @@ async def test_completed_oauth_reset_receipt_wins_live_continuation_cancellation
                 "oauth_reset": {
                     "provider_id": "google",
                     "credential_generation": "credential-generation-1",
+                    "connection_generation": "connection-generation-1",
                 },
             },
         },
@@ -3134,7 +3139,10 @@ async def test_completed_oauth_reset_receipt_wins_live_continuation_cancellation
         patch.object(runner, "_execute_claimed_approval", side_effect=asyncio.CancelledError),
         patch.object(runner._approval_responses, "final_delivery", new=AsyncMock(return_value=None)),
         patch.object(runner, "_approval_continuation_execution_identity", return_value=identity),
-        patch("mindroom.response_runner.validate_oauth_reset_approval_bindings"),
+        patch(
+            "mindroom.response_runner.validate_oauth_reset_approval_bindings",
+            new=AsyncMock(),
+        ),
         patch("mindroom.response_runner.resolve_oauth_reset_target") as resolve_reset_target,
         patch("mindroom.response_runner.oauth_reset_operation_result", return_value=True),
         patch(

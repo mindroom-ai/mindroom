@@ -29,7 +29,7 @@ OAuth operations are rare enough that this concurrency is not worth the correctn
 11. Provider adapters classify structured terminal refresh errors as `OAuthRefreshRejectedError` without exposing provider-controlled text.
 12. All consumers build connection and reconnection responses through one factory.
 13. Approval continuations persist and revalidate the exact credential target descriptor before execution.
-14. Every browser callback carries the durable credential revision observed at authorization, and every successful callback or refresh publication advances that revision before publishing credentials so stale approvals and cached clients cannot adopt replacement tokens.
+14. Every credential publication advances a durable lease revision used by materialized clients and MCP sessions, while callback replacement, reset, and terminal invalidation also advance a separate connection generation used to fence browser callbacks and approved resets.
 15. Agent approval continuations install their persisted requester context before reconstructing OAuth-backed toolkits.
 16. Every provider token service ends with `_oauth`, making primary-runtime placement and worker-grant rejection structural.
 17. OAuth-backed toolkit construction receives authorization explicitly, and every managed call revalidates its canonical credential scope and durable revision before reusing cached credentials.
@@ -43,6 +43,8 @@ OAuth operations are rare enough that this concurrency is not worth the correctn
 25. Reset generation metadata durably records every pending intent, retains permanent completed tombstones only for replayable approval operations, and prunes completed direct or provider-driven intents.
 26. Every credential-use and publication transaction finishes pending reset deletion before reading, refreshing, or storing a credential.
 27. Claimed reset recovery publishes a receipt only for a read-only proven completed operation and never starts a missing or pending reset or resumes the stale paused Agno run.
+28. Credential documents carry a scope-bound self-describing publication record, are durably saved before their counters are published, and repair an interrupted state-file commit under the operation lock.
+29. Pending reset deletion always takes precedence over credential-publication recovery.
 
 ## Architecture
 
@@ -89,7 +91,7 @@ It tracks both the desired hash and the hash that built the connected session, v
 It returns the canonical credential context plus the invoking agent name.
 It does not delete credentials or build links.
 
-`src/mindroom/mcp/manager.py` owns requester sessions and performs short durable credential-generation checks immediately before connection publication and admitted remote calls.
+`src/mindroom/mcp/manager.py` owns requester sessions and performs short durable credential-revision checks immediately before connection publication and admitted remote calls.
 
 `src/mindroom/oauth/reset_execution.py` enters MCP retirement, issues a reconnect link immediately before deletion, asks the lifecycle owner to commit the reset, and renders the receipt.
 `src/mindroom/custom_tools/oauth_connections.py` owns only live-request authorization and error translation around that executor.
@@ -116,14 +118,14 @@ Different credential scopes continue concurrently because their lock paths diffe
 
 ### OAuth callback
 
-1. Authenticate the browser user and validate the opaque pending state, target binding, and durable credential revision.
+1. Authenticate the browser user and validate the opaque pending state, target binding, and durable connection generation.
 2. Start a cancellation-safe lifecycle operation.
 3. Acquire the same operation lock used by refresh.
-4. Reject the callback if reset, terminal invalidation, or another successful callback advanced the durable credential revision after authorization.
+4. Reject the callback if reset, terminal invalidation, or another successful callback advanced the durable connection generation after authorization; a same-lineage refresh may advance only the lease revision while the callback waits.
 5. Exchange the authorization code.
 6. Validate and sanitize claims.
 7. Preserve an existing refresh token only when the current locked snapshot has the same verified external identity and OAuth client.
-8. Advance the durable credential revision and durably save the new credential snapshot while retaining the lock.
+8. Durably save the scope-bound credential publication record, then publish its new lease revision and connection generation while retaining the lock.
 9. Release the lock and propagate cancellation only after the local commit completes.
 
 The callback cannot preserve a refresh token that another operation rotated concurrently because exchange and refresh cannot overlap for one scope.
@@ -132,14 +134,14 @@ The callback cannot preserve a refresh token that another operation rotated conc
 
 1. Resolve and revalidate the exact approved credential context.
 2. Return a completed stable operation without entering MCP retirement or touching credentials.
-3. Enter retirement for the approved credential generation.
-4. Skip retirement when the cached requester session already belongs to a later credential generation.
-5. Mark the matching MCP requester-session generation retired so captured callers cannot reconnect it.
+3. Fence the requester-session key, then load its authoritative credential revision and connection generation.
+4. Skip retirement when the authoritative connection generation differs from the approved connection generation.
+5. Otherwise mark every cached requester session for that key retired, including sessions carrying an older lease revision, so captured callers cannot reconnect it.
 6. Close the retired session and keep its key fenced against new sessions.
 7. If retirement fails or is cancelled, retain credentials and restore the tracked generation when possible.
 8. Mint the requester-bound reconnect link after teardown and immediately before reset submission.
 9. Submit credential deletion to the transaction loop and wait cancellably for the operation lock.
-10. Write the stable reset operation as pending together with the new durable credential revision.
+10. Recheck the approved connection generation and write the stable reset operation as pending together with new durable lease and connection generations.
 11. Durably delete the exact scoped credential file without first decoding it.
 12. Mark a replayable approval operation completed with its original file-existed result, retain that tombstone permanently, and prune non-replayable completion state.
 13. Release the in-memory MCP retirement fence and return the receipt even if cancellation arrived after commit.
@@ -175,16 +177,16 @@ Cancellation after that commit is consumed so the approved destructive tool can 
 Focused tests cover observable lifecycle behavior rather than private lock choreography.
 
 - Concurrent same-scope refresh calls perform one necessary rotation and both observe the committed result.
-- Rotated credentials cannot roll back to their pre-refresh snapshot after a successful commit and host crash.
-- Callback waits behind refresh and preserves the latest rotated refresh token when the callback omits one.
+- Rotated credentials and callback results repair an interrupted state-file commit from their durable scope-bound publication record.
+- Callback waits behind refresh, accepts same-lineage lease-revision drift, and preserves the latest rotated refresh token when the callback omits one.
 - Callback cancellation after state consumption still commits exchanged credentials before cancellation propagates.
 - Reset waits behind refresh, closes MCP state, deletes once, and cannot resurrect credentials.
 - Cancellation or failure during MCP teardown leaves credentials intact.
 - Different credential scopes refresh concurrently.
 - A synchronous refresh invoked from an event-loop thread cannot deadlock behind an asynchronous same-scope transaction.
-- Retired MCP generations cannot reconnect with captured stale authorization headers or create a replacement session before deletion commits.
-- Callback state issued before a reset cannot republish credentials after the durable revision advances.
-- Callback success advances the durable revision, and a second callback bound to the consumed revision is rejected.
+- Retired MCP sessions cannot reconnect with captured stale authorization headers or create a replacement session before deletion commits, even when their cached lease revision predates the approved reset.
+- Callback state issued before a reset cannot republish credentials after the connection generation advances.
+- Callback success advances both counters, and a second callback bound to the consumed connection generation is rejected.
 - Reset cancellation before operation-lock ownership preserves credentials, while cancellation after deletion still returns the committed receipt.
 - Reset success is reported only after the credential unlink and parent-directory update are flushed.
 - Refresh cancellation before operation-lock ownership never calls the provider, while cancellation after ownership waits for local publication.

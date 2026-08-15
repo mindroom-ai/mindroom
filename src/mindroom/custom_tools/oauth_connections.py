@@ -71,8 +71,8 @@ class OAuthConnectionTools(Toolkit):
                     if runtime_context.approval_operation is not None
                     else None
                 ),
-                expected_generation=(
-                    runtime_context.approval_operation.credential_generation
+                expected_connection_generation=(
+                    runtime_context.approval_operation.connection_generation
                     if runtime_context.approval_operation is not None
                     else None
                 ),

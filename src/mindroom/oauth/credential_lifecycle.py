@@ -96,8 +96,12 @@ _SCOPE_IMPLICATIONS = {
 
 logger = get_logger(__name__)
 _INITIAL_CREDENTIAL_GENERATION = "initial"
+_OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION = 2
+_CREDENTIAL_STATE_SCHEMA_VERSION_KEY = "schema_version"
 _CREDENTIAL_GENERATION_KEY = "generation"
+_CONNECTION_GENERATION_KEY = "connection_generation"
 _RESET_OPERATIONS_KEY = "reset_operations"
+_CREDENTIAL_PUBLICATION_KEY = "_mindroom_oauth_publication"
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,14 +277,30 @@ class OAuthCredentialsRefreshResult:
     credentials: dict[str, Any] | None
     refreshed: bool
     generation: str
+    connection_generation: str
 
 
 @dataclass(frozen=True, slots=True)
-class _OAuthCredentialsSnapshot:
+class OAuthCredentialsSnapshot:
     """Credential data and durable revision read under one operation lock."""
 
     credentials: dict[str, Any] | None
     generation: str
+    connection_generation: str
+
+
+@dataclass(frozen=True, slots=True)
+class _OAuthCredentialPublication:
+    """Self-describing durable credential commit used to repair state publication."""
+
+    previous_generation: str
+    generation: str
+    connection_generation: str
+    provider_id: str
+    credential_service: str
+    worker_scope: str
+    worker_key: str
+    routing_agent_name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,7 +317,9 @@ class _OAuthCredentialState:
     """One credential generation plus permanent reset-operation tombstones."""
 
     generation: str
+    connection_generation: str
     reset_operations: dict[str, _OAuthResetOperation]
+    schema_version: int = _OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION
 
 
 @dataclass(slots=True)
@@ -363,9 +385,28 @@ def resolve_oauth_credential_context(
 
 
 def load_oauth_credentials(context: OAuthCredentialContext) -> dict[str, Any] | None:
-    """Load credentials for one canonical scope."""
-    if _pending_reset_operations(_load_oauth_credential_state(context)):
+    """Load a committed credential without mutating incomplete lifecycle state."""
+    state = _load_oauth_credential_state(context)
+    if _pending_reset_operations(state):
         return None
+    credentials = _load_raw_oauth_credentials(context)
+    if credentials is None:
+        return None
+    publication = _oauth_credential_publication(credentials)
+    if publication is None:
+        if state.schema_version >= _OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION:
+            msg = "OAuth credential publication metadata is missing"
+            raise OAuthProviderError(msg)
+        return credentials
+    _validate_oauth_credential_publication_scope(context, publication)
+    if publication.generation != state.generation or publication.connection_generation != state.connection_generation:
+        msg = "OAuth credential publication state is incomplete"
+        raise OAuthProviderError(msg)
+    return _credentials_without_publication(credentials)
+
+
+def _load_raw_oauth_credentials(context: OAuthCredentialContext) -> dict[str, Any] | None:
+    """Load the exact stored credential document, including lifecycle metadata."""
     return load_scoped_credentials(
         context.provider.credential_service,
         credentials_manager=context.credentials_manager,
@@ -375,8 +416,13 @@ def load_oauth_credentials(context: OAuthCredentialContext) -> dict[str, Any] | 
 
 
 def oauth_credential_generation(context: OAuthCredentialContext) -> str:
-    """Return the durable revision fencing callbacks and materialized clients."""
-    return _load_oauth_credential_state(context).generation
+    """Return the authoritative durable revision fencing materialized clients."""
+    return load_oauth_credentials_snapshot_sync(context).generation
+
+
+def oauth_connection_generation(context: OAuthCredentialContext) -> str:
+    """Return the connection lineage used to fence callbacks and approved resets."""
+    return load_oauth_credentials_snapshot_sync(context).connection_generation
 
 
 def oauth_reset_operation_result(context: OAuthCredentialContext, operation_id: str) -> bool | None:
@@ -391,7 +437,12 @@ def _load_oauth_credential_state(context: OAuthCredentialContext) -> _OAuthCrede
     """Load and validate generation plus replay-safe reset state."""
     path = _credential_generation_path(context)
     if not path.exists():
-        return _OAuthCredentialState(generation=_INITIAL_CREDENTIAL_GENERATION, reset_operations={})
+        return _OAuthCredentialState(
+            generation=_INITIAL_CREDENTIAL_GENERATION,
+            connection_generation=_INITIAL_CREDENTIAL_GENERATION,
+            reset_operations={},
+            schema_version=1,
+        )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -399,6 +450,22 @@ def _load_oauth_credential_state(context: OAuthCredentialContext) -> _OAuthCrede
         raise OAuthProviderError(msg) from exc
     generation = payload.get(_CREDENTIAL_GENERATION_KEY) if isinstance(payload, dict) else None
     if not isinstance(generation, str) or not generation:
+        msg = "OAuth credential generation state is invalid"
+        raise OAuthProviderError(msg)
+    schema_version = payload.get(_CREDENTIAL_STATE_SCHEMA_VERSION_KEY, 1)
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version not in {1, _OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION}
+    ):
+        msg = "OAuth credential generation state is invalid"
+        raise OAuthProviderError(msg)
+    connection_generation = (
+        payload.get(_CONNECTION_GENERATION_KEY, generation)
+        if schema_version == 1
+        else payload.get(_CONNECTION_GENERATION_KEY)
+    )
+    if not isinstance(connection_generation, str) or not connection_generation:
         msg = "OAuth credential generation state is invalid"
         raise OAuthProviderError(msg)
     stored_operations = payload.get(_RESET_OPERATIONS_KEY, {})
@@ -425,7 +492,12 @@ def _load_oauth_credential_state(context: OAuthCredentialContext) -> _OAuthCrede
             credential_existed=credential_existed,
             replayable=replayable,
         )
-    return _OAuthCredentialState(generation=generation, reset_operations=reset_operations)
+    return _OAuthCredentialState(
+        generation=generation,
+        connection_generation=connection_generation,
+        reset_operations=reset_operations,
+        schema_version=schema_version,
+    )
 
 
 def _write_oauth_credential_state(context: OAuthCredentialContext, state: _OAuthCredentialState) -> None:
@@ -433,7 +505,9 @@ def _write_oauth_credential_state(context: OAuthCredentialContext, state: _OAuth
     write_json_file_durable(
         _credential_generation_path(context),
         {
+            _CREDENTIAL_STATE_SCHEMA_VERSION_KEY: _OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION,
             _CREDENTIAL_GENERATION_KEY: state.generation,
+            _CONNECTION_GENERATION_KEY: state.connection_generation,
             _RESET_OPERATIONS_KEY: {
                 operation_id: {
                     "status": operation.status,
@@ -445,6 +519,108 @@ def _write_oauth_credential_state(context: OAuthCredentialContext, state: _OAuth
         },
         strict_atomic_replace=True,
     )
+
+
+def _oauth_credential_scope_binding(context: OAuthCredentialContext) -> dict[str, str]:
+    """Return the canonical non-secret identity bound to one credential document."""
+    worker_target = context.worker_target
+    worker_scope = (
+        worker_target.worker_scope if worker_target is not None and worker_target.worker_scope else "unscoped"
+    )
+    routing_agent_name = (
+        worker_target.routing_agent_name
+        if worker_target is not None and worker_scope in {"shared", "user_agent"} and worker_target.routing_agent_name
+        else ""
+    )
+    return {
+        "provider_id": context.provider.id,
+        "credential_service": context.provider.credential_service,
+        "worker_scope": worker_scope,
+        "worker_key": worker_target.worker_key if worker_target is not None and worker_target.worker_key else "",
+        "routing_agent_name": routing_agent_name,
+    }
+
+
+def _oauth_credential_publication(credentials: Mapping[str, Any]) -> _OAuthCredentialPublication | None:
+    """Parse one strict self-describing credential publication record."""
+    raw = credentials.get(_CREDENTIAL_PUBLICATION_KEY)
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        msg = "OAuth credential publication metadata is invalid"
+        raise OAuthProviderError(msg)
+    values = {
+        key: raw.get(key)
+        for key in (
+            "previous_generation",
+            "generation",
+            "connection_generation",
+            "provider_id",
+            "credential_service",
+            "worker_scope",
+            "worker_key",
+            "routing_agent_name",
+        )
+    }
+    if any(not isinstance(value, str) for value in values.values()) or any(
+        not values[key]
+        for key in (
+            "previous_generation",
+            "generation",
+            "connection_generation",
+            "provider_id",
+            "credential_service",
+            "worker_scope",
+        )
+    ):
+        msg = "OAuth credential publication metadata is invalid"
+        raise OAuthProviderError(msg)
+    return _OAuthCredentialPublication(**cast("dict[str, str]", values))
+
+
+def _validate_oauth_credential_publication_scope(
+    context: OAuthCredentialContext,
+    publication: _OAuthCredentialPublication,
+) -> None:
+    """Reject a credential document copied from another canonical scope."""
+    expected = _oauth_credential_scope_binding(context)
+    actual = {
+        "provider_id": publication.provider_id,
+        "credential_service": publication.credential_service,
+        "worker_scope": publication.worker_scope,
+        "worker_key": publication.worker_key,
+        "routing_agent_name": publication.routing_agent_name,
+    }
+    if actual != expected:
+        msg = "OAuth credential publication belongs to a different credential scope"
+        raise OAuthProviderError(msg)
+
+
+def _credentials_without_publication(credentials: Mapping[str, Any]) -> dict[str, Any]:
+    """Return provider credential data without lifecycle-owned commit metadata."""
+    result = dict(credentials)
+    result.pop(_CREDENTIAL_PUBLICATION_KEY, None)
+    return result
+
+
+def _credentials_with_publication(
+    context: OAuthCredentialContext,
+    credentials: Mapping[str, Any],
+    *,
+    previous_generation: str,
+    generation: str,
+    connection_generation: str,
+) -> dict[str, Any]:
+    """Attach one scope-bound commit record to a credential document."""
+    return {
+        **_credentials_without_publication(credentials),
+        _CREDENTIAL_PUBLICATION_KEY: {
+            "previous_generation": previous_generation,
+            "generation": generation,
+            "connection_generation": connection_generation,
+            **_oauth_credential_scope_binding(context),
+        },
+    }
 
 
 def _pending_reset_operations(state: _OAuthCredentialState) -> tuple[str, ...]:
@@ -486,24 +662,92 @@ def _finish_pending_resets_locked(
     return completed
 
 
-def load_oauth_credentials_snapshot_sync(context: OAuthCredentialContext) -> _OAuthCredentialsSnapshot:
+def _reconcile_oauth_credential_publication_locked(
+    context: OAuthCredentialContext,
+    state: _OAuthCredentialState,
+) -> _OAuthCredentialState:
+    """Repair a credentials-first commit after its state-file publication was interrupted."""
+    if _pending_reset_operations(state):
+        msg = "Pending OAuth resets must finish before credential publication recovery"
+        raise OAuthProviderError(msg)
+    credentials = _load_raw_oauth_credentials(context)
+    if credentials is None:
+        if state.schema_version >= _OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION:
+            return state
+        upgraded = replace(state, schema_version=_OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION)
+        _write_oauth_credential_state(context, upgraded)
+        return upgraded
+    publication = _oauth_credential_publication(credentials)
+    if publication is None:
+        if state.schema_version >= _OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION:
+            msg = "OAuth credential publication metadata is missing"
+            raise OAuthProviderError(msg)
+        adopted_credentials = _credentials_with_publication(
+            context,
+            credentials,
+            previous_generation=state.generation,
+            generation=state.generation,
+            connection_generation=state.connection_generation,
+        )
+        save_scoped_credentials(
+            context.provider.credential_service,
+            adopted_credentials,
+            credentials_manager=context.credentials_manager,
+            worker_target=context.worker_target,
+        )
+        upgraded = replace(state, schema_version=_OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION)
+        _write_oauth_credential_state(context, upgraded)
+        return upgraded
+    _validate_oauth_credential_publication_scope(context, publication)
+    if publication.generation == state.generation and publication.connection_generation == state.connection_generation:
+        if state.schema_version >= _OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION:
+            return state
+        upgraded = replace(state, schema_version=_OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION)
+        _write_oauth_credential_state(context, upgraded)
+        return upgraded
+    if publication.previous_generation != state.generation:
+        msg = "OAuth credential publication does not extend the current credential revision"
+        raise OAuthProviderError(msg)
+    reconciled = replace(
+        state,
+        generation=publication.generation,
+        connection_generation=publication.connection_generation,
+        schema_version=_OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION,
+    )
+    _write_oauth_credential_state(context, reconciled)
+    return reconciled
+
+
+def _prepare_oauth_credential_state_locked(
+    context: OAuthCredentialContext,
+    state: _OAuthCredentialState | None = None,
+) -> _OAuthCredentialState:
+    """Finish reset recovery before reconciling any credential publication."""
+    current = state or _load_oauth_credential_state(context)
+    if _pending_reset_operations(current):
+        current = _finish_pending_resets_locked(context, current)
+    return _reconcile_oauth_credential_publication_locked(context, current)
+
+
+def load_oauth_credentials_snapshot_sync(context: OAuthCredentialContext) -> OAuthCredentialsSnapshot:
     """Load credentials and their durable revision under one operation lock."""
     return _run_oauth_transaction_sync(_load_oauth_credentials_snapshot_transaction(context))
 
 
-async def load_oauth_credentials_snapshot(context: OAuthCredentialContext) -> _OAuthCredentialsSnapshot:
+async def load_oauth_credentials_snapshot(context: OAuthCredentialContext) -> OAuthCredentialsSnapshot:
     """Load credentials and revision through the shared async transaction owner."""
     return await _run_oauth_transaction(_load_oauth_credentials_snapshot_transaction(context))
 
 
 async def _load_oauth_credentials_snapshot_transaction(
     context: OAuthCredentialContext,
-) -> _OAuthCredentialsSnapshot:
+) -> OAuthCredentialsSnapshot:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
-        _finish_pending_resets_locked(context)
-        return _OAuthCredentialsSnapshot(
+        state = _prepare_oauth_credential_state_locked(context)
+        return OAuthCredentialsSnapshot(
             credentials=load_oauth_credentials(context),
-            generation=oauth_credential_generation(context),
+            generation=state.generation,
+            connection_generation=state.connection_generation,
         )
 
 
@@ -523,26 +767,36 @@ async def _refresh_oauth_credentials_transaction(
     context: OAuthCredentialContext,
 ) -> OAuthCredentialsRefreshResult:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
-        _finish_pending_resets_locked(context)
-        return await run_coroutine_until_complete(_refresh_oauth_credentials_locked(context))
+        state = _prepare_oauth_credential_state_locked(context)
+        return await run_coroutine_until_complete(_refresh_oauth_credentials_locked(context, state))
 
 
 async def _refresh_oauth_credentials_locked(
     context: OAuthCredentialContext,
+    state: _OAuthCredentialState,
 ) -> OAuthCredentialsRefreshResult:
-    generation = oauth_credential_generation(context)
     credentials = load_oauth_credentials(context)
     if credentials is None:
         _log_oauth_refresh_skipped(context, None, reason="missing_credentials")
-        return OAuthCredentialsRefreshResult(credentials=None, refreshed=False, generation=generation)
+        return OAuthCredentialsRefreshResult(
+            credentials=None,
+            refreshed=False,
+            generation=state.generation,
+            connection_generation=state.connection_generation,
+        )
     if not oauth_credentials_usable(context.provider, context.runtime_paths, credentials):
         _log_oauth_refresh_skipped(context, credentials, reason="unusable_credentials")
-        return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False, generation=generation)
+        return OAuthCredentialsRefreshResult(
+            credentials=credentials,
+            refreshed=False,
+            generation=state.generation,
+            connection_generation=state.connection_generation,
+        )
     try:
         refreshed_credentials = await context.provider.refresh_token_data(credentials, context.runtime_paths)
     except OAuthProviderError as exc:
-        _raise_normalized_refresh_error(context, credentials, exc)
-    return _publish_refresh_result(context, credentials, refreshed_credentials, generation=generation)
+        _raise_normalized_refresh_error(context, credentials, exc, state=state)
+    return _publish_refresh_result(context, credentials, refreshed_credentials, state=state)
 
 
 def refresh_oauth_credentials_sync(
@@ -558,20 +812,29 @@ async def _refresh_oauth_credentials_sync_transaction(
     refresh: Callable[[Mapping[str, Any]], dict[str, Any] | None],
 ) -> OAuthCredentialsRefreshResult:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
-        _finish_pending_resets_locked(context)
-        generation = oauth_credential_generation(context)
+        state = _prepare_oauth_credential_state_locked(context)
         credentials = load_oauth_credentials(context)
         if credentials is None:
             _log_oauth_refresh_skipped(context, None, reason="missing_credentials")
-            return OAuthCredentialsRefreshResult(credentials=None, refreshed=False, generation=generation)
+            return OAuthCredentialsRefreshResult(
+                credentials=None,
+                refreshed=False,
+                generation=state.generation,
+                connection_generation=state.connection_generation,
+            )
         if not oauth_credentials_usable(context.provider, context.runtime_paths, credentials):
             _log_oauth_refresh_skipped(context, credentials, reason="unusable_credentials")
-            return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False, generation=generation)
+            return OAuthCredentialsRefreshResult(
+                credentials=credentials,
+                refreshed=False,
+                generation=state.generation,
+                connection_generation=state.connection_generation,
+            )
         try:
             refreshed_credentials = await asyncio.to_thread(refresh, credentials)
         except OAuthProviderError as exc:
-            _raise_normalized_refresh_error(context, credentials, exc)
-        return _publish_refresh_result(context, credentials, refreshed_credentials, generation=generation)
+            _raise_normalized_refresh_error(context, credentials, exc, state=state)
+        return _publish_refresh_result(context, credentials, refreshed_credentials, state=state)
 
 
 def refresh_oauth_credentials_blocking(context: OAuthCredentialContext) -> dict[str, Any] | None:
@@ -584,7 +847,7 @@ async def exchange_and_store_oauth_credentials(
     code: str,
     code_verifier: str | None,
     *,
-    expected_generation: str,
+    expected_connection_generation: str,
 ) -> dict[str, Any]:
     """Exchange one code and publish its credential snapshot atomically."""
     return await _run_oauth_transaction(
@@ -592,7 +855,7 @@ async def exchange_and_store_oauth_credentials(
             context,
             code,
             code_verifier,
-            expected_generation=expected_generation,
+            expected_connection_generation=expected_connection_generation,
         ),
     )
 
@@ -602,20 +865,22 @@ async def _exchange_and_store_oauth_credentials_transaction(
     code: str,
     code_verifier: str | None,
     *,
-    expected_generation: str,
+    expected_connection_generation: str,
 ) -> dict[str, Any]:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
-        _finish_pending_resets_locked(context)
-        if oauth_credential_generation(context) != expected_generation:
+        state = _prepare_oauth_credential_state_locked(context)
+        if state.connection_generation != expected_connection_generation:
             msg = "OAuth connection state is stale because this credential changed"
             raise OAuthProviderError(msg)
-        return await _exchange_and_store_oauth_credentials_locked(context, code, code_verifier)
+        return await _exchange_and_store_oauth_credentials_locked(context, code, code_verifier, state=state)
 
 
 async def _exchange_and_store_oauth_credentials_locked(
     context: OAuthCredentialContext,
     code: str,
     code_verifier: str | None,
+    *,
+    state: _OAuthCredentialState,
 ) -> dict[str, Any]:
     result = await context.provider.exchange_code(
         code,
@@ -628,21 +893,20 @@ async def _exchange_and_store_oauth_credentials_locked(
         load_oauth_credentials(context),
         safe_result.token_data,
     )
-    _advance_oauth_credential_generation(context)
-    save_scoped_credentials(
-        context.provider.credential_service,
+    published, _state = _publish_oauth_credentials_locked(
+        context,
         token_data,
-        credentials_manager=context.credentials_manager,
-        worker_target=context.worker_target,
+        state=state,
+        advance_connection_generation=True,
     )
-    return token_data
+    return published
 
 
 async def reset_oauth_credentials(
     context: OAuthCredentialContext,
     *,
     operation_id: str | None = None,
-    expected_generation: str | None = None,
+    expected_connection_generation: str | None = None,
 ) -> bool:
     """Delete one credential, cancelling before its lock or returning after its commit."""
     outcome = _OAuthCredentialResetOutcome()
@@ -654,7 +918,7 @@ async def reset_oauth_credentials(
                 context,
                 outcome,
                 operation_id=resolved_operation_id,
-                expected_generation=expected_generation,
+                expected_connection_generation=expected_connection_generation,
                 replayable=replayable,
             ),
         )
@@ -669,7 +933,7 @@ async def _reset_oauth_credentials_transaction(
     outcome: _OAuthCredentialResetOutcome,
     *,
     operation_id: str,
-    expected_generation: str | None,
+    expected_connection_generation: str | None,
     replayable: bool,
 ) -> bool:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
@@ -679,13 +943,15 @@ async def _reset_oauth_credentials_transaction(
             outcome.deleted = existing.credential_existed
             outcome.committed = True
             return outcome.deleted
-        state = _finish_pending_resets_locked(context, state)
+        if _pending_reset_operations(state):
+            state = _finish_pending_resets_locked(context, state)
+        state = _reconcile_oauth_credential_publication_locked(context, state)
         existing = state.reset_operations.get(operation_id)
         if existing is not None and existing.status == "completed":
             outcome.deleted = existing.credential_existed
             outcome.committed = True
             return outcome.deleted
-        if expected_generation is not None and state.generation != expected_generation:
+        if expected_connection_generation is not None and state.connection_generation != expected_connection_generation:
             msg = "OAuth connection state is stale because this credential changed"
             raise OAuthProviderError(msg)
         credentials_path = scoped_credentials_path(
@@ -704,6 +970,7 @@ async def _reset_oauth_credentials_transaction(
         }
         pending = _OAuthCredentialState(
             generation=secrets.token_hex(32),
+            connection_generation=secrets.token_hex(32),
             reset_operations=reset_operations,
         )
         _write_oauth_credential_state(context, pending)
@@ -731,15 +998,38 @@ def _credential_generation_path(context: OAuthCredentialContext) -> Path:
     return credentials_path.with_name(f"{credentials_path.name}.oauth-generation.json")
 
 
-def _advance_oauth_credential_generation(context: OAuthCredentialContext) -> str:
-    """Durably advance one credential revision and return its new value."""
-    state = _load_oauth_credential_state(context)
+def _publish_oauth_credentials_locked(
+    context: OAuthCredentialContext,
+    credentials: Mapping[str, Any],
+    *,
+    state: _OAuthCredentialState,
+    advance_connection_generation: bool,
+) -> tuple[dict[str, Any], _OAuthCredentialState]:
+    """Durably save a self-describing credential before publishing its counters."""
     generation = secrets.token_hex(32)
-    _write_oauth_credential_state(
+    connection_generation = secrets.token_hex(32) if advance_connection_generation else state.connection_generation
+    published_credentials = _credentials_without_publication(credentials)
+    stored_credentials = _credentials_with_publication(
         context,
-        replace(state, generation=generation),
+        published_credentials,
+        previous_generation=state.generation,
+        generation=generation,
+        connection_generation=connection_generation,
     )
-    return generation
+    save_scoped_credentials(
+        context.provider.credential_service,
+        stored_credentials,
+        credentials_manager=context.credentials_manager,
+        worker_target=context.worker_target,
+    )
+    published_state = replace(
+        state,
+        generation=generation,
+        connection_generation=connection_generation,
+        schema_version=_OAUTH_CREDENTIAL_STATE_SCHEMA_VERSION,
+    )
+    _write_oauth_credential_state(context, published_state)
+    return published_credentials, published_state
 
 
 def _publish_refresh_result(
@@ -747,27 +1037,32 @@ def _publish_refresh_result(
     credentials: dict[str, Any],
     refreshed_credentials: dict[str, Any] | None,
     *,
-    generation: str,
+    state: _OAuthCredentialState,
 ) -> OAuthCredentialsRefreshResult:
     if refreshed_credentials is None:
         _log_oauth_refresh_skipped(context, credentials, reason="not_needed")
-        return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False, generation=generation)
-    refreshed_generation = _advance_oauth_credential_generation(context)
-    save_scoped_credentials(
-        context.provider.credential_service,
+        return OAuthCredentialsRefreshResult(
+            credentials=credentials,
+            refreshed=False,
+            generation=state.generation,
+            connection_generation=state.connection_generation,
+        )
+    published_credentials, published_state = _publish_oauth_credentials_locked(
+        context,
         refreshed_credentials,
-        credentials_manager=context.credentials_manager,
-        worker_target=context.worker_target,
+        state=state,
+        advance_connection_generation=False,
     )
     logger.info(
         "oauth_credentials_refreshed",
-        **_oauth_refresh_log_context(context, refreshed_credentials),
+        **_oauth_refresh_log_context(context, published_credentials),
         reason="refreshed",
     )
     return OAuthCredentialsRefreshResult(
-        credentials=refreshed_credentials,
+        credentials=published_credentials,
         refreshed=True,
-        generation=refreshed_generation,
+        generation=published_state.generation,
+        connection_generation=published_state.connection_generation,
     )
 
 
@@ -775,9 +1070,10 @@ def _invalidate_rejected_credentials(
     context: OAuthCredentialContext,
     credentials: dict[str, Any],
     exc: OAuthRefreshRejectedError,
+    *,
+    state: _OAuthCredentialState,
 ) -> None:
     _attach_oauth_refresh_failure_context(exc, credentials)
-    state = _load_oauth_credential_state(context)
     operation_id = f"refresh-rejected:{secrets.token_hex(32)}"
     reset_operations = {
         **state.reset_operations,
@@ -785,6 +1081,7 @@ def _invalidate_rejected_credentials(
     }
     pending = _OAuthCredentialState(
         generation=secrets.token_hex(32),
+        connection_generation=secrets.token_hex(32),
         reset_operations=reset_operations,
     )
     _write_oauth_credential_state(context, pending)
@@ -796,10 +1093,12 @@ def _raise_normalized_refresh_error(
     context: OAuthCredentialContext,
     credentials: dict[str, Any],
     exc: OAuthProviderError,
+    *,
+    state: _OAuthCredentialState,
 ) -> NoReturn:
     normalized_error = _normalized_refresh_error(exc)
     if isinstance(normalized_error, OAuthRefreshRejectedError):
-        _invalidate_rejected_credentials(context, credentials, normalized_error)
+        _invalidate_rejected_credentials(context, credentials, normalized_error, state=state)
     else:
         _log_oauth_refresh_failed(context, credentials, normalized_error, reason="provider_refresh_failed")
     if normalized_error is exc:

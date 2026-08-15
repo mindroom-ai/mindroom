@@ -38,7 +38,6 @@ from mindroom.mcp.transports import build_transport_handle
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog, MCPServerState
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
-    load_oauth_credentials,
     load_oauth_credentials_snapshot,
     oauth_credentials_usable,
     refresh_oauth_credentials_with_result,
@@ -353,40 +352,37 @@ class MCPServerManager:
         self,
         server_id: str,
         *,
-        worker_target: ResolvedWorkerTarget | None,
-        expected_credential_generation: str | None = None,
+        credential_context: OAuthCredentialContext,
+        expected_connection_generation: str | None = None,
     ) -> AsyncIterator[None]:
-        """Fence one requester generation while its OAuth credential is reset."""
+        """Fence one requester connection lineage while its credential is reset."""
         base_state = self._states.get(server_id)
         if base_state is None or base_state.config.auth is None:
             yield
             return
         try:
-            key = self._request_session_key(base_state, worker_target)
+            key = self._request_session_key(base_state, credential_context.worker_target)
         except OAuthConnectionRequired:
             yield
             return
         async with self._state_lifecycle_lock:
             retirement_lock = self._request_retirement_locks.setdefault(key, asyncio.Lock())
         async with retirement_lock:
+            state: MCPServerState | None = None
             async with self._state_lifecycle_lock:
-                state = self._scoped_states.get(key)
-                if (
-                    state is not None
-                    and expected_credential_generation is not None
-                    and state.oauth_credential_generation != expected_credential_generation
-                ):
-                    state = None
-                    skip_retirement = True
-                else:
-                    self._retired_request_keys.add(key)
-                    skip_retirement = False
-                if state is not None:
-                    state.retired = True
-            if skip_retirement:
-                yield
-                return
+                self._retired_request_keys.add(key)
             try:
+                snapshot = await load_oauth_credentials_snapshot(credential_context)
+                if (
+                    expected_connection_generation is not None
+                    and snapshot.connection_generation != expected_connection_generation
+                ):
+                    yield
+                    return
+                async with self._state_lifecycle_lock:
+                    state = self._scoped_states.get(key)
+                    if state is not None:
+                        state.retired = True
                 if state is not None:
                     await self._cancel_refresh_task(state)
                     async with state.lock:
@@ -497,7 +493,7 @@ class MCPServerManager:
             refresh_result = await refresh_oauth_credentials_with_result(context)
             credentials = refresh_result.credentials
         except OAuthProviderError as exc:
-            failed_credentials = load_oauth_credentials(context)
+            failed_credentials = (await load_oauth_credentials_snapshot(context)).credentials
             self._log_oauth_refresh_failure(state, provider.id, failed_credentials or {}, exc)
             reason = OAUTH_REFRESH_REJECTED_REASON if isinstance(exc, OAuthRefreshRejectedError) else None
             raise oauth_connection_required(context, reason=reason) from exc

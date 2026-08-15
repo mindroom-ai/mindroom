@@ -22,14 +22,15 @@ One lifecycle module submits asynchronous callers and synchronous provider adapt
 - Complete remote-token-producing operations locally before propagating cancellation.
 - Perform fallible MCP teardown before destructive credential deletion.
 - Fence retired MCP requester-session generations until credential deletion commits.
-- Bind browser callbacks and managed consumers to a durable credential revision advanced by callback success, refresh publication, reset, and terminal invalidation.
+- Bind managed consumers to a durable lease revision advanced by every credential publication, and bind browser callbacks and resets to a separate connection generation advanced only by replacement, reset, and terminal invalidation.
+- Save a scope-bound self-describing credential publication record before publishing its counters, recover an interrupted state commit under the operation lock, and give pending reset deletion absolute recovery precedence.
 - Pass authorization explicitly into OAuth-backed toolkit construction and revalidate the full canonical context plus durable revision before every managed call.
 - Keep managed Google credentials and services together in worker-thread-local state.
 - Copy supported supplied Google credentials into private blocking state and serialize their complete provider calls with one reentrant toolkit lock.
 - Keep GitHub tokens and PyGithub clients together in worker-thread-local state.
-- Revalidate every authenticated MCP connection and call against authoritative cross-process credential generation and token hash immediately before publication or remote use.
+- Revalidate every authenticated MCP connection and call against authoritative cross-process credential revision and token hash immediately before publication or remote use.
 - Use structured provider error codes and never log provider-controlled descriptions or token values.
-- Keep reset approval bound to the exact provider, service, scope, worker key, routing agent, and credential generation.
+- Keep reset approval bound to the exact provider, service, scope, worker key, routing agent, credential revision, and connection generation.
 - Freeze every approved call's exact ID, name, canonical arguments, and invoking agent.
 - Require reset to be the sole call in its approval generation.
 - Key approved reset commits by `approval_id:generation:tool_call_id`, retain those completed tombstones permanently, and prune non-replayable direct or provider-driven completion state.
@@ -53,16 +54,16 @@ One lifecycle module submits asynchronous callers and synchronous provider adapt
 **Interfaces:**
 
 - Produces: `OAuthCredentialContext(provider, runtime_paths, credentials_manager, worker_target, allowed_shared_services=None)`.
-- Produces: `OAuthCredentialsRefreshResult(credentials, refreshed, generation)`.
+- Produces: `OAuthCredentialsRefreshResult(credentials, refreshed, generation, connection_generation)`.
 - Produces: `load_oauth_credentials_snapshot_sync(context)` for lock-consistent eager toolkit construction.
 - Produces: `oauth_credentials_worker_target(provider, worker_target, execution_identity=None, authorization=None)`.
 - Produces: `resolve_oauth_credential_context(...)` as the OAuth-only alias-canonicalization boundary.
 - Produces: `load_oauth_credentials(context)`.
-- Produces: `oauth_credential_generation(context)` for callback/reset fencing.
+- Produces: authoritative credential snapshots carrying both the consumer lease revision and callback/reset connection generation.
 - Produces: `refresh_oauth_credentials(context)` and `refresh_oauth_credentials_with_result(context)`.
 - Produces: `refresh_oauth_credentials_blocking(context)` for synchronous callers of the asynchronous provider contract.
 - Produces: `refresh_oauth_credentials_sync(context, refresh)` for synchronous provider adapters.
-- Produces: `exchange_and_store_oauth_credentials(context, code, code_verifier, expected_generation=...)`.
+- Produces: `exchange_and_store_oauth_credentials(context, code, code_verifier, expected_connection_generation=...)`.
 - Produces: `reset_oauth_credentials(context, operation_id=None)`.
 - Produces: credential validation and sanitization helpers currently housed in `oauth.service`.
 - Consumes: `OAuthProvider`, `RuntimePaths`, `CredentialsManager`, `ResolvedWorkerTarget`, `AuthorizationConfig`, `async_exclusive_file_lock`, and scoped credential storage functions.
@@ -154,10 +155,10 @@ Apply the same missing, unusable, no-refresh-needed, success, terminal rejection
 
 - [ ] **Step 5: Move callback publication and reset into the lifecycle module**
 
-`exchange_and_store_oauth_credentials()` must acquire the operation lock, verify the pending callback generation, and retain the lock through exchange, claim validation, refresh-token preservation, and save.
+`exchange_and_store_oauth_credentials()` must acquire the operation lock, verify the pending callback connection generation, and retain the lock through exchange, claim validation, refresh-token preservation, and publication.
 The API route will wrap the complete lock-wait-through-save coroutine in `run_coroutine_until_complete()` after consuming state.
 
-`reset_oauth_credentials()` must wait cancellably for the operation lock, reject an uncompleted operation whose approved credential generation changed, durably record its pending intent with an advanced generation, delete the exact scoped file, and durably complete or prune the operation without owning MCP transport cleanup.
+`reset_oauth_credentials()` must wait cancellably for the operation lock, reject an uncompleted operation whose approved connection generation changed, durably record its pending intent with advanced lease and connection generations, delete the exact scoped file, and durably complete or prune the operation without owning MCP transport cleanup.
 A completed replayable operation stores the original file-existed result and remains as a permanent tombstone so a stale retry cannot delete credentials from a later callback.
 Every locked credential transaction must finish a pending reset delete before it reads or publishes credentials.
 Cancellation before lock ownership must abort reset, while cancellation after commit must return the deletion result so the caller can publish its receipt.
@@ -284,14 +285,14 @@ Return the dashboard disconnect receipt only after successful cleanup and deleti
 
 Resolve provider-specific requester credential identity once.
 Construct the context with the primary runtime credential manager.
-Persist provider ID, credential service, worker scope, worker key, routing agent, invoking agent, and credential generation in approval bindings.
+Persist provider ID, credential service, worker scope, worker key, routing agent, invoking agent, credential revision, and connection generation in approval bindings.
 Re-resolve and compare every field before approved execution.
 Pass authorization into agent reconstruction and install persisted tool runtime and execution-identity contexts before reconstruction and resumed execution.
 
 - [ ] **Step 6: Make agent reset cancellation-safe by ordering**
 
-Return completed stable operations before retirement, and skip retirement when a cached session already belongs to a later credential generation.
-Enter MCP requester-session retirement for the approved generation, then issue the requester-bound reconnect link immediately before the lifecycle reset transaction.
+Return completed stable operations before retirement, fence the requester-session key, and skip retirement only when authoritative storage proves the connection generation changed after approval.
+Otherwise retire every cached same-key session regardless of lease-revision mismatch, then issue the requester-bound reconnect link immediately before the lifecycle reset transaction.
 If teardown or lifecycle reset raises an ordinary exception, log one bounded lifecycle-wide failure event and tell the caller to verify status before retrying.
 If teardown is cancelled, propagate cancellation while credentials remain intact.
 After deletion, release only the in-memory retirement fence before building the receipt.

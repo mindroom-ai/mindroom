@@ -18,7 +18,6 @@ from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
-    load_oauth_credentials,
     load_oauth_credentials_snapshot_sync,
     oauth_credential_generation,
     oauth_credentials_have_required_scopes,
@@ -250,7 +249,7 @@ class ScopedOAuthClientMixin:
 
     def _load_token_data(self) -> dict[str, Any] | None:
         """Load OAuth credentials for the current execution scope."""
-        return load_oauth_credentials(self._oauth_credential_context())
+        return load_oauth_credentials_snapshot_sync(self._oauth_credential_context()).credentials
 
     def _oauth_credential_context(self) -> OAuthCredentialContext:
         execution_identity = active_tool_execution_identity(None)
@@ -388,6 +387,9 @@ class ScopedOAuthClientMixin:
             state.last_failure = _GoogleRefreshFailure.MISSING
             self._raise_google_refresh_failure(state.last_failure)
         refreshed = self._raw_credentials_from_token_data(result.credentials)
+        if not refreshed.valid:
+            state.last_failure = _GoogleRefreshFailure.MISSING
+            self._raise_google_refresh_failure(state.last_failure)
         credentials.token = refreshed.token
         credentials.expiry = refreshed.expiry
         credentials.refresh_token = refreshed.refresh_token

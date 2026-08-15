@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
 
     from mindroom.mcp.config import MCPOAuthConfig, MCPServerConfig
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
 
 
 def mcp_oauth_provider_id(server_id: str, auth_config: MCPOAuthConfig | None) -> str:
@@ -59,8 +59,8 @@ async def retire_mcp_oauth_request_session(
     mcp_servers: dict[str, MCPServerConfig],
     provider_id: str,
     *,
-    worker_target: ResolvedWorkerTarget | None,
-    expected_credential_generation: str | None = None,
+    credential_context: OAuthCredentialContext,
+    expected_connection_generation: str | None = None,
 ) -> AsyncIterator[None]:
     """Fence a generated provider's requester session for an OAuth reset transaction."""
     server_id = _mcp_oauth_server_id_for_provider_id(mcp_servers, provider_id)
@@ -70,8 +70,8 @@ async def retire_mcp_oauth_request_session(
         return
     async with manager.retire_request_session(
         server_id,
-        worker_target=worker_target,
-        expected_credential_generation=expected_credential_generation,
+        credential_context=credential_context,
+        expected_connection_generation=expected_connection_generation,
     ):
         yield
 

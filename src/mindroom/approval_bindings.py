@@ -33,7 +33,7 @@ def canonical_tool_arguments(arguments: object) -> str:
         raise RuntimeError(msg) from exc
 
 
-def build_approval_tool_bindings(
+async def build_approval_tool_bindings(
     identified_tools: Sequence[tuple[ToolExecution, str, str, str]],
     *,
     config: Config,
@@ -47,7 +47,7 @@ def build_approval_tool_bindings(
     if reset_calls and len(identified_tools) != 1:
         msg = "OAuth reset must be the only tool call in its approval generation"
         raise RuntimeError(msg)
-    reset_bindings = build_oauth_reset_approval_bindings(
+    reset_bindings = await build_oauth_reset_approval_bindings(
         identified_tools,
         config=config,
         runtime_paths=runtime_paths,

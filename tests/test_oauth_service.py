@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import threading
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -13,7 +15,6 @@ import pytest
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
     get_runtime_credentials_manager,
-    load_scoped_credentials,
     save_scoped_credentials,
     scoped_credentials_path,
 )
@@ -21,6 +22,8 @@ from mindroom.oauth import credential_lifecycle
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     exchange_and_store_oauth_credentials,
+    load_oauth_credentials_snapshot,
+    oauth_connection_generation,
     refresh_oauth_credentials_sync,
     refresh_oauth_credentials_with_result,
 )
@@ -192,11 +195,7 @@ def _save(context: OAuthCredentialContext, credentials: dict[str, Any]) -> None:
 
 
 def _load(context: OAuthCredentialContext) -> dict[str, Any] | None:
-    return load_scoped_credentials(
-        context.provider.credential_service,
-        credentials_manager=context.credentials_manager,
-        worker_target=context.worker_target,
-    )
+    return credential_lifecycle.load_oauth_credentials(context)
 
 
 def _assert_no_token_values_logged(logger: _CapturingLogger) -> None:
@@ -290,6 +289,91 @@ async def test_different_scopes_refresh_concurrently(tmp_path: Path) -> None:
     assert started == {"alice", "bob"}
 
 
+@pytest.mark.asyncio
+async def test_credential_publication_record_cannot_be_adopted_by_another_scope(tmp_path: Path) -> None:
+    """A copied credential document cannot advance a fresh requester's initial state."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    provider = _FakeOAuthProvider(unused_refresh)
+    alice = _context(
+        tmp_path,
+        provider,
+        worker_target=_worker_target("@alice:example.test", worker_scope="user"),
+    )
+    bob = _context(
+        tmp_path,
+        provider,
+        worker_target=_worker_target("@bob:example.test", worker_scope="user"),
+    )
+    _save(alice, _credentials("alice", CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+    oauth_connection_generation(alice)
+    alice_path = scoped_credentials_path(
+        alice.provider.credential_service,
+        credentials_manager=alice.credentials_manager,
+        worker_target=alice.worker_target,
+    )
+    bob_path = scoped_credentials_path(
+        bob.provider.credential_service,
+        credentials_manager=bob.credentials_manager,
+        worker_target=bob.worker_target,
+    )
+    bob_path.parent.mkdir(parents=True, exist_ok=True)
+    bob_path.write_bytes(alice_path.read_bytes())
+
+    with pytest.raises(OAuthProviderError, match="different credential scope"):
+        await load_oauth_credentials_snapshot(bob)
+
+
+@pytest.mark.asyncio
+async def test_user_scope_publication_is_shared_across_routing_agents(tmp_path: Path) -> None:
+    """Routing-agent changes cannot split one requester-wide credential scope."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    provider = _FakeOAuthProvider(unused_refresh)
+    code_target = _worker_target("@alice:example.test", worker_scope="user")
+    assert code_target.execution_identity is not None
+    research_target = replace(
+        code_target,
+        routing_agent_name="research",
+        execution_identity=replace(code_target.execution_identity, agent_name="research"),
+    )
+    code = _context(tmp_path, provider, worker_target=code_target)
+    research = _context(tmp_path, provider, worker_target=research_target)
+    expected = _credentials("alice", CHAIN_0, expires_at=FUTURE_EXPIRES_AT)
+    _save(code, expected)
+    oauth_connection_generation(code)
+
+    snapshot = await load_oauth_credentials_snapshot(research)
+
+    assert snapshot.credentials == expected
+
+
+def test_schema_v2_state_requires_explicit_connection_generation(tmp_path: Path) -> None:
+    """The authoritative state format must not collapse its two revision fences."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    credential_lifecycle._credential_generation_path(context).write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "generation": "lease-generation",
+                "reset_operations": {},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(OAuthProviderError, match="generation state is invalid"):
+        credential_lifecycle._load_oauth_credential_state(context)
+
+
 @pytest.mark.parametrize("encrypted", [False, True], ids=("plaintext", "encrypted"))
 @pytest.mark.asyncio
 async def test_reset_deletes_unreadable_scoped_file_and_allows_reconnect(
@@ -333,7 +417,7 @@ async def test_reset_deletes_unreadable_scoped_file_and_allows_reconnect(
         context,
         "replacement-code",
         None,
-        expected_generation=credential_lifecycle.oauth_credential_generation(context),
+        expected_connection_generation=oauth_connection_generation(context),
     )
     assert reconnected["token"] == "callback-access"  # noqa: S105
     assert _load(context) == reconnected
@@ -355,7 +439,7 @@ async def test_completed_reset_operation_cannot_delete_later_callback_credential
         context,
         "replacement-code",
         None,
-        expected_generation=credential_lifecycle.oauth_credential_generation(context),
+        expected_connection_generation=oauth_connection_generation(context),
     )
 
     assert await credential_lifecycle.reset_oauth_credentials(context, operation_id=operation_id) is True
@@ -380,13 +464,14 @@ async def test_completed_reset_replay_does_not_finish_unrelated_pending_delete(t
         context,
         "replacement-code",
         None,
-        expected_generation=credential_lifecycle.oauth_credential_generation(context),
+        expected_connection_generation=oauth_connection_generation(context),
     )
     state = credential_lifecycle._load_oauth_credential_state(context)
     credential_lifecycle._write_oauth_credential_state(
         context,
         credential_lifecycle._OAuthCredentialState(
             generation="pending-generation",
+            connection_generation=state.connection_generation,
             reset_operations={
                 **state.reset_operations,
                 "approval-2:0:reset-call": credential_lifecycle._OAuthResetOperation(
@@ -402,7 +487,9 @@ async def test_completed_reset_replay_does_not_finish_unrelated_pending_delete(t
         context,
         operation_id=completed_operation_id,
     )
-    assert _load(context) == replacement
+    persisted = credential_lifecycle._load_raw_oauth_credentials(context)
+    assert persisted is not None
+    assert credential_lifecycle._credentials_without_publication(persisted) == replacement
     assert (
         credential_lifecycle._load_oauth_credential_state(context).reset_operations["approval-2:0:reset-call"].status
         == "pending"
@@ -435,14 +522,13 @@ async def test_pending_reset_operation_hides_old_credentials_and_reconnect_finis
         )
 
     assert credential_lifecycle.load_oauth_credentials(context) is None
-    pending_generation = credential_lifecycle.oauth_credential_generation(context)
-
     monkeypatch.setattr(credential_lifecycle, "delete_scoped_credentials", real_delete)
+    pending_generation = oauth_connection_generation(context)
     replacement = await exchange_and_store_oauth_credentials(
         context,
         "replacement-code",
         None,
-        expected_generation=pending_generation,
+        expected_connection_generation=pending_generation,
     )
     assert _load(context) == replacement
     assert (
@@ -463,19 +549,19 @@ async def test_stale_approved_reset_cannot_delete_reconnected_credentials(tmp_pa
 
     context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
     _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
-    approved_generation = credential_lifecycle.oauth_credential_generation(context)
+    approved_generation = oauth_connection_generation(context)
     replacement = await exchange_and_store_oauth_credentials(
         context,
         "replacement-code",
         None,
-        expected_generation=approved_generation,
+        expected_connection_generation=approved_generation,
     )
 
     with pytest.raises(OAuthProviderError, match="credential changed"):
         await credential_lifecycle.reset_oauth_credentials(
             context,
             operation_id="approval-1:0:reset-call",
-            expected_generation=approved_generation,
+            expected_connection_generation=approved_generation,
         )
 
     assert _load(context) == replacement
@@ -526,6 +612,8 @@ async def test_callback_waits_for_refresh_and_preserves_rotated_refresh_token(tm
     original["_oauth_claims"] = {"sub": "subject-1"}
     original["_oauth_claims_verified"] = True
     _save(context, original)
+    issued_connection_generation = oauth_connection_generation(context)
+    issued_credential_generation = credential_lifecycle.oauth_credential_generation(context)
 
     refresh_task = asyncio.create_task(refresh_oauth_credentials_with_result(context))
     await asyncio.to_thread(refresh_started.wait)
@@ -534,47 +622,136 @@ async def test_callback_waits_for_refresh_and_preserves_rotated_refresh_token(tm
             context,
             "code",
             None,
-            expected_generation=credential_lifecycle.oauth_credential_generation(context),
+            expected_connection_generation=issued_connection_generation,
         ),
     )
     await asyncio.sleep(0)
     assert not exchange_started.is_set()
 
     release_refresh.set()
-    await refresh_task
+    refresh_result = await refresh_task
     callback_credentials = await callback_task
 
+    assert refresh_result.generation != issued_credential_generation
+    assert refresh_result.connection_generation == issued_connection_generation
     assert callback_credentials["token"] == "callback-access"  # noqa: S105
     assert callback_credentials["refresh_token"] == CHAIN_1
     assert _load(context) == callback_credentials
 
 
 @pytest.mark.asyncio
-async def test_callback_advances_revision_and_rejects_second_callback_for_consumed_revision(tmp_path: Path) -> None:
-    """One issued revision authorizes exactly one successful credential replacement."""
+async def test_callback_advances_connection_generation_and_rejects_second_callback(tmp_path: Path) -> None:
+    """One issued connection generation authorizes exactly one credential replacement."""
 
     async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
         return None
 
     context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
-    issued_revision = credential_lifecycle.oauth_credential_generation(context)
+    issued_connection_generation = oauth_connection_generation(context)
 
     stored = await exchange_and_store_oauth_credentials(
         context,
         "first-code",
         None,
-        expected_generation=issued_revision,
+        expected_connection_generation=issued_connection_generation,
     )
 
     assert stored["token"] == "callback-access"  # noqa: S105
-    assert credential_lifecycle.oauth_credential_generation(context) != issued_revision
+    assert oauth_connection_generation(context) != issued_connection_generation
     with pytest.raises(OAuthProviderError, match="credential changed"):
         await exchange_and_store_oauth_credentials(
             context,
             "second-code",
             None,
-            expected_generation=issued_revision,
+            expected_connection_generation=issued_connection_generation,
         )
+
+
+@pytest.mark.asyncio
+async def test_callback_publication_recovers_after_state_commit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A durable callback credential record repairs a failed state-file commit."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    issued_connection_generation = oauth_connection_generation(context)
+    original_write = credential_lifecycle._write_oauth_credential_state
+    failed = False
+
+    def fail_first_state_commit(
+        write_context: OAuthCredentialContext,
+        state: credential_lifecycle._OAuthCredentialState,
+    ) -> None:
+        nonlocal failed
+        if not failed and state.connection_generation != issued_connection_generation:
+            failed = True
+            message = "simulated state commit failure"
+            raise OSError(message)
+        original_write(write_context, state)
+
+    monkeypatch.setattr(credential_lifecycle, "_write_oauth_credential_state", fail_first_state_commit)
+    with pytest.raises(OSError, match="simulated state commit failure"):
+        await exchange_and_store_oauth_credentials(
+            context,
+            "code",
+            None,
+            expected_connection_generation=issued_connection_generation,
+        )
+
+    monkeypatch.setattr(credential_lifecycle, "_write_oauth_credential_state", original_write)
+    snapshot = await load_oauth_credentials_snapshot(context)
+
+    assert failed is True
+    assert snapshot.credentials is not None
+    assert snapshot.credentials["token"] == "callback-access"  # noqa: S105
+    assert snapshot.connection_generation != issued_connection_generation
+    assert oauth_connection_generation(context) == snapshot.connection_generation
+
+
+@pytest.mark.asyncio
+async def test_refresh_publication_recovers_after_state_commit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A durable rotated credential record repairs a failed state-file commit."""
+
+    async def refresh(_current: Mapping[str, Any]) -> dict[str, Any]:
+        return _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
+
+    context = _context(tmp_path, _FakeOAuthProvider(refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    connection_generation = oauth_connection_generation(context)
+    original_generation = credential_lifecycle.oauth_credential_generation(context)
+    original_write = credential_lifecycle._write_oauth_credential_state
+    failed = False
+
+    def fail_first_state_commit(
+        write_context: OAuthCredentialContext,
+        state: credential_lifecycle._OAuthCredentialState,
+    ) -> None:
+        nonlocal failed
+        if not failed and state.generation != original_generation:
+            failed = True
+            message = "simulated state commit failure"
+            raise OSError(message)
+        original_write(write_context, state)
+
+    monkeypatch.setattr(credential_lifecycle, "_write_oauth_credential_state", fail_first_state_commit)
+    with pytest.raises(OSError, match="simulated state commit failure"):
+        await refresh_oauth_credentials_with_result(context)
+
+    monkeypatch.setattr(credential_lifecycle, "_write_oauth_credential_state", original_write)
+    snapshot = await load_oauth_credentials_snapshot(context)
+
+    assert failed is True
+    assert snapshot.credentials is not None
+    assert snapshot.credentials["refresh_token"] == CHAIN_1
+    assert snapshot.generation != original_generation
+    assert snapshot.connection_generation == connection_generation
 
 
 @pytest.mark.asyncio
@@ -650,7 +827,7 @@ async def test_reset_generation_rejects_a_callback_that_was_issued_before_reset(
 
     context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
     _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
-    stale_generation = credential_lifecycle.oauth_credential_generation(context)
+    stale_generation = oauth_connection_generation(context)
 
     assert await credential_lifecycle.reset_oauth_credentials(context) is True
     with pytest.raises(OAuthProviderError, match="credential changed"):
@@ -658,7 +835,7 @@ async def test_reset_generation_rejects_a_callback_that_was_issued_before_reset(
             context,
             "stale-code",
             None,
-            expected_generation=stale_generation,
+            expected_connection_generation=stale_generation,
         )
 
     assert _load(context) is None

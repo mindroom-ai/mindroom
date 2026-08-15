@@ -1504,7 +1504,8 @@ def test_get_tools(test_client: TestClient) -> None:
     assert calculator_tool["agent_override_fields"] is None
 
 
-def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path) -> None:
     """Custom non-OAuth auth providers should still use ordinary credential presence."""
     runtime_paths = _runtime_paths(tmp_path)
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
@@ -1534,7 +1535,7 @@ def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path)
         },
     ]
 
-    tools_api._update_tools_statuses(tools, context)
+    await tools_api._update_tools_statuses(tools, context)
 
     assert tools[0]["status"] == "available"
 

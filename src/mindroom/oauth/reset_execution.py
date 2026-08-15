@@ -27,22 +27,22 @@ async def retire_and_reset_oauth_credentials(
     *,
     mcp_servers: Mapping[str, MCPServerConfig],
     operation_id: str | None,
-    expected_generation: str | None = None,
+    expected_connection_generation: str | None = None,
     before_reset: Callable[[], None] | None = None,
 ) -> bool:
     """Fence the exact MCP session and commit its credential reset once."""
     async with retire_mcp_oauth_request_session(
         dict(mcp_servers),
         context.provider.id,
-        worker_target=context.worker_target,
-        expected_credential_generation=expected_generation,
+        credential_context=context,
+        expected_connection_generation=expected_connection_generation,
     ):
         if before_reset is not None:
             before_reset()
         return await reset_oauth_credentials(
             context,
             operation_id=operation_id,
-            expected_generation=expected_generation,
+            expected_connection_generation=expected_connection_generation,
         )
 
 
@@ -54,7 +54,7 @@ async def execute_oauth_connection_reset(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
     operation_id: str | None,
-    expected_generation: str | None = None,
+    expected_connection_generation: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> str:
     """Resolve, retire, durably reset, and render one idempotent receipt."""
@@ -85,7 +85,7 @@ async def execute_oauth_connection_reset(
                 reset_target.credential_context,
                 mcp_servers=config.mcp_servers,
                 operation_id=operation_id,
-                expected_generation=expected_generation,
+                expected_connection_generation=expected_connection_generation,
                 before_reset=mint_connect_url,
             )
         else:

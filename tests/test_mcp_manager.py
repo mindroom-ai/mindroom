@@ -31,6 +31,7 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
+    oauth_connection_generation,
     refresh_oauth_credentials,
     reset_oauth_credentials,
 )
@@ -442,7 +443,7 @@ async def test_mcp_manager_non_oauth_calls_use_shared_session_without_requester_
         "mindroom.mcp.manager.refresh_oauth_credentials_with_result",
         _fail_credential_resolution,
     )
-    monkeypatch.setattr("mindroom.mcp.manager.load_oauth_credentials", _fail_credential_resolution)
+    monkeypatch.setattr("mindroom.mcp.manager.load_oauth_credentials_snapshot", _fail_credential_resolution)
     _FakeClientSession.tool_list = [_tool("echo")]
     _FakeClientSession.planned_tool_results = [
         CallToolResult(content=[mcp_types.TextContent(type="text", text="pong-alice")]),
@@ -878,7 +879,7 @@ async def test_mcp_manager_does_not_eagerly_load_oauth_credentials_for_success_l
     def fail_eager_diagnostic_load(*_args: object, **_kwargs: object) -> dict[str, Any]:
         pytest.fail("manager should not eagerly load credentials only for failure logging")
 
-    monkeypatch.setattr("mindroom.mcp.manager.load_oauth_credentials", fail_eager_diagnostic_load)
+    monkeypatch.setattr("mindroom.mcp.manager.load_oauth_credentials_snapshot", fail_eager_diagnostic_load)
 
     access_token, _generation = await manager._oauth_authorization_material(
         manager._require_state("demo"),
@@ -1428,8 +1429,13 @@ async def test_mcp_manager_retires_requester_oauth_session(
     await manager.get_request_catalog("demo", credentials_manager=credentials_manager, worker_target=bob_target)
     alice_session = _FakeClientSession.sessions[0]
     bob_session = _FakeClientSession.sessions[1]
+    credential_context = manager._oauth_credential_context(
+        manager._states["demo"],
+        worker_target=alice_target,
+        credentials_manager=credentials_manager,
+    )
 
-    async with manager.retire_request_session("demo", worker_target=alice_target):
+    async with manager.retire_request_session("demo", credential_context=credential_context):
         pass
 
     assert alice_session.closed is True
@@ -1462,8 +1468,13 @@ async def test_mcp_manager_retirement_fences_captured_state_and_new_requesters(
         worker_target=worker_target,
     )
     captured_headers = {"Authorization": "Bearer alice-token"}
+    credential_context = manager._oauth_credential_context(
+        manager._states["demo"],
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
 
-    async with manager.retire_request_session("demo", worker_target=worker_target):
+    async with manager.retire_request_session("demo", credential_context=credential_context):
         assert captured_state.retired is True
         with pytest.raises(MCPConnectionError, match="retired"):
             await manager._refresh_server_catalog(
@@ -1485,11 +1496,51 @@ async def test_mcp_manager_retirement_fences_captured_state_and_new_requesters(
 
 
 @pytest.mark.asyncio
-async def test_mcp_manager_does_not_retire_session_from_later_credential_generation(
+async def test_mcp_manager_retires_stale_cached_session_for_current_connection_generation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Replay of an old reset must not disconnect a session created by later credentials."""
+    """A stale cached revision cannot survive reset of its current connection lineage."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    state = next(iter(manager._scoped_states.values()))
+    session = _FakeClientSession.sessions[0]
+    credential_context = manager._oauth_credential_context(
+        manager._states["demo"],
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    approved_connection_generation = oauth_connection_generation(credential_context)
+    state.oauth_credential_generation = "stale-cached-generation"
+
+    async with manager.retire_request_session(
+        "demo",
+        credential_context=credential_context,
+        expected_connection_generation=approved_connection_generation,
+    ):
+        assert state.retired is True
+
+    assert session.closed is True
+    assert manager._scoped_states == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_does_not_retire_session_from_later_connection_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An old reset must not disconnect a session from a replacement connection."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
@@ -1506,11 +1557,16 @@ async def test_mcp_manager_does_not_retire_session_from_later_credential_generat
     state = next(iter(manager._scoped_states.values()))
     session = _FakeClientSession.sessions[0]
     assert state.oauth_credential_generation is not None
+    credential_context = manager._oauth_credential_context(
+        manager._states["demo"],
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
 
     async with manager.retire_request_session(
         "demo",
-        worker_target=worker_target,
-        expected_credential_generation="older-approved-generation",
+        credential_context=credential_context,
+        expected_connection_generation="older-approved-connection-generation",
     ):
         assert state.retired is False
 

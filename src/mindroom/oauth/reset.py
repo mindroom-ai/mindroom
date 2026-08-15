@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
-    oauth_credential_generation,
+    load_oauth_credentials_snapshot,
     resolve_oauth_credential_context,
 )
 from mindroom.oauth.registry import load_oauth_providers
@@ -125,7 +125,7 @@ def resolve_oauth_reset_target(
     )
 
 
-def build_oauth_reset_approval_bindings(
+async def build_oauth_reset_approval_bindings(
     identified_tools: Sequence[tuple[ToolExecution, str, str, str]],
     *,
     config: Config,
@@ -155,18 +155,18 @@ def build_oauth_reset_approval_bindings(
             )
         except OAuthResetTargetError as exc:
             raise _OAuthResetApprovalBindingError(str(exc)) from exc
-        bindings[tool_call_id] = _oauth_reset_target_binding(target)
+        bindings[tool_call_id] = await _oauth_reset_target_binding(target)
     return bindings
 
 
-def validate_oauth_reset_approval_bindings(
+async def validate_oauth_reset_approval_bindings(
     *,
     calls: Sequence[tuple[str, str, str, bool]],
     bindings: Mapping[str, Mapping[str, object]],
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
-    allow_credential_generation_drift: bool = False,
+    allow_connection_generation_drift: bool = False,
 ) -> None:
     """Fail closed when an approved reset resolves differently after configuration drift."""
     for tool_call_id, tool_name, invoking_agent, approved in calls:
@@ -190,17 +190,31 @@ def validate_oauth_reset_approval_bindings(
         except OAuthResetTargetError as exc:
             msg = "Approved OAuth credential target changed or is unavailable; run the reset again."
             raise _OAuthResetApprovalBindingError(msg) from exc
-        current_binding = _oauth_reset_target_binding(target)
-        if allow_credential_generation_drift:
-            assert binding is not None
-            binding = {key: value for key, value in binding.items() if key != "credential_generation"}
-            current_binding = {key: value for key, value in current_binding.items() if key != "credential_generation"}
+        assert binding is not None
+        if allow_connection_generation_drift:
+            ignored_keys = {"credential_generation", "connection_generation"}
+            current_binding = _oauth_reset_target_identity_binding(target)
+        else:
+            ignored_keys = {"credential_generation"}
+            current_binding = await _oauth_reset_target_binding(target)
+        binding = {key: value for key, value in binding.items() if key not in ignored_keys}
+        current_binding = {key: value for key, value in current_binding.items() if key not in ignored_keys}
         if binding != current_binding:
             msg = "Approved OAuth credential target changed; run the reset again."
             raise _OAuthResetApprovalBindingError(msg)
 
 
-def _oauth_reset_target_binding(target: _ResolvedOAuthResetTarget) -> dict[str, object]:
+async def _oauth_reset_target_binding(target: _ResolvedOAuthResetTarget) -> dict[str, object]:
+    snapshot = await load_oauth_credentials_snapshot(target.credential_context)
+    return {
+        **_oauth_reset_target_identity_binding(target),
+        "credential_generation": snapshot.generation,
+        "connection_generation": snapshot.connection_generation,
+    }
+
+
+def _oauth_reset_target_identity_binding(target: _ResolvedOAuthResetTarget) -> dict[str, object]:
+    """Return the canonical reset target without reading mutable credential state."""
     worker_target = target.worker_target
     return {
         "provider_id": target.provider.id,
@@ -209,5 +223,4 @@ def _oauth_reset_target_binding(target: _ResolvedOAuthResetTarget) -> dict[str, 
         "worker_scope": cast("str", worker_target.worker_scope),
         "worker_key": cast("str", worker_target.worker_key),
         "routing_agent_name": cast("str", worker_target.routing_agent_name),
-        "credential_generation": oauth_credential_generation(target.credential_context),
     }

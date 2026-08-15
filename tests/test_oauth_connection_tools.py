@@ -177,7 +177,8 @@ async def test_reset_oauth_connection_deletes_only_current_requester_scope(tmp_p
     assert "run this reset again" in result
 
 
-def test_oauth_reset_approval_binding_rejects_worker_scope_drift(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_oauth_reset_approval_binding_rejects_worker_scope_drift(tmp_path: Path) -> None:
     """Approval must freeze the exact credential target rather than only provider_id."""
     _tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
     tool_call = ToolExecution(
@@ -187,7 +188,7 @@ def test_oauth_reset_approval_binding_rejects_worker_scope_drift(tmp_path: Path)
         requires_confirmation=True,
     )
     execution_identity = build_execution_identity_from_runtime_context(context)
-    bindings = build_oauth_reset_approval_bindings(
+    bindings = await build_oauth_reset_approval_bindings(
         ((tool_call, "reset-call", "reset_oauth_connection", "research"),),
         config=context.config,
         runtime_paths=context.runtime_paths,
@@ -196,7 +197,7 @@ def test_oauth_reset_approval_binding_rejects_worker_scope_drift(tmp_path: Path)
     context.config.agents["research"].worker_scope = "user"
 
     with pytest.raises(RuntimeError, match="credential target changed"):
-        validate_oauth_reset_approval_bindings(
+        await validate_oauth_reset_approval_bindings(
             calls=(("reset-call", "reset_oauth_connection", "research", True),),
             bindings=bindings,
             config=context.config,
@@ -206,7 +207,7 @@ def test_oauth_reset_approval_binding_rejects_worker_scope_drift(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_oauth_reset_approval_binding_rejects_credential_generation_drift(tmp_path: Path) -> None:
+async def test_oauth_reset_approval_binding_rejects_connection_generation_drift(tmp_path: Path) -> None:
     """A waiting reset approval must not delete credentials connected after card creation."""
     _tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
     credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
@@ -224,7 +225,7 @@ async def test_oauth_reset_approval_binding_rejects_credential_generation_drift(
         requires_confirmation=True,
     )
     execution_identity = build_execution_identity_from_runtime_context(context)
-    bindings = build_oauth_reset_approval_bindings(
+    bindings = await build_oauth_reset_approval_bindings(
         ((tool_call, "reset-call", "reset_oauth_connection", "research"),),
         config=context.config,
         runtime_paths=context.runtime_paths,
@@ -238,15 +239,16 @@ async def test_oauth_reset_approval_binding_rejects_credential_generation_drift(
         execution_identity=execution_identity,
     )
     assert await credential_lifecycle.reset_oauth_credentials(reset_target.credential_context) is True
-    save_scoped_credentials(
-        provider.credential_service,
+    state = credential_lifecycle._load_oauth_credential_state(reset_target.credential_context)
+    credential_lifecycle._publish_oauth_credentials_locked(
+        reset_target.credential_context,
         {"refresh_token": "replacement-refresh-token"},
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
+        state=state,
+        advance_connection_generation=True,
     )
 
     with pytest.raises(RuntimeError, match="credential target changed"):
-        validate_oauth_reset_approval_bindings(
+        await validate_oauth_reset_approval_bindings(
             calls=(("reset-call", "reset_oauth_connection", "research", True),),
             bindings=bindings,
             config=context.config,
@@ -255,7 +257,61 @@ async def test_oauth_reset_approval_binding_rejects_credential_generation_drift(
         )
 
 
-def test_oauth_reset_must_be_only_call_in_approval_generation(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_oauth_reset_approval_binding_allows_same_connection_refresh_drift(tmp_path: Path) -> None:
+    """A token refresh may advance its lease revision without invalidating reset approval."""
+    _tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
+    provider = google_drive_oauth_provider()
+    save_scoped_credentials(
+        provider.credential_service,
+        {"refresh_token": "first-refresh-token"},
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool_call = ToolExecution(
+        tool_call_id="reset-call",
+        tool_name="reset_oauth_connection",
+        tool_args={"provider_id": provider.id},
+        requires_confirmation=True,
+    )
+    execution_identity = build_execution_identity_from_runtime_context(context)
+    bindings = await build_oauth_reset_approval_bindings(
+        ((tool_call, "reset-call", "reset_oauth_connection", "research"),),
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        execution_identity=execution_identity,
+    )
+    reset_target = oauth_reset_module.resolve_oauth_reset_target(
+        provider.id,
+        agent_name="research",
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        execution_identity=execution_identity,
+    )
+    state = credential_lifecycle._load_oauth_credential_state(reset_target.credential_context)
+    _credentials, refreshed_state = credential_lifecycle._publish_oauth_credentials_locked(
+        reset_target.credential_context,
+        {"refresh_token": "rotated-refresh-token"},
+        state=state,
+        advance_connection_generation=False,
+    )
+
+    await validate_oauth_reset_approval_bindings(
+        calls=(("reset-call", "reset_oauth_connection", "research", True),),
+        bindings=bindings,
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        execution_identity=execution_identity,
+    )
+
+    reset_binding = bindings["reset-call"]
+    assert reset_binding["credential_generation"] != refreshed_state.generation
+    assert reset_binding["connection_generation"] == refreshed_state.connection_generation
+
+
+@pytest.mark.asyncio
+async def test_oauth_reset_must_be_only_call_in_approval_generation(tmp_path: Path) -> None:
     """A reset cannot share one approval generation with another side effect."""
     _tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
     reset_call = ToolExecution(
@@ -272,7 +328,7 @@ def test_oauth_reset_must_be_only_call_in_approval_generation(tmp_path: Path) ->
     )
 
     with pytest.raises(RuntimeError, match="only tool call"):
-        build_approval_tool_bindings(
+        await build_approval_tool_bindings(
             (
                 (reset_call, "reset-call", "reset_oauth_connection", "research"),
                 (other_call, "other-call", "other_tool", "research"),
@@ -297,6 +353,7 @@ async def test_reset_uses_stable_approval_operation_id(
             generation=4,
             tool_call_id="reset-call",
             credential_generation="credential-generation-1",
+            connection_generation="connection-generation-1",
         ),
     )
     execute_reset = AsyncMock(return_value="receipt")
@@ -310,7 +367,7 @@ async def test_reset_uses_stable_approval_operation_id(
 
     assert result == "receipt"
     assert execute_reset.await_args.kwargs["operation_id"] == "approval-1:4:reset-call"
-    assert execute_reset.await_args.kwargs["expected_generation"] == "credential-generation-1"
+    assert execute_reset.await_args.kwargs["expected_connection_generation"] == "connection-generation-1"
 
 
 @pytest.mark.asyncio
@@ -321,7 +378,7 @@ async def test_completed_reset_replay_skips_retirement_and_preserves_reconnected
     """Receipt replay must not retire or delete a session connected after reset completion."""
     _tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
     provider = google_drive_oauth_provider()
-    credentials_manager, worker_target, _credentials = _save_test_credentials(
+    _credentials_manager, worker_target, _credentials = _save_test_credentials(
         context,
         worker_target,
         provider,
@@ -335,19 +392,20 @@ async def test_completed_reset_replay_skips_retirement_and_preserves_reconnected
         execution_identity=build_execution_identity_from_runtime_context(context),
         worker_target=worker_target,
     )
-    approved_generation = credential_lifecycle.oauth_credential_generation(reset_target.credential_context)
+    approved_generation = credential_lifecycle.oauth_connection_generation(reset_target.credential_context)
     operation_id = "approval-1:4:reset-call"
     assert await credential_lifecycle.reset_oauth_credentials(
         reset_target.credential_context,
         operation_id=operation_id,
-        expected_generation=approved_generation,
+        expected_connection_generation=approved_generation,
     )
     replacement = {"refresh_token": "replacement-refresh-token"}
-    save_scoped_credentials(
-        provider.credential_service,
+    state = credential_lifecycle._load_oauth_credential_state(reset_target.credential_context)
+    credential_lifecycle._publish_oauth_credentials_locked(
+        reset_target.credential_context,
         replacement,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
+        state=state,
+        advance_connection_generation=True,
     )
     retire = MagicMock(side_effect=AssertionError("completed replay retired new session"))
     monkeypatch.setattr(oauth_reset_execution_module, "retire_mcp_oauth_request_session", retire)
@@ -360,18 +418,11 @@ async def test_completed_reset_replay_skips_retirement_and_preserves_reconnected
         execution_identity=build_execution_identity_from_runtime_context(context),
         worker_target=worker_target,
         operation_id=operation_id,
-        expected_generation=approved_generation,
+        expected_connection_generation=approved_generation,
     )
 
     assert "Error:" not in result
-    assert (
-        load_scoped_credentials(
-            provider.credential_service,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-        == replacement
-    )
+    assert credential_lifecycle.load_oauth_credentials(reset_target.credential_context) == replacement
     retire.assert_not_called()
 
 

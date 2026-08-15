@@ -12,6 +12,7 @@ RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY = "_oauth_client_runtime_bootstrap"
 OAUTH_CREDENTIAL_FIELDS = frozenset(
     {
         "_id_token",
+        "_mindroom_oauth_publication",
         "_oauth_claims",
         "_oauth_claims_verified",
         "_oauth_provider",

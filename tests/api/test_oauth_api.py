@@ -15,7 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -2550,7 +2550,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
-        payload=oauth_api._target_binding_payload(provider, target),
+        payload=await oauth_api._target_binding_payload(provider, target),
         code_verifier=None,
     )
 
@@ -2567,7 +2567,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
-    monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", lambda *_args: None)
+    monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
     monkeypatch.setattr("mindroom.oauth.credential_lifecycle.async_exclusive_file_lock", blocked_lock)
     request = StarletteRequest(
         {

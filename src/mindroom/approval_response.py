@@ -167,7 +167,7 @@ class ApprovalResponseCoordinator:
         return _ApprovalPausePlan(
             tools=tuple(tool for tool, _tool_call_id, _tool_name, _invoking_agent in identified),
             calls=calls,
-            tool_bindings=build_approval_tool_bindings(
+            tool_bindings=await build_approval_tool_bindings(
                 identified,
                 config=config,
                 runtime_paths=self.runtime_paths,

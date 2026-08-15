@@ -36,6 +36,7 @@ from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     OAuthCredentialsRefreshResult,
     exchange_and_store_oauth_credentials,
+    oauth_connection_generation,
     oauth_credential_generation,
     reset_oauth_credentials,
 )
@@ -410,6 +411,46 @@ def test_google_wrapper_refresh_failure_recovery_is_terminal_only(
     assert (stored is not None) is credential_remains
 
 
+def test_google_lazy_refresh_rejects_expired_access_only_snapshot(runtime_paths: RuntimePaths) -> None:
+    """An expired access token without a refresh grant cannot report lazy-refresh success."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "expired-access-only-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 1.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    with pytest.raises(RefreshError, match="OAuth credential refresh failed"):
+        tool.creds.refresh(object())
+
+    assert tool._consume_oauth_connection_required() == (True, None)
+    assert tool.creds is None
+
+
 def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
     monkeypatch: pytest.MonkeyPatch,
     runtime_paths: RuntimePaths,
@@ -776,6 +817,7 @@ async def test_google_wrapper_reloads_callback_replacement_in_materialized_worke
     )
     callback_context = replace(tool._oauth_credential_context(), provider=callback_provider)
     issued_revision = oauth_credential_generation(callback_context)
+    issued_connection_generation = oauth_connection_generation(callback_context)
     worker = ThreadPoolExecutor(max_workers=1)
     try:
 
@@ -788,7 +830,7 @@ async def test_google_wrapper_reloads_callback_replacement_in_materialized_worke
             callback_context,
             "account-b-code",
             "pkce-verifier",
-            expected_generation=issued_revision,
+            expected_connection_generation=issued_connection_generation,
         )
 
         def revalidate_materialized_service() -> tuple[str | None, str, object | None]:
