@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING, cast
 
 from agno.models.message import Message
 
+from mindroom.event_journal import ApprovalCall
+from mindroom.event_journal import ApprovalDecision as ContinuationDecision
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Generator
 
@@ -19,6 +22,33 @@ if TYPE_CHECKING:
 
 _MARKER_KEY = "mindroom_approval_receipt"
 _HOOK_ATTR = "_mindroom_approval_receipt_hook_installed"
+_APPROVAL_RECEIPT_HEADER = (
+    "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
+    "paused tool calls were authorized. Do not infer approval policy from tool success alone."
+)
+
+
+def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
+    """Render trusted model context for one exact approval generation."""
+    lines = [_APPROVAL_RECEIPT_HEADER]
+    for call_ordinal, call in enumerate(calls, start=1):
+        if call.decision is None:
+            msg = f"Cannot build trusted receipt for pending approval call #{call_ordinal}"
+            raise ValueError(msg)
+        call_label = f"`{call.tool_name}` (call #{call_ordinal})"
+        if call.decision is ContinuationDecision.APPROVED:
+            if call.human_approval_required is True:
+                outcome = "an approval card was shown and approved before execution."
+            elif call.human_approval_required is False:
+                outcome = "human approval was not required; policy approved execution."
+            else:
+                outcome = "approval was granted, but its approval provenance is unavailable."
+        elif call.decision is ContinuationDecision.EXPIRED:
+            outcome = "human approval expired; the tool was not executed."
+        else:
+            outcome = "approval was denied; the tool was not executed."
+        lines.append(f"- {call_label}: {outcome}")
+    return "\n".join(lines)
 
 
 @dataclass

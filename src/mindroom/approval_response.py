@@ -28,10 +28,6 @@ from mindroom.tool_approval import (
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
 _USER_STOP_VISIBLE_NOTE = "**[Response cancelled by user]**"
-_APPROVAL_RECEIPT_HEADER = (
-    "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
-    "paused tool calls were authorized. Do not infer approval policy from tool success alone."
-)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -53,29 +49,6 @@ class _ApprovalPausePlan:
     tools: tuple[ToolExecution, ...]
     calls: tuple[ApprovalCall, ...]
     waiting_text: str | None
-
-
-def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
-    """Render trusted model context for one exact approval generation."""
-    lines = [_APPROVAL_RECEIPT_HEADER]
-    for call_ordinal, call in enumerate(calls, start=1):
-        if call.decision is None:
-            msg = f"Cannot build trusted receipt for pending approval call #{call_ordinal}"
-            raise ValueError(msg)
-        call_label = f"`{call.tool_name}` (call #{call_ordinal})"
-        if call.decision is ContinuationDecision.APPROVED:
-            if call.human_approval_required is True:
-                outcome = "an approval card was shown and approved before execution."
-            elif call.human_approval_required is False:
-                outcome = "human approval was not required; policy approved execution."
-            else:
-                outcome = "approval was granted, but its approval provenance is unavailable."
-        elif call.decision is ContinuationDecision.EXPIRED:
-            outcome = "human approval expired; the tool was not executed."
-        else:
-            outcome = "approval was denied; the tool was not executed."
-        lines.append(f"- {call_label}: {outcome}")
-    return "\n".join(lines)
 
 
 def identify_approval_tools(

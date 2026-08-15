@@ -17,10 +17,9 @@ from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.approval_execution import AgentApprovalExecution
-from mindroom.approval_receipt import approval_receipt_context
+from mindroom.approval_receipt import approval_receipt_context, build_approval_receipt
 from mindroom.approval_response import (
     ApprovalResponseCoordinator,
-    build_approval_receipt,
     continuation_target,
     identify_approval_tools,
 )
