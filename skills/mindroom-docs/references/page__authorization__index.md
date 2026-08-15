@@ -57,8 +57,11 @@ matrix_room_access:
   publish_to_room_directory: false # publish managed rooms to public directory
   invite_only_rooms: []            # room keys/aliases/IDs that stay restricted
   reconcile_existing_rooms: false  # migrate existing managed rooms when true
+  encrypt_managed_rooms: false     # enable E2EE for managed rooms; rooms.<key>.encrypted overrides
   room_admins: []                  # Matrix user IDs granted admin power (100) in every managed room
 ```
+
+Enabling encryption is irreversible for a Matrix room, and MindRoom never disables encryption after it is enabled.
 
 **Defaults** (when `authorization` block is omitted):
 
@@ -67,6 +70,7 @@ matrix_room_access:
 - `default_room_access: false`
 - `config_command_enabled: false`
 - `agent_reply_permissions: {}`
+- `aliases: {}`
 
 This means only MindRoom system users (agents, teams, router, and the configured internal user if present) can interact with agents by default.
 

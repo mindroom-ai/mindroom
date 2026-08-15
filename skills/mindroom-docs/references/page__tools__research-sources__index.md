@@ -115,6 +115,7 @@ This makes `wikipedia` a simple direct lookup tool by default, with an advanced 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `knowledge` | `text` | `no` | `null` | Advanced upstream hook for injecting a `Knowledge` object. In typical MindRoom YAML usage you leave this unset and use direct summary search. |
+| `auto_suggest` | `boolean` | `no` | `true` | Let Wikipedia suggest or correct the requested title before summary lookup; disable for exact-title-oriented lookup. |
 | `all` | `boolean` | `no` | `false` | Exposed in metadata, but the current upstream implementation does not change behavior for this toolkit. |
 
 ### Example

@@ -42,7 +42,7 @@ Attachments work in both direct messages and threads, and with both individual a
 
 ## Attachment IDs
 
-Each uploaded file or video is assigned a stable attachment ID (e.g., `att_abc123`).
+Each registered file, image, audio clip, or video is assigned a stable attachment ID (e.g., `att_abc123`).
 Attachments sent with the current message are listed in the prompt with full provenance (kind, filename, sender, send time, and originating event ID):
 
 ```
@@ -61,7 +61,7 @@ Keeping media bytes pinned to their original messages also keeps the request pre
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.
-Voice raw-audio fallback uses the same attachment ID mechanism; see [Voice Fallback](https://docs.mindroom.chat/voice/#voice-fallback-no-stt-available).
+When voice media download and registration succeed, raw-audio fallback uses the same attachment ID mechanism; see [Voice Fallback](https://docs.mindroom.chat/voice/#voice-fallback-no-stt-available).
 
 ## The `attachments` Tool
 
@@ -106,12 +106,8 @@ The `attachments` tool lets any model work with files by calling tools that oper
 
 ## Encryption
 
-Both unencrypted and E2E encrypted files and videos are supported.
+Both unencrypted and E2E encrypted files, images, audio clips, and videos are supported.
 Encrypted media is decrypted transparently using the key material from the Matrix event.
-
-## Caching
-
-AI response caching is automatically skipped when files, images, audio, or videos are present, since media payloads are large and unlikely to repeat.
 
 ## Retention
 

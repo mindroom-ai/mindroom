@@ -30,8 +30,6 @@ Use these tools when you need outbound communication, mailbox access, team-chat 
 
 `gmail` uses `auth_provider="google_gmail"` and connects through the generic `/api/oauth/google_gmail/*` flow.
 Its OAuth tokens are stored separately from editable Gmail tool settings.
-`homeassistant` stays local even when other tools are routed through the sandbox proxy.
-MindRoom enforces that restriction both at config-validation time and again during tool construction.
 Password fields should be stored through the dashboard or credential store instead of inline YAML.
 Several metadata fields on this page are marked `required: false`, but the installed SDKs still need the corresponding token or secret in practice.
 Useful environment fallbacks on this page include `SLACK_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
@@ -48,7 +46,8 @@ MindRoom wraps Agno's `GmailTools` with `ScopedOAuthClientMixin`, so Gmail crede
 The wrapper refreshes stored Google tokens when needed and raises `OAuthConnectionRequired` with a connect URL when no usable stored OAuth credentials are available.
 It does not fall back to Agno's local OAuth flow when MindRoom credentials are missing.
 It only bypasses MindRoom OAuth when configured for Google service-account auth.
-The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`.
+The registered Gmail surface includes archive, trash, star, draft, message and thread retrieval, search, label mutation, attachment download, send, and reply operations.
+Its exact function names are `apply_label()`, `archive_email()`, `create_draft_email()`, `delete_custom_label()`, `download_attachment()`, `get_draft()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `get_emails_from_user()`, `get_latest_emails()`, `get_message()`, `get_starred_emails()`, `get_thread()`, `get_unread_emails()`, `list_custom_labels()`, `list_drafts()`, `list_labels()`, `mark_email_as_read()`, `mark_email_as_unread()`, `modify_message_labels()`, `modify_thread_labels()`, `remove_label()`, `search_emails()`, `search_threads()`, `send_draft()`, `send_email()`, `send_email_reply()`, `star_email()`, `trash_message()`, `trash_thread()`, `unstar_email()`, and `update_draft()`.
 Draft and send operations accept local file-system paths for attachments.
 
 ### Configuration
@@ -93,11 +92,11 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 
 ## [`slack`]
 
-`slack` is the Slack bot toolkit for posting to channels, replying in threads, listing channels, and reading recent channel history.
+`slack` is the Slack bot toolkit for messaging, threaded replies, channel and user inspection, history and thread reads, workspace search, and file transfer.
 
 ### What It Does
 
-The installed upstream tool exposes `send_message()`, `send_message_thread()`, `list_channels()`, and `get_channel_history()`.
+The installed upstream tool exposes `send_message()`, `send_message_thread()`, `list_channels()`, `get_channel_history()`, `upload_file()`, `download_file()`, `search_messages()`, `search_workspace()`, `get_thread()`, `list_users()`, `get_user_info()`, and `get_channel_info()`.
 It uses Slack's `WebClient` from `slack_sdk`.
 `markdown` maps to the `mrkdwn` flag on `chat_postMessage()`.
 Channel-history responses are normalized into a smaller JSON structure instead of returning the full Slack API payload.
@@ -108,11 +107,23 @@ Channel-history responses are normalized into a smaller JSON structure instead o
 | --- | --- | --- | --- | --- |
 | `token` | `password` | `no` | `null` | Slack bot token, or use `SLACK_TOKEN`. Required in practice. |
 | `markdown` | `boolean` | `no` | `true` | Enable Slack markdown rendering on sent messages. |
+| `output_directory` | `text` | `no` | `null` | Directory for saved downloads. |
+| `save_downloads` | `boolean` | `no` | `false` | Save downloaded files instead of returning base64-only content. |
 | `enable_send_message` | `boolean` | `no` | `true` | Enable `send_message()`. |
 | `enable_send_message_thread` | `boolean` | `no` | `true` | Enable `send_message_thread()`. |
 | `enable_list_channels` | `boolean` | `no` | `true` | Enable `list_channels()`. |
 | `enable_get_channel_history` | `boolean` | `no` | `true` | Enable `get_channel_history()`. |
+| `enable_upload_file` | `boolean` | `no` | `true` | Enable `upload_file()`. |
+| `enable_download_file` | `boolean` | `no` | `true` | Enable `download_file()`. |
+| `enable_search_messages` | `boolean` | `no` | `false` | Enable `search_messages()`. |
+| `enable_search_workspace` | `boolean` | `no` | `false` | Enable `search_workspace()`. |
+| `enable_get_thread` | `boolean` | `no` | `false` | Enable `get_thread()`. |
+| `enable_list_users` | `boolean` | `no` | `false` | Enable `list_users()`. |
+| `enable_get_user_info` | `boolean` | `no` | `false` | Enable `get_user_info()`. |
+| `enable_get_channel_info` | `boolean` | `no` | `false` | Enable `get_channel_info()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+| `max_file_size` | `number` | `no` | `1073741824` | Maximum upload or download size in bytes. |
+| `thread_message_limit` | `number` | `no` | `20` | Maximum messages returned by `get_thread()`. |
 
 ### Example
 
@@ -226,11 +237,12 @@ send_message("Nightly backup completed.")
 
 ## [`whatsapp`]
 
-`whatsapp` is the WhatsApp Business API toolkit for text messages and template messages through Meta's Graph API.
+`whatsapp` is the WhatsApp Business API toolkit for text, template, interactive, image, document, location, and reaction messages through Meta's Graph API.
 
 ### What It Does
 
-The installed upstream tool can expose either `send_text_message_sync()` and `send_template_message_sync()` or their async variants, depending on `async_mode`.
+The installed upstream tool exposes `send_text_message()` and `send_template_message()` by default.
+Optional functions include `send_reply_buttons()`, `send_list_message()`, `send_image()`, `send_document()`, `send_location()`, and `send_reaction()`.
 It posts to `https://graph.facebook.com/<version>/<phone_number_id>/messages`.
 `recipient_waid` sets a default recipient so callers can omit the `recipient` argument.
 If no default recipient is configured, every send call must provide one.
@@ -243,7 +255,15 @@ If no default recipient is configured, every send call must provide one.
 | `phone_number_id` | `text` | `no` | `null` | WhatsApp Business phone number ID, or use `WHATSAPP_PHONE_NUMBER_ID`. Required in practice. |
 | `version` | `text` | `no` | `v22.0` | Graph API version prefix. |
 | `recipient_waid` | `text` | `no` | `null` | Default recipient phone number or WhatsApp ID. |
-| `async_mode` | `boolean` | `no` | `false` | Register async send functions instead of sync send functions. |
+| `enable_send_text_message` | `boolean` | `no` | `true` | Enable `send_text_message()`. |
+| `enable_send_template_message` | `boolean` | `no` | `true` | Enable `send_template_message()`. |
+| `enable_send_reply_buttons` | `boolean` | `no` | `false` | Enable `send_reply_buttons()`. |
+| `enable_send_list_message` | `boolean` | `no` | `false` | Enable `send_list_message()`. |
+| `enable_send_image` | `boolean` | `no` | `false` | Enable `send_image()`. |
+| `enable_send_document` | `boolean` | `no` | `false` | Enable `send_document()`. |
+| `enable_send_location` | `boolean` | `no` | `false` | Enable `send_location()`. |
+| `enable_send_reaction` | `boolean` | `no` | `false` | Enable `send_reaction()`. |
+| `all` | `boolean` | `no` | `false` | Enable every WhatsApp function. |
 
 ### Example
 
@@ -254,18 +274,18 @@ agents:
       - whatsapp:
           version: v22.0
           recipient_waid: "+15551234567"
-          async_mode: false
+          enable_send_reply_buttons: true
 ```
 
 ```python
-send_text_message_sync("The deployment finished.")
-send_template_message_sync(template_name="deployment_notice", language_code="en_US")
+send_text_message("The deployment finished.")
+send_template_message(template_name="deployment_notice", language_code="en_US")
 ```
 
 ### Notes
 
 - Set both `access_token` and `phone_number_id` even though the metadata marks them optional.
-- `async_mode: true` changes the registered function names to the async variants, which matters if you are debugging tool traces or reading model-generated tool calls.
+- Plain-text and template sends are enabled by default, while interactive and media functions are opt-in unless `all: true` is set.
 - Template sends expect a preapproved WhatsApp template name and, optionally, template `components`.
 
 ## [`twilio`]
@@ -274,7 +294,7 @@ send_template_message_sync(template_name="deployment_notice", language_code="en_
 
 ### What It Does
 
-The installed upstream tool exposes `send_sms()`, `get_call_details()`, and `list_messages()`.
+The installed upstream tool exposes `send_sms()`, `get_call_details()`, `list_messages()`, and `validate_phone_number()`.
 It supports two auth modes: `account_sid` plus `auth_token`, or `account_sid` plus `api_key` and `api_secret`.
 Optional `region` and `edge` are passed into the Twilio client for regional routing.
 `send_sms()` validates that both `to` and `from_` are in E.164 format before sending.
@@ -311,6 +331,7 @@ agents:
 send_sms("+15551234567", "+15557654321", "Build passed.")
 get_call_details("CA1234567890abcdef")
 list_messages(limit=10)
+validate_phone_number("+15551234567")
 ```
 
 ### Notes
@@ -451,7 +472,7 @@ email_user("Nightly report", "The report finished successfully.")
 
 ### What It Does
 
-The installed upstream tool exposes `create_post()`, `reply_to_post()`, `send_dm()`, `get_user_info()`, `get_home_timeline()`, and `search_posts()`.
+The installed upstream tool exposes `create_post()`, `reply_to_post()`, `send_dm()`, `get_my_info()`, `get_user_info()`, `get_home_timeline()`, and `search_posts()`.
 It uses `tweepy.Client` and passes through `wait_on_rate_limit`.
 `search_posts()` calls `search_recent_tweets()` and, when `include_post_metrics` is enabled, augments each returned post with reply, retweet, like, and quote counts.
 The implementation clamps `max_results` for search to the Twitter API's supported `10` to `100` range.
@@ -489,7 +510,7 @@ reply_to_post("1890123456789012345", "Thanks for the feedback.")
 ### Notes
 
 - A bearer token can support read-style endpoints such as search, but posting, replying, DMs, and home-timeline access generally need full OAuth user credentials.
-- The toolkit also defines `get_my_info()`, but MindRoom's current registered tool list on this branch does not advertise a separate config flag for it.
+- Use `get_my_info()` to inspect the authenticated X account.
 - `reply_to_post()` builds a `twitter.com` URL in its response, while `create_post()` builds an `x.com` URL, so response formatting is currently inconsistent upstream.
 
 ## [`reddit`]

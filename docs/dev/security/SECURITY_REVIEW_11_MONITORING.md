@@ -1,9 +1,11 @@
 # Security Review: Monitoring & Incident Response
 
-> **Audit note (2026-03-18):** Prometheus metrics and alert rules are live, but Alertmanager is not routed to any receiver and no incident response playbook exists.
+> **Audit note (2026-03-18):** Prometheus metrics and alert-rule manifests exist, but no Alertmanager receiver is configured.
+> The incident-response section below is an unowned draft template, not a tested operational playbook.
+> This is a historical repository review, not a live deployment attestation.
 
 **Review Date**: 2025-01-11
-**Updated**: 2025-09-16 (Post-Implementation Review)
+**Updated**: 2026-03-18 (Repository Audit)
 **Reviewer**: Claude Code Security Analysis
 **Scope**: Category 11 - Monitoring & Incident Response (6 items)
 **Project**: MindRoom SaaS Platform
@@ -17,12 +19,12 @@ This security review assessed the monitoring and incident response capabilities 
 ### Critical Findings
 - ✅ **Authentication failure monitoring IMPLEMENTED**
 - ✅ **IP-based blocking for brute force protection IMPLEMENTED**
-- ✅ **Audit logging for all auth events IMPLEMENTED**
-- 🟡 **Prometheus alerting rules deployed (routing TBD)**
-- ❌ **No incident response procedures**
+- ⚠️ **Audit logging covers uncached regular-user verification; cache-hit, admin, and SSO paths remain incomplete**
+- 🟡 **Prometheus alert-evaluation rules defined (receiver routing and live state unverified)**
+- ❌ **No owned or tested incident response procedures**
 - ❌ **No advanced attack pattern detection** (basic protection exists)
 
-**Risk Level**: **MEDIUM** – Core logging exists, but automated alerting, dashboards, and incident process are absent.
+**Risk Level**: **MEDIUM** – Core logging and alert evaluation exist, but external notifications, dashboards, and an operational incident process are absent.
 
 ---
 
@@ -30,15 +32,15 @@ This security review assessed the monitoring and incident response capabilities 
 
 ### 1. Set up alerts for multiple failed authentication attempts
 
-**Status**: ⚠️ **PARTIAL** (Prometheus alerting rules live; notification routing pending)
+**Status**: ⚠️ **PARTIAL** (Prometheus alerting rules are defined; notification routing and live state remain unverified)
 
 **Current State**:
 - Authentication failure tracking implemented in `auth_monitor.py`
 - Automatic IP blocking after 5 failures in 15 minutes (30-minute lockout)
 - Auth events logged to `audit_logs`
-- Prometheus scrape + alert rules (`platform-security-alerts`) deployed for:
+- Prometheus scrape and alert-rule manifests (`platform-security-alerts`) define:
   - `MindroomAuthBlockedIP` (blocked IP persists >5m)
-  - `MindroomAdminUnauthorizedSpike` (auth failures spike >5 in 5m)
+  - `MindroomAdminUnauthorizedSpike` (unauthorized admin verification attempts exceed 5 in 5m)
   - `MindroomBlockedRequestFlood` (blocked_request surge)
 - Alertmanager receivers (email/Slack/PagerDuty) still to be configured
 
@@ -63,14 +65,14 @@ def record_failure(ip_address: str, user_id: str = None) -> bool:
 **Implementation Details**:
 - ✅ Tracking of failed authentication attempts per IP
 - ✅ Automatic IP blocking after threshold
-- ✅ Audit logging of all auth events
+- ⚠️ Audit logging of uncached regular-user verification events; other auth surfaces remain incomplete
 - ✅ Prometheus metrics exposed (`mindroom_auth_events_total`, `mindroom_admin_verifications_total`, `mindroom_blocked_ips`)
 - ✅ Prometheus ServiceMonitor scrapes platform backend every 30s
-- ✅ Alert expressions deployed via `PrometheusRule platform-security-alerts`
+- ✅ Alert expressions defined via `PrometheusRule platform-security-alerts`
 - ⏳ Alertmanager routing/SIEM integration pending
 
 **Operational Notes**
-- Metrics and alert rules live inside the in-cluster Prometheus (`monitoring` namespace).
+- Metrics and alert rules are configured for an in-cluster Prometheus in the `monitoring` namespace; verify the live target before relying on them.
 - Use `kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090` then visit http://localhost:9090 to inspect targets, graph the new metrics, or verify alert status.
 - Alertmanager is deployed with the stack; configure receivers (email/Slack/PagerDuty) before notifications are sent externally.
 
@@ -84,7 +86,7 @@ def record_failure(ip_address: str, user_id: str = None) -> bool:
 
 ### 2. Monitor for unusual data access patterns
 
-**Status**: ❌ **FAIL**
+**Status**: ❌ **FAIL** (draft template below is not operationalized)
 
 **Current State**:
 - No data access monitoring implemented
@@ -251,7 +253,7 @@ command_injection_patterns = [
 **Status**: ❌ **FAIL**
 
 **Current State**:
-- No documented incident response procedures
+- No owned, approved, or tested incident response procedures
 - No escalation protocols
 - No communication plans
 - No recovery procedures
@@ -607,7 +609,10 @@ class KubernetesMonitor:
         await self._send_config_alert(change_event)
 ```
 
-## Incident Response Playbook
+## Draft Incident Response Playbook Template
+
+This template lacks named owners, contact routes, environment-specific runbooks, approval, and exercise evidence.
+It does not satisfy the operational playbook gap by itself.
 
 ### 1. Incident Classification
 
@@ -826,23 +831,17 @@ class SecurityOrchestration:
 
 ---
 
-## Immediate Action Items
+## Original Immediate Action Items (Historical)
 
 ### Week 1 (Critical)
-1. **Implement authentication failure monitoring**
-   - Deploy enhanced auth logging
-   - Set up failed attempt tracking
-   - Configure automatic IP blocking
+1. **Authentication failure monitoring** — implemented for the covered regular-user verification path.
 
 2. **Deploy basic attack detection**
    - Implement WAF for common attacks
    - Add rate limiting to auth endpoints
    - Set up security event logging
 
-3. **Enhance admin action logging**
-   - Log all admin operations
-   - Add IP and session tracking
-   - Implement real-time alerts
+3. **Enhance admin action logging** — audit logging exists, but coverage and receiver routing require verification.
 
 ### Week 2 (High Priority)
 1. **Set up monitoring dashboards**
@@ -908,8 +907,8 @@ class SecurityOrchestration:
 - **Enhancement Needed**: Automate escalation paths and operationalize log review.
 
 ### Business Impact
-With current logging-only setup:
-- 🔶 **Breach detection** relies on manual log review (no alerts).
+With the current partially configured setup:
+- 🔶 **Breach notification** relies on manual review because alert evaluation has no verified external receiver path.
 - ✅ **Compliance support** improved via audit trails but requires process documentation.
 - 🔶 **Risk mitigation** limited without proactive notifications.
 - ✅ **Operational security** benefits from recorded admin actions, yet alerting would accelerate response.

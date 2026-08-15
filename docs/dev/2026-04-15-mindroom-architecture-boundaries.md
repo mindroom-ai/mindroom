@@ -12,7 +12,7 @@ It is allowed to change as we learn more about the codebase.
 
 It is not a frozen contract and it is not a promise that the current code already matches the target state.
 
-Enforcement has since caught up with it: `tach.toml` now declares the whole runtime rather than one pilot slice.
+Enforcement has since expanded beyond the pilot slice, but `tach.toml` still covers only declared runtime modules rather than every module under `src/mindroom`.
 
 ## Purpose
 
@@ -142,9 +142,9 @@ Public seams should be memory and knowledge service interfaces rather than priva
 
 Storage details and prompt-building helpers should not become de facto public APIs through direct imports.
 
-The memory facade is now Tach-enforced as a narrow slice with 15 exposed symbols.
+The memory facade is now Tach-enforced as a narrow slice with 16 exposed symbols.
 
-A transitional bypass-grep guard blocks direct helper imports while the broader cleanup continues.
+Tach visibility and dependency rules enforce helper restrictions for the declared modules.
 
 See [tach.toml](../../tach.toml) for the enforced surface and its source of truth.
 
@@ -250,9 +250,9 @@ Broader integration tests should increasingly prefer public seams.
 
 ## Enforcement strategy
 
-Enforcement started as a deliberately narrow pilot and has since grown to cover the runtime.
+Enforcement started as a deliberately narrow pilot and has since grown to cover a broad declared runtime surface.
 
-`tach.toml` is now the source of truth for enforced module boundaries, and it declares explicit `depends_on` rules for the whole `src/mindroom` tree rather than one slice of it.
+`tach.toml` is the source of truth for enforced module boundaries, but undeclared modules under `src/mindroom` remain outside those dependency rules.
 
 That includes the durable conversation domain: `mindroom.event_journal`, `mindroom.matrix.journal_ingress`, and `mindroom.matrix.conversation_reads` each carry their own dependency rules.
 

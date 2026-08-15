@@ -16,8 +16,7 @@
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage",
-    "test:unit": "vitest run --reporter=verbose",
-    "test:e2e": "node ../e2e-tests/gmail-oauth.test.js"
+    "test:unit": "vitest run --reporter=verbose"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

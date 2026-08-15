@@ -51,6 +51,9 @@ Multiple runtimes may access the same agent directory concurrently, so files and
 Add a `sandbox-runner` service alongside MindRoom.
 Both use the same image.
 The runner just has a different entrypoint and no access to `.env` or the primary data volume.
+This shared-runner topology provides worker-local scratch storage only.
+It does not expose the primary runtime's canonical `agents/<agent>/workspace` tree, so do not use it when file or shell work must persist in the agent workspace.
+Use the dedicated Docker backend below for persistent agent workspaces.
 
 ```yaml
 services:
@@ -81,6 +84,7 @@ services:
 
 volumes:
   sandbox-workspace:
+    name: sandbox-workspace
 ```
 
 Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
@@ -89,7 +93,7 @@ Do not mount the full `mindroom_data` tree into the runner because it contains c
 > The `sandbox-workspace` Docker volume is created as root by default.
 > The runner runs as UID 1000, so you must fix ownership after first creating the volume:
 > ```bash
-> docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace
+> docker compose run --rm --user root --entrypoint chown sandbox-runner -R 1000:1000 /app/workspace
 > ```
 > Alternatively, omit the `user:` directive to run as root (less secure).
 
@@ -167,12 +171,13 @@ Run MindRoom directly on the host while isolating code-execution tools in a Dock
 
 ```bash
 # 1. Start the sandbox runner container
+export MINDROOM_SANDBOX_PROXY_TOKEN="$(openssl rand -hex 32)"
 docker run -d \
   --name mindroom-sandbox-runner \
-  -p 8766:8766 \
+  -p 127.0.0.1:8766:8766 \
   -e MINDROOM_WORKER_BACKEND=static_runner \
   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
-  -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
+  -e MINDROOM_SANDBOX_PROXY_TOKEN="$MINDROOM_SANDBOX_PROXY_TOKEN" \
   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
   ghcr.io/mindroom-ai/mindroom:latest \
   /app/run-sandbox-runner.sh
@@ -180,7 +185,6 @@ docker run -d \
 # 2. Start MindRoom on the host with proxy config
 export MINDROOM_WORKER_BACKEND=static_runner
 export MINDROOM_SANDBOX_PROXY_URL=http://localhost:8766
-export MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token
 export MINDROOM_SANDBOX_EXECUTION_MODE=selective
 export MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
 mindroom run
@@ -191,7 +195,7 @@ Or add the proxy variables to your `.env` file:
 ```bash
 MINDROOM_WORKER_BACKEND=static_runner
 MINDROOM_SANDBOX_PROXY_URL=http://localhost:8766
-MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token
+MINDROOM_SANDBOX_PROXY_TOKEN=<generated-strong-random-token>
 MINDROOM_SANDBOX_EXECUTION_MODE=selective
 MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
 ```
@@ -203,11 +207,11 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 > ```bash
 > docker run -d \
 >   --name mindroom-sandbox-runner \
->   -p 8766:8766 \
+>   -p 127.0.0.1:8766:8766 \
 >   -v ./config.yaml:/app/config.yaml:ro \
 >   -e MINDROOM_CONFIG_PATH=/app/config.yaml \
 >   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
->   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
+>   -e MINDROOM_SANDBOX_PROXY_TOKEN=<generated-strong-random-token> \
 >   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
 >   ghcr.io/mindroom-ai/mindroom:latest \
 >   /app/run-sandbox-runner.sh
@@ -503,7 +507,7 @@ If you don't want a value to reach tools, don't export it.
 - Any failure (non-zero exit, timeout, escape, missing `bash`) returns the tool call as `ok: false` with `failure_kind: "tool"` and an error mentioning `.mindroom/worker-env.sh`.
 - Hook failures do not poison the worker; only the requesting tool call fails.
 
-This hook works identically for the static sidecar and dedicated Kubernetes worker backends because it runs inside the sandbox runner per request.
+This hook works identically for static sidecar, dedicated Docker, and dedicated Kubernetes worker backends because it runs inside the sandbox runner per request.
 It is not a true container startup hook — it does not change pod templates, recreate Deployments, or alter Helm values.
 For an example, see `docs/tools/execution-and-coding.md`.
 
@@ -520,7 +524,7 @@ export MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON='{"shell": ["github"], "python": 
 ```
 
 This shares the `github` credential service with `shell` tool calls and `openai` with `python` tool calls.
-Credentials are never stored in the runner.
+Credentials are never persisted by the runner; a lease holds them in memory until consumed or expired.
 Each lease is consumed on use and expires after the configured TTL.
 
 ## Security considerations
@@ -530,7 +534,8 @@ Each lease is consumed on use and expires after the configured TTL.
 
   Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
 - Credential leases are single-use by default and expire after 60 seconds.
-- The worker container `securityContext` drops all capabilities and disables privilege escalation.
+- Helm-managed Kubernetes worker containers drop all capabilities and disable privilege escalation.
+- Dedicated Docker workers do not currently receive the same chart-managed `securityContext`; harden their Docker host and launch policy separately.
 - With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.

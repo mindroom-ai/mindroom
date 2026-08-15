@@ -39,8 +39,8 @@ Each contract is stated as a rule, then as what actually shipped.
 
 ### 1. The projection is a prompt view, not a Matrix replica
 
-A bounded, recent, latest-visible view whose purpose is prompt construction.
-No certification, no periodic scan, no unbounded export API.
+A latest-visible view whose read APIs apply bounded prompt and export windows.
+The durable projection itself is not storage-bounded, and it provides no certification or independent Matrix-reduction path.
 
 **Export reads this projection; it does not paginate Matrix itself.**
 Before the cutover it did, and owning a second Matrix reducer meant an exported

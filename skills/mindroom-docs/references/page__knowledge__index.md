@@ -255,8 +255,8 @@ When an agent has multiple semantic knowledge bases, results are interleaved fai
 ## Git-Backed Knowledge Bases
 
 Knowledge bases can sync from a Git repository.
-MindRoom starts a background refresh for configured shared Git knowledge bases when runtime support starts.
-After that, it schedules another background refresh every `poll_interval_seconds`.
+MindRoom waits one `poll_interval_seconds` interval before the first background refresh for a configured shared Git knowledge base, avoiding a refresh burst during startup.
+It then schedules another background refresh after each interval.
 Reads keep using the last published index while a refresh is running.
 
 ```yaml

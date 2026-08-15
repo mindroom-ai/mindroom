@@ -11,7 +11,7 @@ You can generate a starter config with `mindroom config init`.
 
 ## Configuration Structure
 
-The configuration file has these top-level sections:
+The configuration file has these common top-level sections; see the exhaustive [configuration reference](../configuration/index.md) for additional runtime, prompt, MCP, trigger, approval, call, event-journal, debug, and Matrix-sync sections.
 
 1. **agents** - Configure individual agents and their capabilities
 2. **teams** - Multi-agent collaboration groups
@@ -62,7 +62,6 @@ Each model entry supports these fields:
 - **provider** (required) - Provider name (see list below)
 - **id** (required) - Model ID specific to the provider
 - **host** - Optional host URL (e.g., for Ollama or OpenAI-compatible servers)
-- **api_key** - Optional API key (usually set via env vars instead)
 - **extra_kwargs** - Additional provider-specific parameters (e.g., `base_url`)
 - **context_window** - Actual provider context window size in tokens; when set, MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction config sets a smaller `replay_window_tokens`, and applies a final replay-fit step that may reduce or disable persisted replay for that run; on `vertexai_claude` models it additionally enables request-time fitting that trims replayed history when a request would exceed the window
 
@@ -70,7 +69,11 @@ Each model entry supports these fields:
 
 - **anthropic** - Claude models (requires `ANTHROPIC_API_KEY`)
 - **azure** - Azure OpenAI deployments (requires `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_ENDPOINT`)
+- **bedrock_claude** - Claude models through Amazon Bedrock
 - **openai** - OpenAI and OpenAI-compatible models (requires `OPENAI_API_KEY`)
+- **codex** / **openai_codex** - OpenAI models through a Codex CLI ChatGPT login
+- **kimi** / **kimi_code** - Kimi models through a Kimi Code CLI login
+- **llama_cpp** - Local OpenAI-compatible llama.cpp servers
 - **ollama** - Local models via Ollama (requires `OLLAMA_HOST`, defaults to `http://localhost:11434`)
 - **openrouter** - Access multiple models through OpenRouter (requires `OPENROUTER_API_KEY`)
 - **gemini** / **google** - Google Gemini models (requires `GOOGLE_API_KEY`)
@@ -79,6 +82,7 @@ Each model entry supports these fields:
 - **deepseek** - DeepSeek models (requires `DEEPSEEK_API_KEY`)
 - **zai** - Z.ai GLM models (requires `ZAI_API_KEY`)
 - **cerebras** - Cerebras-hosted models (requires `CEREBRAS_API_KEY`)
+- **synthetic** - Internal Lorem Ipsum model for local tests and load generation
 
 ## Memory Configuration
 
@@ -359,7 +363,7 @@ Default settings inherited by all agents unless overridden:
 
 ```yaml
 defaults:
-  tools: [scheduler]  # Tools added to every agent
+  tools: [scheduler]  # Merged into agents unless include_default_tools: false
   markdown: true
   enable_streaming: true
   show_stop_button: true

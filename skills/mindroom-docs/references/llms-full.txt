@@ -118,13 +118,22 @@ models:
 defaults:
   tools: [scheduler]
   markdown: true
+
+authorization:
+  global_users:
+    - "@alice:matrix.example.com"
+  agent_reply_permissions:
+    "*":
+      - "@alice:matrix.example.com"
 ```
 
 2. Set up your environment in `.env`:
 
 ```bash
-# Matrix homeserver (must allow open registration)
+# Matrix homeserver must allow agent registration, either through a
+# registration token/provisioning service or intentionally open registration.
 MATRIX_HOMESERVER=https://matrix.example.com
+# MATRIX_REGISTRATION_TOKEN=your-registration-token
 
 # AI provider API keys
 OPENAI_API_KEY=your_api_key
@@ -150,7 +159,7 @@ mindroom run
 | **Agents** | Single-specialty actors with specific tools and instructions |
 | **Teams** | Collaborative bundles of agents (coordinate or collaborate modes) |
 | **Router** | Built-in traffic director that routes messages to the right agent |
-| **Memory** | Mem0-inspired memory system with agent and team scopes |
+| **Memory** | Pluggable Mem0/ChromaDB and Markdown-file backends with agent and team scopes |
 | **Knowledge Bases** | File-backed semantic RAG or files-only access with per-agent base assignment |
 | **Tools** | 100+ integrations for external services |
 | **Skills** | OpenClaw-compatible skills system for extended agent capabilities |
@@ -322,7 +331,7 @@ Notes:
 
 - Pair code is short-lived (10 minutes). Generate a new one if it expires.
 - `mindroom connect` writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env` by default.
-- Use `--no-persist-env` to export variables only for the current shell session instead of writing to `.env`.
+- Use `--no-persist-env` to print export commands instead of writing `.env`; evaluate or copy those commands into the current shell yourself.
 
 ### 4. Run MindRoom
 
@@ -337,7 +346,7 @@ uvx mindroom run
 **Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools.
 Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.
 
-**Preflight check:** Run `mindroom doctor` before `mindroom run` to verify config, API keys, Matrix connectivity, and storage in one pass.
+**Preflight check:** Run `uvx mindroom doctor` before `uvx mindroom run` to verify config, API keys, Matrix connectivity, and storage in one pass.
 
 For a detailed architecture and credential model, see:
 [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/).
@@ -454,6 +463,13 @@ defaults:
   tools: [scheduler]
   markdown: true
 
+authorization:
+  global_users:
+    - "@alice:matrix.example.com"
+  agent_reply_permissions:
+    "*":
+      - "@alice:matrix.example.com"
+
 timezone: America/Los_Angeles
 ```
 
@@ -462,8 +478,11 @@ timezone: America/Los_Angeles
 Create a `.env` file with your credentials:
 
 ```bash
-# Matrix homeserver (must allow open registration for agent accounts)
+# Matrix homeserver must allow managed account provisioning.
 MATRIX_HOMESERVER=https://matrix.example.com
+
+# Recommended when the homeserver supports token-gated registration.
+# MATRIX_REGISTRATION_TOKEN=your-registration-token
 
 # Optional: For self-signed certificates (development)
 # MATRIX_SSL_VERIFY=false
@@ -497,7 +516,9 @@ uv run mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/ma
 This starts Synapse from the `mindroom-stack` compose files, starts a MindRoom Chat container, waits for both services to be healthy, and by default writes local Matrix settings to `.env` next to your active `config.yaml`.
 
 > [!NOTE]
-> MindRoom automatically creates Matrix user accounts for each agent. Your Matrix homeserver must allow open registration, or you need to configure it to allow registration from localhost. If registration fails, check your homeserver's registration settings.
+> MindRoom automatically creates Matrix user accounts for each agent.
+> Configure one supported provisioning path: hosted provisioning, `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, or intentionally open registration.
+> If registration fails, check the selected provisioning credentials and homeserver policy.
 
 #### 3. Run MindRoom
 
@@ -533,9 +554,8 @@ Install [TestFlight](https://apps.apple.com/app/testflight/id899247664) from the
 
 Open the link on your iPhone or iPad, tap **Accept**, then install **MindRoom AI** from TestFlight.
 
-If TestFlight says the beta is not accepting new testers, the current build is still waiting for Apple's Beta App Review.
-Try the button again later.
-If TestFlight says the beta is full, expired, or has no build available after the beta opens, email `support@mindroom.chat` with the Apple ID email address you use on your iOS device.
+If TestFlight says the beta is not accepting new testers, enrollment is temporarily unavailable.
+Try the button again later or use the [support page](https://docs.mindroom.chat/support/).
 
 ## Sign In
 
@@ -553,13 +573,14 @@ Then follow the [Getting Started](https://docs.mindroom.chat/getting-started/) g
 
 - TestFlight builds expire after 90 days.
   Install updates from TestFlight when they appear.
-- The public beta link starts accepting new testers after Apple approves the current TestFlight build for external testing.
-- If the invitation is full, expired, or missing, email `support@mindroom.chat` with your Apple ID email address.
+- The public beta link accepts testers only while an eligible build and public enrollment are available.
+- If the invitation is full, expired, or missing, use the [support page](https://docs.mindroom.chat/support/).
 - Include your device model, iOS version, app version, and homeserver URL when reporting beta issues.
 
 # Web Dashboard
 
-MindRoom includes a web dashboard for configuring agents, teams, rooms, and integrations without editing YAML files. Changes are synchronized to `config.yaml` in real-time.
+MindRoom includes a web dashboard for configuring agents, teams, rooms, and integrations without editing YAML files.
+Editors keep local draft state and write `config.yaml` when you use their save action.
 
 ## Accessing the Dashboard
 
@@ -628,11 +649,10 @@ View and manage rooms that agents have joined but are not in the configuration:
 Configure AI model providers:
 
 - **Add/edit models** with provider, model ID, host URL, and advanced settings
-- **Provider filter** to show models by provider
-- **Test connection** to verify model accessibility
 - **Provider API keys** section for configuring credentials
 
-**Runtime-supported providers:** OpenAI, Codex CLI ChatGPT authentication (`codex`), Anthropic, Google Gemini (`google`/`gemini`), Vertex AI Claude (`vertexai_claude`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
+**Runtime-supported providers:** Anthropic, Bedrock Claude, Azure OpenAI, OpenAI, Codex CLI ChatGPT authentication, Kimi Code, Google Gemini, Vertex AI Claude, Ollama, llama.cpp, Groq, OpenRouter, Cerebras, DeepSeek, Z.ai, and the internal synthetic provider.
+The dashboard preserves provider IDs already present in the configuration; not every runtime provider has a dedicated icon or preset in the add-model dropdown.
 
 ### Memory
 
@@ -713,7 +733,7 @@ Configure voice message handling:
 
 - **Enable/disable** voice message support
 - **Speech-to-Text** - OpenAI transcription or a self-hosted OpenAI-compatible service
-- **Command Intelligence** - Model selection for command recognition
+- **Transcript intelligence** - Model selection for mention normalization and light ASR cleanup
 
 ### Integrations
 
@@ -725,7 +745,7 @@ Connect external services to enable agent capabilities:
 
 ## Features
 
-### Real-time Sync
+### Save Status
 
 The sync status indicator in the header shows:
 
@@ -834,7 +854,7 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Returns `{"status": "healthy"}` when the HTTP server is running and Matrix sync is active. Returns `503` with `{"status": "unhealthy", "stale_sync_entities": [...]}` when Matrix sync has been stale for >180s (after watchdog recovery attempts) |
+| GET | `/api/health` | Liveness endpoint that returns `503` with `{"status": "unhealthy", "stale_sync_entities": [...]}` for stale Matrix sync after startup is ready, while `/api/ready` owns startup state before readiness. |
 | GET | `/api/ready` | Returns `{"status": "ready"}` when the orchestrator has finished startup. Returns `503` with `{"status": "<phase>", "detail": "..."}` otherwise |
 
 MindRoom tracks runtime phases internally:
@@ -1075,9 +1095,9 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the dashboard API with credentials | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
-| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
+| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (`0` = wait indefinitely). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
+| `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may wait for one active durable sync-cache phase before treating it as wedged | `600` |
-| `MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS` | Wall-clock seconds allowed for live dispatch-safe Matrix thread reads before dispatch proceeds with degraded thread evidence | `1.0` |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 
 The sync cache-write grace is a hang backstop, not the ordinary Matrix transport timeout.
@@ -1199,13 +1219,12 @@ agents:
 # Model configurations (at least a "default" model is recommended)
 models:
   default:
-    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: anthropic, azure, bedrock_claude, openai, codex, kimi, llama_cpp, ollama, google/gemini, vertexai_claude, groq, cerebras, openrouter, deepseek, zai, or synthetic
     id: claude-sonnet-5            # Required: Model ID for the provider
   sonnet:
-    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: anthropic, azure, bedrock_claude, openai, codex, kimi, llama_cpp, ollama, google/gemini, vertexai_claude, groq, cerebras, openrouter, deepseek, zai, or synthetic
     id: claude-sonnet-5            # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
-    api_key: null                  # Optional: API key (usually from env vars)
     extra_kwargs: null             # Optional: Provider-specific parameters
     context_window: null           # Optional: Needed on the active runtime model for replay safety; explicit compaction.model also needs its own window for summary generation
 
@@ -1285,29 +1304,19 @@ defaults:
 # defaults.streaming is also global-only and controls streamed message edit cadence.
 # Tools can be plain strings or single-key dicts with per-agent config overrides.
 
-MindRoom uses `defaults.thread_summary_temperature` for automatic thread summaries on providers that support runtime temperature overrides.
-Set it to `null` to omit the field and use provider defaults.
-MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite thread summaries.
-Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
-Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
-
-When a thread has no trusted prior summary, its first automatic summary call is summary-only so a useful thread title appears early.
-The next scheduled automatic summary refresh also returns one to three topic tags when the thread has no existing tags, whether the prior summary was automatic or manual.
-This delayed initial enrichment uses the same summary model, room override, temperature, prompt, and background task as the refreshed summary.
-After initial enrichment completes, later summary refreshes do not regenerate or replace tags.
-
-`defaults.worker_grantable_credentials` is a list of credential service names.
-Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
-Google OAuth client config and Google OAuth token services stay in the primary runtime and cannot be mirrored into isolated workers.
-If a tool runs inside an isolated worker, only the services listed here are available to that worker.
-Leave this unset to keep isolated workers deny-by-default for shared credentials.
-This setting never injects provider env vars such as `OPENAI_API_KEY`.
-
-For worker-routed tools, it only controls which shared credentials MindRoom may load inside isolated workers.
-This setting also does not control local shared-only integrations that stay in the main runtime, such as `homeassistant`.
-Those tools keep using normal shared credentials even when `worker_grantable_credentials` is empty.
-`google_vertex_adc` is intentionally not supported here because isolated workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; use that auth path only in the main runtime.
-Sandbox-proxied execution is stricter than direct local execution: ordinary runtime `.env` values and provider env do not carry over unless they are explicitly passed through.
+# defaults.thread_summary_temperature controls automatic summaries on providers that support runtime temperature overrides.
+# Set it to null to use provider defaults.
+# Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite always use provider defaults.
+# room_thread_summary_models can override defaults.thread_summary_model for a room alias or raw Matrix room ID.
+#
+# A thread's first trusted automatic summary call is summary-only.
+# Its next scheduled refresh adds one to three tags when none exist.
+# Later refreshes preserve those tags.
+#
+# worker_grantable_credentials lists shared credential service names that isolated workers may load.
+# Google OAuth client and token services stay in the primary runtime and cannot be mirrored.
+# Provider environment variables are not injected by this setting.
+# google_vertex_adc is unsupported because isolated workers do not receive ADC files.
 
 # Required compaction is destructive inside the active session.
 # It uses one Matrix lifecycle notice that is edited in place.
@@ -2302,8 +2311,8 @@ Agent and team names must be distinct — the same key cannot appear in both `ag
 
 ## Defaults
 
-The `defaults` section sets fallback values for all agents.
-Any agent that omits a setting inherits the value from here.
+The `defaults` section sets fallback values for supported per-agent override fields and global-only agent behavior.
+Supported override fields inherit when omitted, `defaults.tools` is merged only when `include_default_tools` is true, and global-only defaults apply to every agent.
 
 ```yaml
 defaults:
@@ -2367,6 +2376,7 @@ Models define the AI providers and model IDs used by agents.
 - `google` or `gemini` - Google Gemini models
 - `vertexai_claude` - Anthropic Claude models on Google Vertex AI
 - `ollama` - Local models via Ollama
+- `llama_cpp` - Local models through an OpenAI-compatible llama.cpp server
 - `groq` - Groq-hosted models (fast inference)
 - `openrouter` - OpenRouter-hosted models (access to many providers)
 - `cerebras` - Cerebras-hosted models
@@ -2383,9 +2393,11 @@ Each model configuration supports the following fields:
 | `provider` | Yes | - | The AI provider (see supported providers above) |
 | `id` | Yes | - | Model ID specific to the provider |
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
-| `api_key` | No | `null` | API key (usually read from environment variables) |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
 | `context_window` | No | `null` | Actual provider context window size in tokens; MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction sets a smaller `replay_window_tokens`; an explicit `compaction.model` or `compaction.fallback_model` needs its own `context_window` for summary generation; on `vertexai_claude` it also enables request-time fitting |
+
+For Azure OpenAI, `id` is the Azure deployment name, not the underlying base-model name.
+Provider credentials come from supported environment variables, stored credentials, CLI authentication, or deliberately supplied `extra_kwargs`; the top-level `ModelConfig.api_key` field is not used during model construction.
 
 ## Configuration Examples
 
@@ -2793,7 +2805,7 @@ Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICA
 
 ### File-based Secrets
 
-For container environments (Kubernetes, Docker Swarm), you can also use file-based secrets by appending `_FILE` to any environment variable name:
+For container environments (Kubernetes, Docker Swarm), supported API-key and secret variables can also use a `_FILE` suffix:
 
 ```bash
 # Instead of setting the key directly:
@@ -2899,6 +2911,8 @@ teams:
 | `compaction` | No | `defaults.compaction` | Team-scoped required-compaction overrides |
 
 Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.
+Each configured team must contain at least one unique, known agent.
+Private agents, and agents whose delegation closure reaches private agents, are not supported in configured teams.
 
 `num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings.
 When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.
@@ -2953,9 +2967,8 @@ For dynamic teams, the collaboration mode is selected by AI based on the task:
 - Tasks with different subtasks for each agent use **coordinate** mode
 - Tasks asking for opinions or brainstorming use **collaborate** mode
 
-When AI mode selection is unavailable or fails, MindRoom falls back to:
-- **coordinate** when multiple agents are explicitly tagged in the message (they likely have different roles to fulfill)
-- **collaborate** for all other cases, such as agents from thread history or DM rooms (likely discussing the same topic)
+Before model selection completes, explicit mentions carry a provisional **coordinate** heuristic and thread-derived groups carry a provisional **collaborate** heuristic.
+The execution layer asks the model to refine that choice; when model selection fails or returns an unexpected result, MindRoom falls back to **collaborate**.
 
 Dynamic teams do not have a named `teams:` entry, so their history replay and compaction policy comes from `defaults`, not from any participating agent's overrides.
 
@@ -3013,6 +3026,7 @@ All modes include the culture description in the agent's context. The difference
 - All agents listed in a culture must exist in the top-level `agents` section.
 - Culture state is persisted to `mindroom_data/culture/<culture_name>.db` and survives restarts.
 - Culture managers are cached and shared across agents in the same culture — if two agents belong to the same culture, they share the same `CultureManager` instance.
+- For private agents, culture storage and manager caches are scoped to the resolved requester identity, so different requesters do not share culture state.
 - Changes to a culture's `description` or `mode` in `config.yaml` invalidate the cache, so the manager is recreated on the next hot-reload.
 
 # Router Configuration
@@ -3061,7 +3075,8 @@ The router is a special system agent that handles several important tasks beyond
 
 ### Command Handling
 
-The router exclusively handles all commands:
+The router owns commands by default.
+A requester-scoped `!desktop` command may instead be owned by an eligible private agent when the room contains exactly that requester and agent.
 
 - `!help [topic]` - Get help on commands or specific topics
 - `!hi` - Show the welcome message again
@@ -3069,13 +3084,19 @@ The router exclusively handles all commands:
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
+- `!reload-plugins` - Reload configured plugins (admin only)
 - `!config <operation>` - Manage configuration when explicitly enabled for global admins
+- `!desktop [setup|status|confirm|rotate|disconnect]` - Manage the requester's Desktop target
+- `!model [name|list|reset]` - Show or switch the current thread model
+- `!thread_mode [room|thread|reset|show]` - Manage room thread mode (room admin only)
+- `!encrypt [confirm]` - Enable room encryption (irreversible, room admin only)
+- `!e2ee` - Show room encryption diagnostics
 
 Even in single-responder rooms, commands are always processed by the router.
 
 ### Welcome Messages
 
-When the router joins a room after an invite, it sends a requester-scoped welcome message.
+After accepting an invite, the router sends a requester-scoped welcome message only when the room has no existing message history.
 
 That welcome message lists:
 
@@ -3258,7 +3279,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 Some entries are config-only presets rather than runtime toolkits.
 `openclaw_compat` expands to a native bundle of MindRoom tools.
 Some tools also imply companion tools through `Config.IMPLIED_TOOLS`.
-Today `matrix_message` implies `attachments`, so the effective tool set includes both even when only `matrix_message` is configured explicitly.
+Today `matrix_message` implies both `attachments` and `matrix_room`, so the effective tool set includes all three even when only `matrix_message` is configured explicitly.
 
 ## Tool Runtime Context
 
@@ -3299,7 +3320,7 @@ defaults:
 ## Worker-Routed Execution
 
 Some tools default to running in a sandboxed worker container instead of the primary agent process.
-The current worker-routed defaults are `file`, `shell`, `python`, and `coding`.
+The current worker-routed defaults are `file`, `shell`, `python`, `coding`, and `docker`.
 Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for deployment details and worker-scope behavior.
 
 ## Shared-Only Integrations
@@ -3356,7 +3377,8 @@ No flags means the tool is eager and appears in every request.
 
 ## Native Server-Side Tool Search
 
-Claude models since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 on the `anthropic` and `vertexai_claude` providers, and GPT models 5.4 or newer on the first-party `openai`, `codex`, and `openai_codex` providers, use the provider's server-side tool search automatically.
+Claude models since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 on the `anthropic` and `vertexai_claude` providers, and GPT models 5.4 or newer on first-party `openai`, `codex`, and `openai_codex` endpoints, use the provider's server-side tool search automatically.
+An `openai` model configured with `extra_kwargs.base_url` or a non-official `OPENAI_BASE_URL` uses MindRoom's runtime gating instead.
 On this path every deferred tool ships in every request tagged `defer_loading: true` together with the provider's tool-search entry, so deferred schemas stay out of the model's rendered context until the model searches for them.
 Tool discovery never invalidates the prompt cache: Anthropic expands discovered tool references inline in the message stream, and OpenAI loads discovered tools at the end of the context window.
 The `dynamic_tools` manager, its prompt blocks, and session loaded-tool state are not used on this path; all deferred toolkits are attached at agent build, so discovered calls execute directly.
@@ -3372,7 +3394,8 @@ The manager exposes `list_tools()`, `tool_search(query)`, `load_tool(tool_name)`
 Search is plain keyword and exact-name lookup only.
 A newly loaded tool becomes callable once it appears in the agent's available tools, never in the same parallel tool-call batch as `load_tool()`.
 A standalone agent continues the same task in a later tool-call step within the same response, because its run loop rebuilds the agent with the updated schema and resumes the turn without waiting for another user message.
-Team members and other embedded agents run without that continuation loop, so their loads and unloads take effect on the next request in the same session.
+Standalone agents and normal team turns continue the same task after loading or unloading a tool.
+Embedded callers without a continuation-capable response-turn driver apply changes on the next request in the same session.
 Rebuilding the agent after a tool load also makes that toolkit's instructions available in the new system prompt.
 
 ## State Scope
@@ -3399,7 +3422,7 @@ Use these tools when you need local execution, coding-oriented file access, ligh
 - [`docker`] - Local Docker container, image, volume, and network management.
 - [`calculator`] - Exact arithmetic and small numeric helper functions.
 - [`reasoning`] - Internal `think` and `analyze` scratchpad tools for structured reasoning.
-- [`file_generation`] - JSON, CSV, PDF, and text file export helpers.
+- [`file_generation`] - JSON, CSV, PDF, DOCX, HTML, and text file export helpers.
 - [`visualization`] - Matplotlib-backed chart generation.
 - [`sleep`] - Intentional delays and pauses.
 
@@ -3429,7 +3452,7 @@ No extra configuration is required beyond that workspace root.
 `MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES` overrides the default 64 MiB per-output write cap for explicit and automatic saves.
 
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
-That matters most here for `docker`, `file_generation`, and `visualization`, which depend on Docker access, `reportlab`, and `matplotlib`.
+That matters most here for `docker`, `file_generation`, and `visualization`, which depend on Docker access, `reportlab`, `python-docx`, and `matplotlib`.
 
 ```yaml
 defaults:
@@ -3466,10 +3489,11 @@ agents:
 
 ### What It Does
 
-`file` exposes `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `read_file_chunk()`, and `replace_file_chunk()`.
-The underlying Agno toolkit resolves paths against `base_dir` and rejects paths that escape that root.
+`file` exposes `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
+Paths resolve against `base_dir` and reject escapes by default; set `restrict_to_base_dir: false` to allow outside paths.
 `read_file()` enforces `max_file_length` and `max_file_lines`, and it tells the caller to use chunk reads when a file is too large.
 `search_files()` uses glob patterns relative to `base_dir` rather than full-text search.
+`search_content()` searches text-file contents and skips paths matching `exclude_patterns`.
 MindRoom marks `file` as worker-routed by default, so it usually executes in the sandboxed worker runtime unless you override `worker_tools`.
 
 ### Configuration
@@ -3477,6 +3501,7 @@ MindRoom marks `file` as worker-routed by default, so it usually executes in the
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working root when an agent workspace exists, otherwise the current directory. This field is not normally authored inline in `config.yaml`. |
+| `restrict_to_base_dir` | `boolean` | `no` | `true` | Keep file access inside `base_dir`; set to `false` to allow outside paths. |
 | `enable_save_file` | `boolean` | `no` | `true` | Enable `save_file()`. |
 | `enable_read_file` | `boolean` | `no` | `true` | Enable `read_file()`. |
 | `enable_delete_file` | `boolean` | `no` | `false` | Enable `delete_file()`. |
@@ -3488,6 +3513,7 @@ MindRoom marks `file` as worker-routed by default, so it usually executes in the
 | `max_file_length` | `number` | `no` | `10000000` | Maximum character count for `read_file()`. |
 | `max_file_lines` | `number` | `no` | `100000` | Maximum line count for `read_file()`. |
 | `line_separator` | `text` | `no` | `"\n"` | Separator used by the chunk helpers. |
+| `exclude_patterns` | `string[]` | `no` | `null` | Fnmatch-style path-component patterns excluded from content and file searches; `null` uses Agno defaults and `[]` disables exclusions. |
 | `all` | `boolean` | `no` | `false` | Enable every upstream `file` function at once. |
 
 ### Example
@@ -3507,6 +3533,7 @@ read_file_chunk("src/mindroom/tools/file.py", 0, 80)
 replace_file_chunk("docs/notes.md", 10, 12, "Updated text")
 list_files(directory="src")
 search_files("**/*.py")
+search_content("default_execution_target", directory="src/mindroom/tools")
 save_file("temporary notes\n", "scratch/notes.txt")
 ```
 
@@ -3514,7 +3541,7 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 - `file` is the compatibility-friendly general file toolkit, but `coding` is a better default for code-editing agents.
 - `delete_file()` is disabled by default, so destructive access is opt-in.
-- `search_files()` matches filesystem globs, not content inside files.
+- `search_files()` matches filesystem globs; use `search_content()` to search inside text files.
 
 ## [`shell`]
 
@@ -3649,7 +3676,7 @@ list_files()
 If exact matching fails, `edit_file()` falls back to whitespace-and-Unicode-normalized fuzzy matching.
 `grep()` prefers `rg` when available and falls back to Python regex search otherwise.
 `find_files()` filters hidden and gitignored paths, and `ls()` keeps dotfiles visible while adding `/` markers to directories.
-All path resolution stays inside `base_dir`.
+Path resolution stays inside `base_dir` by default; set `restrict_to_base_dir: false` to allow outside paths.
 MindRoom marks `coding` as worker-routed by default.
 
 ### Configuration
@@ -3657,6 +3684,7 @@ MindRoom marks `coding` as worker-routed by default.
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working directory for code operations when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
+| `restrict_to_base_dir` | `boolean` | `no` | `true` | Keep code operations inside `base_dir`; set to `false` to allow outside paths. |
 
 ### Example
 
@@ -3816,15 +3844,17 @@ analyze(
 
 ## [`file_generation`]
 
-`file_generation` creates export artifacts as JSON, CSV, PDF, or plain text and can optionally save them to disk.
+`file_generation` creates export artifacts as JSON, CSV, PDF, DOCX, HTML, or plain text and can optionally save them to disk.
 
 ### What It Does
 
-`file_generation` exposes `generate_json_file()`, `generate_csv_file()`, `generate_pdf_file()`, and `generate_text_file()`.
+`file_generation` exposes `generate_json_file()`, `generate_csv_file()`, `generate_pdf_file()`, `generate_docx_file()`, `generate_html_file()`, and `generate_text_file()`.
 Each function returns a `ToolResult` with a generated file artifact attached.
 If `output_directory` is set, the generated file is also written to disk and the result message includes that file path.
-If `output_directory` is unset, the file still exists in the tool result payload but is not persisted to disk by the toolkit itself.
+If `output_directory` is unset and `save_files` is `false`, the file exists only in the tool result payload.
+If `save_files` is `true` without `output_directory`, the toolkit writes generated files to its current working directory.
 PDF generation is automatically disabled when `reportlab` is unavailable, even if `enable_pdf_generation` is left on.
+DOCX generation is automatically disabled when `python-docx` is unavailable, even if `enable_docx_generation` is left on.
 `file_generation` defaults to primary execution.
 
 ### Configuration
@@ -3835,7 +3865,10 @@ PDF generation is automatically disabled when `reportlab` is unavailable, even i
 | `enable_json_generation` | `boolean` | `no` | `true` | Enable `generate_json_file()`. |
 | `enable_csv_generation` | `boolean` | `no` | `true` | Enable `generate_csv_file()`. |
 | `enable_pdf_generation` | `boolean` | `no` | `true` | Enable `generate_pdf_file()` when `reportlab` is available. |
+| `enable_docx_generation` | `boolean` | `no` | `true` | Enable `generate_docx_file()` when `python-docx` is available. |
 | `enable_txt_generation` | `boolean` | `no` | `true` | Enable `generate_text_file()`. |
+| `enable_html_generation` | `boolean` | `no` | `true` | Enable `generate_html_file()`. |
+| `save_files` | `boolean` | `no` | `false` | Save generated files to disk; when `output_directory` is unset, use the current working directory. |
 | `all` | `boolean` | `no` | `false` | Enable all file-generation functions. |
 
 ### Example
@@ -3853,6 +3886,8 @@ agents:
 generate_json_file({"status": "ok", "items": 3}, filename="summary.json")
 generate_csv_file([{"name": "alpha", "value": 1}, {"name": "beta", "value": 2}], filename="data.csv")
 generate_pdf_file("Quarterly summary", filename="report.pdf", title="Q1 Report")
+generate_docx_file("Quarterly summary", filename="report.docx", title="Q1 Report")
+generate_html_file("<h1>Quarterly summary</h1>", filename="report.html")
 generate_text_file("Plain text export", filename="notes.txt")
 ```
 
@@ -3860,7 +3895,7 @@ generate_text_file("Plain text export", filename="notes.txt")
 
 - Filenames are auto-generated when omitted, and missing file extensions are appended automatically for the matching export type.
 - `generate_json_file()` accepts dicts, lists, or strings, and plain strings are wrapped into JSON when they are not already valid JSON.
-- Use a real `output_directory` if you want the artifact to remain on disk for later shell or file-tool access.
+- Set `output_directory` to persist artifacts at a predictable location for later shell or file-tool access.
 
 ## [`visualization`]
 
@@ -3984,7 +4019,7 @@ Use these tools when you need database access, dataframe-style analysis, Google 
 `sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_drive`, `google_docs`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
 `duckdb`, `csv`, `pandas`, `openbb`, and `yfinance` are `setup_type: none`, so they can be enabled immediately once their optional Python dependencies are installed.
 MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, and `api_key` must go through the dashboard or credential store instead of inline YAML.
-Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, `obb`, and `session`.
+Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, and `obb`.
 Token-like fields such as `openbb_pat` are better kept in stored credentials even when the current metadata does not mark them as password fields.
 `src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Drive, Docs, and Sheets use the generic `/api/oauth/google_drive/*`, `/api/oauth/google_docs/*`, and `/api/oauth/google_sheets/*` flows.
 `google_drive`, `google_docs`, and `google_sheets` declare per-service `auth_provider` values and store OAuth tokens separately from editable tool settings.
@@ -4113,8 +4148,8 @@ When IAM auth is enabled, the toolkit can fall back to environment variables suc
 | `host` | `url` | `yes` | `null` | Redshift cluster endpoint. |
 | `port` | `number` | `no` | `5439` | Redshift port. |
 | `database` | `text` | `yes` | `null` | Database name. |
-| `user` | `text` | `yes` | `null` | Username for password auth. |
-| `password` | `password` | `yes` | `null` | Password for standard authentication. |
+| `user` | `text` | `yes` | `null` | Username; current dashboard configured-state checks require it even when `iam` is enabled. |
+| `password` | `password` | `yes` | `null` | Password; current dashboard configured-state checks require it even when `iam` is enabled. |
 | `iam` | `boolean` | `no` | `false` | Use IAM-based auth instead of password auth. |
 | `cluster_identifier` | `text` | `no` | `null` | Cluster identifier, required for IAM auth against provisioned clusters. |
 | `region` | `text` | `no` | `null` | AWS region for IAM auth. |
@@ -4135,10 +4170,8 @@ agents:
       - redshift:
           host: my-cluster.abc123.us-east-1.redshift.amazonaws.com
           database: dev
-          iam: true
-          cluster_identifier: analytics-prod
-          region: us-east-1
-          db_user: analyst
+          user: analyst
+          table_schema: reporting
 ```
 
 ```python
@@ -4151,7 +4184,7 @@ export_table_to_path("fact_orders", "/tmp/fact_orders.csv")
 
 ### Notes
 
-- If `iam: true`, the toolkit can use `profile` or explicit AWS credentials instead of `user` and `password`.
+- The upstream toolkit supports IAM through `profile` or explicit AWS credentials, but MindRoom's current dashboard configured-state check still requires stored `user` and `password` values before the tool becomes available.
 - If you use password auth, store `password` through the dashboard or credential store rather than inline YAML.
 - `redshift` is the better fit than generic `sql` when you want Redshift-aware connection options and warehouse export helpers.
 
@@ -4362,9 +4395,9 @@ MindRoom's metadata marks `dataset`, `project`, and `location` as required, even
 | `project` | `text` | `yes` | `null` | Google Cloud project ID. |
 | `location` | `text` | `yes` | `null` | BigQuery location such as `US` or `EU`. |
 | `credentials` | `text` | `no` | `null` | Advanced Google credentials object passed directly to the BigQuery client. |
-| `enable_list_tables` | `boolean` | `no` | `true` | Enable `list_tables()`. |
-| `enable_describe_table` | `boolean` | `no` | `true` | Enable `describe_table()`. |
-| `enable_run_sql_query` | `boolean` | `no` | `true` | Enable `run_sql_query()`. |
+| `list_tables` | `boolean` | `no` | `true` | Enable `list_tables()`. |
+| `describe_table` | `boolean` | `no` | `true` | Enable `describe_table()`. |
+| `run_sql_query` | `boolean` | `no` | `true` | Enable `run_sql_query()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full BigQuery toolkit. |
 
 ### Example
@@ -4624,13 +4657,20 @@ get_price_targets("NVDA")
 
 `yfinance` exposes `get_current_stock_price()`, `get_company_info()`, `get_historical_stock_prices()`, `get_stock_fundamentals()`, `get_income_statements()`, `get_key_financial_ratios()`, `get_analyst_recommendations()`, `get_company_news()`, and `get_technical_indicators()`.
 Unlike `openbb`, it does not require a PAT or provider selection.
-The optional `session` field is an advanced programmatic HTTP session hook for callers that need custom transport behavior.
-
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `session` | `text` | `no` | `null` | Advanced programmatic HTTP session object. |
+| `enable_stock_price` | `boolean` | `no` | `true` | Enable `get_current_stock_price()`. |
+| `enable_company_info` | `boolean` | `no` | `false` | Enable `get_company_info()`. |
+| `enable_stock_fundamentals` | `boolean` | `no` | `false` | Enable `get_stock_fundamentals()`. |
+| `enable_income_statements` | `boolean` | `no` | `false` | Enable `get_income_statements()`. |
+| `enable_key_financial_ratios` | `boolean` | `no` | `false` | Enable `get_key_financial_ratios()`. |
+| `enable_analyst_recommendations` | `boolean` | `no` | `false` | Enable `get_analyst_recommendations()`. |
+| `enable_company_news` | `boolean` | `no` | `false` | Enable `get_company_news()`. |
+| `enable_technical_indicators` | `boolean` | `no` | `false` | Enable `get_technical_indicators()`. |
+| `enable_historical_prices` | `boolean` | `no` | `false` | Enable `get_historical_stock_prices()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full Yahoo Finance toolkit. |
 
 ### Example
 
@@ -4638,7 +4678,10 @@ The optional `session` field is an advanced programmatic HTTP session hook for c
 agents:
   market:
     tools:
-      - yfinance
+      - yfinance:
+          enable_company_info: true
+          enable_historical_prices: true
+          enable_company_news: true
 ```
 
 ```python
@@ -4651,7 +4694,6 @@ get_company_news("TSLA", num_stories=5)
 ### Notes
 
 - `yfinance` has no required setup fields for normal use.
-- `session` is only useful for programmatic customization and is not a common `config.yaml` setting.
 - Choose `yfinance` when you want the widest Yahoo Finance surface with the fewest setup requirements.
 
 ## [`financial_datasets_api`]
@@ -4755,6 +4797,9 @@ The tool returns JSON strings from DDGS rather than a MindRoom-specific normaliz
 | `enable_news` | `boolean` | `no` | `true` | Enable `search_news()`. |
 | `modifier` | `text` | `no` | `null` | Prepends fixed query text to every web search. |
 | `fixed_max_results` | `number` | `no` | `null` | Caps result count for both web and news searches. |
+| `timelimit` | `text` | `no` | `null` | Optional age filter: `d`, `w`, `m`, or `y`. |
+| `region` | `text` | `no` | `null` | DDGS region code. |
+| `backend` | `text` | `no` | `null` | Search backend override; defaults effectively to `duckduckgo`. |
 | `proxy` | `url` | `no` | `null` | Optional proxy for DDGS requests. |
 | `timeout` | `number` | `no` | `10` | Request timeout in seconds. |
 | `verify_ssl` | `boolean` | `no` | `true` | Verify TLS certificates for DDGS requests. |
@@ -4796,13 +4841,15 @@ This is still a DDGS-backed scraper-style search path rather than an official Go
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `enable_search` | `boolean` | `no` | `true` | Enable `web_search()`. The current registry metadata marks this field as text, but the wrapper expects a boolean. |
-| `enable_news` | `boolean` | `no` | `true` | Enable `search_news()`. The current registry metadata marks this field as text, but the wrapper expects a boolean. |
+| `enable_search` | `boolean` | `no` | `true` | Enable `web_search()`. |
+| `enable_news` | `boolean` | `no` | `true` | Enable `search_news()`. |
 | `modifier` | `text` | `no` | `null` | Prepends fixed query text to every web search. |
-| `fixed_max_results` | `number` | `no` | `null` | Caps result count for both web and news searches. The current registry metadata marks this field as text. |
-| `proxy` | `url` | `no` | `null` | Optional proxy for DDGS requests. The current registry metadata marks this field as text. |
-| `timeout` | `number` | `no` | `10` | Request timeout in seconds. The current registry metadata marks this field as text. |
-| `verify_ssl` | `boolean` | `no` | `true` | Verify TLS certificates for DDGS requests. The current registry metadata marks this field as text. |
+| `fixed_max_results` | `number` | `no` | `null` | Caps result count for both web and news searches. |
+| `timelimit` | `text` | `no` | `null` | Optional age filter: `d`, `w`, `m`, or `y`. |
+| `region` | `text` | `no` | `null` | DDGS region code. |
+| `proxy` | `url` | `no` | `null` | Optional proxy for DDGS requests. |
+| `timeout` | `number` | `no` | `10` | Request timeout in seconds. |
+| `verify_ssl` | `boolean` | `no` | `true` | Verify TLS certificates for DDGS requests. |
 
 ### Example
 
@@ -5201,7 +5248,7 @@ Use these tools when you need lightweight text extraction, structured scraping A
 - [`jina`] - Jina Reader URL reading and optional web search with an optional API key.
 - [`firecrawl`] - Firecrawl API for scrape, crawl, map, and search jobs.
 - [`spider`] - Spider Cloud API for search, scrape, and crawl.
-- [`scrapegraph`] - ScrapeGraph AI extraction, markdown conversion, search scraping, and agentic crawling.
+- [`scrapegraph`] - ScrapeGraph AI extraction, markdown conversion, search scraping, structured crawling, and raw scraping.
 - [`apify`] - Apify Actor runner that turns configured actors into tool functions.
 - [`brightdata`] - Bright Data scraping, screenshots, SERP queries, and feed endpoints.
 - [`oxylabs`] - Oxylabs Google search, Amazon data, and general web scraping.
@@ -5572,11 +5619,10 @@ scrape("https://matrix.org/blog/")
 
 #### What It Does
 
-`scrapegraph` exposes `smartscraper()`, `markdownify()`, `crawl()`, `agentic_crawler()`, `searchscraper()`, and `scrape()`.
+`scrapegraph` exposes `smartscraper()`, `markdownify()`, `crawl()`, `searchscraper()`, and `scrape()`.
 `smartscraper()` extracts structured data from one page based on a natural-language prompt.
 `markdownify()` returns a Markdown version of a page.
 `crawl()` applies a prompt plus JSON schema across a crawl.
-`agentic_crawler()` performs automated steps in the browser and can optionally run AI extraction over the resulting content.
 `searchscraper()` searches the web before extracting information.
 `render_heavy_js` only affects the low-level `scrape()` path.
 
@@ -5589,10 +5635,13 @@ scrape("https://matrix.org/blog/")
 | `enable_markdownify` | `boolean` | `no` | `false` | Enable `markdownify()`. |
 | `enable_crawl` | `boolean` | `no` | `false` | Enable `crawl()`. |
 | `enable_searchscraper` | `boolean` | `no` | `false` | Enable `searchscraper()`. |
-| `enable_agentic_crawler` | `boolean` | `no` | `false` | Enable `agentic_crawler()`. |
 | `enable_scrape` | `boolean` | `no` | `false` | Enable raw `scrape()`. |
 | `render_heavy_js` | `boolean` | `no` | `false` | Ask ScrapeGraph to render heavy JavaScript for `scrape()`. |
+| `crawl_poll_interval` | `number` | `no` | `3` | Seconds between crawl-status polls. |
+| `crawl_max_wait` | `number` | `no` | `180` | Maximum seconds to wait for a crawl to complete. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+
+The upstream toolkit also accepts a `headers` mapping, but MindRoom's authored tool-config schema does not currently expose mapping-valued fields, so do not put `headers` in `config.yaml`.
 
 #### Example
 
@@ -5602,7 +5651,6 @@ agents:
     tools:
       - scrapegraph:
           enable_searchscraper: true
-          enable_agentic_crawler: true
 ```
 
 ```python
@@ -5612,7 +5660,7 @@ markdownify("https://matrix.org/blog/")
 
 #### Notes
 
-- If you disable `enable_smartscraper` without enabling `all`, the installed upstream toolkit auto-enables `markdownify()` so the tool still has a useful default surface.
+- Keep at least one function enabled, or set `all: true`; disabling every function flag registers an empty toolkit surface.
 - Use `scrapegraph` when you want prompt-shaped extraction rather than generic page text.
 - For purely local extraction with no hosted API dependency, use `crawl4ai` or `trafilatura`.
 
@@ -6062,6 +6110,7 @@ This makes `wikipedia` a simple direct lookup tool by default, with an advanced 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `knowledge` | `text` | `no` | `null` | Advanced upstream hook for injecting a `Knowledge` object. In typical MindRoom YAML usage you leave this unset and use direct summary search. |
+| `auto_suggest` | `boolean` | `no` | `true` | Let Wikipedia suggest or correct the requested title before summary lookup; disable for exact-title-oriented lookup. |
 | `all` | `boolean` | `no` | `false` | Exposed in metadata, but the current upstream implementation does not change behavior for this toolkit. |
 
 ### Example
@@ -6220,7 +6269,7 @@ The current implementation handles both `gpt-image-*` style models and older DAL
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | OpenAI API key. The upstream SDK also checks `OPENAI_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | OpenAI API key, with `OPENAI_API_KEY` as the upstream SDK fallback. |
 | `enable_transcription` | `boolean` | `no` | `true` | Enable `transcribe_audio()`. |
 | `enable_image_generation` | `boolean` | `no` | `true` | Enable `generate_image()`. |
 | `enable_speech_generation` | `boolean` | `no` | `true` | Enable `generate_speech()`. |
@@ -6325,7 +6374,7 @@ All three functions use the Groq SDK directly and require a Groq API key.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Groq API key. The upstream SDK also checks `GROQ_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Groq API key, with `GROQ_API_KEY` as the upstream SDK fallback. |
 | `transcription_model` | `text` | `no` | `whisper-large-v3` | Model used by `transcribe_audio()`. |
 | `translation_model` | `text` | `no` | `whisper-large-v3` | Model used by `translate_audio()`. |
 | `tts_model` | `text` | `no` | `playai-tts` | Model used by `generate_speech()`. |
@@ -6374,7 +6423,7 @@ Generated artifacts are attached by remote URL rather than downloaded into MindR
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Replicate API key. The upstream implementation also checks `REPLICATE_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Replicate API key, with `REPLICATE_API_KEY` as the upstream fallback. |
 | `model` | `text` | `no` | `minimax/video-01` | Replicate model ref used by `generate_media()`. |
 | `enable_generate_media` | `boolean` | `no` | `true` | Enable `generate_media()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full toolkit, which is currently just `generate_media()`. |
@@ -6414,7 +6463,7 @@ The current implementation streams queue log messages to the MindRoom process lo
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Fal API key. The upstream implementation also checks `FAL_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Fal API key, with `FAL_API_KEY` as the upstream fallback. |
 | `model` | `text` | `no` | `fal-ai/hunyuan-video` | Model used by `generate_media()`. |
 | `enable_generate_media` | `boolean` | `no` | `true` | Enable `generate_media()`. |
 | `enable_image_to_image` | `boolean` | `no` | `false` | Enable `image_to_image()`. |
@@ -6465,7 +6514,7 @@ Generated images are returned as provider-hosted URLs with optional revised prom
 | `size` | `text` | `no` | `1024x1024` | Output size. The current implementation validates it against a fixed allowed set. |
 | `quality` | `text` | `no` | `standard` | Image quality, currently `standard` or `hd`. |
 | `style` | `text` | `no` | `vivid` | Image style, currently `vivid` or `natural`. |
-| `api_key` | `password` | `yes` | `null` | OpenAI API key. The upstream SDK also checks `OPENAI_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | OpenAI API key, with `OPENAI_API_KEY` as the upstream SDK fallback. |
 | `enable_create_image` | `boolean` | `no` | `true` | Enable `create_image()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full toolkit, which is currently just `create_image()`. |
 
@@ -6508,7 +6557,7 @@ The current implementation hardcodes MP3 output at 44.1 kHz and 128 kbps.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Cartesia API key. The upstream SDK also checks `CARTESIA_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Cartesia API key, with `CARTESIA_API_KEY` as the upstream SDK fallback. |
 | `model_id` | `text` | `no` | `sonic-2` | Model used by `text_to_speech()`. |
 | `default_voice_id` | `text` | `no` | `78ab82d5-25be-4f7d-82b3-7ad64e5b85b2` | Default source voice for localization and TTS when no call-specific `voice_id` is supplied. |
 | `enable_text_to_speech` | `boolean` | `no` | `true` | Enable `text_to_speech()`. |
@@ -6561,7 +6610,7 @@ If `target_directory` is set, the current implementation also saves generated au
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `voice_id` | `text` | `no` | `JBFqnCBsd6RMkjVDRZzb` | Default voice used by `text_to_speech()`. |
-| `api_key` | `password` | `yes` | `null` | ElevenLabs API key. The upstream implementation also checks `ELEVEN_LABS_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | ElevenLabs API key, with `ELEVEN_LABS_API_KEY` as the upstream fallback. |
 | `target_directory` | `text` | `no` | `null` | Optional directory where generated audio is also saved locally. |
 | `model_id` | `text` | `no` | `eleven_multilingual_v2` | Model used by `text_to_speech()`. |
 | `output_format` | `text` | `no` | `mp3_44100_64` | Output codec and bitrate preset for generated audio. |
@@ -6652,7 +6701,7 @@ If `wait_for_completion` is false, the current implementation returns `Async gen
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Luma AI API key. The upstream implementation also checks `LUMAAI_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Luma AI API key, with `LUMAAI_API_KEY` as the upstream fallback. |
 | `wait_for_completion` | `boolean` | `no` | `true` | Poll until the provider job completes. Setting it to `false` is not useful on this branch because async return is not implemented. |
 | `poll_interval` | `number` | `no` | `3` | Seconds between status polls. |
 | `max_wait_time` | `number` | `no` | `300` | Maximum wait time in seconds before timing out. |
@@ -6688,13 +6737,13 @@ image_to_video(
 
 ## [`modelslabs`]
 
-`modelslabs` is the ModelsLab wrapper for provider-hosted MP4, GIF, MP3, or WAV generation.
+`modelslabs` is the ModelsLab wrapper for provider-hosted PNG, JPG, MP4, GIF, MP3, or WAV generation.
 
 ### What It Does
 
 `modelslabs` exposes one call, `generate_media(prompt)`.
 The current wrapper chooses one of several provider endpoints based on `file_type` and sends a fixed payload template for that media class.
-For MP4 and GIF generation, it currently uses the provider's text-to-video endpoint and returns future-link URLs with an ETA.
+For PNG and JPG it uses the image endpoint; MP4 and GIF use the text-to-video endpoint and return future-link URLs with an ETA.
 For MP3 and WAV generation, it uses provider voice endpoints and returns audio URLs.
 If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint until the media is ready or the timeout is reached.
 
@@ -6702,8 +6751,11 @@ If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint 
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | ModelsLab API key. The upstream implementation also checks `MODELS_LAB_API_KEY`. |
-| `file_type` | `text` | `no` | `mp4` | Output type for `generate_media()`, currently `mp4`, `gif`, or audio types such as `mp3` and `wav`. |
+| `api_key` | `password` | `no` | `null` | ModelsLab API key, with `MODELS_LAB_API_KEY` as the upstream fallback. |
+| `file_type` | `text` | `no` | `mp4` | Output type: `png`, `jpg`, `mp4`, `gif`, `mp3`, or `wav`. |
+| `model_id` | `text` | `no` | `null` | Provider model override; defaults to `flux` for images or `cogvideox` for video. |
+| `width` | `number` | `no` | `512` | Image or video width. |
+| `height` | `number` | `no` | `512` | Image or video height. |
 | `wait_for_completion` | `boolean` | `no` | `false` | Poll the provider fetch endpoint until the output is ready. |
 | `add_to_eta` | `number` | `no` | `15` | Extra seconds added to the provider ETA before timing out. |
 | `max_wait_time` | `number` | `no` | `60` | Maximum total wait time in seconds. |
@@ -6727,7 +6779,7 @@ generate_media("A looping animation of messages flowing through a Matrix bridge.
 ### Notes
 
 - Despite the broad provider branding, the current wrapper exposes one opinionated `generate_media()` path rather than a generic arbitrary-model interface.
-- MP4 and GIF generation currently use a fixed provider-side video template, including default dimensions and a hardcoded model ID.
+- MP4 and GIF generation use a provider-side video template whose model and dimensions can be overridden with `model_id`, `width`, and `height`.
 - Returned media are provider URLs, and the success message usually includes the provider ETA rather than immediate ready-to-view bytes.
 
 ## Related Docs
@@ -6823,7 +6875,7 @@ Successful calls return a `ToolResult` with both plain-text URLs and attached im
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Giphy API key. The upstream toolkit also checks `GIPHY_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Giphy API key, with `GIPHY_API_KEY` as the upstream fallback. |
 | `limit` | `number` | `no` | `1` | Number of GIFs returned per search. |
 | `enable_search_gifs` | `boolean` | `no` | `true` | Enable `search_gifs()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
@@ -6869,7 +6921,7 @@ It expects a specific YouTube URL and then fetches metadata or transcript-derive
 | `enable_get_video_timestamps` | `boolean` | `no` | `true` | Enable `get_video_timestamps()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 | `languages` | `string[]` | `no` | `null` | Preferred transcript languages, for example `["en", "es"]`. |
-| `proxies` | `text` | `no` | `null` | Optional proxy mapping forwarded to `youtube_transcript_api`. |
+| `proxies` | mapping | unsupported | — | The upstream library accepts a proxy mapping, but MindRoom's authored tool-config schema does not currently expose mapping-valued fields. |
 
 ### Example
 
@@ -7048,7 +7100,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 
 ## Tools On This Page
 
-- [`matrix_message`] - Send, reply, react, read, edit, or inspect Matrix conversation context.
+- [`matrix_message`] - Send, reply, react, read, list room threads, edit, or inspect Matrix conversation context.
 - [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
 - [`thread_resolution`] - Explicitly resolve or reopen the active Matrix thread.
@@ -7060,7 +7112,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 ## Common Setup Notes
 
 These tools depend on the active `ToolRuntimeContext`, so they only work when an agent is running in a Matrix-connected conversation.
-`matrix_message` implies `attachments` through `Config.IMPLIED_TOOLS`, so enabling `matrix_message` makes the `attachments` toolkit available even when you do not list it separately.
+`matrix_message` implies `attachments` and `matrix_room` through `Config.IMPLIED_TOOLS`, so enabling it makes both companion toolkits available even when you do not list them separately.
 Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run.
 Current source in this worktree exposes `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
 
@@ -7070,7 +7122,7 @@ Current source in this worktree exposes `matrix_message`, `matrix_voice_message`
 
 ### What It Does
 
-`matrix_message` supports `send`, `reply`, `thread-reply`, `react`, `read`, `thread-list`, `edit`, and `context`.
+`matrix_message` supports `send`, `reply`, `thread-reply`, `react`, `read`, `room-threads`, `thread-list`, `edit`, and `context`.
 `send` targets the room timeline by default, even when the current conversation is inside a thread.
 When a room-level `send` includes both text and attachments, the text is posted to the room timeline and the attachments are threaded under that new text event.
 When a room-level `send` includes multiple attachments and no text, the first attachment is posted to the room timeline and the remaining attachments are threaded under it.
@@ -7079,8 +7131,9 @@ In `thread_mode: room`, room-level `send` stays plain room messaging and does no
 `reply` and `thread-reply` inherit the current thread when one can be resolved, and they return an error when no thread target is available.
 `read`, `edit`, and `context` also inherit the current thread when one can be resolved, while `thread_id="room"` forces room-level scope instead of thread inheritance.
 `thread-list` uses the current thread when one is active, and it requires an explicit `thread_id` when there is no active thread context.
+`room-threads` pages thread roots in the target room and returns `next_token` plus `has_more`; pass a returned `next_token` as `page_token` to fetch the next page.
 `react` requires `target` and uses `👍` when `message` is empty.
-`read` defaults to 20 messages and caps `limit` at 50.
+`read`, `thread-list`, and `room-threads` default `limit` to 20 and clamp it from 1 through 50.
 `thread-list` returns recent thread messages plus `edit_options` for messages that the current Matrix account can edit.
 Only `send`, `reply`, and `thread-reply` accept attachments, with a combined cap of five `attachment_ids` plus `attachment_file_paths` per call.
 Relative `attachment_file_paths` resolve from the agent workspace when one is available, and they must stay inside that workspace.
@@ -7132,9 +7185,11 @@ Use `caption` for the audio event body and `companion_message` for a separate re
 
 ### Configuration
 
-By default `matrix_voice_message` uses OpenAI text-to-speech through a stored credential or `OPENAI_API_KEY` / `OPENAI_API_KEY_FILE`.
+The optional tool configuration fields are `api_key`, `model`, `base_url`, `voice`, and `response_format`.
+By default `matrix_voice_message` uses OpenAI text-to-speech through an explicit or stored credential, or `OPENAI_API_KEY` / `OPENAI_API_KEY_FILE`.
+Provider-prefixed model IDs such as `hexgrad/kokoro-82m` route through OpenRouter and use an explicit `api_key` or `OPENROUTER_API_KEY`; OpenRouter output is always requested as MP3.
 Set the `base_url` tool config (or the `TTS_URL` secret) to target any OpenAI-compatible speech endpoint instead, such as a local Kokoro server.
-When a `base_url` is configured without an explicit `api_key`, the tool sends a dummy API key so the real OpenAI credential never leaves the machine.
+When a non-OpenRouter `base_url` is configured without an explicit `api_key`, the tool sends a dummy API key so the real OpenAI credential never leaves the machine.
 `base_url` accepts a bare host, a `/v1` URL, or a full `/audio/speech` endpoint URL, and full endpoint URLs are honored verbatim.
 Defaults: `model=gpt-4o-mini-tts`, `voice=alloy`, `response_format=opus`.
 `response_format` must be one of `aac`, `flac`, `mp3`, `opus`, or `wav`, matching what the endpoint returns.
@@ -7399,8 +7454,9 @@ matrix_api(
 
 ### What It Does
 
-`attachments` exposes `list_attachments()`, `get_attachment()`, and `register_attachment()`.
+`attachments` exposes `list_attachments(target=None)`, `get_attachment()`, and `register_attachment()`.
 `list_attachments()` returns the attachment IDs currently available in tool runtime context, the resolved metadata payloads, and any `missing_attachment_ids`.
+Pass a context-available attachment ID as `target` to return only that attachment; an ID outside the current context returns an error.
 `get_attachment()` returns a single attachment record, including the runtime-local path, when called with only an attachment ID.
 `get_attachment(attachment_id, mindroom_output_path="relative/path")` saves the attachment bytes into the agent workspace and returns a `mindroom_tool_output` save receipt with the saved path, byte count, binary format, and SHA256 digest.
 Use `mindroom_output_path` before handing attachments to worker-routed workspace tools such as `file`, `coding`, `python`, or `shell`, because the runtime-local path may not exist inside the worker workspace.
@@ -7426,6 +7482,7 @@ agents:
 
 ```python
 list_attachments()
+list_attachments(target="att_abc123")
 get_attachment("att_abc123")
 get_attachment("att_abc123", mindroom_output_path="incoming/plan.pdf")
 register_attachment("incoming/plan.pdf")
@@ -7492,7 +7549,7 @@ Send, reply, react to, read, edit, or inspect Matrix messages using current room
 - thread-list: List messages in a thread and include edit options keyed by event ID.
   It uses the current thread when one is active, otherwise you must pass `thread_id`.
 - edit: Edit a previously sent message identified by `target`.
-  It uses the current thread by default when editing from threaded context.
+  The required `target` selects the event; current thread context does not select or validate the edit target.
 - context: Return room, thread, reply target, requester, and agent metadata so you can plan a later tool call.
 
 ## Thread targeting
@@ -7503,7 +7560,7 @@ Send, reply, react to, read, edit, or inspect Matrix messages using current room
 - `thread_mode: room` disables implicit attachment auto-threading for room-level sends.
   Pass an explicit `thread_id` when you intentionally want threaded output from the tool.
 - `reply` and `thread-reply` inherit the current thread when possible.
-- `read`, `edit`, and `context` also inherit the current thread when possible.
+- `read` and `context` also inherit the current thread when possible.
 - `thread_id="room"` is a sentinel meaning "force room-level scope and do not inherit the current thread."
   Use it when you want the room timeline instead of the active thread.
 
@@ -7523,6 +7580,9 @@ Send, reply, react to, read, edit, or inspect Matrix messages using current room
 - The default `ignore_mentions=True` exists to prevent accidental infinite loops and noisy mutual paging between agents.
 - Set `ignore_mentions=False` only for intentional dispatch.
   Prefer one deliberate handoff message over repeated self-mentions or agent-to-agent pings.
+- Direct `send`, `reply`, `thread-reply`, and `edit` calls reject interactive prompt blocks; use normal agent response delivery for interactive prompts.
+- Calls are limited to 12 weighted actions per 30 seconds for each agent, requester, and room combination.
+  Each call costs one action, and each attachment on `send`, `reply`, or `thread-reply` costs one additional action.
 
 ## Attachments
 
@@ -7536,8 +7596,11 @@ Send, reply, react to, read, edit, or inspect Matrix messages using current room
 ## Message extras
 
 - `message_extras` adds collapsible MindRoom sections to send, reply, thread-reply, and edit events.
+- `message_extras` requires a non-empty `message`; attachment-only sends with extras are rejected.
 - Keep the visible `message` brief; put supporting evidence in extras.
 - Each section has `title`, `content`, optional `content_type`, and optional `collapsed`.
+- At most 8 sections are accepted; each title must be non-empty and at most 120 characters, and each content value may contain at most 16,384 characters.
+- `collapsed` must be a boolean and defaults to `true`.
 - Supported `content_type` values are `text/plain`, `text/markdown`, and `text/html`; default is `text/markdown`.
 - HTML content may use sanitized rich fragments: paragraphs, headings, lists, tables, blockquotes, code/pre blocks, basic inline formatting, and links.
   Do not include scripts, styles, images, forms, media, SVG/math, or interactive elements; links should use `http`, `https`, or `mailto`.
@@ -8007,8 +8070,6 @@ Use these tools when you need outbound communication, mailbox access, team-chat 
 
 `gmail` uses `auth_provider="google_gmail"` and connects through the generic `/api/oauth/google_gmail/*` flow.
 Its OAuth tokens are stored separately from editable Gmail tool settings.
-`homeassistant` stays local even when other tools are routed through the sandbox proxy.
-MindRoom enforces that restriction both at config-validation time and again during tool construction.
 Password fields should be stored through the dashboard or credential store instead of inline YAML.
 Several metadata fields on this page are marked `required: false`, but the installed SDKs still need the corresponding token or secret in practice.
 Useful environment fallbacks on this page include `SLACK_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
@@ -8025,7 +8086,8 @@ MindRoom wraps Agno's `GmailTools` with `ScopedOAuthClientMixin`, so Gmail crede
 The wrapper refreshes stored Google tokens when needed and raises `OAuthConnectionRequired` with a connect URL when no usable stored OAuth credentials are available.
 It does not fall back to Agno's local OAuth flow when MindRoom credentials are missing.
 It only bypasses MindRoom OAuth when configured for Google service-account auth.
-The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`.
+The registered Gmail surface includes archive, trash, star, draft, message and thread retrieval, search, label mutation, attachment download, send, and reply operations.
+Its exact function names are `apply_label()`, `archive_email()`, `create_draft_email()`, `delete_custom_label()`, `download_attachment()`, `get_draft()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `get_emails_from_user()`, `get_latest_emails()`, `get_message()`, `get_starred_emails()`, `get_thread()`, `get_unread_emails()`, `list_custom_labels()`, `list_drafts()`, `list_labels()`, `mark_email_as_read()`, `mark_email_as_unread()`, `modify_message_labels()`, `modify_thread_labels()`, `remove_label()`, `search_emails()`, `search_threads()`, `send_draft()`, `send_email()`, `send_email_reply()`, `star_email()`, `trash_message()`, `trash_thread()`, `unstar_email()`, and `update_draft()`.
 Draft and send operations accept local file-system paths for attachments.
 
 ### Configuration
@@ -8070,11 +8132,11 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 
 ## [`slack`]
 
-`slack` is the Slack bot toolkit for posting to channels, replying in threads, listing channels, and reading recent channel history.
+`slack` is the Slack bot toolkit for messaging, threaded replies, channel and user inspection, history and thread reads, workspace search, and file transfer.
 
 ### What It Does
 
-The installed upstream tool exposes `send_message()`, `send_message_thread()`, `list_channels()`, and `get_channel_history()`.
+The installed upstream tool exposes `send_message()`, `send_message_thread()`, `list_channels()`, `get_channel_history()`, `upload_file()`, `download_file()`, `search_messages()`, `search_workspace()`, `get_thread()`, `list_users()`, `get_user_info()`, and `get_channel_info()`.
 It uses Slack's `WebClient` from `slack_sdk`.
 `markdown` maps to the `mrkdwn` flag on `chat_postMessage()`.
 Channel-history responses are normalized into a smaller JSON structure instead of returning the full Slack API payload.
@@ -8085,11 +8147,23 @@ Channel-history responses are normalized into a smaller JSON structure instead o
 | --- | --- | --- | --- | --- |
 | `token` | `password` | `no` | `null` | Slack bot token, or use `SLACK_TOKEN`. Required in practice. |
 | `markdown` | `boolean` | `no` | `true` | Enable Slack markdown rendering on sent messages. |
+| `output_directory` | `text` | `no` | `null` | Directory for saved downloads. |
+| `save_downloads` | `boolean` | `no` | `false` | Save downloaded files instead of returning base64-only content. |
 | `enable_send_message` | `boolean` | `no` | `true` | Enable `send_message()`. |
 | `enable_send_message_thread` | `boolean` | `no` | `true` | Enable `send_message_thread()`. |
 | `enable_list_channels` | `boolean` | `no` | `true` | Enable `list_channels()`. |
 | `enable_get_channel_history` | `boolean` | `no` | `true` | Enable `get_channel_history()`. |
+| `enable_upload_file` | `boolean` | `no` | `true` | Enable `upload_file()`. |
+| `enable_download_file` | `boolean` | `no` | `true` | Enable `download_file()`. |
+| `enable_search_messages` | `boolean` | `no` | `false` | Enable `search_messages()`. |
+| `enable_search_workspace` | `boolean` | `no` | `false` | Enable `search_workspace()`. |
+| `enable_get_thread` | `boolean` | `no` | `false` | Enable `get_thread()`. |
+| `enable_list_users` | `boolean` | `no` | `false` | Enable `list_users()`. |
+| `enable_get_user_info` | `boolean` | `no` | `false` | Enable `get_user_info()`. |
+| `enable_get_channel_info` | `boolean` | `no` | `false` | Enable `get_channel_info()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+| `max_file_size` | `number` | `no` | `1073741824` | Maximum upload or download size in bytes. |
+| `thread_message_limit` | `number` | `no` | `20` | Maximum messages returned by `get_thread()`. |
 
 ### Example
 
@@ -8203,11 +8277,12 @@ send_message("Nightly backup completed.")
 
 ## [`whatsapp`]
 
-`whatsapp` is the WhatsApp Business API toolkit for text messages and template messages through Meta's Graph API.
+`whatsapp` is the WhatsApp Business API toolkit for text, template, interactive, image, document, location, and reaction messages through Meta's Graph API.
 
 ### What It Does
 
-The installed upstream tool can expose either `send_text_message_sync()` and `send_template_message_sync()` or their async variants, depending on `async_mode`.
+The installed upstream tool exposes `send_text_message()` and `send_template_message()` by default.
+Optional functions include `send_reply_buttons()`, `send_list_message()`, `send_image()`, `send_document()`, `send_location()`, and `send_reaction()`.
 It posts to `https://graph.facebook.com/<version>/<phone_number_id>/messages`.
 `recipient_waid` sets a default recipient so callers can omit the `recipient` argument.
 If no default recipient is configured, every send call must provide one.
@@ -8220,7 +8295,15 @@ If no default recipient is configured, every send call must provide one.
 | `phone_number_id` | `text` | `no` | `null` | WhatsApp Business phone number ID, or use `WHATSAPP_PHONE_NUMBER_ID`. Required in practice. |
 | `version` | `text` | `no` | `v22.0` | Graph API version prefix. |
 | `recipient_waid` | `text` | `no` | `null` | Default recipient phone number or WhatsApp ID. |
-| `async_mode` | `boolean` | `no` | `false` | Register async send functions instead of sync send functions. |
+| `enable_send_text_message` | `boolean` | `no` | `true` | Enable `send_text_message()`. |
+| `enable_send_template_message` | `boolean` | `no` | `true` | Enable `send_template_message()`. |
+| `enable_send_reply_buttons` | `boolean` | `no` | `false` | Enable `send_reply_buttons()`. |
+| `enable_send_list_message` | `boolean` | `no` | `false` | Enable `send_list_message()`. |
+| `enable_send_image` | `boolean` | `no` | `false` | Enable `send_image()`. |
+| `enable_send_document` | `boolean` | `no` | `false` | Enable `send_document()`. |
+| `enable_send_location` | `boolean` | `no` | `false` | Enable `send_location()`. |
+| `enable_send_reaction` | `boolean` | `no` | `false` | Enable `send_reaction()`. |
+| `all` | `boolean` | `no` | `false` | Enable every WhatsApp function. |
 
 ### Example
 
@@ -8231,18 +8314,18 @@ agents:
       - whatsapp:
           version: v22.0
           recipient_waid: "+15551234567"
-          async_mode: false
+          enable_send_reply_buttons: true
 ```
 
 ```python
-send_text_message_sync("The deployment finished.")
-send_template_message_sync(template_name="deployment_notice", language_code="en_US")
+send_text_message("The deployment finished.")
+send_template_message(template_name="deployment_notice", language_code="en_US")
 ```
 
 ### Notes
 
 - Set both `access_token` and `phone_number_id` even though the metadata marks them optional.
-- `async_mode: true` changes the registered function names to the async variants, which matters if you are debugging tool traces or reading model-generated tool calls.
+- Plain-text and template sends are enabled by default, while interactive and media functions are opt-in unless `all: true` is set.
 - Template sends expect a preapproved WhatsApp template name and, optionally, template `components`.
 
 ## [`twilio`]
@@ -8251,7 +8334,7 @@ send_template_message_sync(template_name="deployment_notice", language_code="en_
 
 ### What It Does
 
-The installed upstream tool exposes `send_sms()`, `get_call_details()`, and `list_messages()`.
+The installed upstream tool exposes `send_sms()`, `get_call_details()`, `list_messages()`, and `validate_phone_number()`.
 It supports two auth modes: `account_sid` plus `auth_token`, or `account_sid` plus `api_key` and `api_secret`.
 Optional `region` and `edge` are passed into the Twilio client for regional routing.
 `send_sms()` validates that both `to` and `from_` are in E.164 format before sending.
@@ -8288,6 +8371,7 @@ agents:
 send_sms("+15551234567", "+15557654321", "Build passed.")
 get_call_details("CA1234567890abcdef")
 list_messages(limit=10)
+validate_phone_number("+15551234567")
 ```
 
 ### Notes
@@ -8428,7 +8512,7 @@ email_user("Nightly report", "The report finished successfully.")
 
 ### What It Does
 
-The installed upstream tool exposes `create_post()`, `reply_to_post()`, `send_dm()`, `get_user_info()`, `get_home_timeline()`, and `search_posts()`.
+The installed upstream tool exposes `create_post()`, `reply_to_post()`, `send_dm()`, `get_my_info()`, `get_user_info()`, `get_home_timeline()`, and `search_posts()`.
 It uses `tweepy.Client` and passes through `wait_on_rate_limit`.
 `search_posts()` calls `search_recent_tweets()` and, when `include_post_metrics` is enabled, augments each returned post with reply, retweet, like, and quote counts.
 The implementation clamps `max_results` for search to the Twitter API's supported `10` to `100` range.
@@ -8466,7 +8550,7 @@ reply_to_post("1890123456789012345", "Thanks for the feedback.")
 ### Notes
 
 - A bearer token can support read-style endpoints such as search, but posting, replying, DMs, and home-timeline access generally need full OAuth user credentials.
-- The toolkit also defines `get_my_info()`, but MindRoom's current registered tool list on this branch does not advertise a separate config flag for it.
+- Use `get_my_info()` to inspect the authenticated X account.
 - `reply_to_post()` builds a `twitter.com` URL in its response, while `create_post()` builds an `x.com` URL, so response formatting is currently inconsistent upstream.
 
 ## [`reddit`]
@@ -9113,7 +9197,7 @@ Use these tools when you need Google Calendar access, Cal.com booking APIs, or M
 
 `google_calendar` is a per-service Google OAuth integration.
 It uses the `google_calendar` OAuth provider instead of an API key form.
-It always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets.
+It supports shared and requester-isolated worker scopes, with OAuth credentials resolved for the active execution identity.
 Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) to connect Google before enabling `google_calendar`.
 `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
 `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys.
@@ -9126,7 +9210,7 @@ MindRoom also includes `scheduler` in `defaults.tools` by default on this branch
 
 ### What It Does
 
-`google_calendar` exposes `list_events()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `create_event()`, `update_event()`, and `delete_event()`.
+`google_calendar` exposes `list_events()`, `get_event()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `check_availability()`, `get_event_attendees()`, `search_events()`, `create_event()`, `update_event()`, `delete_event()`, `quick_add_event()`, `move_event()`, and `respond_to_event()`.
 MindRoom loads the connected Google account from its unified credential store instead of relying on a per-process `token.json`.
 The OAuth provider requests narrowly targeted scopes for event access, calendar listing, availability, and working-hours settings, while MindRoom gates write methods with the `allow_update` setting.
 Write calls are enabled by default and can be removed from the tool surface with `allow_update: false`.
@@ -9138,14 +9222,13 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `calendar_id` | `text` | `no` | `primary` | Google Calendar ID to query or update. |
-| `allow_update` | `boolean` | `no` | `true` | Expose create, update, and delete operations. |
+| `allow_update` | `boolean` | `no` | `true` | Expose create, update, delete, quick-add, move, and invitation-response operations. |
 
 ### Example
 
 ```yaml
 agents:
   assistant:
-    worker_scope: shared
     tools:
       - google_calendar:
           calendar_id: primary
@@ -9232,7 +9315,7 @@ get_upcoming_bookings(email="alex@example.com")
 
 `scheduler` exposes `schedule()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`.
 It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`.
-By default `schedule()` posts back into the current room or thread scope, while `new_thread=True` schedules a future room-level root message.
+Pass `new_thread=False` to post back into the current room or thread scope, or `new_thread=True` to schedule a future room-level root message.
 The optional `history_limit` argument caps how many recent messages the scheduled responder sees each time the task fires.
 Use `history_limit=0` for no prior conversation context, or a positive integer to keep that many recent messages.
 Scheduled tasks are stored in Matrix room state and persist across restarts.
@@ -9253,9 +9336,9 @@ agents:
 ```
 
 ```python
-schedule("tomorrow at 9am @ops check the deployment")
+schedule("tomorrow at 9am @ops check the deployment", new_thread=False)
 schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
-schedule("every hour @ops check deployment health", history_limit=0)
+schedule("every hour @ops check deployment health", new_thread=False, history_limit=0)
 list_schedules()
 edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5)
 cancel_schedule("a1b2c3d4")
@@ -9301,7 +9384,8 @@ If the effective backend is `none`, MindRoom does not attach the `memory` tool t
 Use [Memory System](https://docs.mindroom.chat/memory/) for the canonical docs on backend selection, automatic extraction, file-backed memory, Agno Learning, and storage layout.
 `mem0` and `zep` are separate upstream Agno toolkits that talk to external memory providers directly.
 Enabling `mem0` or `zep` does not change MindRoom's own memory backend, automatic memory extraction, or the behavior of the `memory` tool.
-`mem0` can work with a hosted Mem0 API key or with local/default upstream Mem0 configuration.
+`mem0` can work with a hosted Mem0 API key or upstream defaults.
+The upstream local config object is not currently expressible through MindRoom's authored YAML schema.
 `zep` requires a Zep API key, either through stored credentials or the `ZEP_API_KEY` environment variable.
 If optional dependencies for these tools are missing, MindRoom can auto-install them at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 This page does not document conversation-scoped file attachments even though they are storage-like.
@@ -9370,15 +9454,14 @@ delete_memory("abc123")
 `mem0` exposes `add_memory()`, `search_memory()`, `get_all_memories()`, and `delete_all_memories()`.
 It uses the upstream `mem0ai` client directly rather than MindRoom's built-in memory API.
 If `api_key` is set, or `MEM0_API_KEY` is present in the environment, the toolkit connects to Mem0's hosted platform client.
-If no API key is present but `config` is supplied, the toolkit initializes upstream Mem0 from that local config object.
-If neither `api_key` nor `config` is supplied, the toolkit falls back to upstream Mem0 defaults.
+If no API key is present, the toolkit falls back to upstream Mem0 defaults.
 Operations need a `user_id`, either from tool config or from the run context, and they return an error string when no user ID can be resolved.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `config` | `text` | `no` | `null` | Advanced upstream Mem0 config passed through to `Memory.from_config()`, typically used for local or self-managed setups. |
+| `config` | mapping | unsupported | — | Upstream local Mem0 config object; MindRoom's authored YAML schema does not currently expose mapping-valued fields. |
 | `api_key` | `password` | `no` | `null` | Optional Mem0 Platform API key, also read from `MEM0_API_KEY`. |
 | `user_id` | `text` | `no` | `null` | Fixed user scope for all calls when you do not want to rely on runtime user context. |
 | `org_id` | `text` | `no` | `null` | Optional Mem0 organization ID for platform usage, also read from `MEM0_ORG_ID`. |
@@ -9410,7 +9493,7 @@ delete_all_memories()
 
 ### Notes
 
-- `api_key` is optional because the toolkit can use local/default upstream Mem0 initialization instead of the hosted Mem0 platform.
+- `api_key` is optional because the toolkit can use upstream defaults instead of the hosted Mem0 platform.
 - This toolkit is separate from MindRoom's `memory.backend: mem0` setting, so enabling `mem0` here does not configure or replace MindRoom's built-in memory backend.
 - If you want MindRoom's automatic memory extraction and built-in memory retrieval to use Mem0, configure that in [Memory System](https://docs.mindroom.chat/memory/) instead of relying on this toolkit alone.
 - Store API keys outside authored YAML even when the current metadata marks them as optional.
@@ -9978,7 +10061,7 @@ update_own_config(
 `openclaw_compat` is not a runtime toolkit.
 The registered factory returns an empty `Toolkit`, and the real behavior comes from `Config.TOOL_PRESETS`.
 `Config.expand_tool_names()` expands `openclaw_compat` into `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, and `matrix_message`.
-`matrix_message` then implies `attachments`, so the effective enabled set also includes `attachments` even though the preset does not list it directly.
+`matrix_message` then implies `attachments` and `matrix_room`, so the effective enabled set includes both companion toolkits even though the preset does not list them directly.
 Preset expansion dedupes while preserving order, so adding `openclaw_compat` alongside one of its member tools does not create duplicates.
 This preset is meant for OpenClaw-compatible workspace behavior inside MindRoom rather than for cloning the full OpenClaw gateway control plane.
 
@@ -10140,7 +10223,8 @@ Use these tools when you need infrastructure automation, generic API access, rem
 ## Common Setup Notes
 
 All seven tools on this page default to the primary agent runtime instead of MindRoom's worker-routed execution set.
-`aws_lambda`, `airflow`, and `custom_api` are registered as `setup_type: none`, while `aws_ses`, `e2b`, `daytona`, and `composio` are marked `requires_config`.
+`aws_lambda`, `airflow`, and `custom_api` use `setup_type: none`.
+`aws_ses`, `e2b`, `daytona`, and `composio` have `status: requires_config` and `setup_type: api_key`.
 `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow.
 Password fields such as `api_key` and `password` must be stored through the dashboard or credential store instead of inline YAML.
 `aws_lambda` and `aws_ses` both rely on standard boto3 credential resolution, so normal AWS environment variables, shared config files, or instance-role credentials are the real authentication path.
@@ -10325,7 +10409,7 @@ run_server("python -m http.server 8000", port=8000)
 
 ## [`daytona`]
 
-`daytona` runs code and shell commands in a remote sandbox that can persist across agent sessions.
+`daytona` runs code and shell commands in a remote sandbox that can persist across calls within one agent session.
 
 ### What It Does
 
@@ -10334,7 +10418,8 @@ run_server("python -m http.server 8000", port=8000)
 The toolkit exposes `run_code()`, `run_shell_command()`, `create_file()`, `read_file()`, `list_files()`, `delete_file()`, and `change_directory()`.
 When `persistent` is true, the tool stores the active sandbox ID in `agent.session_state` and tries to reuse that sandbox on later calls.
 It also tracks a working directory in `agent.session_state`, and `run_shell_command()` treats `cd ...` specially so later relative-path commands and file operations stay in that directory.
-If no reusable sandbox exists, the toolkit creates one automatically unless `auto_create_sandbox` is disabled.
+If no reusable sandbox exists, the toolkit creates one on the initial lookup path.
+`auto_create_sandbox: false` disables fallback creation after sandbox-management errors; it does not prevent initial creation when no sandbox is found.
 The bundled default instructions describe a code-write, execute, and show-results workflow, but those instructions are only added to the agent prompt when `add_instructions: true`.
 
 ### Configuration
@@ -10344,7 +10429,7 @@ The bundled default instructions describe a code-write, execute, and show-result
 | `api_key` | `password` | `no` | `null` | Daytona API key. The tool also falls back to `DAYTONA_API_KEY`. |
 | `api_url` | `url` | `no` | `null` | Daytona API URL. The tool also falls back to `DAYTONA_API_URL`. |
 | `sandbox_id` | `text` | `no` | `null` | Explicit sandbox ID to reuse instead of creating or looking up a session-backed sandbox. |
-| `sandbox_language` | `text` | `no` | `PYTHON` | Primary sandbox language, such as `PYTHON`, `JAVASCRIPT`, or `TYPESCRIPT`. |
+| `sandbox_language` | `text` | `no` | `python` | Primary sandbox language: `python`, `javascript`, or `typescript`. |
 | `sandbox_target` | `text` | `no` | `null` | Daytona target passed into `DaytonaConfig`. |
 | `sandbox_os` | `text` | `no` | `null` | Declared sandbox OS field. The current creation path stores this value but does not pass it into `CreateSandboxFromSnapshotParams`. |
 | `auto_stop_interval` | `number` | `no` | `60` | Auto-stop interval in minutes for created sandboxes. |
@@ -10353,9 +10438,9 @@ The bundled default instructions describe a code-write, execute, and show-result
 | `sandbox_labels` | `text` | `no` | `{}` | Advanced raw label mapping for the sandbox. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
 | `organization_id` | `text` | `no` | `null` | Daytona organization ID. |
 | `timeout` | `number` | `no` | `300` | Timeout in seconds for sandbox operations. |
-| `auto_create_sandbox` | `boolean` | `no` | `true` | Create a new sandbox automatically when lookup or reuse fails. |
+| `auto_create_sandbox` | `boolean` | `no` | `true` | Permit fallback creation after a sandbox-management error; initial no-match creation still occurs when false. |
 | `verify_ssl` | `boolean` | `no` | `false` | Verify Daytona SSL certificates. The default `false` path monkey-patches the Daytona client to disable SSL verification warnings and checks. |
-| `persistent` | `boolean` | `no` | `true` | Reuse the same sandbox across agent-session calls instead of creating a fresh sandbox each time. |
+| `persistent` | `boolean` | `no` | `true` | Reuse the same sandbox across calls in the current agent session; use `sandbox_id` for cross-session reuse. |
 | `sandbox_public` | `boolean` | `no` | `null` | Whether created sandboxes should be public. |
 | `instructions` | `text` | `no` | `null` | Custom toolkit instructions that replace the bundled default instructions. |
 | `add_instructions` | `boolean` | `no` | `false` | Add the toolkit instructions into the agent prompt. |
@@ -10368,7 +10453,7 @@ agents:
     tools:
       - daytona:
           api_url: https://api.daytona.io
-          sandbox_language: PYTHON
+          sandbox_language: python
           auto_stop_interval: 30
           persistent: true
           add_instructions: true
@@ -10541,6 +10626,14 @@ MindRoom does not add extra runtime behavior on top of the upstream toolkit beyo
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `key` | `password` | `no` | `null` | Google Maps API key stored through the dashboard or credential store. |
+| `search_places` | `boolean` | `no` | `true` | Enable `search_places()`. |
+| `get_directions` | `boolean` | `no` | `true` | Enable `get_directions()`. |
+| `validate_address` | `boolean` | `no` | `true` | Enable `validate_address()`. |
+| `geocode_address` | `boolean` | `no` | `true` | Enable `geocode_address()`. |
+| `reverse_geocode` | `boolean` | `no` | `true` | Enable `reverse_geocode()`. |
+| `get_distance_matrix` | `boolean` | `no` | `true` | Enable `get_distance_matrix()`. |
+| `get_elevation` | `boolean` | `no` | `true` | Enable `get_elevation()`. |
+| `get_timezone` | `boolean` | `no` | `true` | Enable `get_timezone()`. |
 
 ### Example
 
@@ -10562,7 +10655,7 @@ validate_address("1600 Amphitheatre Pkwy, Mountain View, CA", region_code="US")
 ### Notes
 
 - `key` is optional in MindRoom metadata only because the upstream toolkit can also read `GOOGLE_MAPS_API_KEY` from the runtime environment.
-- In practice, the tool still needs a valid Google Maps API key before any call succeeds.
+- The upstream toolkit also constructs a Google Places client through Google Application Default Credentials, so configure ADC in addition to a valid Google Maps API key.
 - If you plan to use `validate_address()`, enable the Address Validation API for the same Google Cloud project as the key.
 
 ## [`openweather`]
@@ -10651,7 +10744,7 @@ get_shop_info()
 get_products(max_results=25, status="ACTIVE")
 get_orders(max_results=50, created_after="2026-03-01", created_before="2026-03-31")
 get_low_stock_products(threshold=10)
-get_average_order_value(days=30)
+get_average_order_value(group_by="day", created_after="2026-03-01", created_before="2026-03-31")
 ```
 
 ### Notes
@@ -10722,6 +10815,8 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 
 ## Browse By Category
 
+The tool names in this table are representative highlights rather than an exhaustive registry dump; follow each category link for its current full inventory.
+
 | Category | Tools | Link |
 |----------|-------|------|
 | **Execution & Coding** | file, shell, python, coding, docker, calculator, reasoning, sleep | [→ execution-and-coding](https://docs.mindroom.chat/tools/execution-and-coding/) |
@@ -10730,7 +10825,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 | **Web Scraping & Browser** | firecrawl, crawl4ai, browser, jina, website, trafilatura | [→ web-scraping-and-browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) |
 | **Research Sources** | arxiv, google_scholar, wikipedia, pubmed, hackernews | [→ research-sources](https://docs.mindroom.chat/tools/research-sources/) |
 | **AI & Generation** | openai, gemini, groq, replicate, fal, dalle, eleven_labs | [→ ai-and-generation](https://docs.mindroom.chat/tools/ai-and-generation/) |
-| **Media & Content** | youtube, spotify, giphy, moviepy, unsplash, brandfetch | [→ media-and-content](https://docs.mindroom.chat/tools/media-and-content/) |
+| **Media & Content** | youtube, spotify, giphy, moviepy_video_tools, unsplash, brandfetch | [→ media-and-content](https://docs.mindroom.chat/tools/media-and-content/) |
 | **Matrix & Attachments** | matrix_message, matrix_voice_message, thread_tags, thread_resolution, thread_summary, thread_model, matrix_api, attachments | [→ matrix-and-attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) |
 | **Messaging & Social** | gmail, slack, discord, telegram, whatsapp, email, x, reddit | [→ messaging-and-social](https://docs.mindroom.chat/tools/messaging-and-social/) |
 | **Project Management** | github, jira, linear, clickup, notion, trello, todo, todoist | [→ project-management](https://docs.mindroom.chat/tools/project-management/) |
@@ -10834,7 +10929,7 @@ For `streamable-http` servers, `url` is required.
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
 Static `headers` are process-global and shared by every requester.
-Use the OAuth `auth` block for remote MCP servers that need a different bearer token per requester.
+Use the OAuth `auth` block plus `worker_scope: user` or `worker_scope: user_agent` for remote MCP servers that need a different bearer token per requester.
 
 ## Per-Server Options
 
@@ -10905,7 +11000,8 @@ They are useful when one server exposes many tools but one agent should see only
 
 MCP tools are available on every worker scope, including private per-user agents.
 Non-OAuth `mcp_<server_id>` tools always execute through the shared MCP server session; requester identity and requester credentials are never passed to the server.
-OAuth-backed remote MCP servers instead load a scoped OAuth token for the current requester at tool-call time and keep one session per requester scope.
+OAuth-backed remote MCP servers load a token for the resolved worker scope at tool-call time and keep one session per worker key.
+Shared scope reuses one agent-scoped token and session; `user` and `user_agent` provide requester isolation.
 
 ## OAuth-Backed Remote MCP
 
@@ -10955,7 +11051,7 @@ The bridge functions let an agent trigger the normal MindRoom OAuth connect flow
 When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
 Until the requester connects, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
 Set the per-server `description` option to tell the model what connecting would unlock; it is appended to all three bridge tool descriptions.
-After the user connects, `list_tools` returns the remote catalog and `call_tool` sends `Authorization: Bearer <requester access token>` to the MCP server.
+After the user connects, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for that worker scope to the MCP server.
 After MindRoom has a cached requester-specific catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that requester in addition to the bridge functions.
 
 `discovery: auto` performs protected-resource metadata discovery from the configured `resource` or server `url`, then resolves authorization-server metadata.
@@ -11013,7 +11109,8 @@ mcp_servers:
 means a remote MCP tool named `navigate_page` becomes `chrome_navigate_page` inside the agent's tool list.
 
 MindRoom rejects duplicate function names after prefixing.
-That includes collisions inside one server and collisions across different servers.
+That includes collisions inside one server and across tool or server surfaces visible to the same agent.
+Identical final function names are allowed on disjoint agent surfaces.
 The final function name must also fit within 64 characters.
 
 ## Example: Echo MCP Server
@@ -11178,7 +11275,7 @@ It waits up to 600 seconds for active Matrix responses to drain, then force-appl
 - Phase 1 supports MCP tools only.
 - MCP resources and prompts are not exposed in MindRoom yet.
 - Non-OAuth MCP integrations always use the shared server session, even on isolating worker scopes; per-requester isolation requires an OAuth-backed server.
-- OAuth-backed remote MCP integrations use requester-scoped OAuth credentials and sessions.
+- OAuth-backed remote MCP credentials and sessions follow the configured worker scope; use `user` or `user_agent` for requester isolation.
 - OAuth-backed remote MCP typed functions appear only after MindRoom has cached a requester-specific remote catalog.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.
@@ -11228,6 +11325,7 @@ Preset expansion:
 - `subagents`
 - `matrix_message`
 - `attachments` (auto-implied by `matrix_message` via `IMPLIED_TOOLS`, not listed in the preset directly)
+- `matrix_room` (auto-implied by `matrix_message` via `IMPLIED_TOOLS`, not listed in the preset directly)
 
 Memory is not a separate OpenClaw subsystem in MindRoom.
 It uses the normal MindRoom memory backend.
@@ -11243,7 +11341,7 @@ agents:
     include_default_tools: false
     learning: false
     memory_backend: file
-    model: opus
+    model: default
     role: OpenClaw-style personal assistant with persistent file-based identity and memory.
     rooms: [personal]
 
@@ -11284,9 +11382,10 @@ memory:
 
 When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the canonical workspace root, so there is no need to add it to `context_files`.
 If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded.
-The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, sub-agent orchestration, and `matrix_message` tools (`attachments` is auto-implied by `matrix_message`), so listing those tools individually is not necessary.
+The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, sub-agent orchestration, and `matrix_message` tools (`attachments` and `matrix_room` are auto-implied by `matrix_message`), so listing those tools individually is not necessary.
 Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `search_memories` read the same canonical workspace.
-Direct external edits to daily memory files are picked up lazily on the next semantic memory search.
+Native memory mutations schedule semantic-index refresh.
+Arbitrary external edits are not detected by a ready semantic index on access; use the supported memory tools or trigger/restart the index refresh before expecting those edits in semantic results.
 File memory is already searchable on demand through `search_memories`.
 When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
 Use `search_memories` for keyword fallback, team-visible memory, and memory IDs.
@@ -11315,8 +11414,8 @@ mindroom_data/
 
 OpenClaw-compatible agents use the same memory system as every other MindRoom agent:
 
-- `memory.backend: mem0` for vector memory (global default)
-- `memory.backend: file` for file-first memory (global default)
+- `memory.backend: mem0` for vector memory (schema default)
+- `memory.backend: file` for file-first memory
 - `memory.backend: none` or `memory: none` to disable built-in durable memory globally
 - `memory_backend: file` on an individual agent to override the global default
 - `memory_backend: none` on an individual agent to keep that agent stateless
@@ -11332,7 +11431,8 @@ MindRoom includes built-in context controls for OpenClaw-style agents:
 
 - **Conversation history** is stored in Agno sessions, but MindRoom decides what replay summary and raw history messages are injected into each run.
 - **Replay depth** is controlled with `num_history_runs` or `num_history_messages`, and optional required compaction is controlled with `compaction` (see [Agents](https://docs.mindroom.chat/configuration/agents/)).
-- **Preloaded role context** from `context_files` is hard-capped by `defaults.max_preload_chars` (configured in `config.yaml` under `defaults`). When the combined context exceeds this limit, chunks are trimmed from the end and a truncation marker is inserted.
+- **Preloaded role context** from `context_files` is hard-capped by `defaults.max_preload_chars` configured under `defaults` in `config.yaml`.
+  When combined context exceeds the limit, whole chunks are omitted in configured/list order first, the tail of the final retained chunk may be trimmed, and per-file plus summary markers explain the omission.
 
 ## Known limitations
 
@@ -11349,7 +11449,11 @@ MindRoom includes built-in context controls for OpenClaw-style agents:
 
 For details on skill eligibility gating (`openclaw.os`, `openclaw.requires`, `openclaw.always`), see [Skills](https://docs.mindroom.chat/skills/).
 
-Skills are loaded from `~/.mindroom/skills/<name>/`. To use an OpenClaw skill like `transcribe`, copy the skill directory from your OpenClaw workspace:
+Global allowlisted skills load from `~/.mindroom/skills/<name>/`.
+Agent-local workspace skills load automatically from `agents/<agent>/workspace/skills/<name>/` and take precedence over user-global copies.
+For a portable OpenClaw agent, prefer `agents/openclaw/workspace/skills/transcribe/`; use the global root when several agents should share an allowlisted skill.
+
+To install a global skill:
 
 ```bash
 mkdir -p ~/.mindroom/skills
@@ -11423,6 +11527,12 @@ If `metadata.openclaw` is present, MindRoom filters skills using these rules:
 
 Skills without `metadata.openclaw` are always eligible.
 
+## Installing and managing skills
+
+Install a user skill manually at `~/.mindroom/skills/<name>/SKILL.md`, or use the dashboard Skills page to create, view, edit, and delete user skills.
+Bundled and plugin-provided skills are visible but read-only in the dashboard.
+Add a bundled, plugin, or user skill name to the agent's `skills:` allowlist before that agent can use it.
+
 ## Skill locations and precedence
 
 MindRoom resolves skills for each agent from these locations, in this order:
@@ -11440,9 +11550,9 @@ Agent workspace skills are only available to the owning agent at runtime. They d
 
 Agents never need write access to a global skill root to create skills.
 The bundled, plugin, and user roots can be read-only at runtime, for example in container or Kubernetes deployments where the image filesystem and `~/.mindroom` are not writable.
-An agent can always author skills in its own workspace at `<workspace>/skills/<skill-name>/SKILL.md`, using the same `SKILL.md` format described above.
+An agent with a canonical workspace and authorized workspace-rooted file or shell tools can author skills at `<workspace>/skills/<skill-name>/SKILL.md`, using the same `SKILL.md` format described above.
 Workspace-rooted file tools address this location as the relative path `skills/<skill-name>/SKILL.md`.
-Agents with a workspace receive this guidance in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which can be overridden via the root `prompts` block (see [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides)).
+Agents with the required workspace and authoring access receive this guidance in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which can be overridden via the root `prompts` block (see [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides)).
 A new or edited workspace skill is picked up on the agent's next run without a config change.
 
 ## Configuring skills
@@ -11486,7 +11596,7 @@ Agents that have shell or file execution permissions can still read and execute 
 | --- | --- | --- |
 | Definition | Markdown + YAML | Python code |
 | Location | File system | Code/plugins |
-| Filtering | Automatic by requirements | Always available |
+| Filtering | Automatic by requirements | Configured per agent; may be deferred or disabled |
 | Instructions | Rich markdown | Docstrings |
 | Invocation | Model via skill tools | Model only |
 
@@ -11527,7 +11637,8 @@ my-plugin/
         └── SKILL.md
 ```
 
-A plugin must have at least one of `tools_module`, `hooks_module`, `oauth_module`, or `skills`.
+Capability fields are optional.
+An empty manifest still loads but contributes no tools, hooks, OAuth providers, or skills.
 A tools-only plugin exposes callable functions to agents.
 A plugin with `oauth_module` registers OAuth providers whose state, callbacks, and scoped credential storage are handled by MindRoom core.
 A hooks-only plugin observes or transforms events without adding agent-facing tools.
@@ -11914,6 +12025,9 @@ MindRoom does **not** auto-detect constructor parameter names — undeclared man
 | `RUNTIME_PATHS` | `runtime_paths` | Storage paths, environment values, and data directory access |
 | `CREDENTIALS_MANAGER` | `credentials_manager` | Read and write the per-tool credentials store |
 | `WORKER_TARGET` | `worker_target` | Resolved worker routing context (scope, execution identity, worker key) |
+| `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | Workspace root used for managed tool-output saves |
+| `WORKER_TOOLS_OVERRIDE` | `worker_tools_override` | Effective worker-routed tool override |
+| `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 
 Example:
 
@@ -12008,7 +12122,8 @@ MCP toolkits are async; Agno's async agent runs (`arun`, `aprint_response`) hand
 
 List skill directories in the manifest `skills` array.
 Each listed directory is added to MindRoom's skill search roots.
-Skill subdirectories must contain a `SKILL.md` file with YAML frontmatter (name, description, requirements).
+Skill subdirectories must contain a `SKILL.md` file.
+YAML frontmatter is optional: discovery falls back to the directory name and an empty description, and requirements are declared only when needed.
 
 ## Hooks
 
@@ -12120,7 +12235,7 @@ The hot-reload path is intentionally best-effort, not transactional.
 - **In-flight turns keep their old code.** A reload swaps the registry for new events, but any callback already running on the old module finishes there, and only new events use the new module.
 - **No partial-write detection.** If your editor saves the file in two writes, the watcher may briefly load the half-written first state, log an import error, and then reload again on the second write.
 - **CPU-bound infinite loops still wedge the event loop.** The hook dispatcher uses `asyncio.timeout()` for cooperative cancellation, so truly blocking CPU code is not preempted.
-- **Background resources held by the old module can leak until natural cleanup.** Only `asyncio.Task` objects directly attached to module globals are cancelled, so plugins that hold long-lived non-task resources need their own cleanup bookkeeping.
+- **Background resources held by the old module can leak until natural cleanup.** Reload cancels direct module-global `asyncio.Task` objects and tasks in one-level built-in dict, tuple, list, or set containers; deeper or custom containers and non-task resources need their own cleanup bookkeeping.
 - **New plugins added to disk are not auto-enabled.** You still have to add them under `plugins:` in `config.yaml`, because the watcher only reloads plugins that are already configured.
 
 ### Production tip
@@ -12631,13 +12746,15 @@ If you are writing internal code or tests and already have an explicit `HookRegi
 ### Fault isolation
 
 Every hook invocation runs inside an `asyncio.timeout()` with structured error logging.
-No hook can crash the bot.
+Ordinary `Exception` and `SystemExit` failures are logged and isolated so later hooks can continue.
+Cancellation follows the caller and event policy, and external side effects completed before a failure cannot be rolled back.
 
 Failure semantics are mode-aware:
 
-- **Observer** failures lose only side effects; the next hook still runs
+- **Observer** failures stop that callback; completed external side effects remain, and the next hook still runs
 - **Collector** failures lose only that hook's contributed items
-- **Transformer** failures lose only that hook's draft changes; the previous draft continues
+- **`message:before_response` transformer** failures preserve mutations already made to the shared draft before the failure
+- **`message:final_response_transform` transformer** failures discard the failed hook's copy and continue with the previous draft
 
 ### No quarantine, no cooldown
 
@@ -12673,9 +12790,9 @@ Scoped sub-paths (per-room, per-user) are the plugin author's responsibility.
 
 ## Context reference
 
-### Base fields (all hooks)
+### Base fields (non-tool hooks)
 
-Every hook context includes these fields:
+Contexts derived from `HookContext` include these fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -12689,7 +12806,10 @@ Every hook context includes these fields:
 | `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful when plugin state must ignore anything recorded before it |
 | `state_root` | `Path` | Plugin state directory (property) |
 
-Every hook context also exposes the following helpers:
+Those non-tool contexts also expose the following helpers:
+
+`ToolBeforeCallContext` and `ToolAfterCallContext` use a separate tool-hook surface.
+Their `config` and `runtime_paths` values may be absent, and they do not expose `runtime_started_at` or `get_latest_agent_message_snapshot()`.
 
 **`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`**
 Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
@@ -12728,7 +12848,8 @@ Transport exceptions from the underlying Matrix client propagate to the hook.
 Provides a narrow Matrix admin facade when MindRoom has a router-backed admin client available for the current hook context.
 This facade is part of the supported hook contract and is intentionally not the raw Matrix client.
 It is `None` when no admin-capable client is bound.
-The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `get_room_members(room_id)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
+The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `force_join_user(room_id, user_id)`, `kick_user(room_id, user_id, reason=None)`, `get_room_members(room_id)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
+Membership mutation methods return a boolean success result and surface transport exceptions consistently with the other admin operations.
 `get_room_members` returns `None` when the membership fetch fails, so callers can distinguish an unreadable room from a genuinely empty one.
 Rooms created via `create_room` are retained for the creating bot across room cleanup and restarts, the same way rooms it is invited to are kept.
 
@@ -12989,7 +13110,7 @@ To adopt hooks:
 MindRoom owns OAuth state, callback handling, credential scoping, and token persistence because those steps decide which human and agent scope receive access to an external account.
 Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, optional PKCE requirements, requester-only credential placement, explicitly permitted manual fallback fields and runtime environment names, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
 
-The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
+The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/success`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
 When an OAuth request targets an agent with `agent_name`, MindRoom also requires the authenticated dashboard requester to satisfy `authorization.agent_reply_permissions` for that agent.
@@ -13057,7 +13178,8 @@ MindRoom synthesizes an OAuth provider from each `mcp_servers.*.auth.type: oauth
 Generated MCP OAuth token services use the `<provider_id>_oauth` naming pattern; the default provider ID is already `mcp_<server_id>`.
 Custom provider IDs that do not start with `mcp_` get an `mcp_` credential-service prefix.
 These token services stay in the primary runtime credential store.
-The matching MCP toolkit loads the token for the current requester before opening the remote MCP transport, so the transport sends a requester-scoped bearer token instead of a process-global static header.
+The matching MCP toolkit loads the token for the current resolved worker scope before opening the remote MCP transport.
+Use `worker_scope: user` or `worker_scope: user_agent` when different requesters must receive distinct OAuth tokens and MCP sessions; shared scope deliberately reuses one agent-scoped identity.
 Generated MCP OAuth providers can use public clients with `token_endpoint_auth_method: none`, PKCE, and empty scope lists.
 Generated MCP OAuth providers can also discover protected-resource metadata and authorization-server metadata lazily when the first OAuth flow starts.
 If the authorization server advertises dynamic client registration and no client config is stored yet, MindRoom registers a public client and persists the returned registration metadata in the generated OAuth client config service.
@@ -13319,8 +13441,8 @@ When an agent has multiple semantic knowledge bases, results are interleaved fai
 ## Git-Backed Knowledge Bases
 
 Knowledge bases can sync from a Git repository.
-MindRoom starts a background refresh for configured shared Git knowledge bases when runtime support starts.
-After that, it schedules another background refresh every `poll_interval_seconds`.
+MindRoom waits one `poll_interval_seconds` interval before the first background refresh for a configured shared Git knowledge base, avoiding a refresh burst during startup.
+It then schedules another background refresh after each interval.
 Reads keep using the last published index while a refresh is running.
 
 ```yaml
@@ -13858,7 +13980,8 @@ Learning data persists in `agents/<name>/learning/<agent>.db` within the agent's
 
 MindRoom can surface Matrix voice messages as attachment-aware prompts for agents and teams.
 If STT is configured, MindRoom also transcribes the audio and routes it through the normal text pipeline.
-If STT is unavailable, disabled, or fails, the audio still remains available as an attachment and falls back to `🎤 [Attached voice message]`.
+If STT is unavailable, disabled, or fails after media registration succeeds, the audio remains available as an attachment and falls back to `🎤 [Attached voice message]`.
+If media download itself fails, dispatch continues with that text-only fallback and no attachment metadata.
 
 ## Overview
 
@@ -13867,7 +13990,7 @@ When a voice message is received:
 1. The audio event is handled through the shared media pipeline.
 2. If voice STT and `voice.visible_router_echo` are enabled and the router is present and allowed to reply, the router immediately posts `Router agent is transcribing…`.
 3. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment while the placeholder is visible.
-4. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
+4. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and ASR cleanup without creating chat commands.
 5. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
 6. The router replaces its placeholder with the normalized transcript or fallback text, or posts the fallback directly when STT is disabled.
 7. The normalized transcript or fallback prompt plus attachment metadata is dispatched using the normal routing and thread logic.
@@ -13877,7 +14000,7 @@ When a voice message is received:
 
 ## Configuration
 
-Enable STT and voice-intelligence formatting in `config.yaml`:
+Enable STT and transcript normalization in `config.yaml`:
 
 ```yaml
 voice:
@@ -13889,13 +14012,13 @@ voice:
     # Optional: custom service root or /v1 base URL
     # host: http://localhost:8080
   intelligence:
-    model: default  # Model used for command recognition
+    model: default  # Model used for mention normalization and light ASR cleanup
 ```
 
 Or use the dashboard's Voice tab.
 
 With `voice.enabled: false`, audio messages are still surfaced as attachments with the fallback prompt.
-Enabling voice adds STT and command-recognition on top of that attachment flow.
+Enabling voice adds STT and transcript normalization on top of that attachment flow.
 With `voice.visible_router_echo: true` and `voice.enabled: true`, the router immediately posts a transcription placeholder and replaces that message with the normalized transcript or fallback text when it is present in the room and allowed to reply.
 When `voice.enabled: false`, the router posts the fallback text directly without claiming that transcription is running.
 
@@ -13947,19 +14070,18 @@ voice:
 If a custom endpoint has no `api_key`, MindRoom sends a non-secret placeholder rather than requiring a cloud key.
 Cloud OpenAI transcription falls back to the `OPENAI_API_KEY` environment variable.
 
-## Command Recognition
+## Transcript Normalization
 
-The intelligence component uses an AI model to analyze transcriptions and format them properly:
+The intelligence component uses an AI model to normalize transcriptions without turning speech into Matrix commands:
 
 1. **Agent and team mentions** - Converts spoken agent or team names to listed `@agent` or `@team` mentions
 2. **Mention sanitization** - Mentions of agents or teams not available in the current room have their `@` stripped so the responder is not falsely targeted
-3. **Command patterns** - Identifies and formats `!command` syntax
-4. **Speculative command rejection** - Commands the AI invents that were not in the original transcription are rejected to prevent false positives
-5. **Smart formatting** - Handles speech recognition errors and natural language variations
+3. **Command preservation** - Never invents or rewrites spoken text into `!command` syntax
+4. **Smart formatting** - Handles light speech-recognition errors and natural-language variations
 
 ### Intelligence Model
 
-The intelligence model processes raw transcriptions to recognize commands, agent names, and team names:
+The intelligence model processes raw transcriptions to normalize agent and team mentions plus light ASR errors:
 
 ```yaml
 voice:
@@ -13967,7 +14089,7 @@ voice:
     model: default  # Uses the default model from your models config
 ```
 
-You can specify a different model for faster or more accurate command recognition.
+You can specify a different model for faster or more accurate transcript normalization.
 
 ## How It Works
 
@@ -14037,7 +14159,7 @@ Set `voice.visible_router_echo: false` to suppress the display-only echo without
 
 ### Attachment access
 
-The original audio is always registered as a context-scoped attachment before dispatch continues.
+When media download and registration succeed, the original audio is registered as a context-scoped attachment before dispatch continues.
 That means the responding agent or team can inspect the file directly, use audio-capable models, or fetch it later with the `attachments` tool.
 This is true whether the prompt came from a transcript, a fallback message, or a router handoff.
 For successful STT turns, MindRoom adds hidden model-facing guidance that says the `🎤` text is already the transcript and the raw audio attachment is optional.
@@ -14050,7 +14172,7 @@ Voice messages in Matrix are:
 - Detected as `RoomMessageAudio` or `RoomEncryptedAudio` events
 - Downloaded from the Matrix media server
 - Decrypted if end-to-end encrypted (using the encryption key from the event)
-- Registered as audio attachments before dispatch
+- Registered as an audio attachment before dispatch when media download succeeds
 - Sent to the STT service via the OpenAI-compatible API when transcription is enabled
 - Normalized once per room and thread context, even though multiple bots may observe the event
 
@@ -14084,10 +14206,12 @@ See the [Tools documentation](https://docs.mindroom.chat/tools/) for configurati
 
 When STT is unavailable, disabled, or transcription fails, MindRoom falls back to raw audio passthrough:
 
-1. The voice message audio is downloaded and saved locally as an attachment
+1. When media download succeeds, the voice message audio is saved locally and registered as an attachment
 2. The normalized text becomes `🎤 [Attached voice message]`
-3. The raw audio is registered as an attachment ID available to agents and teams in the room or thread context
-4. When an agent or team responds, it automatically receives the raw audio as an Agno `Audio` object
+3. Registered raw audio receives an attachment ID available to agents and teams in the room or thread context
+4. When registration succeeded, an agent or team automatically receives the raw audio as an Agno `Audio` object
+
+If media download fails, the same fallback text is dispatched without an attachment ID or audio object.
 
 This means voice messages still reach responders even without STT.
 Agents or teams with audio-capable models can process the raw audio directly, and tool-using responders can retrieve the file by attachment ID.
@@ -14154,7 +14278,8 @@ Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_call
 `calls.profiles` defines reusable, complete voice pipelines.
 `calls.agents` maps each enabled agent to exactly one profile name.
 The `model` in a realtime profile is the provider-specific OpenAI realtime speech model ID.
-Cascaded profiles require complete STT and TTS settings, and each speech leg selects its own credential service.
+Cascaded profiles require complete STT and TTS settings.
+OpenAI speech legs require either `credentials_service` or `api_key`; OpenAI-compatible speech legs require `host` and may omit credentials.
 The optional `model` in a cascaded profile references a named entry from the top-level `models` mapping.
 An explicit cascaded call model takes precedence over room and agent models for the calls-enabled agent.
 Omitting it keeps the existing room and agent model resolution.
@@ -14266,7 +14391,7 @@ calls:
     assistant: openai-cascaded
 ```
 
-Each speech component has its own `provider`, `model`, `credentials_service`, `host`, and `extra_kwargs`.
+Each speech component has its own `provider`, `model`, `credentials_service`, `api_key`, `host`, and `extra_kwargs`.
 The two speech legs may select the same named credential or different ones.
 The current OpenAI model catalog documents [`gpt-4o-transcribe`](https://developers.openai.com/api/docs/models/gpt-4o-transcribe) for transcription and [`tts-1`](https://developers.openai.com/api/docs/models/tts-1) for text-to-speech.
 
@@ -14428,17 +14553,13 @@ This follows [MSC2530](https://github.com/matrix-org/matrix-spec-proposals/pull/
 
 ## Image Persistence
 
-Images are saved under `mindroom_data/attachments/` and `mindroom_data/incoming_media/` and registered as attachment records with 30-day retention.
+Image bytes are saved under `mindroom_data/incoming_media/`, while their attachment metadata is saved under `mindroom_data/attachments/`; both are subject to the attachment retention policy.
 In addition to being passed to the AI model as vision input, each image is also registered as an `att_*` attachment ID so agents can reference it via tool calls.
 See [Attachments](https://docs.mindroom.chat/attachments/) for details on retention and context scoping.
 
 ## Encryption
 
 Both unencrypted and E2E encrypted images are supported. Encrypted images are decrypted transparently using the key material from the Matrix event.
-
-## Caching
-
-AI response caching is automatically skipped when images are present, since image payloads are large and unlikely to repeat.
 
 ## Media Fallback
 
@@ -14447,7 +14568,8 @@ The retried prompt includes `[Inline media unavailable for this model]` to infor
 Agents can still reference the files via attachment IDs and tools.
 
 This fallback is transparent — no user action is required.
-Any failure of a media-bearing request triggers one retry without media — no error wording decides whether to retry, so unknown provider prose degrades gracefully instead of surfacing a raw provider error.
+Any ordinary failure of a media-bearing request triggers one retry without media — no error wording decides whether to retry, so unknown provider prose degrades gracefully instead of surfacing a raw provider error.
+Provider safeguard refusals are returned as refusals and are not retried without media.
 When the retry succeeds, the model route learns that the dropped media kinds are unsupported, and later requests omit them up front instead of paying a failed API call.
 This learned capability state is process-local and resets on restart.
 Payload-size and context-overflow rejections never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
@@ -14503,7 +14625,7 @@ Attachments work in both direct messages and threads, and with both individual a
 
 ## Attachment IDs
 
-Each uploaded file or video is assigned a stable attachment ID (e.g., `att_abc123`).
+Each registered file, image, audio clip, or video is assigned a stable attachment ID (e.g., `att_abc123`).
 Attachments sent with the current message are listed in the prompt with full provenance (kind, filename, sender, send time, and originating event ID):
 
 ```
@@ -14522,7 +14644,7 @@ Keeping media bytes pinned to their original messages also keeps the request pre
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.
-Voice raw-audio fallback uses the same attachment ID mechanism; see [Voice Fallback](https://docs.mindroom.chat/voice/#voice-fallback-no-stt-available).
+When voice media download and registration succeed, raw-audio fallback uses the same attachment ID mechanism; see [Voice Fallback](https://docs.mindroom.chat/voice/#voice-fallback-no-stt-available).
 
 ## The `attachments` Tool
 
@@ -14567,12 +14689,8 @@ The `attachments` tool lets any model work with files by calling tools that oper
 
 ## Encryption
 
-Both unencrypted and E2E encrypted files and videos are supported.
+Both unencrypted and E2E encrypted files, images, audio clips, and videos are supported.
 Encrypted media is decrypted transparently using the key material from the Matrix event.
-
-## Caching
-
-AI response caching is automatically skipped when files, images, audio, or videos are present, since media payloads are large and unlikely to repeat.
 
 ## Retention
 
@@ -14614,7 +14732,7 @@ The **router** normally handles commands.
 `!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
 Commands work in both main room messages and within threads.
 
-Voice messages that contain commands (e.g., spoken `!schedule`) are recognized after transcription and processed the same way.
+Voice transcription is not rewritten into chat-command syntax; commands must arrive as text commands.
 
 ## Permission Behavior
 
@@ -14642,7 +14760,7 @@ Display available commands or get detailed help on a specific topic.
 !help edit_schedule
 ```
 
-**Topics:** `schedule`, `config`, `model`, `thread_mode`, `thread-mode`, `threadmode`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
+**Topics:** `schedule`, `config`, `model`, `thread_mode`, `thread-mode`, `threadmode`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
 
 ### `!hi`
 
@@ -14766,7 +14884,7 @@ Run these commands in a private Matrix room containing only the requester and on
 !desktop disconnect confirm
 ```
 
-`!desktop setup` returns a local `mindroom desktop pair` command and a short-lived pairing code.
+`!desktop setup` returns a local `mindroom desktop setup` command and a short-lived pairing code.
 The local pairing command presents that code through an authenticated encrypted Matrix device event.
 It then prints an exact chat confirmation command with a verification value derived from the authenticated local device key.
 Only the same Matrix requester in the same agent scope can confirm the matching claim.
@@ -14928,7 +15046,7 @@ When an agent's response contains a specially formatted JSON block, MindRoom aut
 1. An agent includes an `interactive` code block in its response.
 2. MindRoom parses the JSON, formats the options as a numbered list, and adds emoji reactions to the message.
 3. The user clicks a reaction emoji or types the option number.
-4. MindRoom captures the selection and feeds it back to the agent as a follow-up prompt (`"The user selected: <value>"`).
+4. MindRoom captures the selection and feeds the agent structured selection context containing the question event, thread, question text, and selected option key, label, and value.
 
 The entire flow happens within the thread where the original question was asked.
 
@@ -14957,6 +15075,9 @@ Agents emit interactive questions by wrapping JSON in an `interactive` code bloc
 | `options[].emoji` | string | No | Emoji shown as a reaction button. Defaults to `"❓"`. |
 | `options[].label` | string | No | Human-readable label for the option. Defaults to `"Option"`. |
 | `options[].value` | string | No | Value passed back to the agent when selected. Defaults to the label in lowercase. |
+
+Use a unique emoji for every option when reaction buttons must distinguish the choices.
+Duplicate emoji keys, including repeated default `❓` values, collapse in the reaction map; numeric replies remain available as a fallback.
 
 ### Rendered Output
 
@@ -15003,7 +15124,8 @@ agents:
 ## Limitations
 
 - Maximum of **5 options** per question. Additional options are silently truncated.
-- Only **one active question per message**. If a response contains multiple interactive blocks, only the first is processed.
+- Only **one active question per message**.
+  The first valid block receives interactive metadata and reaction buttons; later valid blocks render as plain, non-interactive question text.
 - Questions and in-flight selections persist across restarts in the event journal and remain tied to the prompt revision current when the answer is admitted.
 - Interactive metadata over 8,000 bytes is omitted, so the formatted question remains visible without reaction buttons or numeric selection.
 - Interactive blocks are supported in normal agent responses; direct `matrix_message` sends and edits reject them because those operations have no durable response identity.
@@ -15316,7 +15438,8 @@ Edits are state-only Matrix writes.
 
 Running tasks pick up edited state on their next poll instead of relying on caller-supplied cache or restart hooks.
 
-Past one-time tasks are automatically skipped during restoration.
+Past one-time tasks within the recovery grace window are queued and started in order after Matrix sync is ready.
+Older missed one-time tasks are marked failed instead of executing unexpectedly.
 
 Only the router restores persisted schedules after startup — individual agents do not restore their own.
 
@@ -15706,8 +15829,11 @@ matrix_room_access:
   publish_to_room_directory: false # publish managed rooms to public directory
   invite_only_rooms: []            # room keys/aliases/IDs that stay restricted
   reconcile_existing_rooms: false  # migrate existing managed rooms when true
+  encrypt_managed_rooms: false     # enable E2EE for managed rooms; rooms.<key>.encrypted overrides
   room_admins: []                  # Matrix user IDs granted admin power (100) in every managed room
 ```
+
+Enabling encryption is irreversible for a Matrix room, and MindRoom never disables encryption after it is enabled.
 
 **Defaults** (when `authorization` block is omitted):
 
@@ -15716,6 +15842,7 @@ matrix_room_access:
 - `default_room_access: false`
 - `config_command_enabled: false`
 - `agent_reply_permissions: {}`
+- `aliases: {}`
 
 This means only MindRoom system users (agents, teams, router, and the configured internal user if present) can interact with agents by default.
 
@@ -15906,6 +16033,7 @@ Removing a user from `authorization.global_users` stops future MindRoom authoriz
 Demote stale Space admins manually in a Matrix client when needed.
 
 Set `enabled: false` to disable Space creation entirely.
+Disabling the setting does not delete an existing Space or remove its current child links.
 The `name` field controls the Space's display name and can be changed at any time.
 
 # OpenAI-Compatible API
@@ -16029,6 +16157,7 @@ Point the base URL at `http://localhost:8765/v1` and set the API key. MindRoom i
 Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`.
 Only shared agents that are either unscoped or explicitly configured with `worker_scope=shared` appear in `/v1/models`.
 Agents that use `agents.<name>.private` are not listed there, because `private.per` creates requester-private instances and therefore an isolating execution scope.
+Agents whose `delegate_to` closure reaches an isolating agent are also excluded, because an OpenAI-compatible request cannot safely materialize that delegated target.
 An OpenAI-compatible run can expose fewer tool functions than the same agent in Matrix when `tool_approval` hides approval-gated functions from `/v1` or tool metadata hides functions that require live room context.
 
 ### Auto-routing
@@ -16148,7 +16277,7 @@ MindRoom's architecture consists of several key components working together.
 │                                                          │
 │  ┌─────────────────────────────────────────────────┐    │
 │  │                Memory System                     │    │
-│  │  (Mem0 + ChromaDB, agent/team scopes)           │    │
+│  │  (Mem0, file, or none; agent/team scopes)       │    │
 │  └─────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -16197,6 +16326,9 @@ MindRoom's architecture consists of several key components working together.
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
+| `response_turn.py` | Shared blocking and streaming response-turn drivers, including retries and dynamic-tool continuation |
+| `response_attempt.py` | Executes one visible response attempt with stop tracking |
+| `response_terminal.py` | Classifies pending-visible failures and terminal stream outcomes |
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
@@ -16204,7 +16336,7 @@ MindRoom's architecture consists of several key components working together.
 | `visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
-| `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
+| `streaming.py` | Streaming state machine and progressive response state |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
 | `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
@@ -16220,7 +16352,7 @@ MindRoom's architecture consists of several key components working together.
 3. **Messages are ordered and coalesced**: `ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing.py` batches per conversation — a live batch ending in text is a complete utterance and dispatches immediately, a live batch ending in media waits a debounce window for more attachments or a trailing caption, and follow-up backlogs queued behind an active response flush as one combined turn at idle; conversations never wait on each other
 4. **The turn is planned**: `turn_policy.py` decides to ignore, route, or respond; a direct responder is resolved when one eligible agent or team remains, otherwise the router selects among candidates
 5. **Selected entity processes** the message via `response_runner.py` and the Agno runtime, executing tools as needed
-6. **Response is delivered** through `streaming.py` (progressive edits) and `delivery_gateway.py` (Matrix send/edit)
+6. **Response is delivered** through `delivery_gateway.py`, which owns Matrix send/edit/finalization while `streaming.py` owns progressive response state
 7. **The turn is recorded** in the durable handled-turn ledger (`turn_store.py` / `handled_turns.py`) so restarts do not double-reply
 8. **Memory updates** asynchronously in background
 
@@ -16320,6 +16452,9 @@ This provenance remains attached across recovery, restart, and decryption indepe
 `matrix/journal_ingress.py` commits every inbound event to the event journal before nio treats it as delivered, and a refused write raises `nio.CallbackNotAcceptedError` so nio redelivers the event rather than advancing the checkpoint past it.
 Admission is fail-closed at every provenance, not only for recovery, because an event the journal never accepted is one no later process would see again.
 Conversation history is hydrated on demand rather than pre-warmed at join: a bounded backward walk fills one room or thread and records the membership epoch it filled under, so a rejoin rebuilds from what the new membership can see instead of merging two memberships into one conversation.
+Every derived conversation row, pending turn, and delivery outbox entry is tied to that membership epoch.
+A departure advances the epoch, removes old projected history, retires unsent old-membership delivery work, and prevents an in-flight response admitted before departure from being sent after rejoin.
+Attempted but unacknowledged deliveries retain their frozen transaction identity for exact reconciliation instead of being blindly resent.
 Changing `matrix_sync` restarts running entities on config hot reload.
 Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart on connection failures.
 
@@ -16337,7 +16472,7 @@ See [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) for the 
 ### Streaming Responses
 
 Agents stream responses by progressively editing messages.
-Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
+Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), avoiding progressive Matrix edits for offline users.
 See [Streaming Responses](https://docs.mindroom.chat/streaming/) for the full feature documentation.
 
 Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
@@ -16629,19 +16764,16 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 
 ## Message Handling
 
-Event callbacks are wrapped in `_create_task_wrapper()` to run as background tasks, ensuring the sync loop is never blocked.
+Correctness-critical timeline callbacks cross durable journal admission before ordinary callbacks run, and background dispatch workers then process committed work without blocking the sync loop.
 
-**`_on_message` flow:**
+**Inbound message flow:**
 
-1. Skip own messages (except voice transcriptions from router)
-2. Check sender authorization and handle edits
-3. Check if already responded (`TurnStore.is_handled`)
-4. Router handles commands exclusively
-5. Extract message context (mentions, thread history, non-agent mention detection)
-6. Skip messages from other agents (unless mentioned)
-7. Router routes when no agent or team is mentioned and thread doesn't have multiple human participants
-8. Check for team formation or individual response
-9. Generate response and store memory
+1. `matrix/journal_ingress.py` commits the event before nio accepts it.
+2. `journal_dispatch.py` and `pending_event_worker.py` dispatch admitted or recovered work.
+3. `turn_controller.py` runs ingress validation, normalization, conversation resolution, receipt ordering, and coalescing.
+4. `text_ingress_dispatch.py` and `turn_policy.py` decide whether to ignore, route, execute a command, or respond.
+5. `response_runner.py` and `response_turn.py` execute the selected agent or team.
+6. `delivery_gateway.py` sends or edits the Matrix response and `TurnStore` records durable terminal truth.
 
 **Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content.
 The agent edits its own previous reply in place rather than sending a new message.
@@ -16665,7 +16797,7 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 - An automatic receive-loop restart replaces only the sync task and its watchdog, so in-flight responses keep their original owner and finish across the restart
 - The response runtime is drained and cancelled only when the bot itself stops: a config reload replacing the entity, entity removal, or process shutdown
 - Each of those lifecycle events logs `restart_reason_category` and `resulting_action`, so `matrix_sync_transport_restart` is distinguishable from `matrix_agent_response_runtime_shutdown` in logs
-- Event callbacks run as background tasks (never block the sync loop)
+- Admitted callbacks are dispatched as background work and remain durably retryable until settled
 - `TurnStore`, backed by the durable handled-turn ledger, prevents duplicate replies
 - `StopManager` handles cancellation of in-progress responses
 
@@ -16673,16 +16805,12 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 On `orchestrator.stop()`:
 
-1. Set `self.running = False`
-2. Cancel config reload task
-3. Drain orchestrator-owned MCP catalog replacement tasks for up to 5 seconds before MCP or entity teardown
-4. Stop memory auto-flush worker
-5. Shut down the per-binding knowledge refresh scheduler
-6. Cancel pending bot start tasks
-7. Stop the MCP manager
-8. Cancel all sync tasks
-9. Signal all bots to stop (`bot.running = False`)
-10. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)
+1. Mark the runtime stopped, signal runtime shutdown, unbind external triggers, and close approval transport/runtime state.
+2. Cancel config reload, drain MCP catalog and dispatch-recovery work, and cancel startup maintenance.
+3. Stop todo-poke and memory auto-flush workers plus knowledge watching and refresh scheduling.
+4. Cancel pending bot starts and stop the MCP manager.
+5. Cancel sync tasks before stopping bots so shutdown cannot race active receive loops.
+6. Stop all bots concurrently, wait for attachment cleanup, and close the shared event journal last because bots borrow it while draining delivery work.
 
 # Deployment
 
@@ -16740,7 +16868,7 @@ If you want worker-routed execution tools like `coding`, `docker`, `file`, `pyth
 ### NixOS LXC container (preferred alternative, agent-controlled machine)
 
 Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, Element, Caddy) plus Docker and `ragenix`-based secrets wiring, so the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
+The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with MindRoom, Tuwunel, MindRoom Chat, and Caddy plus Docker and `ragenix`-based secrets wiring, so the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
 It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
 It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/); see the repo README for the full setup.
 
@@ -16759,8 +16887,10 @@ cd mindroom-stack
 cp .env.example .env
 $EDITOR .env  # add at least one AI provider key
 
-docker compose up -d
+./scripts/quickstart.py
 ```
+
+Raw `docker compose up -d` remains a manual fallback; the quickstart validates provider configuration, waits for readiness, and diagnoses common port and startup failures.
 
 The stack exposes MindRoom at `http://localhost:8765`, the MindRoom client at `http://localhost:8080`, and Matrix at `http://localhost:8008`.
 The stack uses published `mindroom`, `mindroom-chat`, and `mindroom-tuwunel` images by default.
@@ -16805,14 +16935,14 @@ Full stack:
 
 ```bash
 # .env in the full stack repo
-OPENAI_API_KEY=sk-...
-# Add other providers as needed
+ANTHROPIC_API_KEY=sk-ant-...
+# The default stack model uses Anthropic; selecting another provider also requires changing the model config.
 ```
 
 Direct and single-container deployments:
 
-1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` (must allow open registration for agent accounts)
-2. **AI provider keys** - At least one of `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, etc.
+1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` and configure hosted provisioning, a registration/shared-secret token, or intentionally open registration for managed agent accounts
+2. **Model credentials** - Configure credentials that match the selected provider, using an API key or a supported CLI login; containers must mount or provide the corresponding auth state
 3. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
 
 See the [Docker guide](https://docs.mindroom.chat/deployment/docker/#environment-variables) for the complete environment variable reference.
@@ -16857,12 +16987,14 @@ Use `uvx mindroom config init --provider codex` if you want the starter config t
 
 ## 2. Add AI Provider Key
 
-Edit `~/.mindroom/.env` and set at least one provider key:
+Edit `~/.mindroom/.env` and set credentials matching the provider selected during `config init`.
+The default provider is OpenAI:
 
 ```bash
 OPENAI_API_KEY=...
-# or OPENROUTER_API_KEY=...
 ```
+
+To use OpenRouter instead, regenerate with `uvx mindroom config init --provider openrouter` and then set `OPENROUTER_API_KEY`.
 
 For Codex CLI ChatGPT authentication, run `codex login` instead of adding an API key.
 MindRoom reads `~/.codex/auth.json` by default.
@@ -16948,13 +17080,17 @@ So the precise claim is: encrypted Matrix message content is protected from the 
 You can keep the same local flow and switch endpoints:
 
 - `MATRIX_HOMESERVER=https://your-matrix.example.com`
+- `MATRIX_SERVER_NAME=your-matrix.example.com`
 - `MINDROOM_PROVISIONING_URL=https://your-matrix.example.com` (or your dedicated provisioning host)
+
+If the homeserver requires a registration token for managed agent accounts, also set `MATRIX_REGISTRATION_TOKEN`.
 
 Then run `mindroom connect` again with a fresh pair code from your own UI.
 
 # Bridges
 
-MindRoom uses [mautrix](https://docs.mau.fi/bridges/) bridges to connect external messaging platforms to Matrix. Bridges run as appservices alongside Synapse, creating ghost users for external contacts and relaying messages bidirectionally.
+MindRoom uses [mautrix](https://docs.mau.fi/bridges/) bridges to connect external messaging platforms to Matrix.
+Bridges run as appservices alongside a Matrix homeserver such as Synapse or Tuwunel, create ghost users for external contacts, and relay messages bidirectionally.
 
 ## Available Bridges
 
@@ -16966,7 +17102,8 @@ MindRoom uses [mautrix](https://docs.mau.fi/bridges/) bridges to connect externa
 
 ## How Bridges Work
 
-Each bridge registers as a Matrix [Application Service](https://spec.matrix.org/latest/application-service-api/) with Synapse. The bridge:
+Each bridge registers as a Matrix [Application Service](https://spec.matrix.org/latest/application-service-api/) with the homeserver.
+The bridge:
 
 1. Creates ghost users on Matrix for external contacts
 2. Creates Matrix rooms for external chats
@@ -16974,259 +17111,107 @@ Each bridge registers as a Matrix [Application Service](https://spec.matrix.org/
 
 In **puppet mode**, you log into your real account on the external platform. Your messages appear as coming from you on both sides, not from a bot.
 
-## Adding a New Bridge
+## Bridge Manager
 
-1. Create a config directory: `telegram-bridge/`, `slack-bridge/`, etc.
-2. Add the bridge service to `compose.yaml`
-3. Generate a registration file and mount it into Synapse
-4. Add the registration path to `homeserver.yaml` under `app_service_config_files`
-5. Restart Synapse and start the bridge
+Bridge deployments are managed from `local/instances/deploy/`.
+Run `./bridge.py --help` there for the exact supported commands.
+
+The normal workflow is:
+
+1. Add the bridge with `bridge.py add <type> --instance <name>`.
+2. Generate and install its appservice registration with `bridge.py register <type> --instance <name>`.
+3. Start it with `bridge.py start <type> --instance <name>`.
+4. Inspect it with `bridge.py status` and `bridge.py logs`.
+
+Generated bridge data lives beneath the selected instance data directory.
+Synapse registration is wired automatically by the manager; Tuwunel uses its appservice registration flow.
+
+Adding a new bridge type requires a template under `local/instances/deploy/templates/bridges/` plus corresponding manager support.
 
 # Telegram Bridge
 
-Bridge Telegram and Matrix using [mautrix-telegram](https://docs.mau.fi/bridges/python/telegram/) in **puppet mode**. Each user logs in with their own Telegram account, so messages appear as the real user on both sides.
-
-## What Can You Do With This?
-
-The bridge enables two main use cases:
-
-1. **Talk to MindRoom agents from Telegram** -- Link a Telegram group to a Matrix room (like Lobby) so you can chat with AI agents directly from the Telegram app, without opening Element.
-
-2. **Access Telegram chats from Matrix** -- Your existing Telegram conversations appear as Matrix rooms in Element, so you can use one client for everything.
-
-Most users want use case 1. See [Bridging Matrix rooms to Telegram](#step-2-bridge-matrix-rooms-to-telegram) after setup.
-
-## Architecture
-
-```
-Telegram Cloud <--> mautrix-telegram <--> Synapse <--> Element
-                    (bridge bot)         (homeserver)   (client)
-```
-
-- **mautrix-telegram** runs locally and connects outbound to Telegram's API -- your Matrix server does NOT need to be publicly accessible
-- Each Matrix user can log into their own Telegram account (puppeting)
-- Messages flow bidirectionally in real time
+Bridge Telegram and Matrix with `mautrix-telegram` in puppet mode.
+Each user can authenticate their own Telegram account, and linked Telegram groups become Matrix rooms.
 
 ## Prerequisites
 
-### 1. Telegram API Credentials
+Create Telegram API credentials at [my.telegram.org](https://my.telegram.org), and create a bridge bot through [@BotFather](https://t.me/BotFather).
+Keep the API hash and bot token secret.
 
-1. Go to [my.telegram.org](https://my.telegram.org) and log in
-2. Click "API development tools"
-3. Create an app (title: "MindRoom Bridge", short name: "mindroom")
-4. Note the **api_id** (numeric) and **api_hash** (string)
+## Deploy
 
-### 2. Telegram Bot
+Run the bridge manager from `local/instances/deploy/`:
 
-1. Message [@BotFather](https://t.me/BotFather) on Telegram
-2. Send `/newbot`, choose a name and username
-3. Note the **bot token** (format: `123456789:ABCdefGHI...`)
+```bash
+./bridge.py add telegram --instance <instance>
+./bridge.py register telegram --instance <instance>
+./bridge.py start telegram --instance <instance>
+./bridge.py status --instance <instance>
+./bridge.py logs telegram --instance <instance>
+```
 
-## Setup
+`bridge.py add` creates the bridge data directory, `.env.telegram`, configuration, and generated `docker-compose.yml` service named `telegram`.
+Enter `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `TELEGRAM_BOT_TOKEN` in the generated `.env.telegram` file before starting the bridge.
 
-### 1. Add credentials to config
+Synapse and Tuwunel use different appservice registration mechanisms; `bridge.py register` selects the correct path for the instance homeserver.
 
-Edit `telegram-bridge/config.yaml` and replace the placeholders in the `telegram:` section:
+## Configure MindRoom
+
+Telegram ghost users must resolve to an authorized Matrix requester when room access is restrictive.
+Register the bridge bot as a bot account when it can originate events, and use room-level thread mode because Telegram does not preserve Matrix thread relations:
 
 ```yaml
-telegram:
-    api_id: 12345678          # Your numeric api_id
-    api_hash: abcdef123456    # Your api_hash string
-    bot_token: 123456:ABC...  # Your bot token from BotFather
+bot_accounts:
+  - "@telegrambot:matrix.example.com"
+
+authorization:
+  aliases:
+    telegram:
+      patterns:
+        - "@telegram_*:matrix.example.com"
+      target: "@owner:matrix.example.com"
+  agent_reply_permissions:
+    "*":
+      - "@owner:matrix.example.com"
+
+agents:
+  assistant:
+    thread_mode: room
 ```
 
-Also update the same values in your `.env`:
+Replace IDs and alias patterns with the values generated for your deployment.
+Validate the complete configuration before starting MindRoom.
 
-```bash
-TELEGRAM_API_ID=12345678
-TELEGRAM_API_HASH=abcdef123456
-TELEGRAM_BOT_TOKEN=123456:ABC...
-```
+## Authenticate Telegram
 
-### 2. Recreate Synapse and start the bridge
+Start a Matrix DM with the generated Telegram bridge bot.
+Use either:
 
-Synapse needs a new volume mount for the bridge registration file, so it must be **recreated** (not just restarted):
+- `login phone +15551234567` for phone authentication.
+- `login qr` for QR authentication.
 
-```bash
-# Recreate Synapse to pick up the new volume mount and bridge registration
-docker compose up -d synapse
+Telegram normally sends the login code to an already authenticated Telegram client.
+Accounts with two-factor authentication receive an additional password prompt.
 
-# Wait for Synapse to become healthy
-docker compose ps synapse
+## Link a Room
 
-# Start the bridge
-docker compose up -d telegram-bridge
-```
+1. Create a Telegram group and add the generated Telegram bot.
+2. Invite the Matrix bridge bot into the MindRoom-managed Matrix room.
+3. Follow the bridge bot's current `help` output to create or link the portal.
 
-> **Note:** `docker compose restart synapse` will NOT work here because the `registration.yaml` volume mount is new in `compose.yaml`.
-> A restart reuses the existing container; `up -d` recreates it with the updated mounts.
+Exact portal commands depend on the pinned `mautrix-telegram` image, so use the running bridge's `help` output rather than commands copied from another version.
 
-### 3. Verify
+## Operations
 
-```bash
-# Check bridge logs
-docker compose logs telegram-bridge --tail 20
+Use the manager for status, logs, start, stop, and registration operations.
+Generated configuration, registration, and SQLite state live under the instance's bridge data directory.
 
-# Look for "Startup actions complete"
-```
+Deleting the bridge database removes Telegram login and portal state and requires users to authenticate again.
+Back up the generated bridge data directory before any reset.
 
-## Usage
-
-### Step 1: Log in to Telegram via the bridge
-
-Before you can bridge anything, you must link your Telegram account:
-
-1. Open Element at your Element URL
-2. Start a DM with `@telegrambot:your.matrix.domain`
-3. Send `login`
-4. Enter your phone number in international format (e.g., `+1234567890`)
-5. Enter the verification code sent to your Telegram app
-6. Your existing Telegram chats will appear as Matrix rooms
-
-### Step 2: Bridge Matrix rooms to Telegram
-
-This is the primary use case -- talking to MindRoom agents from Telegram.
-
-The bridge connects a **Telegram group** to a **Matrix room**. You need a Telegram group on the Telegram side because that's what you'll open in the Telegram app to send and receive messages.
-
-**For each Matrix room you want to access from Telegram** (e.g., Lobby):
-
-1. **Create a Telegram group** in the Telegram app (e.g., name it "MindRoom Lobby")
-2. **Add your bridge bot** (e.g., `@your_bridge_bot`) to that Telegram group
-3. **In Element**, go to the Matrix room you want to bridge (e.g., Lobby)
-4. **Invite the bridge bot**: invite `@telegrambot:your.matrix.domain` to the room
-5. **Link the rooms**: in the Matrix room, send `!tg bridge` -- the bot will list your Telegram groups and let you pick which one to link
-
-Once linked:
-- Messages you send in the **Telegram group** appear in the **Matrix room** -- MindRoom agents will see and respond to them
-- Agent responses in the **Matrix room** appear in the **Telegram group**
-- You can chat with MindRoom agents entirely from the Telegram app
-
-Repeat for any other Matrix rooms you want accessible from Telegram.
-
-> **Why can't I just invite the bot directly?**
-> The bridge bot (`@telegrambot`) is Matrix-side infrastructure -- it manages the bridge but isn't a Telegram chat.
-> To use Telegram as your client, there must be a Telegram group for the Telegram app to display.
-> The bridge connects that group to the Matrix room bidirectionally.
-
-### Accessing Telegram chats from Matrix
-
-After logging in (step 1), your Telegram chats automatically appear as Matrix rooms in Element. This lets you use Element as a unified client for both Matrix and Telegram conversations.
-
-- **Private chats**: Automatically bridged as Matrix DMs
-- **Groups**: Automatically bridged if within `sync_create_limit` (default: 30)
-- **Additional groups**: Use `search <query>` in the bridge bot DM to find and bridge more
-
-### Bot Commands Reference
-
-Send these to `@telegrambot:your.matrix.domain` in a DM, or in a bridged room:
-
-| Command | Description |
-|---------|-------------|
-| `login` | Link your Telegram account |
-| `logout` | Unlink your Telegram account |
-| `ping` | Check bridge connection status |
-| `search <query>` | Search your Telegram chats |
-| `!tg bridge` | Link current Matrix room to a Telegram group (send in the room) |
-| `unbridge` | Unlink current room from Telegram |
-| `sync` | Re-sync Telegram chat list |
-| `help` | Show all commands |
-
-## Configuration Reference
-
-Key settings in `telegram-bridge/config.yaml`:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `bridge.username_template` | `telegram_{userid}` | Matrix username pattern for Telegram ghosts |
-| `bridge.displayname_template` | `{displayname} (TG)` | Display name pattern for Telegram users |
-| `bridge.sync_create_limit` | `30` | Max chats to auto-create on first sync |
-| `bridge.sync_direct_chats` | `true` | Auto-bridge private chats |
-| `bridge.encryption.allow` | `true` | Allow E2EE in bridged rooms |
-| `bridge.permissions` | See config | Who can use the bridge and at what level |
-
-### Permission Levels
-
-Set in `bridge.permissions`:
-
-- `relaybot` - Messages relayed through the bot (not puppeted)
-- `user` - Can use the bridge but not log in
-- `puppeting` - Can log in with their Telegram account
-- `full` - Full access including creating portals
-- `admin` - Bridge administration
-
-Default config gives `full` to all users on your homeserver domain.
-
-## Troubleshooting
-
-### Bridge won't start
-
-- Check credentials: `api_id` must be numeric, `api_hash` must be a hex string, `bot_token` must be a valid BotFather token
-- Check logs: `docker compose logs telegram-bridge --tail 50`
-- Verify Synapse is healthy: `docker compose ps`
-
-### Login fails
-
-- Ensure `api_id` and `api_hash` are from the same Telegram app
-- The bot token must be from a bot you own (not revoked)
-- If you get "FLOOD_WAIT", wait the indicated time before retrying
-
-### Messages not bridging
-
-- Check the bridge is connected: DM the bot and send `ping`
-- Verify Synapse has the registration: check `app_service_config_files` in `homeserver.yaml`
-- Check bridge permissions in `config.yaml` - your user domain must have `full` or `puppeting`
-
-### Double puppeting
-
-To make your messages from Matrix appear as your real Telegram account (not the bridge bot):
-
-1. This is automatic when you log in via `login` - puppet mode is the default
-2. If messages still show as the bot, check `bridge.sync_with_custom_puppets` in config
-
-### Database issues
-
-The bridge uses SQLite stored in the `telegram-bridge` data volume. To reset:
-
-```bash
-docker compose stop telegram-bridge
-rm <data-dir>/telegram-bridge/mautrix-telegram.db
-docker compose up -d telegram-bridge
-```
-
-Note: This will require re-logging into Telegram.
-
-### Registration out of sync
-
-If Synapse reports appservice errors, regenerate the registration:
-
-```bash
-docker compose stop telegram-bridge
-rm telegram-bridge/registration.yaml
-# Temporarily set valid api_id in config.yaml, then:
-docker compose run --rm --no-deps --entrypoint \
-  "python -m mautrix_telegram -g -c /data/config.yaml -r /data/registration.yaml" \
-  telegram-bridge
-docker compose restart synapse
-docker compose up -d telegram-bridge
-```
-
-## Maintenance
-
-### Updating
-
-```bash
-docker compose pull telegram-bridge
-docker compose up -d telegram-bridge
-```
-
-### Backup
-
-Important data locations:
-
-- `telegram-bridge/config.yaml` - Bridge configuration
-- `telegram-bridge/registration.yaml` - Appservice registration
-- Telegram bridge data volume - SQLite database with session data
+Telegram-side puppeting is established by Telegram login.
+Matrix double puppeting is a separate feature controlled by the generated configuration's current `double_puppet` settings.
+Do not assume Telegram login configures Matrix double puppeting automatically.
 
 # Google Services OAuth
 
@@ -17690,15 +17675,20 @@ A `Dockerfile.mindroom-minimal` variant is also available, which builds a smalle
 For development, run MindRoom alongside a local Matrix server:
 
 ```bash
-# Start Matrix (Synapse + Postgres + Redis)
-cd local/matrix && docker compose up -d
+# Start Matrix (Synapse + Postgres + Redis) without changing directories
+docker compose -f local/matrix/docker-compose.yml up -d
 
 # Verify Matrix is running
 curl -s http://localhost:8008/_matrix/client/versions
 
-# Start MindRoom using the docker-compose.yml you created above
+# Start MindRoom using the docker-compose.yml you created above.
+# Its MATRIX_HOMESERVER must resolve from inside the MindRoom container.
 docker compose up -d
 ```
+
+The two Compose projects do not share a network automatically.
+Either attach both services to one named external network and use the Synapse service name, such as `http://mindroom-synapse:8008`, or configure an explicit host-gateway address.
+Do not use `http://localhost:8008` inside the MindRoom container; there, `localhost` means the MindRoom container itself.
 
 The local Matrix stack includes:
 
@@ -17806,6 +17796,9 @@ Multiple runtimes may access the same agent directory concurrently, so files and
 Add a `sandbox-runner` service alongside MindRoom.
 Both use the same image.
 The runner just has a different entrypoint and no access to `.env` or the primary data volume.
+This shared-runner topology provides worker-local scratch storage only.
+It does not expose the primary runtime's canonical `agents/<agent>/workspace` tree, so do not use it when file or shell work must persist in the agent workspace.
+Use the dedicated Docker backend below for persistent agent workspaces.
 
 ```yaml
 services:
@@ -17836,6 +17829,7 @@ services:
 
 volumes:
   sandbox-workspace:
+    name: sandbox-workspace
 ```
 
 Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
@@ -17844,7 +17838,7 @@ Do not mount the full `mindroom_data` tree into the runner because it contains c
 > The `sandbox-workspace` Docker volume is created as root by default.
 > The runner runs as UID 1000, so you must fix ownership after first creating the volume:
 > ```bash
-> docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace
+> docker compose run --rm --user root --entrypoint chown sandbox-runner -R 1000:1000 /app/workspace
 > ```
 > Alternatively, omit the `user:` directive to run as root (less secure).
 
@@ -17922,12 +17916,13 @@ Run MindRoom directly on the host while isolating code-execution tools in a Dock
 
 ```bash
 # 1. Start the sandbox runner container
+export MINDROOM_SANDBOX_PROXY_TOKEN="$(openssl rand -hex 32)"
 docker run -d \
   --name mindroom-sandbox-runner \
-  -p 8766:8766 \
+  -p 127.0.0.1:8766:8766 \
   -e MINDROOM_WORKER_BACKEND=static_runner \
   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
-  -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
+  -e MINDROOM_SANDBOX_PROXY_TOKEN="$MINDROOM_SANDBOX_PROXY_TOKEN" \
   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
   ghcr.io/mindroom-ai/mindroom:latest \
   /app/run-sandbox-runner.sh
@@ -17935,7 +17930,6 @@ docker run -d \
 # 2. Start MindRoom on the host with proxy config
 export MINDROOM_WORKER_BACKEND=static_runner
 export MINDROOM_SANDBOX_PROXY_URL=http://localhost:8766
-export MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token
 export MINDROOM_SANDBOX_EXECUTION_MODE=selective
 export MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
 mindroom run
@@ -17946,7 +17940,7 @@ Or add the proxy variables to your `.env` file:
 ```bash
 MINDROOM_WORKER_BACKEND=static_runner
 MINDROOM_SANDBOX_PROXY_URL=http://localhost:8766
-MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token
+MINDROOM_SANDBOX_PROXY_TOKEN=<generated-strong-random-token>
 MINDROOM_SANDBOX_EXECUTION_MODE=selective
 MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
 ```
@@ -17958,11 +17952,11 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 > ```bash
 > docker run -d \
 >   --name mindroom-sandbox-runner \
->   -p 8766:8766 \
+>   -p 127.0.0.1:8766:8766 \
 >   -v ./config.yaml:/app/config.yaml:ro \
 >   -e MINDROOM_CONFIG_PATH=/app/config.yaml \
 >   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
->   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
+>   -e MINDROOM_SANDBOX_PROXY_TOKEN=<generated-strong-random-token> \
 >   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
 >   ghcr.io/mindroom-ai/mindroom:latest \
 >   /app/run-sandbox-runner.sh
@@ -18258,7 +18252,7 @@ If you don't want a value to reach tools, don't export it.
 - Any failure (non-zero exit, timeout, escape, missing `bash`) returns the tool call as `ok: false` with `failure_kind: "tool"` and an error mentioning `.mindroom/worker-env.sh`.
 - Hook failures do not poison the worker; only the requesting tool call fails.
 
-This hook works identically for the static sidecar and dedicated Kubernetes worker backends because it runs inside the sandbox runner per request.
+This hook works identically for static sidecar, dedicated Docker, and dedicated Kubernetes worker backends because it runs inside the sandbox runner per request.
 It is not a true container startup hook — it does not change pod templates, recreate Deployments, or alter Helm values.
 For an example, see `docs/tools/execution-and-coding.md`.
 
@@ -18275,7 +18269,7 @@ export MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON='{"shell": ["github"], "python": 
 ```
 
 This shares the `github` credential service with `shell` tool calls and `openai` with `python` tool calls.
-Credentials are never stored in the runner.
+Credentials are never persisted by the runner; a lease holds them in memory until consumed or expired.
 Each lease is consumed on use and expires after the configured TTL.
 
 ## Security considerations
@@ -18285,7 +18279,8 @@ Each lease is consumed on use and expires after the configured TTL.
 
   Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
 - Credential leases are single-use by default and expire after 60 seconds.
-- The worker container `securityContext` drops all capabilities and disables privilege escalation.
+- Helm-managed Kubernetes worker containers drop all capabilities and disable privilege escalation.
+- Dedicated Docker workers do not currently receive the same chart-managed `securityContext`; harden their Docker host and launch policy separately.
 - With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
@@ -18460,6 +18455,9 @@ If traffic goes `worker -> Agent Vault -> Squid`, Squid only sees the Agent Vaul
 
 Use `approvedEgress.parentProxy` to make the chart render a layered Squid config and point Agent Vault tool traffic at approved egress first:
 
+Before enabling the server and bootstrap job, create `workers.kubernetes.agentVault.bootstrapSecretName` (default `agent-vault-bootstrap`) with both `AGENT_VAULT_MASTER_PASSWORD` and `AGENT_VAULT_OWNER_PASSWORD`.
+Create the Secret in the worker namespace too when it differs from the release namespace.
+
 ```yaml
 workers:
   backend: kubernetes
@@ -18531,7 +18529,7 @@ Requests for `worker_scope: user` are rejected because one user-scoped worker ca
 ## Secure Minimum
 
 Use `workers.backend: kubernetes`.
-Keep `workers.kubernetes.networkPolicy.create` and `egressProxy.networkPolicy.create` enabled.
+Keep `workers.kubernetes.networkPolicy.create`, `egressProxy.networkPolicy.create`, and `approvedEgress.networkPolicy.create` enabled.
 Provide `approvedEgress.token.existingSecret` or `workers.sandbox.proxyToken`.
 Pin `approvedEgress.image.tag` or `approvedEgress.image.digest`.
 Keep `request_network_access` behind `tool_approval`.
@@ -18805,7 +18803,7 @@ See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-prox
 
 ## Secrets Management
 
-API keys are mounted as files at `/etc/secrets/` (not environment variables). MindRoom reads paths from `*_API_KEY_FILE` environment variables:
+The hosted instance chart mounts provider keys as files under `/etc/secrets/` and sets the matching `*_API_KEY_FILE` variables:
 
 ```yaml
 env:
@@ -18814,6 +18812,9 @@ env:
   - name: OPENROUTER_API_KEY_FILE
     value: "/etc/secrets/openrouter_key"
 ```
+
+The standalone runtime chart instead reads `providerCredentials` Secret keys into direct provider environment variables.
+Its `env` values shape is a map with `extra` and `envFrom`, not the list shown above for the hosted instance container.
 
 For production SaaS instance provisioning, the platform backend creates `mindroom-api-keys-{instance_id}` directly with Kubernetes before running Helm.
 The instance chart is then rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`, so tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
@@ -19854,6 +19855,7 @@ Runs a series of checks in one pass:
 - **Memory config** — checks memory LLM and embedder reachability (Ollama, OpenAI embeddings, sentence-transformers)
 - **Matrix homeserver** — verifies the homeserver is reachable via `/_matrix/client/versions`
 - **Storage** — confirms the storage directory is writable
+- **Encryption stores** — checks that persisted Matrix device identities still have their local E2EE stores
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -19934,7 +19936,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 Create a starter `config.yaml` with the personal Mind agent, one model, file-based memory, and sensible defaults.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
-Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
+Provider presets (`--provider`) set the default model: `anthropic`, `azure`, `bedrock_claude`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
 Generated configs include commented model alternatives for providers that have common variants, such as OpenAI mini/nano models.
 
 ```bash
@@ -20030,6 +20032,16 @@ Show the resolved config file path and all search locations.
 
 ```bash
 mindroom config path
+```
+
+### config resolve
+
+Print the fully merged YAML after recursively resolving every `!include` tag.
+Keys are sorted so the output can be diffed before and after splitting a configuration into include files.
+
+```bash
+mindroom config resolve
+mindroom config resolve --path ./config.yaml
 ```
 
 ## connect

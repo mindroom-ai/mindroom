@@ -9,7 +9,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 
 ## Tools On This Page
 
-- [`matrix_message`] - Send, reply, react, read, edit, or inspect Matrix conversation context.
+- [`matrix_message`] - Send, reply, react, read, list room threads, edit, or inspect Matrix conversation context.
 - [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
 - [`thread_resolution`] - Explicitly resolve or reopen the active Matrix thread.
@@ -21,7 +21,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 ## Common Setup Notes
 
 These tools depend on the active `ToolRuntimeContext`, so they only work when an agent is running in a Matrix-connected conversation.
-`matrix_message` implies `attachments` through `Config.IMPLIED_TOOLS`, so enabling `matrix_message` makes the `attachments` toolkit available even when you do not list it separately.
+`matrix_message` implies `attachments` and `matrix_room` through `Config.IMPLIED_TOOLS`, so enabling it makes both companion toolkits available even when you do not list them separately.
 Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run.
 Current source in this worktree exposes `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
 
@@ -31,7 +31,7 @@ Current source in this worktree exposes `matrix_message`, `matrix_voice_message`
 
 ### What It Does
 
-`matrix_message` supports `send`, `reply`, `thread-reply`, `react`, `read`, `thread-list`, `edit`, and `context`.
+`matrix_message` supports `send`, `reply`, `thread-reply`, `react`, `read`, `room-threads`, `thread-list`, `edit`, and `context`.
 `send` targets the room timeline by default, even when the current conversation is inside a thread.
 When a room-level `send` includes both text and attachments, the text is posted to the room timeline and the attachments are threaded under that new text event.
 When a room-level `send` includes multiple attachments and no text, the first attachment is posted to the room timeline and the remaining attachments are threaded under it.
@@ -40,8 +40,9 @@ In `thread_mode: room`, room-level `send` stays plain room messaging and does no
 `reply` and `thread-reply` inherit the current thread when one can be resolved, and they return an error when no thread target is available.
 `read`, `edit`, and `context` also inherit the current thread when one can be resolved, while `thread_id="room"` forces room-level scope instead of thread inheritance.
 `thread-list` uses the current thread when one is active, and it requires an explicit `thread_id` when there is no active thread context.
+`room-threads` pages thread roots in the target room and returns `next_token` plus `has_more`; pass a returned `next_token` as `page_token` to fetch the next page.
 `react` requires `target` and uses `👍` when `message` is empty.
-`read` defaults to 20 messages and caps `limit` at 50.
+`read`, `thread-list`, and `room-threads` default `limit` to 20 and clamp it from 1 through 50.
 `thread-list` returns recent thread messages plus `edit_options` for messages that the current Matrix account can edit.
 Only `send`, `reply`, and `thread-reply` accept attachments, with a combined cap of five `attachment_ids` plus `attachment_file_paths` per call.
 Relative `attachment_file_paths` resolve from the agent workspace when one is available, and they must stay inside that workspace.
@@ -93,9 +94,11 @@ Use `caption` for the audio event body and `companion_message` for a separate re
 
 ### Configuration
 
-By default `matrix_voice_message` uses OpenAI text-to-speech through a stored credential or `OPENAI_API_KEY` / `OPENAI_API_KEY_FILE`.
+The optional tool configuration fields are `api_key`, `model`, `base_url`, `voice`, and `response_format`.
+By default `matrix_voice_message` uses OpenAI text-to-speech through an explicit or stored credential, or `OPENAI_API_KEY` / `OPENAI_API_KEY_FILE`.
+Provider-prefixed model IDs such as `hexgrad/kokoro-82m` route through OpenRouter and use an explicit `api_key` or `OPENROUTER_API_KEY`; OpenRouter output is always requested as MP3.
 Set the `base_url` tool config (or the `TTS_URL` secret) to target any OpenAI-compatible speech endpoint instead, such as a local Kokoro server.
-When a `base_url` is configured without an explicit `api_key`, the tool sends a dummy API key so the real OpenAI credential never leaves the machine.
+When a non-OpenRouter `base_url` is configured without an explicit `api_key`, the tool sends a dummy API key so the real OpenAI credential never leaves the machine.
 `base_url` accepts a bare host, a `/v1` URL, or a full `/audio/speech` endpoint URL, and full endpoint URLs are honored verbatim.
 Defaults: `model=gpt-4o-mini-tts`, `voice=alloy`, `response_format=opus`.
 `response_format` must be one of `aac`, `flac`, `mp3`, `opus`, or `wav`, matching what the endpoint returns.
@@ -360,8 +363,9 @@ matrix_api(
 
 ### What It Does
 
-`attachments` exposes `list_attachments()`, `get_attachment()`, and `register_attachment()`.
+`attachments` exposes `list_attachments(target=None)`, `get_attachment()`, and `register_attachment()`.
 `list_attachments()` returns the attachment IDs currently available in tool runtime context, the resolved metadata payloads, and any `missing_attachment_ids`.
+Pass a context-available attachment ID as `target` to return only that attachment; an ID outside the current context returns an error.
 `get_attachment()` returns a single attachment record, including the runtime-local path, when called with only an attachment ID.
 `get_attachment(attachment_id, mindroom_output_path="relative/path")` saves the attachment bytes into the agent workspace and returns a `mindroom_tool_output` save receipt with the saved path, byte count, binary format, and SHA256 digest.
 Use `mindroom_output_path` before handing attachments to worker-routed workspace tools such as `file`, `coding`, `python`, or `shell`, because the runtime-local path may not exist inside the worker workspace.
@@ -387,6 +391,7 @@ agents:
 
 ```python
 list_attachments()
+list_attachments(target="att_abc123")
 get_attachment("att_abc123")
 get_attachment("att_abc123", mindroom_output_path="incoming/plan.pdf")
 register_attachment("incoming/plan.pdf")

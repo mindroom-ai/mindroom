@@ -90,7 +90,7 @@ Successful calls return a `ToolResult` with both plain-text URLs and attached im
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Giphy API key. The upstream toolkit also checks `GIPHY_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Giphy API key, with `GIPHY_API_KEY` as the upstream fallback. |
 | `limit` | `number` | `no` | `1` | Number of GIFs returned per search. |
 | `enable_search_gifs` | `boolean` | `no` | `true` | Enable `search_gifs()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
@@ -136,7 +136,7 @@ It expects a specific YouTube URL and then fetches metadata or transcript-derive
 | `enable_get_video_timestamps` | `boolean` | `no` | `true` | Enable `get_video_timestamps()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 | `languages` | `string[]` | `no` | `null` | Preferred transcript languages, for example `["en", "es"]`. |
-| `proxies` | `text` | `no` | `null` | Optional proxy mapping forwarded to `youtube_transcript_api`. |
+| `proxies` | mapping | unsupported | — | The upstream library accepts a proxy mapping, but MindRoom's authored tool-config schema does not currently expose mapping-valued fields. |
 
 ### Example
 

@@ -48,6 +48,10 @@ To provide messaging features, MindRoom and your selected homeserver process dat
 - app configuration and local preferences stored on your device
 - diagnostic information you choose to share with support
 
+If you use MindRoom's hosted control plane, it also processes account profile and status data, subscription and payment records, hosted instance records, usage metrics, audit events, and marketing or analytics consent choices.
+These records support service operation, billing, security, fraud prevention, compliance, and the preferences you select.
+Hosted account and instance data is stored with Supabase, and payment processing is handled by Stripe.
+
 ## Matrix and Homeservers
 
 MindRoom is built on Matrix.
@@ -134,7 +138,12 @@ Retention depends on the system component:
 
 - data stored on Matrix homeservers is retained according to the homeserver operator's policies
 - local app data remains on your device until you remove it or delete the app
+- runtime sessions, credentials, workspaces, files, and persistent volumes are retained until the installation operator removes them or applies its own retention policy
+- the hosted control plane schedules hard deletion of soft-deleted application accounts after a 7-day grace period
+- hosted non-critical audit logs are scheduled for deletion after 90 days and usage metrics after 365 days; selected security and deletion audit events are excluded from that ordinary cleanup
 - support emails and diagnostics may be retained for support and security purposes
+
+Scheduled cleanup describes the repository's configured policy, not proof that a particular deployment has completed every cleanup run.
 
 ## Account Deactivation / Deletion
 
@@ -143,6 +152,10 @@ The MindRoom iOS app provides an in-app account deactivation path:
 - `Settings` -> `Account` -> `Delete / Deactivate Account`
 
 Actual deletion/deactivation behavior depends on the capabilities and policies of your Matrix homeserver.
+
+Hosted MindRoom service account deletion is a separate control-plane flow with a 7-day grace period and is not triggered by Matrix account deactivation.
+The current hard-delete procedure removes application-database account, subscription, instance, usage, payment, and related records covered by its database function.
+It does not itself delete the upstream authentication user, Stripe customer or subscription data, Matrix account data, or installation persistent volumes; those processors and operators have separate deletion boundaries.
 
 ## Security
 
@@ -160,4 +173,4 @@ We may update this policy from time to time. The "Last updated" date will change
 
 For privacy questions, contact:
 
-- `support@mindroom.chat`
+- [MindRoom GitHub issues](https://github.com/mindroom-ai/mindroom/issues) for general policy questions; do not post personal data or private account details publicly

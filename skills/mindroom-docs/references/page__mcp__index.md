@@ -89,7 +89,7 @@ For `streamable-http` servers, `url` is required.
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
 Static `headers` are process-global and shared by every requester.
-Use the OAuth `auth` block for remote MCP servers that need a different bearer token per requester.
+Use the OAuth `auth` block plus `worker_scope: user` or `worker_scope: user_agent` for remote MCP servers that need a different bearer token per requester.
 
 ## Per-Server Options
 
@@ -160,7 +160,8 @@ They are useful when one server exposes many tools but one agent should see only
 
 MCP tools are available on every worker scope, including private per-user agents.
 Non-OAuth `mcp_<server_id>` tools always execute through the shared MCP server session; requester identity and requester credentials are never passed to the server.
-OAuth-backed remote MCP servers instead load a scoped OAuth token for the current requester at tool-call time and keep one session per requester scope.
+OAuth-backed remote MCP servers load a token for the resolved worker scope at tool-call time and keep one session per worker key.
+Shared scope reuses one agent-scoped token and session; `user` and `user_agent` provide requester isolation.
 
 ## OAuth-Backed Remote MCP
 
@@ -210,7 +211,7 @@ The bridge functions let an agent trigger the normal MindRoom OAuth connect flow
 When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
 Until the requester connects, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
 Set the per-server `description` option to tell the model what connecting would unlock; it is appended to all three bridge tool descriptions.
-After the user connects, `list_tools` returns the remote catalog and `call_tool` sends `Authorization: Bearer <requester access token>` to the MCP server.
+After the user connects, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for that worker scope to the MCP server.
 After MindRoom has a cached requester-specific catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that requester in addition to the bridge functions.
 
 `discovery: auto` performs protected-resource metadata discovery from the configured `resource` or server `url`, then resolves authorization-server metadata.
@@ -268,7 +269,8 @@ mcp_servers:
 means a remote MCP tool named `navigate_page` becomes `chrome_navigate_page` inside the agent's tool list.
 
 MindRoom rejects duplicate function names after prefixing.
-That includes collisions inside one server and collisions across different servers.
+That includes collisions inside one server and across tool or server surfaces visible to the same agent.
+Identical final function names are allowed on disjoint agent surfaces.
 The final function name must also fit within 64 characters.
 
 ## Example: Echo MCP Server
@@ -433,7 +435,7 @@ It waits up to 600 seconds for active Matrix responses to drain, then force-appl
 - Phase 1 supports MCP tools only.
 - MCP resources and prompts are not exposed in MindRoom yet.
 - Non-OAuth MCP integrations always use the shared server session, even on isolating worker scopes; per-requester isolation requires an OAuth-backed server.
-- OAuth-backed remote MCP integrations use requester-scoped OAuth credentials and sessions.
+- OAuth-backed remote MCP credentials and sessions follow the configured worker scope; use `user` or `user_agent` for requester isolation.
 - OAuth-backed remote MCP typed functions appear only after MindRoom has cached a requester-specific remote catalog.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.

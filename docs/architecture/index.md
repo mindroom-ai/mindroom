@@ -32,7 +32,7 @@ MindRoom's architecture consists of several key components working together.
 │                                                          │
 │  ┌─────────────────────────────────────────────────┐    │
 │  │                Memory System                     │    │
-│  │  (Mem0 + ChromaDB, agent/team scopes)           │    │
+│  │  (Mem0, file, or none; agent/team scopes)       │    │
 │  └─────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -81,6 +81,9 @@ MindRoom's architecture consists of several key components working together.
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
+| `response_turn.py` | Shared blocking and streaming response-turn drivers, including retries and dynamic-tool continuation |
+| `response_attempt.py` | Executes one visible response attempt with stop tracking |
+| `response_terminal.py` | Classifies pending-visible failures and terminal stream outcomes |
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
@@ -88,7 +91,7 @@ MindRoom's architecture consists of several key components working together.
 | `visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
-| `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
+| `streaming.py` | Streaming state machine and progressive response state |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
 | `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
@@ -104,7 +107,7 @@ MindRoom's architecture consists of several key components working together.
 3. **Messages are ordered and coalesced**: `ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing.py` batches per conversation — a live batch ending in text is a complete utterance and dispatches immediately, a live batch ending in media waits a debounce window for more attachments or a trailing caption, and follow-up backlogs queued behind an active response flush as one combined turn at idle; conversations never wait on each other
 4. **The turn is planned**: `turn_policy.py` decides to ignore, route, or respond; a direct responder is resolved when one eligible agent or team remains, otherwise the router selects among candidates
 5. **Selected entity processes** the message via `response_runner.py` and the Agno runtime, executing tools as needed
-6. **Response is delivered** through `streaming.py` (progressive edits) and `delivery_gateway.py` (Matrix send/edit)
+6. **Response is delivered** through `delivery_gateway.py`, which owns Matrix send/edit/finalization while `streaming.py` owns progressive response state
 7. **The turn is recorded** in the durable handled-turn ledger (`turn_store.py` / `handled_turns.py`) so restarts do not double-reply
 8. **Memory updates** asynchronously in background
 

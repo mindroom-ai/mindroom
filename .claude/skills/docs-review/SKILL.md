@@ -38,11 +38,12 @@ Look for new features, changed defaults, renamed options, or removed functionali
 
 ### 2. Verify Configuration Docs Against Code
 
-Compare docs under `docs/configuration/` against the Pydantic models in `src/mindroom/config.py`. Don't rely on a fixed list of files — discover what exists in both locations and check they match.
+Compare docs under `docs/configuration/` against the Pydantic models in the `src/mindroom/config/` package, whose root model is in `src/mindroom/config/main.py`.
+Do not rely on a fixed list of files; discover what exists in both locations and check they match.
 
 ```bash
 # Find all config models
-grep -r "class.*BaseModel" src/mindroom/config.py -A 15
+rg -n "class .*\(BaseModel\)" src/mindroom/config
 
 # Find all config doc files
 ls docs/configuration/

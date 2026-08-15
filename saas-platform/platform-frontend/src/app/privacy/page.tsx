@@ -2,46 +2,46 @@ export default function PrivacyPage() {
   return (
     <main className="max-w-3xl px-6 py-12 mx-auto space-y-6">
       <header className="space-y-2">
-        <p className="text-sm text-muted-foreground">Last updated: September 20, 2025</p>
+        <p className="text-sm text-muted-foreground">Last reviewed: August 14, 2026</p>
         <h1 className="text-3xl font-semibold">MindRoom Privacy Notice</h1>
         <p className="text-base text-muted-foreground">
-          This preview environment is intended for evaluation and internal testing. The details below
-          describe how we handle data while the platform is in staged rollout.
+          This hosted control-plane notice supplements the canonical MindRoom privacy policy.
         </p>
       </header>
       <section className="space-y-3">
         <h2 className="text-xl font-semibold">Information We Collect</h2>
         <p>
-          We store account details, workspace configuration, and interaction logs needed to operate the
-          Matrix-based agent runtime. Do not upload end-user personal data or regulated content during
-          testing.
+          We process account profile and status data, subscriptions and payments, hosted instance records,
+          usage metrics, audit events, and consent choices needed to operate the service.
         </p>
       </section>
       <section className="space-y-3">
         <h2 className="text-xl font-semibold">How Information Is Used</h2>
         <p>
-          Data collected in staging supports troubleshooting, product analytics, and improving agent
-          quality. Access is limited to the MindRoom engineering team.
+          This data supports service operation, billing, security, fraud prevention, compliance, and the
+          preferences you select.
         </p>
       </section>
       <section className="space-y-3">
         <h2 className="text-xl font-semibold">Retention</h2>
         <p>
-          Logs and configuration snapshots may be reset or purged at any time. If you need staging data
-          removed sooner, contact the team and we will wipe it promptly.
+          Hosted cleanup schedules soft-deleted application accounts for removal after a seven-day grace
+          period, ordinary audit logs after 90 days, and usage metrics after 365 days. Some security and
+          deletion audit events are excluded from ordinary audit cleanup.
         </p>
       </section>
       <section className="space-y-3">
         <h2 className="text-xl font-semibold">Third Parties</h2>
         <p>
-          The preview stack uses Supabase for authentication and Stripe in test mode for billing flows.
-          These services receive only the minimum data required for evaluation.
+          The hosted control plane uses Supabase for database and authentication services and Stripe for
+          payment processing. Matrix homeserver and installation operators have their own data boundaries.
         </p>
       </section>
       <section className="space-y-3">
         <h2 className="text-xl font-semibold">Contact</h2>
         <p>
-          Reach us at <a className="text-primary" href="mailto:support@mindroom.chat">support@mindroom.chat</a> for privacy questions or data requests.
+          Read the full <a className="text-primary" href="https://docs.mindroom.chat/privacy/">MindRoom privacy policy</a>.
+          For general questions, use <a className="text-primary" href="https://github.com/mindroom-ai/mindroom/issues">MindRoom GitHub issues</a> without posting personal data or private account details.
         </p>
       </section>
     </main>

@@ -1,12 +1,15 @@
 # MindRoom Security Review - Executive Summary
 
 **Date:** September 15, 2025
-**Updated:** September 17, 2025 (Status refresh after doc audit)
+**Updated:** March 18, 2026 (Repository audit)
 **Status:** 🟠 MEDIUM-HIGH – Staging-only; production launch blocked by open security items
 
 > **Audit note (2026-03-18):** Completion claims in this summary lack PR/commit proof.
 > Alertmanager receiver configuration is still pending.
 > The 6.8→5.8 risk score reduction is stated without supporting methodology.
+>
+> **Evidence boundary:** This is a historical repository review, not a deployment attestation.
+> “Present” below means visible in tracked code or configuration unless a dated live-environment result is cited.
 
 ## Overview
 
@@ -14,11 +17,11 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
 
 ## Key Security Improvements (September 17, 2025)
 
-- ✅ Admin endpoints now require `verify_admin`, enforce allowlists, and are rate limited.
-- ✅ `auth_monitor.py` provides IP-based lockout after 5 failures/15 minutes with audit logging.
-- ✅ Staging builds include CSP + security headers, request-size limits, trusted host checks.
-- ✅ GDPR endpoints for export/deletion/consent are present with automated tests.
-- ✅ Per-instance network policies and RBAC restrictions deployed; secrets mounted as read-only files.
+- ✅ Admin endpoint authentication, allowlists, and rate limiting are present in tracked code.
+- ✅ `auth_monitor.py` provides IP-based lockout after 5 failures/15 minutes for the covered verification path.
+- ✅ CSP, security headers, request-size limits, and trusted-host checks are present in tracked configuration.
+- ✅ GDPR endpoints for export, deletion, and consent are present with automated tests.
+- ✅ Per-instance network policies, RBAC restrictions, and read-only secret mounts are present in tracked charts.
 
 ## Outstanding High-Risk Work
 
@@ -42,13 +45,13 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
 | Multi-Tenancy & Data Isolation | ✅ PASS | RLS, ownership validation, and webhook/payment isolation verified |
 | Secrets Management | ⚠️ PARTIAL | Secrets via files, but rotation evidence + etcd encryption still pending |
 | Input Validation & Injection | ⚠️ PARTIAL | CLI/script sanitization and comprehensive request validation outstanding |
-| Session & Token Management | ⚠️ PARTIAL | Supabase handles JWTs, but cache allows ~5 min post-expiry window; no revocation list |
+| Session & Token Management | ⚠️ PARTIAL | Cache entries are bounded by JWT expiry, but server-side revocation or permission changes can remain stale for up to about five minutes; no revocation list |
 | Infrastructure Security | ⚠️ PARTIAL | Instance pods hardened, platform pods still run as root; internal TLS undecided |
 | Data Protection & Privacy | ⚠️ PARTIAL | GDPR workflows exist; confirm storage encryption & retention controls |
 | Dependency & Supply Chain | ⚠️ PARTIAL | pnpm audit shows 5 vulns; automate scanning + upgrade path |
 | Error Handling | ⚠️ PARTIAL | Base headers in place; need consistent sanitized error body strategy |
 | API Security | ⚠️ PARTIAL | Webhook/user CAPTCHA absent; key rotation not yet executed |
-| Monitoring & Incident Response | ⚠️ PARTIAL | Prometheus metrics + alert rules live; configure Alertmanager routing, dashboards, IR playbook, security.txt |
+| Monitoring & Incident Response | ⚠️ PARTIAL | Prometheus metrics and alert-rule manifests exist; configure and verify Alertmanager routing, dashboards, an owned IR playbook, and security.txt |
 | Frontend Security | ⚠️ PARTIAL | CSP shipped; remove dev auth bypass & require re-auth for sensitive flows |
 
 ## Business Impact Assessment
@@ -69,8 +72,8 @@ A comprehensive security review of the MindRoom SaaS platform was conducted acro
 ## Implementation Highlights
 
 - Phase 1 hardening (admin auth, rate limiting, logging) complete.
-- GDPR endpoints, log sanitization, and CSP deployed with automated tests.
-- Follow-up work (secrets rotation verification, alert routing/IR, pod hardening) is in flight; see timeline below for remaining tasks.
+- GDPR endpoints, a log sanitizer, and CSP are present with automated tests, but global logging coverage is incomplete.
+- Follow-up work includes secrets rotation verification, alert routing and incident response, and pod hardening; see the action plan for remaining tasks.
 
 **Total Implementation Time:** ~3 engineering days to date (additional work pending)
 

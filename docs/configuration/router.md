@@ -48,7 +48,8 @@ The router is a special system agent that handles several important tasks beyond
 
 ### Command Handling
 
-The router exclusively handles all commands:
+The router owns commands by default.
+A requester-scoped `!desktop` command may instead be owned by an eligible private agent when the room contains exactly that requester and agent.
 
 - `!help [topic]` - Get help on commands or specific topics
 - `!hi` - Show the welcome message again
@@ -56,13 +57,19 @@ The router exclusively handles all commands:
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
+- `!reload-plugins` - Reload configured plugins (admin only)
 - `!config <operation>` - Manage configuration when explicitly enabled for global admins
+- `!desktop [setup|status|confirm|rotate|disconnect]` - Manage the requester's Desktop target
+- `!model [name|list|reset]` - Show or switch the current thread model
+- `!thread_mode [room|thread|reset|show]` - Manage room thread mode (room admin only)
+- `!encrypt [confirm]` - Enable room encryption (irreversible, room admin only)
+- `!e2ee` - Show room encryption diagnostics
 
 Even in single-responder rooms, commands are always processed by the router.
 
 ### Welcome Messages
 
-When the router joins a room after an invite, it sends a requester-scoped welcome message.
+After accepting an invite, the router sends a requester-scoped welcome message only when the room has no existing message history.
 
 That welcome message lists:
 

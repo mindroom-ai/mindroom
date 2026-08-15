@@ -112,13 +112,22 @@ models:
 defaults:
   tools: [scheduler]
   markdown: true
+
+authorization:
+  global_users:
+    - "@alice:matrix.example.com"
+  agent_reply_permissions:
+    "*":
+      - "@alice:matrix.example.com"
 ```
 
 2. Set up your environment in `.env`:
 
 ```bash
-# Matrix homeserver (must allow open registration)
+# Matrix homeserver must allow agent registration, either through a
+# registration token/provisioning service or intentionally open registration.
 MATRIX_HOMESERVER=https://matrix.example.com
+# MATRIX_REGISTRATION_TOKEN=your-registration-token
 
 # AI provider API keys
 OPENAI_API_KEY=your_api_key
@@ -144,7 +153,7 @@ mindroom run
 | **Agents** | Single-specialty actors with specific tools and instructions |
 | **Teams** | Collaborative bundles of agents (coordinate or collaborate modes) |
 | **Router** | Built-in traffic director that routes messages to the right agent |
-| **Memory** | Mem0-inspired memory system with agent and team scopes |
+| **Memory** | Pluggable Mem0/ChromaDB and Markdown-file backends with agent and team scopes |
 | **Knowledge Bases** | File-backed semantic RAG or files-only access with per-agent base assignment |
 | **Tools** | 100+ integrations for external services |
 | **Skills** | OpenClaw-compatible skills system for extended agent capabilities |

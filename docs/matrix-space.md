@@ -33,4 +33,5 @@ Removing a user from `authorization.global_users` stops future MindRoom authoriz
 Demote stale Space admins manually in a Matrix client when needed.
 
 Set `enabled: false` to disable Space creation entirely.
+Disabling the setting does not delete an existing Space or remove its current child links.
 The `name` field controls the Space's display name and can be changed at any time.

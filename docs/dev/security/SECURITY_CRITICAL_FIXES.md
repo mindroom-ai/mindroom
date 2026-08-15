@@ -1,11 +1,14 @@
 # Critical Security Fixes for Production Release
 
 **Created:** 2025-01-16
-**Updated:** 2025-09-17 (Post-doc audit)
+**Updated:** 2026-03-18 (Post-doc audit)
 **Status:** P0 🟢 (follow-up pending) | P1.1 🟢 | P1.2 ⚠️ (secrets lifecycle verification outstanding)
 
 > **Audit note (2026-03-18):** The risk score reduction (6.8→5.8) cited in the summary has no scoring methodology or evidence linking specific fixes to numeric changes.
 > P2 items (internal TLS, token cache) show no evidence of progress since September 2025.
+>
+> **Historical planning record:** Status labels below describe tracked-code observations, not verified deployment state.
+> Revalidate them against the current source and target environment before using this document operationally.
 
 ## Priority System
 - **P0**: Legal/Regulatory blockers - Fix IMMEDIATELY
@@ -20,13 +23,13 @@
 **Status:** ⚠️ PARTIAL
 **Files:** Database schema, logging throughout codebase
 **Issues RESOLVED:**
-- ✅ Sensitive data in logs: Sanitized via log_sanitizer.py
+- ⚠️ Sensitive data in logs: `log_sanitizer.py` protects its callers, but standard-library loggers can bypass it.
 - ✅ GDPR flows: Export/delete/consent endpoints live with tests
 - ✅ Soft delete: 7-day grace period implemented
 - ⚠️ PII encryption: Application-level encryption & storage-at-rest verification still pending
 
 **Implementation:**
-1. ✅ Removed all sensitive logging (frontend & backend)
+1. ⚠️ Added a backend sanitizer, but global logging coverage remains incomplete
 2. ✅ Added GDPR data export endpoint
 3. ✅ Implemented soft delete with grace period
 4. ✅ Simple, direct implementation following KISS
@@ -36,13 +39,13 @@
 **Files:** `.env`, git history
 **Issues RESOLVED:**
 - ✅ Git history scan identified 3 keys in docs (DeepSeek, Google, OpenRouter)
-- ✅ Helper scripts available: `scripts/rotate-api-keys.sh` + `scripts/apply-rotated-keys.sh`
+- ⚠️ Obsolete helper scripts remain in the repository: do not run `scripts/rotate-api-keys.sh` or `scripts/apply-rotated-keys.sh`, because their Secret names and keys do not match the current charts.
 - ⚠️ Pending: Execute rotation and capture evidence (no rotation report on disk)
 - ⚠️ Pending: Confirm leaked keys revoked upstream
 
 **Implementation:**
 1. ✅ Checked git history for secrets
-2. ✅ Created rotation procedure
+2. ⚠️ Replace the obsolete helpers with the current Helm, provisioner, or external-secret rotation procedure
 3. ⏳ Awaiting actual key rotation (manual step)
 
 ---
@@ -54,8 +57,8 @@
 **Issues RESOLVED:**
 - ✅ Attack detection: IP-based failure tracking with auto-blocking
 - ✅ Auth failure tracking: In-memory with auto-blocking
-- ✅ Audit logging: Auth events recorded via `create_audit_log`
-- ⚠️ Alerting & dashboards: Not yet configured (logs only)
+- ⚠️ Audit logging: Uncached regular-user verification events are recorded; cache-hit, admin, and SSO paths are not comprehensively covered.
+- ⚠️ Alerting & dashboards: PrometheusRule manifests exist, but receiver routing, dashboards, and live deployment are unverified.
 - ⚠️ Incident response: Playbook + disclosure channels outstanding
 
 **Implementation:**
@@ -117,20 +120,20 @@
 ### ✅ Day 1: Monitoring Basics
 - [x] Added auth failure tracking
 - [x] IP-based auto-blocking
-- [x] Audit logging for all auth events
+- [ ] Audit logging across regular-user cache hits, admin verification, and SSO paths
 
 ### ✅ Complete: Infrastructure
 - [x] K8s Secrets already implemented with secure file mounts
-- [x] Document rotation process
-- [x] Deploy Prometheus metrics + alert rules for auth/admin events
+- [ ] Replace obsolete rotation helpers and document a tested current rotation process
+- [x] Define Prometheus metrics + alert-rule manifests for auth/admin events
 - [ ] Configure Alertmanager receivers & security dashboards (low priority)
 
 ---
 
 ## Success Criteria - STATUS
-- ✅ No PII in logs (sanitization implemented)
+- ⚠️ Sanitization exists for callers using the backend wrapper; global logger coverage is outstanding.
 - ✅ GDPR export/delete/consent endpoints functional (tests cover happy paths)
-- ✅ Auth failures are tracked with IP-based blocking and audit logging
+- ⚠️ Uncached regular-user auth failures are tracked with IP-based blocking and audit logging; other auth surfaces remain incomplete.
 - ⚠️ Secrets rotation still requires an executed run + evidence
 - ⚠️ Comprehensive monitoring/alerting not yet in place
 

@@ -1,10 +1,11 @@
 # Security Review: Data Protection & Privacy
 
-> **Audit note (2026-03-18):** GDPR endpoints are live and log sanitization is done, but PII encryption at rest is still marked FAIL.
-> The action plan does not call this out as a blocker — reconcile priority.
+> **Audit note (2026-03-18):** GDPR endpoints and a log-sanitizer wrapper exist, but global logger coverage and PII encryption at rest remain incomplete.
+> The action plan already lists PII encryption, but its priority and processor-wide deletion scope require reconciliation.
+> This is a historical repository review, not a compliance or deployment attestation; blocks labeled “Original recommendation” describe the initial plan.
 
 **Review Date**: 2025-01-11
-**Updated**: 2025-09-17 (status refresh)
+**Updated**: 2026-03-18 (repository audit)
 **Reviewer**: Claude Code Security Audit
 **Scope**: MindRoom SaaS Platform Data Protection & Privacy Controls
 
@@ -14,13 +15,14 @@ This report evaluates the Data Protection & Privacy controls for the MindRoom Sa
 
 ### Overall Risk Assessment: **MEDIUM RISK**
 
-**Status Update (September 17, 2025):** GDPR/delete/consent flows and log sanitisation are in place. Remaining blockers: confirm Supabase encryption-at-rest (or add column-level encryption) and publish retention/cleanup documentation.
+**Status Update (March 18, 2026):** GDPR, deletion, and consent flows exist, but deletion does not cover every processor and log sanitization is not globally enforced.
+Remaining blockers include encryption-at-rest evidence, processor-wide deletion, global logging coverage, and accurate retention documentation.
 
 **Current Highlights**:
 - ⚠️ **Encryption-at-rest evidence missing** (confirm Supabase or layer pgcrypto)
-- ✅ Frontend/backend logging sanitized (production-safe)
-- ✅ GDPR export/delete/consent live with tests
-- ⚠️ Retention/cleanup policy documentation pending (cleanup job exists but not described externally)
+- ⚠️ Frontend logging is suppressed in production and a backend sanitizer wrapper exists, but many backend modules use raw standard-library loggers.
+- ⚠️ GDPR export, deletion, and consent endpoints exist with tests, but application deletion does not delete `auth.users`, Stripe records, or instance PVC data.
+- ⚠️ Cleanup jobs implement 7-day account deletion, 90-day ordinary audit-log deletion, and 365-day usage-metric deletion without an archival step.
 
 ## Detailed Findings
 
@@ -96,10 +98,10 @@ CREATE TABLE audit_logs (
 
 3. **Use application-level encryption** for sensitive fields as additional layer
 
-### 2. Sensitive Data Logging - ✅ **RESOLVED**
+### 2. Sensitive Data Logging - ⚠️ **PARTIAL**
 
-**Status**: PASS
-**Risk Level**: LOW
+**Status**: PARTIAL
+**Risk Level**: MEDIUM
 
 #### Frontend Logging - FIXED
 **All console.log statements replaced with sanitized logger**:
@@ -155,9 +157,10 @@ def sanitize_message(msg: str) -> str:
     return msg
 ```
 
-**Result**: Automatic redaction of UUIDs, emails, tokens, and API keys in production
+**Result**: Automatic redaction applies only to callers using this wrapper.
+Modules using `logging.getLogger()` directly bypass it, so production-wide sanitization is not established.
 
-#### Remediation Required
+#### Original Recommendation (Historical)
 1. **Remove all console.log from production frontend**:
    ```typescript
    // Replace with structured logging that filters sensitive data
@@ -276,10 +279,10 @@ CREATE TABLE audit_logs (
 
 #### Implementation Summary
 
-**Complete data lifecycle management implemented**:
+**Application database lifecycle controls implemented**:
 1. ✅ **Soft delete mechanism** - 7-day grace period before hard deletion
 2. ✅ **Deletion audit trail** - comprehensive logging for GDPR compliance
-3. ✅ **Controlled deletion** - graceful handling with restoration capability
+3. ⚠️ **Controlled application deletion** - graceful handling with restoration capability, but no deletion of `auth.users`, Stripe records, or instance PVC data
 4. ✅ **Data export** - complete data export before deletion available
 5. ✅ **Grace period** - 7-day recovery window implemented
 
@@ -287,10 +290,10 @@ CREATE TABLE audit_logs (
 - Database migration 004 adds soft delete functionality
 - `soft_delete_account()`, `restore_account()`, `hard_delete_account()` functions
 - Comprehensive audit logging in `audit_logs` table
-- GDPR-compliant deletion via `/my/gdpr/request-deletion` endpoint
+- Application-database deletion is requested through `/my/gdpr/request-deletion`; processor-wide erasure is not established.
 - Account restoration via `/my/gdpr/cancel-deletion` endpoint
 
-#### Remediation Required
+#### Original Recommendation (Historical)
 1. **Implement soft delete pattern**:
    ```sql
    -- Add soft delete columns to all PII tables
@@ -345,18 +348,18 @@ CREATE TABLE audit_logs (
        return {"status": "deletion_scheduled", "data_export": user_data}
    ```
 
-### 5. GDPR Compliance - ✅ **IMPLEMENTED**
+### 5. GDPR Application Flows - ⚠️ **PARTIAL**
 
-**Status**: PASS
-**Risk Level**: LOW
+**Status**: PARTIAL
+**Risk Level**: MEDIUM
 **Implementation Date**: September 15, 2025
 
 #### Implemented GDPR Mechanisms
-**Complete implementation of core GDPR rights**:
+**Implemented application flows and remaining boundaries**:
 
 1. **Right to be Informed** ✅
    - Data processing purposes disclosed in export endpoint
-   - Data retention periods specified (7 years account, 3 years usage, 7 years audit)
+   - Current export describes application data and processing purposes, while cleanup behavior is 7 days for soft-deleted accounts, 90 days for ordinary audit logs, and 365 days for usage metrics.
    - Third-party processors identified (Stripe, Supabase, Cloud Provider)
 
 2. **Right of Access** ✅
@@ -373,7 +376,7 @@ CREATE TABLE audit_logs (
    - Soft delete with 7-day grace period via `/my/gdpr/request-deletion`
    - Confirmation required to prevent accidental deletion
    - Account restoration possible via `/my/gdpr/cancel-deletion`
-   - Complete "right to be forgotten" implementation
+   - Application-database soft deletion with a 7-day grace period; authentication, payment-provider, and instance-storage deletion remain outside this function.
 
 5. **Right to Data Portability** ✅
    - Complete data export in machine-readable JSON format
@@ -386,7 +389,7 @@ CREATE TABLE audit_logs (
    - Essential services clearly identified and separated
    - No marketing communication controls
 
-#### Remediation Required
+#### Original Recommendation (Historical)
 1. **Implement GDPR endpoints**:
    ```python
    # Add to backend/routes/gdpr.py
@@ -468,33 +471,33 @@ CREATE TABLE audit_logs (
    };
    ```
 
-### 6. Data Retention & Cleanup - ✅ **IMPLEMENTED**
+### 6. Data Retention & Cleanup - ⚠️ **PARTIAL**
 
-**Status**: PASS
-**Risk Level**: LOW
+**Status**: PARTIAL
+**Risk Level**: MEDIUM
 **Implementation Date**: September 15, 2025
 
 #### Implementation Summary
-**Comprehensive data retention policies implemented**:
+**Current scheduled cleanup behavior**:
 
 1. ✅ **Automated cleanup** - Soft delete with 7-day hard deletion
-2. ✅ **Retention periods defined** - 7 years account/audit, 3 years usage metrics
+2. ✅ **Retention periods implemented** - hard-delete soft-deleted accounts after 7 days, ordinary audit logs after 90 days, and usage metrics after 365 days
 3. ✅ **Controlled storage** - Grace periods and cleanup procedures
-4. ✅ **Archival processes** - Audit trail preservation before deletion
+4. ⚠️ **No archival step** - the current cleanup task deletes eligible records directly
 5. ✅ **Comprehensive cleanup** - Via `/backend/tasks/cleanup.py` implementation
 
-**Retention Policy Details (from GDPR export)**:
-- Account data: 7 years from account closure
-- Usage metrics: 3 years from generation
-- Audit logs: 7 years from creation
-- Payment data: 7 years for tax compliance
+**Retention Behavior in the Current Cleanup Task**:
+- Soft-deleted application accounts: 7-day grace period before hard deletion
+- Ordinary audit logs: 90 days, with security-critical records treated separately
+- Usage metrics: 365 days
+- Payment and external-processor data: not deleted by the application cleanup task
 
 ```python
 # platform-backend/src/backend/deps.py - Only retention control found
 _auth_cache = TTLCache(maxsize=100, ttl=300)  # 5 minutes
 ```
 
-#### Remediation Required
+#### Original Recommendation (Historical)
 1. **Define data retention policy**:
    ```sql
    -- Create retention policy table
@@ -775,11 +778,11 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 ### Data Protection Regulation Compliance
 
 #### GDPR Requirements
-- [ ] Privacy policy implemented and accessible
-- [ ] Consent management system deployed
-- [ ] Data subject rights endpoints created
-- [ ] Data export functionality working
-- [ ] Deletion workflow implemented with grace period
+- [x] Privacy policy implemented and accessible
+- [x] Consent management endpoint implemented
+- [x] Data subject rights endpoints created
+- [x] Data export functionality covered by tests
+- [x] Application-database deletion workflow implemented with a 7-day grace period; processor-wide deletion remains incomplete
 - [ ] Breach notification procedures documented
 - [ ] Data Protection Impact Assessment completed
 - [ ] Lawful basis for processing documented
@@ -787,7 +790,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 #### SOC 2 Type II Requirements
 - [ ] Data classification policy implemented
 - [ ] Encryption controls for PII documented and tested
-- [ ] Data retention policy enforced automatically
+- [x] Current 7-day, 90-day, and 365-day cleanup windows enforced by the scheduled task; policy and archival coverage remain incomplete
 - [ ] Access controls for sensitive data verified
 - [ ] Audit logging for all data access implemented
 - [ ] Incident response procedures for data breaches

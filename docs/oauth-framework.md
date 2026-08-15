@@ -7,7 +7,7 @@ icon: lucide/key-round
 MindRoom owns OAuth state, callback handling, credential scoping, and token persistence because those steps decide which human and agent scope receive access to an external account.
 Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, optional PKCE requirements, requester-only credential placement, explicitly permitted manual fallback fields and runtime environment names, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
 
-The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
+The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/success`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
 When an OAuth request targets an agent with `agent_name`, MindRoom also requires the authenticated dashboard requester to satisfy `authorization.agent_reply_permissions` for that agent.
@@ -75,7 +75,8 @@ MindRoom synthesizes an OAuth provider from each `mcp_servers.*.auth.type: oauth
 Generated MCP OAuth token services use the `<provider_id>_oauth` naming pattern; the default provider ID is already `mcp_<server_id>`.
 Custom provider IDs that do not start with `mcp_` get an `mcp_` credential-service prefix.
 These token services stay in the primary runtime credential store.
-The matching MCP toolkit loads the token for the current requester before opening the remote MCP transport, so the transport sends a requester-scoped bearer token instead of a process-global static header.
+The matching MCP toolkit loads the token for the current resolved worker scope before opening the remote MCP transport.
+Use `worker_scope: user` or `worker_scope: user_agent` when different requesters must receive distinct OAuth tokens and MCP sessions; shared scope deliberately reuses one agent-scoped identity.
 Generated MCP OAuth providers can use public clients with `token_endpoint_auth_method: none`, PKCE, and empty scope lists.
 Generated MCP OAuth providers can also discover protected-resource metadata and authorization-server metadata lazily when the first OAuth flow starts.
 If the authorization server advertises dynamic client registration and no client config is stored yet, MindRoom registers a public client and persists the returned registration metadata in the generated OAuth client config service.

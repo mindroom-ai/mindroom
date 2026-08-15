@@ -623,8 +623,8 @@ Agent and team names must be distinct — the same key cannot appear in both `ag
 
 ## Defaults
 
-The `defaults` section sets fallback values for all agents.
-Any agent that omits a setting inherits the value from here.
+The `defaults` section sets fallback values for supported per-agent override fields and global-only agent behavior.
+Supported override fields inherit when omitted, `defaults.tools` is merged only when `include_default_tools` is true, and global-only defaults apply to every agent.
 
 ```yaml
 defaults:

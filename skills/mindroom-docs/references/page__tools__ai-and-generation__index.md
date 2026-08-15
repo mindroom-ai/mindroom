@@ -48,7 +48,7 @@ The current implementation handles both `gpt-image-*` style models and older DAL
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | OpenAI API key. The upstream SDK also checks `OPENAI_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | OpenAI API key, with `OPENAI_API_KEY` as the upstream SDK fallback. |
 | `enable_transcription` | `boolean` | `no` | `true` | Enable `transcribe_audio()`. |
 | `enable_image_generation` | `boolean` | `no` | `true` | Enable `generate_image()`. |
 | `enable_speech_generation` | `boolean` | `no` | `true` | Enable `generate_speech()`. |
@@ -153,7 +153,7 @@ All three functions use the Groq SDK directly and require a Groq API key.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Groq API key. The upstream SDK also checks `GROQ_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Groq API key, with `GROQ_API_KEY` as the upstream SDK fallback. |
 | `transcription_model` | `text` | `no` | `whisper-large-v3` | Model used by `transcribe_audio()`. |
 | `translation_model` | `text` | `no` | `whisper-large-v3` | Model used by `translate_audio()`. |
 | `tts_model` | `text` | `no` | `playai-tts` | Model used by `generate_speech()`. |
@@ -202,7 +202,7 @@ Generated artifacts are attached by remote URL rather than downloaded into MindR
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Replicate API key. The upstream implementation also checks `REPLICATE_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Replicate API key, with `REPLICATE_API_KEY` as the upstream fallback. |
 | `model` | `text` | `no` | `minimax/video-01` | Replicate model ref used by `generate_media()`. |
 | `enable_generate_media` | `boolean` | `no` | `true` | Enable `generate_media()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full toolkit, which is currently just `generate_media()`. |
@@ -242,7 +242,7 @@ The current implementation streams queue log messages to the MindRoom process lo
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Fal API key. The upstream implementation also checks `FAL_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Fal API key, with `FAL_API_KEY` as the upstream fallback. |
 | `model` | `text` | `no` | `fal-ai/hunyuan-video` | Model used by `generate_media()`. |
 | `enable_generate_media` | `boolean` | `no` | `true` | Enable `generate_media()`. |
 | `enable_image_to_image` | `boolean` | `no` | `false` | Enable `image_to_image()`. |
@@ -293,7 +293,7 @@ Generated images are returned as provider-hosted URLs with optional revised prom
 | `size` | `text` | `no` | `1024x1024` | Output size. The current implementation validates it against a fixed allowed set. |
 | `quality` | `text` | `no` | `standard` | Image quality, currently `standard` or `hd`. |
 | `style` | `text` | `no` | `vivid` | Image style, currently `vivid` or `natural`. |
-| `api_key` | `password` | `yes` | `null` | OpenAI API key. The upstream SDK also checks `OPENAI_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | OpenAI API key, with `OPENAI_API_KEY` as the upstream SDK fallback. |
 | `enable_create_image` | `boolean` | `no` | `true` | Enable `create_image()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full toolkit, which is currently just `create_image()`. |
 
@@ -336,7 +336,7 @@ The current implementation hardcodes MP3 output at 44.1 kHz and 128 kbps.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Cartesia API key. The upstream SDK also checks `CARTESIA_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Cartesia API key, with `CARTESIA_API_KEY` as the upstream SDK fallback. |
 | `model_id` | `text` | `no` | `sonic-2` | Model used by `text_to_speech()`. |
 | `default_voice_id` | `text` | `no` | `78ab82d5-25be-4f7d-82b3-7ad64e5b85b2` | Default source voice for localization and TTS when no call-specific `voice_id` is supplied. |
 | `enable_text_to_speech` | `boolean` | `no` | `true` | Enable `text_to_speech()`. |
@@ -389,7 +389,7 @@ If `target_directory` is set, the current implementation also saves generated au
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `voice_id` | `text` | `no` | `JBFqnCBsd6RMkjVDRZzb` | Default voice used by `text_to_speech()`. |
-| `api_key` | `password` | `yes` | `null` | ElevenLabs API key. The upstream implementation also checks `ELEVEN_LABS_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | ElevenLabs API key, with `ELEVEN_LABS_API_KEY` as the upstream fallback. |
 | `target_directory` | `text` | `no` | `null` | Optional directory where generated audio is also saved locally. |
 | `model_id` | `text` | `no` | `eleven_multilingual_v2` | Model used by `text_to_speech()`. |
 | `output_format` | `text` | `no` | `mp3_44100_64` | Output codec and bitrate preset for generated audio. |
@@ -480,7 +480,7 @@ If `wait_for_completion` is false, the current implementation returns `Async gen
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Luma AI API key. The upstream implementation also checks `LUMAAI_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Luma AI API key, with `LUMAAI_API_KEY` as the upstream fallback. |
 | `wait_for_completion` | `boolean` | `no` | `true` | Poll until the provider job completes. Setting it to `false` is not useful on this branch because async return is not implemented. |
 | `poll_interval` | `number` | `no` | `3` | Seconds between status polls. |
 | `max_wait_time` | `number` | `no` | `300` | Maximum wait time in seconds before timing out. |
@@ -516,13 +516,13 @@ image_to_video(
 
 ## [`modelslabs`]
 
-`modelslabs` is the ModelsLab wrapper for provider-hosted MP4, GIF, MP3, or WAV generation.
+`modelslabs` is the ModelsLab wrapper for provider-hosted PNG, JPG, MP4, GIF, MP3, or WAV generation.
 
 ### What It Does
 
 `modelslabs` exposes one call, `generate_media(prompt)`.
 The current wrapper chooses one of several provider endpoints based on `file_type` and sends a fixed payload template for that media class.
-For MP4 and GIF generation, it currently uses the provider's text-to-video endpoint and returns future-link URLs with an ETA.
+For PNG and JPG it uses the image endpoint; MP4 and GIF use the text-to-video endpoint and return future-link URLs with an ETA.
 For MP3 and WAV generation, it uses provider voice endpoints and returns audio URLs.
 If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint until the media is ready or the timeout is reached.
 
@@ -530,8 +530,11 @@ If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint 
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | ModelsLab API key. The upstream implementation also checks `MODELS_LAB_API_KEY`. |
-| `file_type` | `text` | `no` | `mp4` | Output type for `generate_media()`, currently `mp4`, `gif`, or audio types such as `mp3` and `wav`. |
+| `api_key` | `password` | `no` | `null` | ModelsLab API key, with `MODELS_LAB_API_KEY` as the upstream fallback. |
+| `file_type` | `text` | `no` | `mp4` | Output type: `png`, `jpg`, `mp4`, `gif`, `mp3`, or `wav`. |
+| `model_id` | `text` | `no` | `null` | Provider model override; defaults to `flux` for images or `cogvideox` for video. |
+| `width` | `number` | `no` | `512` | Image or video width. |
+| `height` | `number` | `no` | `512` | Image or video height. |
 | `wait_for_completion` | `boolean` | `no` | `false` | Poll the provider fetch endpoint until the output is ready. |
 | `add_to_eta` | `number` | `no` | `15` | Extra seconds added to the provider ETA before timing out. |
 | `max_wait_time` | `number` | `no` | `60` | Maximum total wait time in seconds. |
@@ -555,7 +558,7 @@ generate_media("A looping animation of messages flowing through a Matrix bridge.
 ### Notes
 
 - Despite the broad provider branding, the current wrapper exposes one opinionated `generate_media()` path rather than a generic arbitrary-model interface.
-- MP4 and GIF generation currently use a fixed provider-side video template, including default dimensions and a hardcoded model ID.
+- MP4 and GIF generation use a provider-side video template whose model and dimensions can be overridden with `model_id`, `width`, and `height`.
 - Returned media are provider URLs, and the success message usually includes the provider ETA rather than immediate ready-to-view bytes.
 
 ## Related Docs

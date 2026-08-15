@@ -1,6 +1,7 @@
 # MindRoom Security Review: Error Handling & Information Disclosure
 
-> **Audit note (2026-03-18):** Log sanitization is in place but database error codes can still leak schema information in some admin error paths.
+> **Audit note (2026-03-18):** A backend log-sanitizer wrapper exists, but standard-library loggers can bypass it and database error codes can still leak schema information in some admin error paths.
+> This is a historical repository review, not a deployment attestation.
 
 **Review Date:** September 11, 2025
 **Updated:** September 16, 2025 (Post-Implementation Review)
@@ -10,12 +11,12 @@
 
 ## Executive Summary
 
-This security review confirms logging/error-handling controls remain effective. Sanitizers strip PII from backend logs and the frontend logger is disabled in production. Continue to monitor admin error pathways and keep sanitizers in place when adding new endpoints.
+The frontend logger is disabled in production and participating backend callers use a PII sanitizer, but global backend logging coverage and some admin error pathways remain incomplete.
 
 ### Risk Assessment: **LOW** (Updated)
-- ✅ **Logging sanitization implemented** - Frontend and backend protection
-- ✅ **Production data protection** - Zero sensitive information exposure
-- ✅ **Error handling secured** - Sanitized error messages in production
+- ⚠️ **Logging sanitization partially implemented** - Frontend suppression and a backend wrapper exist, but raw loggers bypass it.
+- ⚠️ **Production data protection unverified** - Zero sensitive-information exposure is not established.
+- ⚠️ **Error handling partial** - Some admin paths can expose database error details.
 - ⚠️ **Admin endpoint security** addressed through authentication requirements
 
 ---

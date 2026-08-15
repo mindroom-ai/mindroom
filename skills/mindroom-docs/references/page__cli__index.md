@@ -921,6 +921,7 @@ Runs a series of checks in one pass:
 - **Memory config** — checks memory LLM and embedder reachability (Ollama, OpenAI embeddings, sentence-transformers)
 - **Matrix homeserver** — verifies the homeserver is reachable via `/_matrix/client/versions`
 - **Storage** — confirms the storage directory is writable
+- **Encryption stores** — checks that persisted Matrix device identities still have their local E2EE stores
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -1001,7 +1002,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 Create a starter `config.yaml` with the personal Mind agent, one model, file-based memory, and sensible defaults.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
-Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
+Provider presets (`--provider`) set the default model: `anthropic`, `azure`, `bedrock_claude`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
 Generated configs include commented model alternatives for providers that have common variants, such as OpenAI mini/nano models.
 
 ```bash
@@ -1097,6 +1098,16 @@ Show the resolved config file path and all search locations.
 
 ```bash
 mindroom config path
+```
+
+### config resolve
+
+Print the fully merged YAML after recursively resolving every `!include` tag.
+Keys are sorted so the output can be diffed before and after splitting a configuration into include files.
+
+```bash
+mindroom config resolve
+mindroom config resolve --path ./config.yaml
 ```
 
 ## connect

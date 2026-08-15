@@ -96,6 +96,8 @@ teams:
 | `compaction` | No | `defaults.compaction` | Team-scoped required-compaction overrides |
 
 Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.
+Each configured team must contain at least one unique, known agent.
+Private agents, and agents whose delegation closure reaches private agents, are not supported in configured teams.
 
 `num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings.
 When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.
@@ -150,8 +152,7 @@ For dynamic teams, the collaboration mode is selected by AI based on the task:
 - Tasks with different subtasks for each agent use **coordinate** mode
 - Tasks asking for opinions or brainstorming use **collaborate** mode
 
-When AI mode selection is unavailable or fails, MindRoom falls back to:
-- **coordinate** when multiple agents are explicitly tagged in the message (they likely have different roles to fulfill)
-- **collaborate** for all other cases, such as agents from thread history or DM rooms (likely discussing the same topic)
+Before model selection completes, explicit mentions carry a provisional **coordinate** heuristic and thread-derived groups carry a provisional **collaborate** heuristic.
+The execution layer asks the model to refine that choice; when model selection fails or returns an unexpected result, MindRoom falls back to **collaborate**.
 
 Dynamic teams do not have a named `teams:` entry, so their history replay and compaction policy comes from `defaults`, not from any participating agent's overrides.

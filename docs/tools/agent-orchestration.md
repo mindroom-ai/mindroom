@@ -504,7 +504,7 @@ update_own_config(
 `openclaw_compat` is not a runtime toolkit.
 The registered factory returns an empty `Toolkit`, and the real behavior comes from `Config.TOOL_PRESETS`.
 `Config.expand_tool_names()` expands `openclaw_compat` into `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, and `matrix_message`.
-`matrix_message` then implies `attachments`, so the effective enabled set also includes `attachments` even though the preset does not list it directly.
+`matrix_message` then implies `attachments` and `matrix_room`, so the effective enabled set includes both companion toolkits even though the preset does not list them directly.
 Preset expansion dedupes while preserving order, so adding `openclaw_compat` alongside one of its member tools does not create duplicates.
 This preset is meant for OpenClaw-compatible workspace behavior inside MindRoom rather than for cloning the full OpenClaw gateway control plane.
 
