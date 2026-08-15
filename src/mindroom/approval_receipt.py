@@ -94,6 +94,15 @@ def approval_receipt_context(receipt_text: str) -> Generator[None, None, None]:
         _context.reset(token)
 
 
+def _is_response_chain_boundary(message: Message) -> bool:
+    provider_data = message.provider_data
+    return (
+        message.role == "assistant"
+        and isinstance(provider_data, dict)
+        and isinstance(provider_data.get("response_id"), str)
+    )
+
+
 def _messages_with_approval_receipt(
     messages: list[Message],
     *,
@@ -104,13 +113,21 @@ def _messages_with_approval_receipt(
         return None
     receipt_context.fired_model_ids.add(model_id)
     outbound = list(messages)
-    system_index = next(
-        (
-            index
-            for index, message in enumerate(outbound)
-            if message.role in {"system", "developer"} and isinstance(message.content, str)
-        ),
+    response_chain_index = next(
+        (index for index in range(len(outbound) - 1, -1, -1) if _is_response_chain_boundary(outbound[index])),
         None,
+    )
+    system_index = (
+        None
+        if response_chain_index is not None
+        else next(
+            (
+                index
+                for index, message in enumerate(outbound)
+                if message.role in {"system", "developer"} and isinstance(message.content, str)
+            ),
+            None,
+        )
     )
     if system_index is None:
         receipt_message = Message(
@@ -120,7 +137,7 @@ def _messages_with_approval_receipt(
             add_to_agent_memory=False,
         )
         original_system_message = None
-        outbound.insert(0, receipt_message)
+        outbound.insert(0 if response_chain_index is None else response_chain_index + 1, receipt_message)
     else:
         original_system_message = outbound[system_index]
         receipt_message = deepcopy(original_system_message)

@@ -13,6 +13,7 @@ from agno.models.message import Message
 from mindroom import approval_receipt
 from mindroom.approval_receipt import build_approval_receipt
 from mindroom.event_journal import ApprovalCall, ApprovalDecision
+from mindroom.openai_models import MindRoomOpenAIResponses
 from tests.history_helpers import RecordingModel
 
 
@@ -152,6 +153,40 @@ async def test_model_call_hook_appends_one_trusted_approval_receipt_after_tool_r
         ("tool", "tool result"),
         ("assistant", "ok"),
     ]
+
+
+def test_openai_previous_response_chain_keeps_receipt_provider_visible() -> None:
+    """Stateful Responses requests must include the receipt after their chain boundary."""
+    model = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")
+    messages = [
+        Message(role="system", content="base rules"),
+        Message(
+            role="assistant",
+            tool_calls=[
+                {
+                    "id": "call_abcdefghijklmnopqrstuvwx",
+                    "type": "function",
+                    "function": {"name": "publish_report", "arguments": "{}"},
+                },
+            ],
+            provider_data={"response_id": "resp_previous"},
+        ),
+        Message(
+            role="tool",
+            content="published",
+            tool_call_id="call_abcdefghijklmnopqrstuvwx",
+        ),
+    ]
+
+    with approval_receipt.approval_receipt_context("trusted approval receipt"):
+        projection = approval_receipt._messages_with_approval_receipt(messages, model_id=id(model))
+
+    assert projection is not None
+    assert model.get_request_params(messages=projection.outbound_messages)["previous_response_id"] == "resp_previous"
+    formatted_messages = model._format_messages(projection.outbound_messages)
+    assert formatted_messages[0] == {"role": "developer", "content": "trusted approval receipt"}
+    assert formatted_messages[1]["type"] == "function_call_output"
+    assert formatted_messages[1]["output"] == "published"
 
 
 @pytest.mark.asyncio
