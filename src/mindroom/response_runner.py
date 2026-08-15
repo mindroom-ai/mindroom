@@ -61,6 +61,7 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
+from mindroom.oauth.reset import validate_oauth_reset_approval_bindings
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     classify_cancel_source,
@@ -824,7 +825,11 @@ class ResponseRunner:
             else (request.response_envelope.source_event_id,)
         )
         try:
-            plan = await self._approval_responses.plan_pause(identified_tools, requester_id=requester_id)
+            plan = await self._approval_responses.plan_pause(
+                identified_tools,
+                requester_id=requester_id,
+                execution_identity=execution_identity,
+            )
             response_event_id = progress.tracked_event_id
             approval_pending = plan.waiting_text is not None
             visible_text = plan.waiting_text or PROGRESS_PLACEHOLDER
@@ -877,6 +882,7 @@ class ResponseRunner:
                     calls=plan.calls,
                     state=continuation_state,
                     execution_identity=serialize_tool_execution_identity(execution_identity),
+                    tool_bindings=plan.tool_bindings,
                     runtime_model_name=paused.runtime_model_name,
                     team_member_names=team_member_names,
                     team_member_model_names=paused.team_member_model_names,
@@ -983,6 +989,7 @@ class ResponseRunner:
             target=target,
             tool_trace=tool_trace if self._show_tool_calls() else [],
             pending_text=PROGRESS_PLACEHOLDER,
+            execution_identity=self._approval_continuation_execution_identity(claimed),
         )
         current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
         return (
@@ -1379,13 +1386,8 @@ class ResponseRunner:
         target: MessageTarget,
         tool_trace_collector: list[ToolTraceEntry],
     ) -> CompletedApprovalRun | PausedAttempt:
-        execution_identity = parse_tool_execution_identity_payload(
-            continuation.execution_identity,
-            error_prefix="Approval continuation execution_identity",
-        )
-        if execution_identity is None:
-            msg = f"Approval continuation {continuation.approval_id!r} has no execution identity"
-            raise RuntimeError(msg)
+        execution_identity = self._approval_continuation_execution_identity(continuation)
+        config = self.deps.runtime.config
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             target,
             user_id=continuation.requester_id,
@@ -1398,6 +1400,21 @@ class ResponseRunner:
         if tool_dispatch.execution_identity != execution_identity:
             msg = "Approval continuation execution identity no longer matches its target"
             raise RuntimeError(msg)
+        validate_oauth_reset_approval_bindings(
+            calls=tuple(
+                (
+                    call.tool_call_id,
+                    call.tool_name,
+                    call.invoking_agent,
+                    call.decision is ContinuationDecision.APPROVED,
+                )
+                for call in continuation.calls
+            ),
+            bindings=continuation.tool_bindings,
+            config=config,
+            runtime_paths=self.deps.runtime_paths,
+            execution_identity=execution_identity,
+        )
         decisions = {call.tool_call_id: call.decision is ContinuationDecision.APPROVED for call in continuation.calls}
         denial_reasons = {call.tool_call_id: call.reason for call in continuation.calls}
         with approval_receipt_context(build_approval_receipt(continuation.calls)):
@@ -1407,7 +1424,7 @@ class ResponseRunner:
                     return await continue_paused_team_run(
                         member_names=continuation.team_member_names,
                         mode=TeamMode(continuation.team_mode or "coordinate"),
-                        config=self.deps.runtime.config,
+                        config=config,
                         runtime_paths=self.deps.runtime_paths,
                         execution_identity=execution_identity,
                         session_id=continuation.session_id,
@@ -1417,7 +1434,7 @@ class ResponseRunner:
                         model_name=select_model_for_team(
                             continuation.entity_name,
                             continuation.room_id,
-                            self.deps.runtime.config,
+                            config,
                             self.deps.runtime_paths,
                             thread_id=continuation.thread_id,
                         )
@@ -1439,6 +1456,7 @@ class ResponseRunner:
             else:
                 response_text = await self._approval_execution.continue_run(
                     continuation,
+                    resolved_config=config,
                     execution_identity=execution_identity,
                     tool_dispatch=tool_dispatch,
                     decisions=decisions,
@@ -1446,6 +1464,20 @@ class ResponseRunner:
                     tool_trace_collector=tool_trace_collector,
                 )
         return response_text
+
+    @staticmethod
+    def _approval_continuation_execution_identity(
+        continuation: ApprovalContinuation,
+    ) -> ToolExecutionIdentity:
+        """Parse one required approval execution identity at the response-owner boundary."""
+        execution_identity = parse_tool_execution_identity_payload(
+            continuation.execution_identity,
+            error_prefix="Approval continuation execution_identity",
+        )
+        if execution_identity is None:
+            msg = f"Approval continuation {continuation.approval_id!r} has no execution identity"
+            raise RuntimeError(msg)
+        return execution_identity
 
     def _build_turn_recorder(
         self,

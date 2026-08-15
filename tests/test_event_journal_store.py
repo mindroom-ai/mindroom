@@ -5893,6 +5893,7 @@ class TestApprovalContinuations:
                 expires_at_ns=time.time_ns() + 60_000_000_000,
             ),
         )
+        tool_bindings = {"call-2": {"credential_service": "google_drive_oauth", "worker_key": "v1:user"}}
 
         stale = await alice.advance_approval_continuation(
             "approval-1",
@@ -5900,6 +5901,7 @@ class TestApprovalContinuations:
             run_id="run-2",
             session_id="session-1",
             calls=calls,
+            tool_bindings=tool_bindings,
         )
         advanced = await alice.advance_approval_continuation(
             "approval-1",
@@ -5907,6 +5909,7 @@ class TestApprovalContinuations:
             run_id="run-2",
             session_id="session-1",
             calls=calls,
+            tool_bindings=tool_bindings,
         )
 
         assert stale is None
@@ -5916,6 +5919,7 @@ class TestApprovalContinuations:
         assert advanced.run_id == "run-2"
         assert advanced.runtime_generation == "runtime-a"
         assert advanced.calls == calls
+        assert advanced.tool_bindings == tool_bindings
 
     async def test_every_card_is_reserved_before_publication_activates(
         self,

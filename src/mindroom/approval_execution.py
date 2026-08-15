@@ -58,6 +58,7 @@ class AgentApprovalExecution:
         self,
         continuation: ApprovalContinuation,
         *,
+        resolved_config: Config | None = None,
         execution_identity: ToolExecutionIdentity,
         tool_dispatch: ToolDispatchContext,
         decisions: dict[str, bool],
@@ -65,7 +66,7 @@ class AgentApprovalExecution:
         tool_trace_collector: list[ToolTraceEntry],
     ) -> CompletedApprovalRun | PausedAttempt:
         """Apply exact decisions and continue the matching persisted Agno run."""
-        config = self.config()
+        config = resolved_config or self.config()
         if continuation.entity_name not in config.agents:
             msg = f"Agent {continuation.entity_name!r} is no longer configured"
             raise RuntimeError(msg)

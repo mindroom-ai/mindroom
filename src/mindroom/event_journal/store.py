@@ -1010,6 +1010,7 @@ class PrincipalStore:
         run_id: str,
         session_id: str,
         calls: tuple[ApprovalCall, ...],
+        tool_bindings: dict[str, dict[str, object]] | None = None,
     ) -> ApprovalContinuation | None:
         """Replace one claimed generation with the next exact Agno pause."""
         return await self._backend.write(
@@ -1021,6 +1022,7 @@ class PrincipalStore:
                 run_id=run_id,
                 session_id=session_id,
                 calls=calls,
+                tool_bindings=tool_bindings or {},
             ),
         )
 

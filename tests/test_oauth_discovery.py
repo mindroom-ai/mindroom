@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import parse_qs, urlparse
 
@@ -77,6 +79,22 @@ class _ResourceOriginDiscoveryClient:
         del headers
         self.posts.append((url, json))
         return _Response({"client_id": "registered-public-client"}, 201)
+
+
+class _BlockingRegistrationClient(_ResourceOriginDiscoveryClient):
+    registration_started = threading.Event()
+    registration_release = threading.Event()
+
+    async def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: Mapping[str, str] | None = None,
+    ) -> _Response:
+        self.registration_started.set()
+        assert await asyncio.to_thread(self.registration_release.wait, 5)
+        return await super().post(url, json=json, headers=headers)
 
 
 def _install_dns_rebinding(monkeypatch: pytest.MonkeyPatch, *, safe_resolutions: int) -> None:
@@ -179,6 +197,66 @@ async def test_resource_origin_metadata_registers_public_client(
         "_oauth_provider": "example",
         RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
     }
+
+
+@pytest.mark.asyncio
+async def test_dynamic_client_registration_singleflights_across_fresh_event_loops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider refresh worker loops must share one loop-neutral DCR lock."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
+    )
+    _BlockingRegistrationClient.gets = []
+    _BlockingRegistrationClient.posts = []
+    _BlockingRegistrationClient.registration_started.clear()
+    _BlockingRegistrationClient.registration_release.clear()
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _BlockingRegistrationClient)
+    provider = OAuthProvider(
+        id="example",
+        display_name="Example",
+        authorization_url="",
+        token_url="",
+        scopes=(),
+        allow_empty_scopes=True,
+        credential_service="example_oauth",
+        client_config_services=("example_oauth_client",),
+        token_endpoint_auth_method="none",  # noqa: S106
+        pkce_code_challenge_method="S256",
+        runtime_bootstrapper=oauth_runtime_bootstrapper(
+            OAuthDiscoveryConfig(
+                resource="https://resource.example.test",
+                token_endpoint_auth_method="none",  # noqa: S106
+                pkce_code_challenge_method="S256",
+            ),
+        ),
+    )
+
+    def authorize(state: str) -> str:
+        verifier = provider.issue_pkce_code_verifier()
+        assert verifier is not None
+        return asyncio.run(
+            provider.authorization_uri_async(
+                runtime_paths,
+                state=state,
+                code_verifier=verifier,
+            ),
+        )
+
+    first = asyncio.create_task(asyncio.to_thread(authorize, "first-state"))
+    assert await asyncio.to_thread(_BlockingRegistrationClient.registration_started.wait, 5)
+    second = asyncio.create_task(asyncio.to_thread(authorize, "second-state"))
+    await asyncio.sleep(0.05)
+    _BlockingRegistrationClient.registration_release.set()
+
+    first_url, second_url = await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+
+    assert parse_qs(urlparse(first_url).query)["client_id"] == ["registered-public-client"]
+    assert parse_qs(urlparse(second_url).query)["client_id"] == ["registered-public-client"]
+    assert len(_BlockingRegistrationClient.posts) == 1
 
 
 @pytest.mark.asyncio

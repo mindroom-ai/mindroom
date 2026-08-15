@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from agno.models.response import ToolExecution
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -16,8 +17,13 @@ from mindroom.credentials import get_runtime_credentials_manager, load_scoped_cr
 from mindroom.custom_tools import oauth_connections as oauth_connections_module
 from mindroom.custom_tools.oauth_connections import OAuthConnectionTools
 from mindroom.message_target import MessageTarget
+from mindroom.oauth import reset as oauth_reset_module
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.reset import (
+    build_oauth_reset_approval_bindings,
+    validate_oauth_reset_approval_bindings,
+)
 from mindroom.oauth.service import lookup_oauth_connect_token
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -159,6 +165,36 @@ async def test_reset_oauth_connection_deletes_only_current_requester_scope(tmp_p
     assert connect_target.agent_name == "research"
     assert connect_target.requester_id == "@alice:example.org"
     assert connect_target.worker_scope == "user_agent"
+    assert "valid for 10 minutes" in result
+    assert "run this reset again" in result
+
+
+def test_oauth_reset_approval_binding_rejects_worker_scope_drift(tmp_path: Path) -> None:
+    """Approval must freeze the exact credential target rather than only provider_id."""
+    _tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    tool_call = ToolExecution(
+        tool_call_id="reset-call",
+        tool_name="reset_oauth_connection",
+        tool_args={"provider_id": "google_drive"},
+        requires_confirmation=True,
+    )
+    execution_identity = build_execution_identity_from_runtime_context(context)
+    bindings = build_oauth_reset_approval_bindings(
+        ((tool_call, "reset-call", "reset_oauth_connection", "research"),),
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        execution_identity=execution_identity,
+    )
+    context.config.agents["research"].worker_scope = "user"
+
+    with pytest.raises(RuntimeError, match="credential target changed"):
+        validate_oauth_reset_approval_bindings(
+            calls=(("reset-call", "reset_oauth_connection", "research", True),),
+            bindings=bindings,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            execution_identity=execution_identity,
+        )
 
 
 @pytest.mark.asyncio
@@ -361,7 +397,7 @@ async def test_reset_oauth_connection_denies_unconfigured_provider_before_side_e
         "unconfigured-refresh-token",
     )
     disconnect = AsyncMock()
-    monkeypatch.setattr(oauth_connections_module, "load_oauth_providers", lambda *_args: {})
+    monkeypatch.setattr(oauth_reset_module, "load_oauth_providers", lambda *_args: {})
     monkeypatch.setattr(oauth_connections_module, "disconnect_mcp_oauth_request_session", disconnect)
 
     with tool_runtime_context(context):
@@ -377,3 +413,70 @@ async def test_reset_oauth_connection_denies_unconfigured_provider_before_side_e
         == credentials
     )
     disconnect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reset_oauth_connection_builds_link_before_deleting_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Link-generation failure must leave the approved credential unchanged."""
+    tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    provider = google_drive_oauth_provider()
+    credentials_manager, worker_target, credentials = _save_test_credentials(
+        context,
+        worker_target,
+        provider,
+        "link-failure-refresh-token",
+    )
+    monkeypatch.setattr(
+        oauth_connections_module,
+        "oauth_connect_url",
+        MagicMock(side_effect=RuntimeError("state persistence unavailable")),
+    )
+
+    with tool_runtime_context(context), pytest.raises(RuntimeError, match="state persistence unavailable"):
+        await tool.reset_oauth_connection(provider.id)
+
+    assert (
+        load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        == credentials
+    )
+
+
+@pytest.mark.asyncio
+async def test_reset_oauth_connection_returns_link_when_mcp_teardown_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-pop MCP close failure must not hide a successful reset recovery link."""
+    tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    provider = google_drive_oauth_provider()
+    credentials_manager, worker_target, _credentials = _save_test_credentials(
+        context,
+        worker_target,
+        provider,
+        "mcp-close-failure-refresh-token",
+    )
+    monkeypatch.setattr(
+        oauth_connections_module,
+        "disconnect_mcp_oauth_request_session",
+        AsyncMock(side_effect=RuntimeError("close failed")),
+    )
+
+    with tool_runtime_context(context):
+        result = await tool.reset_oauth_connection(provider.id)
+
+    assert "`connect_url`:" in result
+    assert (
+        load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        is None
+    )

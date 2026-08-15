@@ -20,6 +20,7 @@ from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
+from mindroom.oauth.reset import build_oauth_reset_approval_bindings
 from mindroom.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     evaluate_tool_approval,
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import MatrixDelivery, PrincipalStore
     from mindroom.response_turn import PausedAttempt
     from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,7 @@ class _ApprovalPausePlan:
 
     tools: tuple[ToolExecution, ...]
     calls: tuple[ApprovalCall, ...]
+    tool_bindings: dict[str, dict[str, object]]
     waiting_text: str | None
 
 
@@ -116,6 +119,7 @@ class ApprovalResponseCoordinator:
         identified: tuple[tuple[ToolExecution, str, str, str], ...],
         *,
         requester_id: str,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> _ApprovalPausePlan:
         """Evaluate policy once and normalize exact calls with integer deadlines."""
         config = self.config()
@@ -163,6 +167,12 @@ class ApprovalResponseCoordinator:
         return _ApprovalPausePlan(
             tools=tuple(tool for tool, _tool_call_id, _tool_name, _invoking_agent in identified),
             calls=calls,
+            tool_bindings=build_oauth_reset_approval_bindings(
+                identified,
+                config=config,
+                runtime_paths=self.runtime_paths,
+                execution_identity=execution_identity,
+            ),
             waiting_text=(
                 "Waiting for approval: " + ", ".join(f"`{call.tool_name}`" for call in gated_calls)
                 if gated_calls
@@ -254,10 +264,15 @@ class ApprovalResponseCoordinator:
         target: MessageTarget,
         tool_trace: list[ToolTraceEntry],
         pending_text: str,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> str | None:
         """Replace one claim with Agno's next exact pause generation."""
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
-        plan = await self.plan_pause(identified, requester_id=current.requester_id)
+        plan = await self.plan_pause(
+            identified,
+            requester_id=current.requester_id,
+            execution_identity=execution_identity,
+        )
         visible_text = plan.waiting_text or pending_text
         stream_status = STREAM_STATUS_APPROVAL_PENDING if plan.waiting_text is not None else STREAM_STATUS_PENDING
         if not await self.delivery_gateway.edit_text(
@@ -277,6 +292,7 @@ class ApprovalResponseCoordinator:
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
+            tool_bindings=plan.tool_bindings,
         )
         if publishing is None:
             msg = "Could not persist the chained approval pause"

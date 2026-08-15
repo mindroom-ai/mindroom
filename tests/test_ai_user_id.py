@@ -297,6 +297,37 @@ def test_compose_current_turn_prompt_keeps_model_only_tail_without_timestamp() -
 class TestUserIdPassthrough:
     """Test that user_id reaches agent.arun() in both streaming and non-streaming paths."""
 
+    def test_tool_runtime_context_canonicalizes_bridge_alias(self, tmp_path: Path) -> None:
+        """Tool ownership must use one canonical requester principal across bridge aliases."""
+        runtime_paths = _runtime_paths(tmp_path)
+        config = bind_runtime_paths(_config(), runtime_paths)
+        alias = "@telegram_alice:localhost"
+        config.authorization.aliases = {"@alice:localhost": [alias]}
+        bot = MagicMock(spec=AgentBot)
+        bot.logger = MagicMock()
+        bot.stop_manager = MagicMock()
+        bot.client = AsyncMock()
+        bot.agent_name = "general"
+        bot.matrix_id = MagicMock()
+        bot.matrix_id.full_id = "@general:localhost"
+        bot.matrix_id.domain = "localhost"
+        bot.config = config
+        bot.storage_path = tmp_path
+        bot.runtime_paths = runtime_paths
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id=alias,
+        )
+        target = MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True)
+
+        context = coordinator.deps.tool_runtime.build_context(target, user_id=alias)
+
+        assert context is not None
+        assert context.requester_id == "@alice:localhost"
+
     def test_prepare_memory_and_model_context_keeps_raw_prompt_when_model_prompt_only_contains_substring(
         self,
         tmp_path: Path,

@@ -37,7 +37,8 @@ if TYPE_CHECKING:
     from mindroom.oauth.providers import OAuthClientConfig, OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
-_OAUTH_CONNECT_TOKEN_TTL_SECONDS = 600
+OAUTH_CONNECT_TOKEN_TTL_MINUTES = 10
+_OAUTH_CONNECT_TOKEN_TTL_SECONDS = OAUTH_CONNECT_TOKEN_TTL_MINUTES * 60
 _OAUTH_CONNECT_TOKEN_KIND = "conversation_oauth_connect"  # noqa: S105
 _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
 logger = get_logger(__name__)
@@ -78,6 +79,7 @@ _SCOPE_IMPLICATIONS = {
 }
 
 __all__ = [
+    "OAUTH_CONNECT_TOKEN_TTL_MINUTES",
     "OAuthConnectTarget",
     "OAuthCredentialsRefreshResult",
     "build_oauth_connect_instruction",
