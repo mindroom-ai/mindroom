@@ -1049,8 +1049,8 @@ def _github_transport_and_path(url: str) -> tuple[str, str] | None:
     if url.startswith("git@github.com:"):
         return "ssh", url.removeprefix("git@github.com:")
 
-    parsed = urlsplit(url)
     try:
+        parsed = urlsplit(url)
         port = parsed.port
     except ValueError:
         return None
