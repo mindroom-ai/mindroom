@@ -115,7 +115,12 @@ The sidecar gets:
 - An `emptyDir` volume for worker-local scratch files and caches.
 - Access to the same shared storage that holds agent data directories.
 - Read-only access to config for plugin tool registration.
-- No access to the primary secrets volume.
+- The configured credentials-encryption key so it can consume encrypted credential leases.
+
+> [!WARNING]
+> The Kubernetes `static_runner` sidecar is not a secrets or filesystem isolation boundary.
+> It can read the full shared storage mount, including persisted credential data, and tools running in the sidecar may access its environment.
+> Use dedicated Kubernetes workers when agent-scoped filesystem and credential isolation are required.
 
 ### Kubernetes dedicated workers (`workerBackend: kubernetes`)
 

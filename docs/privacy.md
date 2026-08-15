@@ -6,7 +6,7 @@ icon: lucide/shield-check
 
 # Privacy Policy
 
-Last updated: 2026-07-14
+Last updated: 2026-08-14
 
 This Privacy Policy explains how MindRoom and related MindRoom clients/services handle information.
 

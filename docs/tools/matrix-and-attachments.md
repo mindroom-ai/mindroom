@@ -42,7 +42,8 @@ When a room-level `send` includes multiple attachments and no text, the first at
 When `send` uses an explicit `thread_id`, both text and attachments stay in that existing thread instead of creating a new attachment thread.
 In `thread_mode: room`, room-level `send` stays plain room messaging and does not auto-thread attachments unless you pass an explicit `thread_id`.
 `reply` and `thread-reply` inherit the current thread when one can be resolved, and they return an error when no thread target is available.
-`read`, `edit`, and `context` also inherit the current thread when one can be resolved, while `thread_id="room"` forces room-level scope instead of thread inheritance.
+`read` and `context` also inherit the current thread when one can be resolved, while `thread_id="room"` forces room-level scope instead of thread inheritance.
+For `edit`, the required `target` alone selects the event; thread context does not select or validate that target.
 `thread-list` uses the current thread when one is active, and it requires an explicit `thread_id` when there is no active thread context.
 `room-threads` pages thread roots in the target room and returns `next_token` plus `has_more`; pass a returned `next_token` as `page_token` to fetch the next page.
 `react` requires `target` and uses `👍` when `message` is empty.

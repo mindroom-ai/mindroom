@@ -1100,8 +1100,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may wait for one active durable sync-cache phase before treating it as wedged | `600` |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 
-The sync cache-write grace is a hang backstop, not the ordinary Matrix transport timeout.
-Set it above the observed healthy cache-write p99 for the deployment.
+The sync cache-write grace is a hang backstop rather than the ordinary Matrix transport timeout; set it above the observed healthy cache-write p99 for the deployment.
 Raising it delays both watchdog cancellation and liveness failure only while a sync callback is actively completing its sequential durable cache phase.
 
 ### OpenAI-Compatible API
@@ -7129,7 +7128,8 @@ When a room-level `send` includes multiple attachments and no text, the first at
 When `send` uses an explicit `thread_id`, both text and attachments stay in that existing thread instead of creating a new attachment thread.
 In `thread_mode: room`, room-level `send` stays plain room messaging and does not auto-thread attachments unless you pass an explicit `thread_id`.
 `reply` and `thread-reply` inherit the current thread when one can be resolved, and they return an error when no thread target is available.
-`read`, `edit`, and `context` also inherit the current thread when one can be resolved, while `thread_id="room"` forces room-level scope instead of thread inheritance.
+`read` and `context` also inherit the current thread when one can be resolved, while `thread_id="room"` forces room-level scope instead of thread inheritance.
+For `edit`, the required `target` alone selects the event; thread context does not select or validate that target.
 `thread-list` uses the current thread when one is active, and it requires an explicit `thread_id` when there is no active thread context.
 `room-threads` pages thread roots in the target room and returns `next_token` plus `has_more`; pass a returned `next_token` as `page_token` to fetch the next page.
 `react` requires `target` and uses `👍` when `message` is empty.
@@ -17166,6 +17166,9 @@ bot_accounts:
   - "@telegrambot:matrix.example.com"
 
 authorization:
+  default_room_access: false
+  global_users:
+    - "@owner:matrix.example.com"
   aliases:
     "@owner:matrix.example.com":
       - "@telegram_12345:matrix.example.com"
@@ -17864,7 +17867,12 @@ The sidecar gets:
 - An `emptyDir` volume for worker-local scratch files and caches.
 - Access to the same shared storage that holds agent data directories.
 - Read-only access to config for plugin tool registration.
-- No access to the primary secrets volume.
+- The configured credentials-encryption key so it can consume encrypted credential leases.
+
+> [!WARNING]
+> The Kubernetes `static_runner` sidecar is not a secrets or filesystem isolation boundary.
+> It can read the full shared storage mount, including persisted credential data, and tools running in the sidecar may access its environment.
+> Use dedicated Kubernetes workers when agent-scoped filesystem and credential isolation are required.
 
 ### Kubernetes dedicated workers (`workerBackend: kubernetes`)
 

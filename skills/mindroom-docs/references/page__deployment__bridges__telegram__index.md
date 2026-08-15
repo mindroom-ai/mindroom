@@ -36,6 +36,9 @@ bot_accounts:
   - "@telegrambot:matrix.example.com"
 
 authorization:
+  default_room_access: false
+  global_users:
+    - "@owner:matrix.example.com"
   aliases:
     "@owner:matrix.example.com":
       - "@telegram_12345:matrix.example.com"
