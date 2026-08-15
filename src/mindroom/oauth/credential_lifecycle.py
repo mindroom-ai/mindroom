@@ -1245,7 +1245,8 @@ def _oauth_refresh_log_context(
     }
 
 
-def _oauth_credentials_expires_at(credentials: dict[str, Any] | None) -> float | None:
+def _oauth_credentials_expires_at(credentials: Mapping[str, object] | None) -> float | None:
+    """Return one finite stored access-token expiry timestamp."""
     if credentials is None:
         return None
     expires_at = credentials.get("expires_at")
@@ -1282,7 +1283,7 @@ def _refresh_token_value(credentials: Mapping[str, Any] | None) -> str | None:
     return refresh_token if isinstance(refresh_token, str) and refresh_token else None
 
 
-def oauth_credentials_usable(  # noqa: PLR0911
+def oauth_credentials_usable(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     credentials: dict[str, object] | None,
@@ -1306,21 +1307,15 @@ def oauth_credentials_usable(  # noqa: PLR0911
         return False
 
     token = credentials.get("token") or credentials.get("access_token")
-    refresh_token = credentials.get("refresh_token")
-    has_refresh_token = isinstance(refresh_token, str) and bool(refresh_token)
+    has_refresh_token = _refresh_token_value(credentials) is not None
+    expires_at = _oauth_credentials_expires_at(credentials)
     if isinstance(token, str) and token:
-        expires_at = credentials.get("expires_at")
-        if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
-            return True
         return (
-            float(expires_at) > (now if now is not None else time.time()) + _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS
+            expires_at is None
+            or expires_at > (now if now is not None else time.time()) + _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS
             or has_refresh_token
         )
-
-    expires_at = credentials.get("expires_at")
-    if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
-        return False
-    return has_refresh_token
+    return expires_at is not None and has_refresh_token
 
 
 def oauth_credentials_match_client_id(

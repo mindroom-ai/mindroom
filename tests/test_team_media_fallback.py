@@ -42,7 +42,7 @@ from mindroom.ai_runtime import (
     install_queued_message_notice_hook,
     queued_message_signal_context,
 )
-from mindroom.approval_bindings import canonical_tool_arguments
+from mindroom.approval_bindings import approval_tool_descriptor
 from mindroom.approval_receipt import approval_receipt_context
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
@@ -431,7 +431,7 @@ async def test_team_continuation_executes_real_agno_confirmation(
     tool_bindings = {
         tool_call_id: {
             "tool_name": requirement.tool_execution.tool_name,
-            "arguments_json": canonical_tool_arguments(requirement.tool_execution.tool_args),
+            "arguments_json": approval_tool_descriptor(requirement.tool_execution)[1],
             "invoking_agent": "research",
         },
     }

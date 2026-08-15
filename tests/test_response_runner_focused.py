@@ -1594,16 +1594,25 @@ async def test_claimed_committed_reset_wins_later_authorization_revocation(tmp_p
         state="claimed",
     )
     target = _target(thread_id="$thread", reply_to_event_id="$source")
+    outcome = FinalDeliveryOutcome(
+        terminal_status="completed",
+        event_id="$waiting",
+        is_visible_response=True,
+    )
 
     with (
         patch.object(runner, "_recover_frozen_approval_final", new=AsyncMock(return_value=(False, None))),
         patch.object(runner, "_approval_continuation_is_authorized", return_value=False),
         patch.object(
             runner,
-            "_recover_revoked_oauth_reset",
-            new=AsyncMock(return_value="$waiting"),
-            create=True,
+            "_recover_revoked_oauth_reset_outcome",
+            new=AsyncMock(return_value=outcome),
         ) as recover_reset,
+        patch.object(
+            runner,
+            "_finalize_recovered_oauth_reset_receipt",
+            new=AsyncMock(return_value="$waiting"),
+        ) as finalize_reset,
         patch.object(runner, "_recover_nonready_approval", new=AsyncMock()) as recover_nonready,
         patch.object(runner, "_settle_unauthorized_approval_continuation", new=AsyncMock()) as settle_denial,
     ):
@@ -1611,6 +1620,7 @@ async def test_claimed_committed_reset_wins_later_authorization_revocation(tmp_p
 
     assert result == (True, "$waiting")
     recover_reset.assert_awaited_once_with(claimed, target=target)
+    finalize_reset.assert_awaited_once_with(claimed, target=target, outcome=outcome)
     recover_nonready.assert_not_awaited()
     settle_denial.assert_not_awaited()
 
@@ -2860,7 +2870,6 @@ async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agn
                 "invoking_agent": "general",
                 "oauth_reset": {
                     "provider_id": "google",
-                    "credential_generation": "credential-generation-1",
                     "connection_generation": "connection-generation-1",
                 },
             },
@@ -2874,15 +2883,15 @@ async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agn
         final_visible_body="reset receipt",
         delivery_kind="edited",
     )
+    credential_context = MagicMock()
 
     with (
         patch.object(runner, "_recover_frozen_approval_final", new=AsyncMock(return_value=(False, None))),
         patch.object(runner, "_approval_continuation_execution_identity", return_value=identity),
         patch(
             "mindroom.response_runner.validate_oauth_reset_approval_bindings",
-            new=AsyncMock(),
+            new=AsyncMock(return_value={"reset-call": credential_context}),
         ),
-        patch("mindroom.response_runner.resolve_oauth_reset_target") as resolve_reset_target,
         patch(
             "mindroom.response_runner.oauth_reset_operation_snapshot",
             return_value=SimpleNamespace(status=operation_status, credential_existed=True),
@@ -2901,7 +2910,6 @@ async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agn
         patch.object(runner._approval_responses, "settle_failure", new=AsyncMock()) as settle_failure,
         patch.object(runner, "_continue_entity_call", new=AsyncMock()) as continue_entity,
     ):
-        resolve_reset_target.return_value.credential_context = MagicMock()
         event_id = await runner._recover_claimed_approval_lifecycle(
             claimed,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
@@ -3265,7 +3273,6 @@ async def test_outbox_first_claim_remints_authorized_reset_link(tmp_path: Path) 
                 "invoking_agent": "general",
                 "oauth_reset": {
                     "provider_id": "google",
-                    "credential_generation": "credential-generation-1",
                     "connection_generation": "connection-generation-1",
                 },
             },
@@ -3294,6 +3301,7 @@ async def test_outbox_first_claim_remints_authorized_reset_link(tmp_path: Path) 
         edits_event_id="$waiting",
     )
     sent: list[MatrixDelivery] = []
+    credential_context = MagicMock()
 
     async def send(delivery: MatrixDelivery) -> str:
         sent.append(delivery)
@@ -3302,8 +3310,10 @@ async def test_outbox_first_claim_remints_authorized_reset_link(tmp_path: Path) 
     with (
         patch.object(runner, "_approval_continuation_is_authorized", return_value=True),
         patch.object(runner, "_approval_continuation_execution_identity", return_value=identity),
-        patch("mindroom.response_runner.validate_oauth_reset_approval_bindings", new=AsyncMock()),
-        patch("mindroom.response_runner.resolve_oauth_reset_target") as resolve_reset_target,
+        patch(
+            "mindroom.response_runner.validate_oauth_reset_approval_bindings",
+            new=AsyncMock(return_value={"reset-call": credential_context}),
+        ),
         patch(
             "mindroom.response_runner.oauth_reset_operation_snapshot",
             return_value=SimpleNamespace(status="completed", credential_existed=True),
@@ -3313,7 +3323,6 @@ async def test_outbox_first_claim_remints_authorized_reset_link(tmp_path: Path) 
             new=AsyncMock(return_value=fresh_body),
         ) as execute_reset,
     ):
-        resolve_reset_target.return_value.credential_context = MagicMock()
         outcome = await MatrixDeliveryWorker(
             store=store,
             send=send,
@@ -3452,7 +3461,6 @@ async def test_outbox_first_claim_preserves_hook_removed_reset_link(tmp_path: Pa
                 "invoking_agent": "general",
                 "oauth_reset": {
                     "provider_id": "google",
-                    "credential_generation": "credential-generation-1",
                     "connection_generation": "connection-generation-1",
                 },
             },
@@ -3479,6 +3487,7 @@ async def test_outbox_first_claim_preserves_hook_removed_reset_link(tmp_path: Pa
     )
     fresh_link = "https://example.test/api/oauth/google/authorize?connect_token=fresh"
     sent: list[MatrixDelivery] = []
+    credential_context = MagicMock()
 
     async def send(delivery: MatrixDelivery) -> str:
         sent.append(delivery)
@@ -3487,8 +3496,10 @@ async def test_outbox_first_claim_preserves_hook_removed_reset_link(tmp_path: Pa
     with (
         patch.object(runner, "_approval_continuation_is_authorized", return_value=True),
         patch.object(runner, "_approval_continuation_execution_identity", return_value=identity),
-        patch("mindroom.response_runner.validate_oauth_reset_approval_bindings", new=AsyncMock()),
-        patch("mindroom.response_runner.resolve_oauth_reset_target") as resolve_reset_target,
+        patch(
+            "mindroom.response_runner.validate_oauth_reset_approval_bindings",
+            new=AsyncMock(return_value={"reset-call": credential_context}),
+        ),
         patch(
             "mindroom.response_runner.oauth_reset_operation_snapshot",
             return_value=SimpleNamespace(status="completed", credential_existed=True),
@@ -3498,7 +3509,6 @@ async def test_outbox_first_claim_preserves_hook_removed_reset_link(tmp_path: Pa
             new=AsyncMock(return_value=f"OAuth connection reset. `connect_url`: {fresh_link}; reconnect."),
         ),
     ):
-        resolve_reset_target.return_value.credential_context = MagicMock()
         outcome = await MatrixDeliveryWorker(
             store=store,
             send=send,
@@ -3879,7 +3889,6 @@ async def test_completed_oauth_reset_receipt_wins_live_continuation_cancellation
                 "invoking_agent": "general",
                 "oauth_reset": {
                     "provider_id": "google",
-                    "credential_generation": "credential-generation-1",
                     "connection_generation": "connection-generation-1",
                 },
             },
@@ -3893,6 +3902,7 @@ async def test_completed_oauth_reset_receipt_wins_live_continuation_cancellation
         delivery_kind="edited",
     )
     lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
+    credential_context = MagicMock()
 
     with (
         patch.object(runner, "_execute_claimed_approval", side_effect=asyncio.CancelledError),
@@ -3900,9 +3910,8 @@ async def test_completed_oauth_reset_receipt_wins_live_continuation_cancellation
         patch.object(runner, "_approval_continuation_execution_identity", return_value=identity),
         patch(
             "mindroom.response_runner.validate_oauth_reset_approval_bindings",
-            new=AsyncMock(),
+            new=AsyncMock(return_value={"reset-call": credential_context}),
         ),
-        patch("mindroom.response_runner.resolve_oauth_reset_target") as resolve_reset_target,
         patch(
             "mindroom.response_runner.oauth_reset_operation_snapshot",
             return_value=SimpleNamespace(status="completed", credential_existed=True),
@@ -3920,7 +3929,6 @@ async def test_completed_oauth_reset_receipt_wins_live_continuation_cancellation
         ) as finish_continuation,
         patch.object(runner._approval_responses, "settle_failure", new=AsyncMock()) as settle_failure,
     ):
-        resolve_reset_target.return_value.credential_context = MagicMock()
         outcome = await runner._run_claimed_approval_lifecycle(
             claimed,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),

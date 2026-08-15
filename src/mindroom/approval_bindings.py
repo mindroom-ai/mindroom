@@ -19,7 +19,7 @@ _OAUTH_RESET_BINDING_KEY = "oauth_reset"
 _OAUTH_RESET_TOOL_NAME = "reset_oauth_connection"
 
 
-def canonical_tool_arguments(arguments: object) -> str:
+def _canonical_tool_arguments(arguments: object) -> str:
     """Encode one tool argument object into deterministic JSON."""
     if arguments is None:
         arguments = {}
@@ -37,7 +37,7 @@ def approval_tool_descriptor(tool: ToolExecution) -> tuple[str | None, str, bool
     """Return the security-relevant identity of one observed approval tool call."""
     return (
         tool.tool_name,
-        canonical_tool_arguments(tool.tool_args),
+        _canonical_tool_arguments(tool.tool_args),
         bool(tool.requires_confirmation),
     )
 
@@ -85,7 +85,7 @@ async def build_approval_tool_bindings(
     for tool, tool_call_id, tool_name, invoking_agent in identified_tools:
         binding: dict[str, object] = {
             "tool_name": tool_name,
-            "arguments_json": canonical_tool_arguments(tool.tool_args),
+            "arguments_json": _canonical_tool_arguments(tool.tool_args),
             "invoking_agent": invoking_agent,
         }
         reset_binding = reset_bindings.get(tool_call_id)
@@ -116,7 +116,7 @@ def validate_exact_approval_requirements(
         binding = bindings.get(tool_call_id)
         if binding is None or (
             binding.get("tool_name") != tool.tool_name
-            or binding.get("arguments_json") != canonical_tool_arguments(tool.tool_args)
+            or binding.get("arguments_json") != _canonical_tool_arguments(tool.tool_args)
             or binding.get("invoking_agent") != (requirement.member_agent_name or default_agent_name)
         ):
             msg = "Paused tools no longer match the approval continuation"

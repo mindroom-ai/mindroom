@@ -29,7 +29,7 @@ One lifecycle module submits asynchronous callers and synchronous provider adapt
 - Keep GitHub tokens and PyGithub clients together in worker-thread-local state.
 - Revalidate every authenticated MCP connection and call against authoritative cross-process credential revision and token hash immediately before publication or remote use.
 - Use structured provider error codes and never log provider-controlled descriptions or token values.
-- Keep reset approval bound to the exact provider, service, scope, worker key, routing agent, and connection generation while retaining credential revision as audit metadata.
+- Keep reset approval bound to the exact provider, service, scope, worker key, routing agent, and connection generation.
 - Freeze every approved call's exact ID, name, canonical arguments, and invoking agent.
 - Require reset to be the sole observed call in its paused run.
 - Key approved reset commits by `approval_id:generation:tool_call_id`, retain those completed tombstones permanently, and prune non-replayable direct or provider-driven completion state.

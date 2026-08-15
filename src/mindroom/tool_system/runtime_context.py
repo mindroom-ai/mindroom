@@ -66,16 +66,8 @@ def _tool_runtime_context_scope(tool_context: ToolRuntimeContext | None) -> Iter
 class ApprovalToolOperation:
     """Stable identity for one approved tool side effect."""
 
-    approval_id: str
-    generation: int
-    tool_call_id: str
-    credential_generation: str
+    operation_id: str
     connection_generation: str
-
-    @property
-    def operation_id(self) -> str:
-        """Return the durable lifecycle operation key."""
-        return f"{self.approval_id}:{self.generation}:{self.tool_call_id}"
 
 
 @dataclass(frozen=True)

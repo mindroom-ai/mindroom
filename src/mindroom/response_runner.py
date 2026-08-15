@@ -20,7 +20,6 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
-from mindroom.approval_bindings import canonical_tool_arguments
 from mindroom.approval_execution import AgentApprovalExecution
 from mindroom.approval_receipt import approval_receipt_context, build_approval_receipt
 from mindroom.approval_response import (
@@ -75,7 +74,7 @@ from mindroom.oauth.reset import (
     OAuthResetApprovalBindingError,
     OAuthResetTargetError,
     completed_oauth_reset_result_from_binding,
-    resolve_oauth_reset_target,
+    parse_frozen_oauth_reset_binding,
     validate_oauth_reset_approval_bindings,
 )
 from mindroom.orchestration.runtime import (
@@ -1351,14 +1350,19 @@ class ResponseRunner:
         settled = await self._approval_responses.settle_failure(claimed, reason)
         return claimed.response_event_id if settled else None
 
-    async def _recover_completed_oauth_reset(
+    async def _recover_oauth_reset_for_current_authorization(
         self,
         claimed: ApprovalContinuation,
         *,
         target: MessageTarget,
     ) -> str | None:
-        """Replay one approved reset by stable operation ID and deliver its receipt directly."""
-        outcome = await self._recover_completed_oauth_reset_outcome(claimed, target=target)
+        """Recover reset debt without disclosing reconnect material after revocation."""
+        authorized = self._approval_continuation_is_authorized(claimed)
+        outcome = await (
+            self._recover_completed_oauth_reset_outcome(claimed, target=target)
+            if authorized
+            else self._recover_revoked_oauth_reset_outcome(claimed, target=target)
+        )
         if outcome is None:
             return None
         try:
@@ -1368,19 +1372,10 @@ class ResponseRunner:
                 outcome=outcome,
             )
         except Exception as exc:
+            if not authorized:
+                raise
             msg = "Completed OAuth reset receipt recovery remains pending"
             raise _OAuthResetReceiptRecoveryError(msg) from exc
-
-    async def _recover_oauth_reset_for_current_authorization(
-        self,
-        claimed: ApprovalContinuation,
-        *,
-        target: MessageTarget,
-    ) -> str | None:
-        """Recover reset debt without disclosing reconnect material after revocation."""
-        if self._approval_continuation_is_authorized(claimed):
-            return await self._recover_completed_oauth_reset(claimed, target=target)
-        return await self._recover_revoked_oauth_reset(claimed, target=target)
 
     async def _recover_oauth_reset_outcome_for_current_authorization(
         self,
@@ -1504,70 +1499,32 @@ class ResponseRunner:
         call = claimed.calls[0]
         if call.tool_name != "reset_oauth_connection" or call.decision is not ContinuationDecision.APPROVED:
             return None
-        binding = claimed.tool_bindings.get(call.tool_call_id)
-        if binding is None:
-            msg = "Approved OAuth credential target is missing; run the reset again."
-            raise RuntimeError(msg)
-        reset_binding = binding.get("oauth_reset") if binding is not None else None
-        reset_target = cast("dict[str, object]", reset_binding) if isinstance(reset_binding, dict) else None
-        provider_id = reset_target.get("provider_id") if reset_target is not None else None
-        credential_generation = reset_target.get("credential_generation") if reset_target is not None else None
-        connection_generation = reset_target.get("connection_generation") if reset_target is not None else None
-        if not isinstance(provider_id, str) or not provider_id:
-            msg = "Approved OAuth credential target is missing; run the reset again."
-            raise RuntimeError(msg)
-        if not isinstance(credential_generation, str) or not credential_generation:
-            msg = "Approved OAuth credential generation is missing; run the reset again."
-            raise RuntimeError(msg)
-        if not isinstance(connection_generation, str) or not connection_generation:
-            msg = "Approved OAuth connection generation is missing; run the reset again."
-            raise RuntimeError(msg)
-        if (
-            binding.get("tool_name") != call.tool_name
-            or binding.get("invoking_agent") != call.invoking_agent
-            or binding.get("arguments_json") != canonical_tool_arguments({"provider_id": provider_id})
-        ):
-            msg = "Approved OAuth reset call changed; run the reset again."
+        frozen = parse_frozen_oauth_reset_binding(
+            invoking_agent=call.invoking_agent,
+            stored_binding=claimed.tool_bindings.get(call.tool_call_id),
+        )
+        if frozen is None:
+            msg = "Approved OAuth reset binding is invalid; run the reset again."
             raise RuntimeError(msg)
         execution_identity = self._approval_continuation_execution_identity(claimed)
-        await self._validate_oauth_reset_recovery(claimed, allow_connection_generation_drift=True)
-        operation = ApprovalToolOperation(
-            approval_id=claimed.approval_id,
-            generation=claimed.generation,
-            tool_call_id=call.tool_call_id,
-            credential_generation=credential_generation,
-            connection_generation=connection_generation,
-        )
-        resolved_target = resolve_oauth_reset_target(
-            provider_id,
-            agent_name=call.invoking_agent,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-            execution_identity=execution_identity,
-        )
-        return _OAuthResetRecovery(
-            provider_id=provider_id,
-            invoking_agent=call.invoking_agent,
-            execution_identity=execution_identity,
-            operation=operation,
-            credential_context=resolved_target.credential_context,
-        )
-
-    async def _validate_oauth_reset_recovery(
-        self,
-        claimed: ApprovalContinuation,
-        *,
-        allow_connection_generation_drift: bool,
-    ) -> None:
-        """Validate stored target binding against current config and canonical identity."""
-        call = claimed.calls[0]
-        await validate_oauth_reset_approval_bindings(
+        credential_contexts = await validate_oauth_reset_approval_bindings(
             calls=((call.tool_call_id, call.tool_name, call.invoking_agent, True),),
             bindings=claimed.tool_bindings,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
-            execution_identity=self._approval_continuation_execution_identity(claimed),
-            allow_connection_generation_drift=allow_connection_generation_drift,
+            execution_identity=execution_identity,
+            allow_connection_generation_drift=True,
+        )
+        operation = ApprovalToolOperation(
+            operation_id=frozen.operation_id(claimed.approval_id, claimed.generation, call.tool_call_id),
+            connection_generation=cast("str", frozen.connection_generation),
+        )
+        return _OAuthResetRecovery(
+            provider_id=frozen.provider_id,
+            invoking_agent=call.invoking_agent,
+            execution_identity=execution_identity,
+            operation=operation,
+            credential_context=credential_contexts[call.tool_call_id],
         )
 
     async def _finalize_recovered_oauth_reset_receipt(
@@ -1966,23 +1923,20 @@ class ResponseRunner:
         call = continuation.calls[0]
         if call.tool_name != "reset_oauth_connection" or call.decision is not ContinuationDecision.APPROVED:
             return tool_dispatch
-        binding = continuation.tool_bindings.get(call.tool_call_id)
-        reset_binding = binding.get("oauth_reset") if binding is not None else None
-        reset_target = cast("Mapping[str, object]", reset_binding) if isinstance(reset_binding, dict) else None
-        credential_generation = reset_target.get("credential_generation") if reset_target is not None else None
-        connection_generation = reset_target.get("connection_generation") if reset_target is not None else None
-        if not isinstance(credential_generation, str) or not credential_generation:
-            msg = "Approved OAuth credential generation is missing; run the reset again."
-            raise RuntimeError(msg)
-        if not isinstance(connection_generation, str) or not connection_generation:
-            msg = "Approved OAuth connection generation is missing; run the reset again."
+        frozen = parse_frozen_oauth_reset_binding(
+            invoking_agent=call.invoking_agent,
+            stored_binding=continuation.tool_bindings.get(call.tool_call_id),
+        )
+        if frozen is None:
+            msg = "Approved OAuth reset binding is invalid; run the reset again."
             raise RuntimeError(msg)
         operation = ApprovalToolOperation(
-            approval_id=continuation.approval_id,
-            generation=continuation.generation,
-            tool_call_id=call.tool_call_id,
-            credential_generation=credential_generation,
-            connection_generation=connection_generation,
+            operation_id=frozen.operation_id(
+                continuation.approval_id,
+                continuation.generation,
+                call.tool_call_id,
+            ),
+            connection_generation=cast("str", frozen.connection_generation),
         )
         return replace(
             tool_dispatch,
@@ -2529,29 +2483,17 @@ class ResponseRunner:
                 return True, event_id
         authorized = self._approval_continuation_is_authorized(owned)
         if owned.state == "claimed" and not authorized:
-            recovered_reset = await self._recover_revoked_oauth_reset(owned, target=target)
-            if recovered_reset is not None:
-                return True, recovered_reset
+            outcome = await self._recover_revoked_oauth_reset_outcome(owned, target=target)
+            if outcome is not None:
+                return True, await self._finalize_recovered_oauth_reset_receipt(
+                    owned,
+                    target=target,
+                    outcome=outcome,
+                )
         if owned.state != "ready" and not authorized:
             return True, await self._settle_unauthorized_approval_continuation(owned)
         recovered, event_id = await self._recover_nonready_approval(owned, target=target)
         return recovered, event_id
-
-    async def _recover_revoked_oauth_reset(
-        self,
-        claimed: ApprovalContinuation,
-        *,
-        target: MessageTarget,
-    ) -> str | None:
-        """Finish proved reset debt after revocation without publishing reconnect material."""
-        outcome = await self._recover_revoked_oauth_reset_outcome(claimed, target=target)
-        if outcome is None:
-            return None
-        return await self._finalize_recovered_oauth_reset_receipt(
-            claimed,
-            target=target,
-            outcome=outcome,
-        )
 
     async def _recover_revoked_oauth_reset_outcome(
         self,
@@ -2602,27 +2544,18 @@ class ResponseRunner:
         call = claimed.calls[0]
         if call.tool_name != "reset_oauth_connection" or call.decision is not ContinuationDecision.APPROVED:
             return None
-        binding = claimed.tool_bindings.get(call.tool_call_id)
-        reset_binding = binding.get("oauth_reset") if binding is not None else None
-        reset_target = cast("dict[str, object]", reset_binding) if isinstance(reset_binding, dict) else None
-        if reset_target is None:
+        frozen = parse_frozen_oauth_reset_binding(
+            invoking_agent=call.invoking_agent,
+            stored_binding=claimed.tool_bindings.get(call.tool_call_id),
+            require_connection_generation=False,
+        )
+        if frozen is None:
             return None
-        provider_id = reset_target.get("provider_id") if reset_target is not None else None
-        if (
-            not isinstance(provider_id, str)
-            or not provider_id
-            or binding is None
-            or binding.get("tool_name") != call.tool_name
-            or binding.get("invoking_agent") != call.invoking_agent
-            or binding.get("arguments_json") != canonical_tool_arguments({"provider_id": provider_id})
-        ):
-            return None
-        operation_id = f"{claimed.approval_id}:{claimed.generation}:{call.tool_call_id}"
         return completed_oauth_reset_result_from_binding(
-            reset_target,
+            frozen.target,
             execution_identity=self._approval_continuation_execution_identity(claimed),
             runtime_paths=self.deps.runtime_paths,
-            operation_id=operation_id,
+            operation_id=frozen.operation_id(claimed.approval_id, claimed.generation, call.tool_call_id),
         )
 
     def _approval_continuation_is_authorized(self, continuation: ApprovalContinuation) -> bool:

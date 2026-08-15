@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
@@ -35,6 +36,55 @@ class OAuthResetTargetError(ValueError):
 
 class OAuthResetApprovalBindingError(RuntimeError):
     """One approved OAuth reset no longer resolves to its original credential target."""
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenOAuthResetBinding:
+    """Typed reset fields recovered from one exact persisted approval descriptor."""
+
+    provider_id: str
+    connection_generation: str | None
+    target: Mapping[str, object]
+
+    @staticmethod
+    def operation_id(approval_id: str, generation: int, tool_call_id: str) -> str:
+        """Return the stable lifecycle key for one approval generation."""
+        return f"{approval_id}:{generation}:{tool_call_id}"
+
+
+def parse_frozen_oauth_reset_binding(
+    *,
+    invoking_agent: str,
+    stored_binding: Mapping[str, object] | None,
+    require_connection_generation: bool = True,
+) -> _FrozenOAuthResetBinding | None:
+    """Parse one exact approved reset descriptor, failing closed on any drift."""
+    if stored_binding is None:
+        return None
+    nested = stored_binding.get("oauth_reset")
+    if not isinstance(nested, dict):
+        return None
+    target = cast("Mapping[str, object]", nested)
+    provider_id = target.get("provider_id")
+    raw_connection_generation = target.get("connection_generation")
+    connection_generation = (
+        raw_connection_generation if isinstance(raw_connection_generation, str) and raw_connection_generation else None
+    )
+    if (
+        not isinstance(provider_id, str)
+        or not provider_id
+        or (require_connection_generation and connection_generation is None)
+        or stored_binding.get("tool_name") != _OAUTH_RESET_TOOL_NAME
+        or stored_binding.get("invoking_agent") != invoking_agent
+        or stored_binding.get("arguments_json")
+        != json.dumps({"provider_id": provider_id}, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    ):
+        return None
+    return _FrozenOAuthResetBinding(
+        provider_id=provider_id,
+        connection_generation=connection_generation,
+        target=target,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,8 +218,9 @@ async def validate_oauth_reset_approval_bindings(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
     allow_connection_generation_drift: bool = False,
-) -> None:
+) -> dict[str, OAuthCredentialContext]:
     """Fail closed when an approved reset resolves differently after configuration drift."""
+    credential_contexts: dict[str, OAuthCredentialContext] = {}
     for tool_call_id, tool_name, invoking_agent, approved in calls:
         if tool_name != _OAUTH_RESET_TOOL_NAME or not approved:
             continue
@@ -192,24 +243,24 @@ async def validate_oauth_reset_approval_bindings(
             msg = "Approved OAuth credential target changed or is unavailable; run the reset again."
             raise OAuthResetApprovalBindingError(msg) from exc
         assert binding is not None
+        ignored_keys = {"credential_generation"}
         if allow_connection_generation_drift:
-            ignored_keys = {"credential_generation", "connection_generation"}
+            ignored_keys.add("connection_generation")
             current_binding = _oauth_reset_target_identity_binding(target)
         else:
-            ignored_keys = {"credential_generation"}
             current_binding = await _oauth_reset_target_binding(target)
         binding = {key: value for key, value in binding.items() if key not in ignored_keys}
-        current_binding = {key: value for key, value in current_binding.items() if key not in ignored_keys}
         if binding != current_binding:
             msg = "Approved OAuth credential target changed; run the reset again."
             raise OAuthResetApprovalBindingError(msg)
+        credential_contexts[tool_call_id] = target.credential_context
+    return credential_contexts
 
 
 async def _oauth_reset_target_binding(target: _ResolvedOAuthResetTarget) -> dict[str, object]:
     snapshot = await load_oauth_credentials_snapshot(target.credential_context)
     return {
         **_oauth_reset_target_identity_binding(target),
-        "credential_generation": snapshot.generation,
         "connection_generation": snapshot.connection_generation,
     }
 

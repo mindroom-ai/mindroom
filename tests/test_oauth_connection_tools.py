@@ -97,10 +97,7 @@ def _tool_and_context(
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         approval_operation=ApprovalToolOperation(
-            approval_id="approval-default",
-            generation=1,
-            tool_call_id="reset-call",
-            credential_generation="initial",
+            operation_id="approval-default:1:reset-call",
             connection_generation="initial",
         ),
     )
@@ -119,6 +116,76 @@ def _connect_url_from_result(result: str) -> str:
     marker = "`connect_url`: "
     assert marker in result
     return result.split(marker, maxsplit=1)[1].split(";", maxsplit=1)[0]
+
+
+def test_frozen_oauth_reset_binding_parses_one_exact_approved_call() -> None:
+    """Persisted reset parsing should have one typed owner for every replay path."""
+    parsed = oauth_reset_module.parse_frozen_oauth_reset_binding(
+        invoking_agent="research",
+        stored_binding={
+            "tool_name": "reset_oauth_connection",
+            "arguments_json": '{"provider_id":"google_drive"}',
+            "invoking_agent": "research",
+            "oauth_reset": {
+                "provider_id": "google_drive",
+                "connection_generation": "connection-generation-1",
+            },
+        },
+    )
+
+    assert parsed is not None
+    assert parsed.provider_id == "google_drive"
+    assert parsed.connection_generation == "connection-generation-1"
+    assert parsed.operation_id("approval-1", 4, "reset-call") == "approval-1:4:reset-call"
+
+
+def test_frozen_oauth_reset_binding_rejects_descriptor_drift() -> None:
+    """A frozen target cannot be detached from its exact approved descriptor."""
+    parsed = oauth_reset_module.parse_frozen_oauth_reset_binding(
+        invoking_agent="research",
+        stored_binding={
+            "tool_name": "reset_oauth_connection",
+            "arguments_json": '{"provider_id":"google_drive"}',
+            "invoking_agent": "other-agent",
+            "oauth_reset": {
+                "provider_id": "google_drive",
+                "connection_generation": "connection-generation-1",
+            },
+        },
+    )
+
+    assert parsed is None
+
+
+def test_frozen_oauth_reset_binding_can_parse_completed_target_without_generation() -> None:
+    """Completed tombstone lookup needs only the frozen canonical target descriptor."""
+    binding = {
+        "tool_name": "reset_oauth_connection",
+        "arguments_json": '{"provider_id":"removed"}',
+        "invoking_agent": "research",
+        "oauth_reset": {"provider_id": "removed"},
+    }
+
+    parsed = oauth_reset_module.parse_frozen_oauth_reset_binding(
+        invoking_agent="research",
+        stored_binding=binding,
+        require_connection_generation=False,
+    )
+
+    assert parsed is not None
+    assert parsed.provider_id == "removed"
+    assert parsed.connection_generation is None
+
+
+def test_approval_tool_operation_keeps_only_execution_inputs() -> None:
+    """Runtime reset context should not repeat durable approval descriptor fields."""
+    operation = ApprovalToolOperation(
+        operation_id="approval-1:4:reset-call",
+        connection_generation="connection-generation-1",
+    )
+
+    assert operation.operation_id == "approval-1:4:reset-call"
+    assert operation.connection_generation == "connection-generation-1"
 
 
 def _save_test_credentials(
@@ -386,7 +453,7 @@ async def test_oauth_reset_approval_binding_allows_same_connection_refresh_drift
     )
 
     reset_binding = bindings["reset-call"]
-    assert reset_binding["credential_generation"] != refreshed_state.generation
+    assert "credential_generation" not in reset_binding
     assert reset_binding["connection_generation"] == refreshed_state.connection_generation
 
 
@@ -507,10 +574,7 @@ async def test_reset_uses_stable_approval_operation_id(
     context = replace(
         context,
         approval_operation=ApprovalToolOperation(
-            approval_id="approval-1",
-            generation=4,
-            tool_call_id="reset-call",
-            credential_generation="credential-generation-1",
+            operation_id="approval-1:4:reset-call",
             connection_generation="connection-generation-1",
         ),
     )
@@ -538,10 +602,7 @@ async def test_approved_reset_propagates_runtime_failure_for_durable_recovery(
     context = replace(
         context,
         approval_operation=ApprovalToolOperation(
-            approval_id="approval-1",
-            generation=4,
-            tool_call_id="reset-call",
-            credential_generation="credential-generation-1",
+            operation_id="approval-1:4:reset-call",
             connection_generation="connection-generation-1",
         ),
     )
