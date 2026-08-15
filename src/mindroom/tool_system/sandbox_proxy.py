@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, TypedDict
 import httpx
 
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, build_execution_tool_env
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY, SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
@@ -457,6 +457,11 @@ def _get_worker_manager(
 
 def ensure_worker_target_ready(runtime_paths: RuntimePaths, worker_target: ResolvedWorkerTarget) -> None:
     """Ensure the exact trusted worker target is ready without dispatching a tool into it."""
+    if primary_worker_backend_name(runtime_paths) != "kubernetes" or not runtime_paths.env_flag(
+        KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_enabled"],
+    ):
+        msg = "Agent repository requires Kubernetes workers with Agent Vault enabled"
+        raise WorkerBackendError(msg)
     proxy_config = sandbox_proxy_config(runtime_paths)
     manager_context = _primary_worker_manager_context(runtime_paths)
     with lease_primary_worker_manager(

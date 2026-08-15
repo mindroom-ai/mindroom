@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     icon_color="text-slate-700",
     dependencies=["agno", "httpx"],
     consumes_workspace_paths=True,
+    supports_output_redirection=False,
     config_fields=[
         ConfigField(
             name="organization",

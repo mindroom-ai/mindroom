@@ -140,6 +140,10 @@ def test_agent_repositories_validation_rejects_partial_or_unsafe_policy() -> Non
             "agentRepositories.brokerUrl port must be between 1 and 65535",
         ),
         (
+            (*_enabled_values(), "agentRepositories.organization=example--org"),
+            "agentRepositories.organization must be a valid GitHub organization slug",
+        ),
+        (
             (*_enabled_values(), "workers.backend=static_runner"),
             "agentRepositories.enabled requires workers.backend=kubernetes",
         ),

@@ -677,7 +677,7 @@ def _build_tool_instance(
             runtime_paths,
             auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
         )
-        if tool_output_workspace_root is not None
+        if tool_output_workspace_root is not None and metadata.supports_output_redirection
         else None
     )
     wrap_toolkit_for_output_files(toolkit, output_file_policy)
@@ -1325,6 +1325,7 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("supports_toolkit_filters", None)
+        tool_dict.pop("supports_output_redirection", None)
         tool_dict.pop("factory", None)
         tools.append(tool_dict)
 

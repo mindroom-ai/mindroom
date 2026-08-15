@@ -337,7 +337,7 @@ def _binding_from_payload(payload: object) -> RepositoryBinding:
         msg = "Repository binding file has an invalid schema"
         raise RepositoryBindingError(msg)
     data = cast("dict[str, object]", payload)
-    if data["version"] != _BINDING_VERSION:
+    if type(data["version"]) is not int or data["version"] != _BINDING_VERSION:
         msg = "Repository binding file has an unsupported version"
         raise RepositoryBindingError(msg)
     repository_id = data["repository_id"]
@@ -619,6 +619,19 @@ def _reject_indirect_git_configuration(git_fd: int) -> None:
         raise RepositoryOriginConflictError(msg)
 
 
+def _require_complete_git_directory(git_fd: int) -> None:
+    required_entries = (("HEAD", stat.S_ISREG), ("objects", stat.S_ISDIR), ("refs", stat.S_ISDIR))
+    for name, expected_type in required_entries:
+        try:
+            entry_stat = os.stat(name, dir_fd=git_fd, follow_symlinks=False)
+        except OSError as exc:
+            msg = "Agent repository workspace has incomplete Git metadata"
+            raise RepositoryBindingError(msg) from exc
+        if not expected_type(entry_stat.st_mode):
+            msg = "Agent repository workspace has incomplete Git metadata"
+            raise RepositoryBindingError(msg)
+
+
 def _git_directory_is_current(workspace_fd: int, git_fd: int) -> bool:
     try:
         current_stat = os.stat(".git", dir_fd=workspace_fd, follow_symlinks=False)
@@ -709,6 +722,7 @@ def configure_repository_workspace(
                 if created:
                     _initialize_git_directory(git_fd, clone_url)
                 else:
+                    _require_complete_git_directory(git_fd)
                     config_fd, config_mode = _open_git_config(git_fd)
                     try:
                         fetch_urls, push_urls, has_origin = _origin_urls_from_config(

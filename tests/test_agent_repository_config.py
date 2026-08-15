@@ -34,6 +34,15 @@ def test_shared_agent_repository_opt_in_uses_global_policy() -> None:
     }
 
 
+def test_repository_policy_rejects_consecutive_organization_hyphens() -> None:
+    """Runtime policy must reject organization names GitHub cannot create."""
+    data = _shared_config()
+    data["agent_repositories"]["organization"] = "example--org"  # type: ignore[index]
+
+    with pytest.raises(ValidationError, match="valid GitHub organization slug"):
+        Config.model_validate(data)
+
+
 def test_repository_policy_is_not_injected_into_an_unassigned_agent() -> None:
     """Global policy must not make the control-plane capability globally loadable."""
     data = _shared_config()
