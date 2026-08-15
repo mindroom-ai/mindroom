@@ -1785,15 +1785,16 @@ def select_model_for_team(
 
     Priority:
     1. Thread-specific model override
-    2. Room-specific model from room_models
-    3. Team's configured model
-    4. Global default model
+    2. Persisted runtime room override
+    3. Room-specific model from room_models
+    4. Team's configured model
+    5. Global default model
 
     Args:
         team_name: Name of the team
         room_id: Matrix room ID
         config: Application configuration
-        runtime_paths: Explicit runtime context for room alias resolution
+        runtime_paths: Explicit runtime context for persisted overrides and room alias resolution
         thread_id: Optional resolved Matrix thread root for thread model overrides
 
     Returns:
