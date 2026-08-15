@@ -6,13 +6,13 @@ MindRoom-managed OAuth credentials must remain recoverable when refresh grants a
 
 ## Problem
 
-The current implementation distributes one credential lifecycle across API routes, provider wrappers, toolkit mixins, MCP session management, reset approval code, and generic OAuth helpers.
-Each component is locally reasonable, but no component owns the complete provider-operation-to-persistence transaction.
-That gap has produced stale refresh-token preservation, lost rotated tokens, reconnect races, inconsistent failure messages, and destructive resets that can be cancelled after deletion but before returning a recovery link.
+Before this change, one credential lifecycle was distributed across API routes, provider wrappers, toolkit mixins, MCP session management, reset approval code, and generic OAuth helpers.
+Each component was locally reasonable, but no component owned the complete provider-operation-to-persistence transaction.
+That gap produced stale refresh-token preservation, lost rotated tokens, reconnect races, inconsistent failure messages, and destructive resets that could be cancelled after deletion but before returning a recovery link.
 
-Two different per-scope locks and optimistic snapshot comparisons attempt to reconcile concurrent mutations after provider I/O.
-Those mechanisms create a retry state machine whose branches grow whenever another writer or cancellation point is found.
-OAuth operations are rare enough that this concurrency is not worth the correctness cost.
+Two different per-scope locks and optimistic snapshot comparisons attempted to reconcile concurrent mutations after provider I/O.
+Those mechanisms created a retry state machine whose branches grew whenever another writer or cancellation point was found.
+OAuth operations are rare enough that this concurrency was not worth the correctness cost.
 
 ## Invariants
 
@@ -45,6 +45,7 @@ OAuth operations are rare enough that this concurrency is not worth the correctn
 27. Claimed reset recovery re-enters only a durable pending or completed operation by its stable ID, never starts a missing reset, and never resumes the stale paused Agno run.
 28. Credential documents carry a scope-bound self-describing publication record, are durably saved before their counters are published, and repair an interrupted state-file commit under the operation lock.
 29. Pending reset deletion always takes precedence over credential-publication recovery.
+30. Reset receipt recovery rechecks current authorization before publishing reconnect material, while revoked recovery emits only a link-free completion receipt.
 
 ## Architecture
 

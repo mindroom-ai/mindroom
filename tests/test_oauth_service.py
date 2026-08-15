@@ -841,6 +841,38 @@ async def test_refresh_cancellation_while_waiting_for_lock_does_not_call_provide
 
 
 @pytest.mark.asyncio
+async def test_snapshot_cancellation_while_waiting_for_lock_returns_promptly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A read-only snapshot must remain cancellable before it owns the operation lock."""
+    lock_waiting = threading.Event()
+    release_lock = threading.Event()
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    @asynccontextmanager
+    async def blocked_lock(_path: Path) -> AsyncIterator[None]:
+        lock_waiting.set()
+        await asyncio.to_thread(release_lock.wait)
+        yield None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+    monkeypatch.setattr(credential_lifecycle, "async_exclusive_file_lock", blocked_lock)
+    snapshot_task = asyncio.create_task(load_oauth_credentials_snapshot(context))
+    await asyncio.to_thread(lock_waiting.wait)
+    snapshot_task.cancel()
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(snapshot_task, timeout=1)
+    finally:
+        release_lock.set()
+
+
+@pytest.mark.asyncio
 async def test_refresh_publishes_rotation_before_propagating_cancellation(tmp_path: Path) -> None:
     """A remotely rotated refresh grant is committed before cancellation escapes."""
     provider_rotated = threading.Event()

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 type OverrideRecord = dict[str, str]
 _override_load_cache: dict[Path, tuple[int, dict[str, OverrideRecord]]] = {}
 _MAX_DURABLE_DIRECTORY_IDENTITIES = 4096
+_DIRECTORY_FSYNC_SUPPORTED = os.name != "nt"
 _durable_directory_identities: OrderedDict[Path, tuple[int, int]] = OrderedDict()
 _durable_directory_identities_lock = Lock()
 
@@ -46,6 +47,7 @@ def delete_file_durable(path: Path) -> bool:
     try:
         path.unlink()
     except FileNotFoundError:
+        _fsync_directory_durable(path.parent)
         return False
     _fsync_directory_durable(path.parent)
     return True
@@ -166,6 +168,8 @@ def _fsync_directory(directory: Path) -> None:
 
 def _fsync_directory_durable(directory: Path) -> None:
     """Flush one directory update and propagate durability failures."""
+    if not _DIRECTORY_FSYNC_SUPPORTED:
+        return
     directory_fd = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(directory_fd)

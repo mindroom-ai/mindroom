@@ -223,7 +223,11 @@ class GithubTools(AgnoGithubTools):
                     return json.dumps(oauth_connection_required_payload(exc))
                 result = _entrypoint(*args, **kwargs)
                 if not self._explicit_access_token and _is_github_authentication_error(result):
-                    return json.dumps(oauth_connection_required_payload(self._connection_required()))
+                    return json.dumps(
+                        oauth_connection_required_payload(
+                            self._connection_required(reason=OAUTH_REFRESH_REJECTED_REASON),
+                        ),
+                    )
                 return result
 
             function.entrypoint = oauth_entrypoint

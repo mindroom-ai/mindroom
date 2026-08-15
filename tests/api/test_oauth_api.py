@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from httpx import HTTPError, HTTPStatusError, Request, Response
 from starlette.requests import Request as StarletteRequest
@@ -35,6 +35,7 @@ from mindroom.oauth import OAuthClaimValidationError, OAuthProvider
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import reset_execution as oauth_reset_execution
 from mindroom.oauth import service as oauth_service
+from mindroom.oauth.credential_lifecycle import OAuthCredentialConflictError
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_docs import google_docs_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
@@ -1922,6 +1923,54 @@ def test_disconnect_invalidates_oauth_state_issued_before_reset(tmp_path: Path) 
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_callback_maps_locked_connection_generation_race_to_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reset after target precheck must remain the same public 409 conflict."""
+    runtime_paths = _runtime_paths(tmp_path)
+    provider = _fake_provider()
+    manager = get_runtime_credentials_manager(runtime_paths)
+    target = RequestCredentialsTarget(
+        runtime_paths=runtime_paths,
+        base_manager=manager,
+        target_manager=manager,
+        worker_scope=None,
+        agent_name=None,
+        execution_identity=None,
+    )
+    pending = SimpleNamespace(
+        agent_name=None,
+        execution_scope_override_provided=False,
+        execution_scope_override=None,
+        payload={"connection_generation": "generation-1"},
+        code_verifier=None,
+    )
+    conflict = OAuthCredentialConflictError("OAuth connection state is stale because this credential changed")
+    monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
+    monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
+    monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
+    monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
+    monkeypatch.setattr(oauth_api, "exchange_and_store_oauth_credentials", AsyncMock(side_effect=conflict))
+    request = StarletteRequest(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": f"/api/oauth/{provider.id}/callback",
+            "query_string": b"code=test-code&state=test-state",
+            "headers": [],
+        },
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        await oauth_api.callback(provider.id, request)
+
+    assert raised.value.status_code == 409
+    assert raised.value.detail == str(conflict)
 
 
 def test_generated_mcp_oauth_routes_store_status_and_disconnect_scoped_credentials(

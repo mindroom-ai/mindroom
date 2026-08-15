@@ -28,7 +28,7 @@ from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
 from mindroom.ai_turn_state import AITurnState
-from mindroom.approval_bindings import validate_exact_approval_requirements
+from mindroom.approval_bindings import approval_tool_descriptor, validate_exact_approval_requirements
 from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -481,13 +481,17 @@ def _merged_observed_tools(
 ) -> tuple[ToolExecution, ...]:
     """Deduplicate the complete tool history while preserving first-seen order."""
     observed_tools: list[ToolExecution] = []
-    observed_call_ids: set[str] = set()
+    observed_call_descriptors: dict[str, tuple[str | None, str, bool]] = {}
     observed_without_call_id: set[int] = set()
     for tool in (*additional_tools, *response_tools, *pending_tools):
         if tool.tool_call_id:
-            if tool.tool_call_id in observed_call_ids:
+            descriptor = approval_tool_descriptor(tool)
+            previous = observed_call_descriptors.setdefault(tool.tool_call_id, descriptor)
+            if previous != descriptor:
+                msg = "Observed tools contain conflicting duplicate tool-call IDs"
+                raise RuntimeError(msg)
+            if any(existing.tool_call_id == tool.tool_call_id for existing in observed_tools):
                 continue
-            observed_call_ids.add(tool.tool_call_id)
         elif id(tool) in observed_without_call_id:
             continue
         else:

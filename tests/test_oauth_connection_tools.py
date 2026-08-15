@@ -95,6 +95,13 @@ def _tool_and_context(
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
+        approval_operation=ApprovalToolOperation(
+            approval_id="approval-default",
+            generation=1,
+            tool_call_id="reset-call",
+            credential_generation="initial",
+            connection_generation="initial",
+        ),
     )
     worker_target = build_agent_toolkit_worker_target(
         config.resolve_entity("research").execution_scope,
@@ -175,6 +182,26 @@ async def test_reset_oauth_connection_deletes_only_current_requester_scope(tmp_p
     assert connect_target.worker_scope == "user_agent"
     assert "valid for 10 minutes" in result
     assert "run this reset again" in result
+
+
+@pytest.mark.asyncio
+async def test_reset_oauth_connection_requires_approved_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live request context alone must not authorize destructive credential deletion."""
+    tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    execute_reset = AsyncMock()
+    monkeypatch.setattr(
+        "mindroom.custom_tools.oauth_connections.execute_oauth_connection_reset",
+        execute_reset,
+    )
+
+    with tool_runtime_context(replace(context, approval_operation=None)):
+        result = await tool.reset_oauth_connection("google_drive")
+
+    assert result == "Error: OAuth reset requires an approved operation."
+    execute_reset.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -345,6 +372,32 @@ async def test_oauth_reset_rejects_executed_non_confirmation_sibling(tmp_path: P
     _tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
     ordinary_call = ToolExecution(
         tool_call_id="ordinary-call",
+        tool_name="ordinary_side_effect",
+        tool_args={"value": 1},
+    )
+    reset_call = ToolExecution(
+        tool_call_id="reset-call",
+        tool_name="reset_oauth_connection",
+        tool_args={"provider_id": "google_drive"},
+        requires_confirmation=True,
+    )
+
+    with pytest.raises(RuntimeError, match="only tool call"):
+        await build_approval_tool_bindings(
+            ((reset_call, "reset-call", "reset_oauth_connection", "research"),),
+            observed_tools=(ordinary_call, reset_call),
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            execution_identity=build_execution_identity_from_runtime_context(context),
+        )
+
+
+@pytest.mark.asyncio
+async def test_oauth_reset_rejects_conflicting_sibling_with_same_call_id(tmp_path: Path) -> None:
+    """A model-supplied call-ID collision cannot hide an already-executed side effect."""
+    _tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    ordinary_call = ToolExecution(
+        tool_call_id="reset-call",
         tool_name="ordinary_side_effect",
         tool_args={"value": 1},
     )

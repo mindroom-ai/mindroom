@@ -2934,7 +2934,7 @@ async def test_claimed_failure_recovers_completed_reset_before_failure_fence(tmp
         patch.object(runner, "_recover_frozen_approval_final", new=AsyncMock(return_value=(False, None))),
         patch.object(
             runner,
-            "_recover_completed_oauth_reset",
+            "_recover_oauth_reset_for_current_authorization",
             new=AsyncMock(return_value="$waiting"),
         ),
         patch.object(runner._approval_responses, "request_failure", new=AsyncMock()) as request_failure,
@@ -2947,6 +2947,60 @@ async def test_claimed_failure_recovers_completed_reset_before_failure_fence(tmp
 
     assert (owns_final, event_id, failing) == (True, "$waiting", None)
     request_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_reset_recovery_hides_reconnect_link_after_revocation(tmp_path: Path) -> None:
+    """Interruption recovery must use the link-free receipt when current authority is gone."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    claimed = ApprovalContinuation(
+        approval_id="approval-reset-revoked-during-interruption",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="claimed",
+    )
+    expected = FinalDeliveryOutcome(
+        terminal_status="completed",
+        event_id="$waiting",
+        is_visible_response=True,
+        final_visible_body="OAuth connection reset completed without a reconnect link.",
+    )
+
+    with (
+        patch.object(
+            runner._approval_responses,
+            "successful_final_delivery",
+            new=AsyncMock(return_value=None),
+        ),
+        patch.object(runner._approval_responses, "final_delivery", new=AsyncMock(return_value=None)),
+        patch.object(runner, "_approval_continuation_is_authorized", return_value=False),
+        patch.object(
+            runner,
+            "_recover_completed_oauth_reset_outcome",
+            new=AsyncMock(side_effect=AssertionError("reconnect receipt disclosed")),
+        ) as recover_with_link,
+        patch.object(
+            runner,
+            "_recover_revoked_oauth_reset_outcome",
+            new=AsyncMock(return_value=expected),
+        ) as recover_without_link,
+    ):
+        result = await runner._recover_interrupted_claimed_approval_outcome(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert result == expected
+    recover_with_link.assert_not_awaited()
+    recover_without_link.assert_awaited_once()
 
 
 @pytest.mark.asyncio

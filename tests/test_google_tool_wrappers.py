@@ -184,6 +184,60 @@ def test_google_service_state_first_access_is_thread_safe(monkeypatch: pytest.Mo
     assert results == [True, True]
 
 
+@pytest.mark.parametrize(
+    ("cache_field", "account_a_value"),
+    [
+        pytest.param("_label_cache", {"inbox": "label-a"}, id="gmail-labels"),
+        pytest.param("_user_email", "alice@example.com", id="calendar-principal"),
+    ],
+)
+def test_google_account_cache_clears_when_credential_key_changes(
+    cache_field: str,
+    account_a_value: object,
+) -> None:
+    """Account-derived identifiers must not survive a requester credential switch."""
+
+    class Tool(ThreadLocalGoogleServiceMixin):
+        pass
+
+    tool = Tool()
+    tool._google_credential_key = "account-a"
+    setattr(tool, cache_field, account_a_value)
+    tool._google_credential_key = "account-a"
+    assert getattr(tool, cache_field) == account_a_value
+
+    tool._google_credential_key = "account-b"
+
+    assert getattr(tool, cache_field) is None
+
+
+@pytest.mark.parametrize(
+    ("cache_field", "values"),
+    [
+        pytest.param("_label_cache", ({"inbox": "label-a"}, {"inbox": "label-b"}), id="gmail-labels"),
+        pytest.param("_user_email", ("alice@example.com", "bob@example.com"), id="calendar-principal"),
+    ],
+)
+def test_google_account_cache_is_thread_local(cache_field: str, values: tuple[object, object]) -> None:
+    """Concurrent requester workers must not share account-derived identifiers."""
+
+    class Tool(ThreadLocalGoogleServiceMixin):
+        pass
+
+    tool = Tool()
+    barrier = threading.Barrier(2)
+
+    def set_and_read(value: object) -> object:
+        setattr(tool, cache_field, value)
+        barrier.wait(timeout=5)
+        return getattr(tool, cache_field)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        observed = list(executor.map(set_and_read, values))
+
+    assert observed == list(values)
+
+
 def test_google_service_account_configured_checks_instance_and_runtime_values(
     runtime_paths: RuntimePaths,
     tmp_path: Path,
@@ -576,7 +630,13 @@ def test_google_forced_refresh_rejects_unchanged_readonly_bearer(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
-    monkeypatch.setattr(GoogleOAuthCredentials, "refresh", lambda _credentials, _request: None)
+    rotated_refresh_token = "rotated-refresh-token"  # noqa: S105
+
+    def rotate_refresh_grant(credentials: GoogleOAuthCredentials, _request: object) -> None:
+        credentials.refresh_token = rotated_refresh_token
+        credentials.expiry = datetime(2100, 1, 1, tzinfo=UTC)
+
+    monkeypatch.setattr(GoogleOAuthCredentials, "refresh", rotate_refresh_grant)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
@@ -585,6 +645,15 @@ def test_google_forced_refresh_rejects_unchanged_readonly_bearer(
 
     with pytest.raises(RefreshError, match="OAuth credential refresh failed"):
         tool.creds.refresh(object())
+
+    stored = load_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    assert stored is not None
+    assert stored["token"] == "rejected-readonly-token"  # noqa: S105
+    assert stored["refresh_token"] == rotated_refresh_token
 
 
 def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
@@ -1439,6 +1508,38 @@ def test_google_wrapper_applies_env_file_service_account_to_upstream_auth(
     assert tool.service_account_path == str(service_account_path)
     assert tool.delegated_user == "alice@example.com"
     assert tool._should_fallback_to_original_auth() is True
+
+
+def test_google_drive_forwards_env_file_quota_project_to_service_account_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Runtime env-file quota ownership must reach Agno's service-account path."""
+    runtime_paths = replace(
+        runtime_paths,
+        env_file_values={
+            **runtime_paths.env_file_values,
+            "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "service-account.json"),
+            "GOOGLE_CLOUD_QUOTA_PROJECT_ID": "billing-project",
+        },
+    )
+
+    def fail_load_stored_credentials(_self: ScopedOAuthClientMixin) -> None:
+        raise AssertionError
+
+    monkeypatch.setattr(
+        ScopedOAuthClientMixin,
+        "_load_stored_credentials",
+        fail_load_stored_credentials,
+    )
+
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+    )
+
+    assert tool.quota_project_id == "billing-project"
 
 
 def test_google_wrapper_service_account_fallback_wins_over_valid_cached_oauth(

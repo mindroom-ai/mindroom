@@ -1151,7 +1151,7 @@ class ResponseRunner:
             )
         try:
             return await run_coroutine_until_complete(
-                self._recover_completed_oauth_reset_outcome(
+                self._recover_oauth_reset_outcome_for_current_authorization(
                     claimed,
                     target=target,
                 ),
@@ -1230,7 +1230,7 @@ class ResponseRunner:
         owns_final, event_id = await self._recover_frozen_approval_final(claimed, target=target)
         if owns_final:
             return event_id
-        recovered_reset = await self._recover_completed_oauth_reset(claimed, target=target)
+        recovered_reset = await self._recover_oauth_reset_for_current_authorization(claimed, target=target)
         if recovered_reset is not None:
             return recovered_reset
         reason = "Tool approval continuation was interrupted before final delivery and denied safely."
@@ -1256,6 +1256,28 @@ class ResponseRunner:
         except Exception as exc:
             msg = "Completed OAuth reset receipt recovery remains pending"
             raise _OAuthResetReceiptRecoveryError(msg) from exc
+
+    async def _recover_oauth_reset_for_current_authorization(
+        self,
+        claimed: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> str | None:
+        """Recover reset debt without disclosing reconnect material after revocation."""
+        if self._approval_continuation_is_authorized(claimed):
+            return await self._recover_completed_oauth_reset(claimed, target=target)
+        return await self._recover_revoked_oauth_reset(claimed, target=target)
+
+    async def _recover_oauth_reset_outcome_for_current_authorization(
+        self,
+        claimed: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> FinalDeliveryOutcome | None:
+        """Deliver reset debt through the caller-owned lifecycle with current authority."""
+        if self._approval_continuation_is_authorized(claimed):
+            return await self._recover_completed_oauth_reset_outcome(claimed, target=target)
+        return await self._recover_revoked_oauth_reset_outcome(claimed, target=target)
 
     async def _recover_completed_oauth_reset_outcome(
         self,
@@ -1501,7 +1523,7 @@ class ResponseRunner:
             owns_final, event_id = False, None
         if not owns_final:
             try:
-                recovered_reset = await self._recover_completed_oauth_reset(
+                recovered_reset = await self._recover_oauth_reset_for_current_authorization(
                     claimed,
                     target=target,
                 )
@@ -2124,7 +2146,7 @@ class ResponseRunner:
                 return True if event_id is not None else None
             recovered_reset = None
             try:
-                recovered_reset = await self._recover_completed_oauth_reset(
+                recovered_reset = await self._recover_oauth_reset_for_current_authorization(
                     continuation,
                     target=target,
                 )
@@ -2382,6 +2404,22 @@ class ResponseRunner:
         target: MessageTarget,
     ) -> str | None:
         """Finish proved reset debt after revocation without publishing reconnect material."""
+        outcome = await self._recover_revoked_oauth_reset_outcome(claimed, target=target)
+        if outcome is None:
+            return None
+        return await self._finalize_recovered_oauth_reset_receipt(
+            claimed,
+            target=target,
+            outcome=outcome,
+        )
+
+    async def _recover_revoked_oauth_reset_outcome(
+        self,
+        claimed: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> FinalDeliveryOutcome | None:
+        """Deliver proved reset debt without publishing reconnect material."""
         from mindroom.oauth.reset_execution import complete_oauth_connection_reset  # noqa: PLC0415
 
         try:
@@ -2402,18 +2440,13 @@ class ResponseRunner:
             operation_id=recovery.operation.operation_id,
             expected_connection_generation=recovery.operation.connection_generation,
         )
-        outcome = await self._deliver_recovered_oauth_reset_outcome(
+        return await self._deliver_recovered_oauth_reset_outcome(
             claimed,
             target=target,
             response_text=(
                 "OAuth connection reset completed. Current authorization no longer permits "
                 "publishing a reconnect link in this conversation."
             ),
-        )
-        return await self._finalize_recovered_oauth_reset_receipt(
-            claimed,
-            target=target,
-            outcome=outcome,
         )
 
     def _approval_continuation_is_authorized(self, continuation: ApprovalContinuation) -> bool:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -83,7 +84,7 @@ def test_durable_delete_fsyncs_parent_after_unlink(monkeypatch: pytest.MonkeyPat
     assert not target.exists()
     assert fsynced == [tmp_path]
     assert delete_file_durable(target) is False
-    assert fsynced == [tmp_path]
+    assert fsynced == [tmp_path, tmp_path]
 
 
 def test_durable_replace_fsyncs_parent_after_publish(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -118,6 +119,47 @@ def test_durable_delete_propagates_directory_fsync_failure(
 
     with pytest.raises(OSError, match="directory fsync failed"):
         delete_file_durable(target)
+
+    monkeypatch.setattr(durable_write, "_fsync_directory_durable", lambda _directory: None)
+    assert delete_file_durable(target) is False
+
+
+def test_durable_delete_retries_parent_fsync_after_unlink_commit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An absent retry must finish the directory publication that a prior call could not prove."""
+    target = tmp_path / "credential.json"
+    target.write_text("secret", encoding="utf-8")
+    calls = 0
+
+    def fail_once(_directory: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            msg = "directory fsync failed"
+            raise OSError(msg)
+
+    monkeypatch.setattr(durable_write, "_fsync_directory_durable", fail_once)
+
+    with pytest.raises(OSError, match="directory fsync failed"):
+        delete_file_durable(target)
+    assert delete_file_durable(target) is False
+    assert calls == 2
+
+
+def test_strict_directory_flush_is_explicitly_unsupported_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Platforms without directory fsync must skip the POSIX-only directory open."""
+    monkeypatch.setattr(durable_write, "_DIRECTORY_FSYNC_SUPPORTED", False)
+    open_directory = MagicMock(side_effect=AssertionError("directory opened"))
+    monkeypatch.setattr(durable_write.os, "open", open_directory)
+
+    durable_write._fsync_directory_durable(tmp_path)
+
+    open_directory.assert_not_called()
 
 
 def test_cached_override_records_are_returned_as_independent_snapshots(tmp_path: Path) -> None:

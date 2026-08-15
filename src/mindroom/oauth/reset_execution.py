@@ -76,8 +76,8 @@ async def execute_oauth_connection_reset(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
-    operation_id: str | None,
-    expected_connection_generation: str | None = None,
+    operation_id: str,
+    expected_connection_generation: str,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> str:
     """Resolve, retire, durably reset, and render one idempotent receipt."""
@@ -98,22 +98,13 @@ async def execute_oauth_connection_reset(
         connect_url = oauth_connect_url(provider, runtime_paths, worker_target=resolved_worker_target)
 
     try:
-        if operation_id is None or expected_connection_generation is None:
-            deleted = await retire_and_reset_oauth_credentials(
-                reset_target.credential_context,
-                mcp_servers=config.mcp_servers,
-                operation_id=operation_id,
-                expected_connection_generation=expected_connection_generation,
-                before_reset=mint_connect_url,
-            )
-        else:
-            deleted = await complete_oauth_connection_reset(
-                reset_target.credential_context,
-                mcp_servers=config.mcp_servers,
-                operation_id=operation_id,
-                expected_connection_generation=expected_connection_generation,
-                before_reset=mint_connect_url,
-            )
+        deleted = await complete_oauth_connection_reset(
+            reset_target.credential_context,
+            mcp_servers=config.mcp_servers,
+            operation_id=operation_id,
+            expected_connection_generation=expected_connection_generation,
+            before_reset=mint_connect_url,
+        )
     except Exception as exc:
         logger.warning(
             "oauth_connection_reset_failed",

@@ -14,6 +14,8 @@ class _GoogleServiceThreadState(threading.local):
         self.creds: Any | None = None
         self.service: Any | None = None
         self.credential_key: object | None = None
+        self.label_cache: dict[str, str] | None = None
+        self.user_email: str | None = None
 
 
 def google_service_account_configured(service_account_path: str | None, runtime_paths: RuntimePaths) -> bool:
@@ -38,6 +40,8 @@ class ThreadLocalGoogleServiceMixin:
         state = self._google_service_state()
         if state.creds is not value:
             state.service = None
+            state.label_cache = None
+            state.user_email = None
         state.creds = value
 
     @property
@@ -56,4 +60,27 @@ class ThreadLocalGoogleServiceMixin:
 
     @_google_credential_key.setter
     def _google_credential_key(self, value: object | None) -> None:
-        self._google_service_state().credential_key = value
+        state = self._google_service_state()
+        if state.credential_key != value:
+            state.service = None
+            state.label_cache = None
+            state.user_email = None
+        state.credential_key = value
+
+    @property
+    def _label_cache(self) -> dict[str, str] | None:
+        """Return Gmail label identities owned by the current account thread."""
+        return self._google_service_state().label_cache
+
+    @_label_cache.setter
+    def _label_cache(self, value: dict[str, str] | None) -> None:
+        self._google_service_state().label_cache = value
+
+    @property
+    def _user_email(self) -> str | None:
+        """Return the Calendar principal owned by the current account thread."""
+        return self._google_service_state().user_email
+
+    @_user_email.setter
+    def _user_email(self, value: str | None) -> None:
+        self._google_service_state().user_email = value

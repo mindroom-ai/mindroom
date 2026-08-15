@@ -16,7 +16,7 @@ from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY, c
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import (
-    _mcp_oauth_server_id_for_provider_id,
+    _mcp_oauth_provider_is_configured,
     _oauth_discovery_config,
     mcp_oauth_provider,
     mcp_oauth_provider_id,
@@ -88,12 +88,9 @@ def test_mcp_oauth_provider_lookup_ignores_disabled_shadow_server() -> None:
     disabled = base.model_copy(update={"enabled": False, "auth": auth})
     enabled = base.model_copy(update={"auth": auth})
 
-    assert (
-        _mcp_oauth_server_id_for_provider_id(
-            {"disabled": disabled, "enabled": enabled},
-            "shared-provider",
-        )
-        == "enabled"
+    assert _mcp_oauth_provider_is_configured(
+        {"disabled": disabled, "enabled": enabled},
+        "shared-provider",
     )
 
 

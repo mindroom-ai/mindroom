@@ -1126,8 +1126,8 @@ async def test_scoped_oauth_refresh_lock_releases_after_noop_returns(
     )
     assert missing_credentials is None
 
-    save_scoped_credentials(
-        "mcp_demo_oauth",
+    credential_lifecycle._publish_oauth_credentials_locked(
+        context,
         {
             "token": ACCESS_0,
             "refresh_token": CHAIN_0,
@@ -1137,8 +1137,8 @@ async def test_scoped_oauth_refresh_lock_releases_after_noop_returns(
             "_oauth_provider": "mcp_demo",
             "expires_at": 900.0,
         },
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
+        state=credential_lifecycle._load_oauth_credential_state(context),
+        advance_connection_generation=True,
     )
     unusable_credentials = await asyncio.wait_for(
         refresh_oauth_credentials(context),
@@ -1147,12 +1147,19 @@ async def test_scoped_oauth_refresh_lock_releases_after_noop_returns(
     assert unusable_credentials is not None
     assert unusable_credentials["client_id"] == "wrong-client"
 
-    _save_mcp_oauth_credentials(
-        runtime_paths,
-        worker_target,
-        ACCESS_0,
-        refresh_token=CHAIN_0,
-        expires_at=900.0,
+    credential_lifecycle._publish_oauth_credentials_locked(
+        context,
+        {
+            "token": ACCESS_0,
+            "refresh_token": CHAIN_0,
+            "client_id": "public-client",
+            "scopes": [],
+            "_source": "oauth",
+            "_oauth_provider": "mcp_demo",
+            "expires_at": 900.0,
+        },
+        state=credential_lifecycle._load_oauth_credential_state(context),
+        advance_connection_generation=True,
     )
     refreshed_credentials = await asyncio.wait_for(
         refresh_oauth_credentials(context),
@@ -1556,6 +1563,157 @@ async def test_mcp_manager_scopes_catalog_collision_failure_to_one_requester(
 
 
 @pytest.mark.asyncio
+async def test_mcp_config_reload_retries_request_resolution_on_new_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A request racing config replacement cannot publish the retired URL/token pair."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "stored-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    original_config = _oauth_mcp_config()
+    replacement_config = original_config.model_copy(update={"url": "https://replacement.example.test/mcp"})
+    await manager.sync_servers(_ConfigStub({"demo": original_config}))
+    first_authorization_started = asyncio.Event()
+    release_first_authorization = asyncio.Event()
+    replacement_published = asyncio.Event()
+    authorization_calls = 0
+    publish_server_config = manager._publish_server_config
+
+    async def publish_and_signal(
+        config: Config,
+        desired_servers: Mapping[str, MCPServerConfig],
+    ) -> list[MCPServerState] | None:
+        retired_states = await publish_server_config(config, desired_servers)
+        replacement_published.set()
+        return retired_states
+
+    async def authorization_material(
+        _state: MCPServerState,
+        *,
+        credential_context: OAuthCredentialContext,
+    ) -> tuple[str, str]:
+        del credential_context
+        nonlocal authorization_calls
+        authorization_calls += 1
+        if authorization_calls == 1:
+            first_authorization_started.set()
+            await release_first_authorization.wait()
+            return "retired-token", "retired-generation"
+        return "replacement-token", "replacement-generation"
+
+    monkeypatch.setattr(manager, "_oauth_authorization_material", authorization_material)
+    monkeypatch.setattr(manager, "_publish_server_config", publish_and_signal)
+    request_task = asyncio.create_task(
+        manager._request_state_and_headers(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        ),
+    )
+    await first_authorization_started.wait()
+    sync_task = asyncio.create_task(manager.sync_servers(_ConfigStub({"demo": replacement_config})))
+    await asyncio.wait_for(replacement_published.wait(), timeout=1)
+    release_first_authorization.set()
+    request_state, lease = await request_task
+    await sync_task
+
+    assert authorization_calls == 2
+    assert request_state.config == replacement_config
+    assert request_state.config_generation == manager._states["demo"].config_generation
+    assert lease.headers == {"Authorization": "Bearer replacement-token"}
+    assert lease.session_key.config_generation == request_state.config_generation
+    assert tuple(manager._scoped_states.values()) == (request_state,)
+
+
+@pytest.mark.asyncio
+async def test_mcp_provider_move_retires_current_provider_owner_not_old_server_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reset follows provider/requester ownership when a provider moves between servers."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+
+    def oauth_config(*, provider_id: str, url: str) -> MCPServerConfig:
+        config = _oauth_mcp_config()
+        assert config.auth is not None
+        return config.model_copy(
+            update={
+                "url": url,
+                "auth": config.auth.model_copy(update={"provider_id": provider_id}),
+            },
+        )
+
+    def save_provider_credentials(provider_id: str, token: str) -> None:
+        credentials_manager.save_credentials(f"{provider_id}_oauth_client", {"client_id": "public-client"})
+        save_scoped_credentials(
+            f"{provider_id}_oauth",
+            {
+                "token": token,
+                "client_id": "public-client",
+                "scopes": [],
+                "_source": "oauth",
+                "_oauth_provider": provider_id,
+            },
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    shared_provider = "mcp_shared"
+    replacement_provider = "mcp_replacement"
+    save_provider_credentials(shared_provider, "shared-token")
+    save_provider_credentials(replacement_provider, "replacement-token")
+    old_alpha = oauth_config(provider_id=shared_provider, url="https://old-alpha.example.test/mcp")
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"alpha": old_alpha}))
+    await manager.get_request_catalog(
+        "alpha",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    old_context = manager._oauth_credential_context(
+        manager._states["alpha"],
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    new_alpha = oauth_config(
+        provider_id=replacement_provider,
+        url="https://new-alpha.example.test/mcp",
+    )
+    new_beta = oauth_config(provider_id=shared_provider, url="https://new-beta.example.test/mcp")
+    await manager.sync_servers(_ConfigStub({"alpha": new_alpha, "beta": new_beta}))
+    await manager.get_request_catalog(
+        "alpha",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    await manager.get_request_catalog(
+        "beta",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    replacement_key = next(key for key in manager._scoped_states if key.provider_id == replacement_provider)
+    shared_key = next(key for key in manager._scoped_states if key.provider_id == shared_provider)
+    replacement_session = manager._scoped_states[replacement_key].session
+    shared_session = manager._scoped_states[shared_key].session
+    assert replacement_session is not None
+    assert shared_session is not None
+
+    async with manager.retire_request_session(credential_context=old_context):
+        assert replacement_key in manager._scoped_states
+        assert shared_key not in manager._scoped_states
+
+    assert replacement_session.closed is False
+    assert shared_session.closed is True
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_retires_requester_oauth_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1581,7 +1739,7 @@ async def test_mcp_manager_retires_requester_oauth_session(
         credentials_manager=credentials_manager,
     )
 
-    async with manager.retire_request_session("demo", credential_context=credential_context):
+    async with manager.retire_request_session(credential_context=credential_context):
         pass
 
     assert alice_session.closed is True
@@ -1620,7 +1778,7 @@ async def test_mcp_manager_retirement_fences_captured_state_and_new_requesters(
         credentials_manager=credentials_manager,
     )
 
-    async with manager.retire_request_session("demo", credential_context=credential_context):
+    async with manager.retire_request_session(credential_context=credential_context):
         assert captured_state.retired is True
         with pytest.raises(MCPConnectionError, match="retired"):
             await manager._refresh_server_catalog(
@@ -1671,7 +1829,7 @@ async def test_mcp_manager_retirement_releases_fence_when_cleanup_is_cancelled(
     finish_body = asyncio.Event()
 
     async def retire() -> None:
-        async with manager.retire_request_session("demo", credential_context=credential_context):
+        async with manager.retire_request_session(credential_context=credential_context):
             body_entered.set()
             await finish_body.wait()
 
@@ -1687,7 +1845,7 @@ async def test_mcp_manager_retirement_releases_fence_when_cleanup_is_cancelled(
     finally:
         manager._state_lifecycle_lock.release()
 
-    assert key not in manager._retired_request_keys
+    assert key.oauth_request_key not in manager._retired_request_keys
 
 
 @pytest.mark.asyncio
@@ -1720,7 +1878,6 @@ async def test_mcp_manager_retires_stale_cached_session_for_current_connection_g
     state.oauth_credential_generation = "stale-cached-generation"
 
     async with manager.retire_request_session(
-        "demo",
         credential_context=credential_context,
         expected_connection_generation=approved_connection_generation,
     ):
@@ -1759,7 +1916,6 @@ async def test_mcp_manager_does_not_retire_session_from_later_connection_generat
     )
 
     async with manager.retire_request_session(
-        "demo",
         credential_context=credential_context,
         expected_connection_generation="older-approved-connection-generation",
     ):
@@ -2063,27 +2219,27 @@ async def test_mcp_manager_shutdown_fences_sync_resuming_after_await(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Reconciliation paused during removal must not publish state after shutdown."""
+    """Reconciliation paused during old-generation drain must not survive shutdown."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     manager = MCPServerManager(_runtime_paths(tmp_path))
     await manager.sync_servers(_ConfigStub({"old": MCPServerConfig(transport="stdio", command="npx")}))
-    removal_entered = asyncio.Event()
-    allow_removal = asyncio.Event()
-    original_remove_server = manager._remove_server
+    drain_entered = asyncio.Event()
+    allow_drain = asyncio.Event()
+    original_drain = manager._drain_retired_states
 
-    async def delayed_remove_server(server_id: str) -> None:
-        removal_entered.set()
-        await allow_removal.wait()
-        await original_remove_server(server_id)
+    async def delayed_drain(states: tuple[MCPServerState, ...]) -> None:
+        drain_entered.set()
+        await allow_drain.wait()
+        await original_drain(states)
 
-    monkeypatch.setattr(manager, "_remove_server", delayed_remove_server)
+    monkeypatch.setattr(manager, "_drain_retired_states", delayed_drain)
     sync_task = asyncio.create_task(
         manager.sync_servers(_ConfigStub({"new": MCPServerConfig(transport="stdio", command="npx")})),
     )
-    await removal_entered.wait()
+    await drain_entered.wait()
     await manager.shutdown()
-    allow_removal.set()
+    allow_drain.set()
     assert await sync_task == set()
 
     assert manager._config is None
@@ -2157,7 +2313,7 @@ async def test_mcp_manager_shutdown_waits_for_state_already_removed_for_retireme
         await original_disconnect(state)
 
     monkeypatch.setattr(manager, "_disconnect_state_when_idle", delayed_disconnect)
-    removal_task = asyncio.create_task(manager._remove_server("demo"))
+    removal_task = asyncio.create_task(manager.sync_servers(_ConfigStub({})))
     await drain_started.wait()
     shutdown_task = asyncio.create_task(manager.shutdown())
     await asyncio.sleep(0)

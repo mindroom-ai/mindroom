@@ -289,6 +289,10 @@ class OAuthCredentialsSnapshot:
     connection_generation: str
 
 
+class OAuthCredentialConflictError(OAuthProviderError):
+    """Signal that an OAuth mutation lost its connection-lineage compare-and-swap."""
+
+
 @dataclass(frozen=True, slots=True)
 class _OAuthResetOperationSnapshot:
     """Read-only durable state for one stable reset operation ID."""
@@ -758,7 +762,7 @@ def load_oauth_credentials_snapshot_sync(context: OAuthCredentialContext) -> OAu
 
 async def load_oauth_credentials_snapshot(context: OAuthCredentialContext) -> OAuthCredentialsSnapshot:
     """Load credentials and revision through the shared async transaction owner."""
-    return await _run_oauth_transaction(_load_oauth_credentials_snapshot_transaction(context))
+    return await _run_cancellable_oauth_transaction(lambda: _load_oauth_credentials_snapshot_transaction(context))
 
 
 async def _load_oauth_credentials_snapshot_transaction(
@@ -908,7 +912,7 @@ async def _exchange_and_store_oauth_credentials_transaction(
         state = _prepare_oauth_credential_state_locked(context)
         if state.connection_generation != expected_connection_generation:
             msg = "OAuth connection state is stale because this credential changed"
-            raise OAuthProviderError(msg)
+            raise OAuthCredentialConflictError(msg)
         return await _exchange_and_store_oauth_credentials_locked(context, code, code_verifier, state=state)
 
 
@@ -990,7 +994,7 @@ async def _reset_oauth_credentials_transaction(
             return outcome.deleted
         if expected_connection_generation is not None and state.connection_generation != expected_connection_generation:
             msg = "OAuth connection state is stale because this credential changed"
-            raise OAuthProviderError(msg)
+            raise OAuthCredentialConflictError(msg)
         credentials_path = scoped_credentials_path(
             context.provider.credential_service,
             credentials_manager=context.credentials_manager,

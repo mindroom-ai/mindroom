@@ -305,6 +305,35 @@ def test_paused_attempt_preserves_non_confirmation_siblings_for_sensitive_bindin
     assert paused.observed_tools == (ordinary_tool, reset_tool)
 
 
+def test_paused_attempt_rejects_conflicting_observed_tools_with_same_call_id() -> None:
+    """A call-ID collision must fail before approval admission can discard either descriptor."""
+    ordinary_tool = ToolExecution(
+        tool_call_id="collision-call",
+        tool_name="ordinary_side_effect",
+        tool_args={"value": 1},
+    )
+    reset_tool = ToolExecution(
+        tool_call_id="collision-call",
+        tool_name="reset_oauth_connection",
+        tool_args={"provider_id": "google"},
+        requires_confirmation=True,
+    )
+    response = RunOutput(
+        status=RunStatus.paused,
+        session_id="session-1",
+        run_id="run-1",
+        tools=[ordinary_tool, reset_tool],
+        requirements=[RunRequirement(reset_tool)],
+    )
+
+    with pytest.raises(RuntimeError, match="conflicting duplicate"):
+        response_turn_module.paused_attempt_from_response(
+            response,
+            fallback_session_id=None,
+            fallback_run_id=None,
+        )
+
+
 def test_paused_team_attempt_merges_recursive_tool_history() -> None:
     """Nested team side effects must remain visible beside a requirement-only reset."""
     ordinary_tool = ToolExecution(

@@ -31,6 +31,7 @@ from mindroom.oauth import (
     is_oauth_loopback_hostname,
 )
 from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialConflictError,
     OAuthCredentialContext,
     exchange_and_store_oauth_credentials,
     load_oauth_credentials_snapshot,
@@ -464,6 +465,10 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
 
     try:
         await run_coroutine_until_complete(verify_and_store())
+    except HTTPException:
+        raise
+    except OAuthCredentialConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except OAuthClaimValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OAuthProviderError as exc:

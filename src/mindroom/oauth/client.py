@@ -64,10 +64,6 @@ class _GoogleRefreshGrantMissingError(RuntimeError):
     """Signal that a forced provider retry has no refresh grant to use."""
 
 
-class _GoogleRefreshResultUnchangedError(RuntimeError):
-    """Signal that forced refresh retained the provider-rejected bearer."""
-
-
 class _OAuthAuthSource(Enum):
     """Credential source selected for one tool auth attempt."""
 
@@ -390,9 +386,6 @@ class ScopedOAuthClientMixin:
         except _GoogleRefreshGrantMissingError:
             state.last_failure = _GoogleRefreshFailure.MISSING
             self._raise_google_refresh_failure(state.last_failure)
-        except _GoogleRefreshResultUnchangedError:
-            state.last_failure = _GoogleRefreshFailure.PROVIDER
-            self._raise_google_refresh_failure(state.last_failure)
         except OAuthRefreshRejectedError:
             state.last_failure = _GoogleRefreshFailure.TERMINAL
             self._raise_google_refresh_failure(state.last_failure)
@@ -412,6 +405,11 @@ class ScopedOAuthClientMixin:
         state.snapshot.clear()
         state.snapshot.update(result.credentials)
         self._google_credential_key = (context, result.generation)
+        if result.refreshed and refreshed.token == (
+            triggering_snapshot.get("token") or triggering_snapshot.get("access_token")
+        ):
+            state.last_failure = _GoogleRefreshFailure.PROVIDER
+            self._raise_google_refresh_failure(state.last_failure)
         state.last_succeeded = True
 
     def _refresh_google_token_if_snapshot_current(
@@ -425,12 +423,7 @@ class ScopedOAuthClientMixin:
             return None
         if not current.get("refresh_token"):
             raise _GoogleRefreshGrantMissingError
-        refreshed = self._refresh_google_token_data(current, request, force=True)
-        if refreshed is not None and (refreshed.get("token") or refreshed.get("access_token")) == (
-            triggering_snapshot.get("token") or triggering_snapshot.get("access_token")
-        ):
-            raise _GoogleRefreshResultUnchangedError
-        return refreshed
+        return self._refresh_google_token_data(current, request, force=True)
 
     def _raise_google_refresh_failure(self, failure: _GoogleRefreshFailure) -> NoReturn:
         """Replay one sanitized refresh outcome to the current caller thread."""

@@ -92,6 +92,9 @@ class MCPServerState:
 
     server_id: str
     config: MCPServerConfig
+    config_generation: int = 0
+    oauth_provider_id: str | None = None
+    oauth_request_scope: tuple[str, str] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     call_lock: _AsyncReadWriteLock = field(default_factory=_AsyncReadWriteLock)
     catalog: MCPServerCatalog | None = None

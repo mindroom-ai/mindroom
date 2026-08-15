@@ -41,17 +41,17 @@ def _mcp_oauth_service_prefix(provider_id: str) -> str:
     return provider_id if provider_id.startswith("mcp_") else f"mcp_{provider_id}"
 
 
-def _mcp_oauth_server_id_for_provider_id(
+def _mcp_oauth_provider_is_configured(
     mcp_servers: dict[str, MCPServerConfig],
     provider_id: str,
-) -> str | None:
-    """Return the MCP server id that generated one OAuth provider id."""
+) -> bool:
+    """Return whether the request-pinned config generated one OAuth provider."""
     for server_id, server_config in mcp_servers.items():
         if not server_config.enabled or server_config.auth is None:
             continue
         if mcp_oauth_provider_id(server_id, server_config.auth) == provider_id:
-            return server_id
-    return None
+            return True
+    return False
 
 
 @asynccontextmanager
@@ -63,13 +63,11 @@ async def retire_mcp_oauth_request_session(
     expected_connection_generation: str | None = None,
 ) -> AsyncIterator[None]:
     """Fence a generated provider's requester session for an OAuth reset transaction."""
-    server_id = _mcp_oauth_server_id_for_provider_id(mcp_servers, provider_id)
-    manager = require_mcp_server_manager() if server_id is not None else None
-    if manager is None or server_id is None:
+    manager = require_mcp_server_manager() if _mcp_oauth_provider_is_configured(mcp_servers, provider_id) else None
+    if manager is None:
         yield
         return
     async with manager.retire_request_session(
-        server_id,
         credential_context=credential_context,
         expected_connection_generation=expected_connection_generation,
     ):

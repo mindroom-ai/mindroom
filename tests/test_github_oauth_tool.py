@@ -24,6 +24,7 @@ from mindroom.credentials import (
     save_scoped_credentials,
 )
 from mindroom.custom_tools.github import GithubTools
+from mindroom.oauth import credential_lifecycle
 from mindroom.oauth.providers import OAuthRefreshRejectedError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 
@@ -409,11 +410,12 @@ def test_github_workers_keep_token_and_client_ownership_thread_local(tmp_path: P
     ):
         old_future = old_worker.submit(old_call)
         assert old_ready.wait(timeout=5)
-        save_scoped_credentials(
-            "github_oauth",
+        credential_context = tool._oauth_credential_context()
+        credential_lifecycle._publish_oauth_credentials_locked(
+            credential_context,
             _oauth_credentials("account-b-token"),
-            credentials_manager=manager,
-            worker_target=oauth_target,
+            state=credential_lifecycle._load_oauth_credential_state(credential_context),
+            advance_connection_generation=True,
         )
         new_state = new_worker.submit(current_state).result(timeout=5)
         release_old.set()
@@ -910,6 +912,8 @@ def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path
 
     assert payload["oauth_connection_required"] is True
     assert payload["provider"] == "github"
+    assert payload["reason"] == "refresh_rejected"
+    assert "session for this agent expired or is no longer valid" in payload["error"]
     assert "/api/oauth/github/authorize?connect_token=" in payload["connect_url"]
     assert revoked_token not in result
 

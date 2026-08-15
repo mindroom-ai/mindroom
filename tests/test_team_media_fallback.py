@@ -71,7 +71,7 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -504,6 +504,107 @@ async def test_team_continuation_executes_real_agno_confirmation(
         session_type=SessionType.TEAM,
         entity_name="research",
     )
+
+
+@pytest.mark.asyncio
+async def test_chained_team_pause_preserves_recursive_tool_history() -> None:
+    """A continued pause must retain nested tools observed before the first approval."""
+    prior_side_effect = ToolExecution(
+        tool_call_id="side-effect",
+        tool_name="ordinary_side_effect",
+        tool_args={"value": 1},
+        result="done",
+    )
+    first_confirmation = ToolExecution(
+        tool_call_id="confirm-first",
+        tool_name="confirm_first",
+        tool_args={},
+        requires_confirmation=True,
+    )
+    reset_tool = ToolExecution(
+        tool_call_id="reset-second",
+        tool_name="reset_oauth_connection",
+        tool_args={"provider_id": "google"},
+        requires_confirmation=True,
+    )
+    persisted = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        requirements=[RunRequirement(first_confirmation)],
+        member_responses=[
+            RunOutput(
+                status=RunStatus.completed,
+                agent_name="GeneralAgent",
+                tools=[prior_side_effect],
+            ),
+        ],
+    )
+    continued = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        requirements=[RunRequirement(reset_tool)],
+        tools=[reset_tool],
+    )
+    team = MagicMock()
+    team.db = None
+    team.aget_session = AsyncMock(return_value=SimpleNamespace(get_run=lambda _run_id: persisted))
+    team.acontinue_run = AsyncMock(return_value=continued)
+    members = ResolvedExactTeamMembers(
+        requested_agent_names=[],
+        agents=[],
+        display_names=[],
+        materialized_agent_names=set(),
+        failed_agent_names=[],
+    )
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="research",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    with (
+        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
+        patch(
+            "mindroom.teams.open_bound_scope_session_context",
+            return_value=nullcontext(SimpleNamespace(storage=None, storage_factory=None)),
+        ),
+        patch("mindroom.teams.build_materialized_team_instance", return_value=team),
+        patch("mindroom.teams.close_team_runtime_state_dbs"),
+    ):
+        result = await continue_paused_team_run(
+            member_names=(),
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            session_id="session-1",
+            run_id="run-1",
+            user_id="@user:localhost",
+            configured_team_name="research",
+            model_name="default",
+            decisions={"confirm-first": True},
+            denial_reasons={"confirm-first": None},
+            tool_bindings={
+                "confirm-first": {
+                    "tool_name": "confirm_first",
+                    "arguments_json": "{}",
+                    "invoking_agent": "research",
+                },
+            },
+            refresh_scheduler=None,
+        )
+
+    assert isinstance(result, PausedAttempt)
+    assert result.tools == (reset_tool,)
+    assert result.observed_tools == (prior_side_effect, first_confirmation, reset_tool)
 
 
 @pytest.mark.parametrize(

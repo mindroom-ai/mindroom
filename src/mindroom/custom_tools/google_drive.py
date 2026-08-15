@@ -139,6 +139,8 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         if quota_project_id is not None and not isinstance(quota_project_id, str):
             msg = "Google Drive quota_project_id must be a string"
             raise TypeError(msg)
+        if quota_project_id is not None:
+            kwargs["quota_project_id"] = quota_project_id
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
         self._workspace_root = tool_output_workspace_root

@@ -33,6 +33,15 @@ def canonical_tool_arguments(arguments: object) -> str:
         raise RuntimeError(msg) from exc
 
 
+def approval_tool_descriptor(tool: ToolExecution) -> tuple[str | None, str, bool]:
+    """Return the security-relevant identity of one observed approval tool call."""
+    return (
+        tool.tool_name,
+        canonical_tool_arguments(tool.tool_args),
+        bool(tool.requires_confirmation),
+    )
+
+
 async def build_approval_tool_bindings(
     identified_tools: Sequence[tuple[ToolExecution, str, str, str]],
     *,
@@ -46,15 +55,23 @@ async def build_approval_tool_bindings(
 
     reset_calls = tuple(item for item in identified_tools if item[2] == _OAUTH_RESET_TOOL_NAME)
     if reset_calls:
-        reset_call_ids = {item[1] for item in reset_calls}
-        identified_call_ids = {item[1] for item in identified_tools}
+        reset_tool, reset_call_id, _tool_name, _invoking_agent = reset_calls[0]
         observed = observed_tools if observed_tools is not None else tuple(item[0] for item in identified_tools)
-        observed_call_ids = {tool.tool_call_id for tool in observed if tool.tool_call_id}
+        observed_by_call_id: dict[str, tuple[str | None, str, bool]] = {}
+        for tool in observed:
+            tool_call_id = tool.tool_call_id
+            if not tool_call_id:
+                msg = "OAuth reset must be the only tool call in its paused run"
+                raise RuntimeError(msg)
+            descriptor = approval_tool_descriptor(tool)
+            previous = observed_by_call_id.setdefault(tool_call_id, descriptor)
+            if previous != descriptor:
+                msg = "OAuth reset must be the only tool call in its paused run"
+                raise RuntimeError(msg)
         if (
             len(reset_calls) != 1
-            or len(reset_call_ids) != 1
-            or any(not tool.tool_call_id for tool in observed)
-            or identified_call_ids | observed_call_ids != reset_call_ids
+            or len(identified_tools) != 1
+            or observed_by_call_id != {reset_call_id: approval_tool_descriptor(reset_tool)}
         ):
             msg = "OAuth reset must be the only tool call in its paused run"
             raise RuntimeError(msg)

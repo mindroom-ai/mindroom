@@ -2003,6 +2003,10 @@ async def continue_paused_team_run(
             continued,
             fallback_session_id=session_id,
             fallback_run_id=run_id,
+            additional_observed_tools=(
+                *_collect_team_tool_executions(persisted),
+                *_collect_team_tool_executions(continued),
+            ),
         )
         if paused is not None:
             return paused

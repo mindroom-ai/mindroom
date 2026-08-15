@@ -57,6 +57,9 @@ class OAuthConnectionTools(Toolkit):
             config=config,
         ):
             return "Error: The current requester is not authorized to manage this agent's credentials."
+        approval_operation = runtime_context.approval_operation
+        if approval_operation is None:
+            return "Error: OAuth reset requires an approved operation."
 
         try:
             return await execute_oauth_connection_reset(
@@ -66,20 +69,8 @@ class OAuthConnectionTools(Toolkit):
                 runtime_paths=self.runtime_paths,
                 execution_identity=build_execution_identity_from_runtime_context(runtime_context),
                 worker_target=self.worker_target,
-                operation_id=(
-                    runtime_context.approval_operation.operation_id
-                    if runtime_context.approval_operation is not None
-                    else None
-                ),
-                expected_connection_generation=(
-                    runtime_context.approval_operation.connection_generation
-                    if runtime_context.approval_operation is not None
-                    else None
-                ),
+                operation_id=approval_operation.operation_id,
+                expected_connection_generation=approval_operation.connection_generation,
             )
         except OAuthResetTargetError as exc:
             return f"Error: {exc}"
-        except Exception:
-            if runtime_context.approval_operation is not None:
-                raise
-            return "Error: OAuth connection reset did not complete; verify connection status, then retry."
