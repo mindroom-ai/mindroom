@@ -350,7 +350,7 @@ reset_thread_model()
 
 - The override is stored per thread root in `mindroom_data/tracking/thread_models.json`.
 - Users can manage the same override with the `!model` chat command; see [Chat Commands](../chat-commands.md).
-- An explicit `active_model_name` (for example a delegated child run) still beats the thread override, and the thread override beats `room_models` and the authored entity model.
+- An explicit `active_model_name` (for example a delegated child run) still beats the thread override, and the thread override beats the runtime `!room_model` choice, configured `room_models`, and the authored entity model.
 
 ## [`matrix_api`]
 

@@ -61,6 +61,7 @@ A requester-scoped `!desktop` command may instead be owned by an eligible privat
 - `!config <operation>` - Manage configuration when explicitly enabled for global admins
 - `!desktop [setup|status|confirm|rotate|disconnect]` - Manage the requester's Desktop target
 - `!model [name|list|reset]` - Show or switch the current thread model
+- `!room_model [name|list|reset]` - Show or switch the current room's runtime model default
 - `!thread_mode [room|thread|reset|show]` - Manage room thread mode (room admin only)
 - `!encrypt [confirm]` - Enable room encryption (irreversible, room admin only)
 - `!e2ee` - Show room encryption diagnostics

@@ -16,6 +16,7 @@ Commands start with `!` and are normally handled by the router agent.
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
 | `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
+| `!room_model [name\|list\|reset]` | Show or switch the default model used in the current room |
 | `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room |
 | `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) |
 | `!e2ee` | Show encryption diagnostics for this room |
@@ -56,7 +57,7 @@ Display available commands or get detailed help on a specific topic.
 !help edit_schedule
 ```
 
-**Topics:** `schedule`, `config`, `model`, `thread_mode`, `thread-mode`, `threadmode`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
+**Topics:** `schedule`, `config`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
 
 ### `!hi`
 
@@ -202,8 +203,27 @@ Show or switch the model that every agent, team, and the router uses in the curr
 `!model` and `!model list` show the current override and the available model names.
 Model names come from the `models:` section of `config.yaml`.
 The override applies from the next message in the thread and survives restarts.
-Other threads and rooms keep their configured models; room-wide overrides are configured via `room_models` in `config.yaml`.
+Other threads and rooms keep their configured models.
+Use `!room_model` for a durable runtime room default or `room_models` in `config.yaml` for an authored room default.
 Agents can also switch the thread model themselves when they have the `thread_model` tool.
+
+### `!room_model`
+
+Show or switch the model that every agent, team, and the router uses by default in the current room.
+
+```
+!room_model
+!room_model list
+!room_model opus
+!room_model reset
+```
+
+`!room_model` and `!room_model list` show the current runtime override and available model names.
+`!room_model opus` stores a durable room override without modifying `config.yaml`.
+`!room_model reset` removes the runtime override so the configured `room_models` choice or each entity's configured model applies again.
+Thread-level `!model` overrides and explicit per-run model choices take precedence over the room default.
+Set and reset are Matrix room-admin-only actions, while status is available to authorized room members.
+The override is keyed by Matrix room ID and stored under `mindroom_data/tracking`, so it survives restarts and room-alias changes.
 
 ### `!thread_mode`
 

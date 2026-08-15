@@ -593,6 +593,9 @@ rooms:
 # Example: room_models: {dev: sonnet, lobby: gpt4o}
 room_models: {}
 
+# Room admins can override this authored choice at runtime with !room_model.
+# Runtime overrides are stored under mindroom_data/tracking and do not modify this file.
+
 # Room-specific automatic thread summary model overrides (optional)
 # Keys are room aliases or raw Matrix room IDs, values are model names from the models section.
 # Example: room_thread_summary_models: {lobby: haiku}

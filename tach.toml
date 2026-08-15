@@ -1815,6 +1815,7 @@ depends_on = [
     "mindroom.mcp.config",
     "mindroom.prompt_templates",
     "mindroom.prompts",
+    "mindroom.room_model_overrides",
     "mindroom.room_thread_modes",
     "mindroom.thread_models",
     "mindroom.tool_system.catalog",
@@ -2208,6 +2209,7 @@ visibility = [
     "mindroom.bot",
     "mindroom.bot_room_lifecycle",
     "mindroom.commands.encryption_commands",
+    "mindroom.commands.room_model_commands",
     "mindroom.commands.thread_mode_commands",
     "mindroom.external_triggers.executor",
     "mindroom.hooks.matrix_admin",
@@ -2626,6 +2628,13 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.thread_models"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.durable_write",
+]
+
+[[modules]]
+path = "mindroom.room_model_overrides"
 depends_on = [
     "mindroom.constants",
     "mindroom.durable_write",
@@ -3101,6 +3110,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.commands.room_model_commands"
+depends_on = [
+    "mindroom.matrix.client_room_admin",
+    "mindroom.room_model_overrides",
+]
+visibility = ["mindroom.commands.handler"]
+
+[[modules]]
 path = "mindroom.commands.thread_mode_commands"
 depends_on = [
     "mindroom.matrix.client_room_admin",
@@ -3134,6 +3151,7 @@ depends_on = [
     "mindroom.commands.encryption_commands",
     "mindroom.commands.model_commands",
     "mindroom.commands.parsing",
+    "mindroom.commands.room_model_commands",
     "mindroom.commands.thread_mode_commands",
     "mindroom.constants",
     "mindroom.entity_resolution",

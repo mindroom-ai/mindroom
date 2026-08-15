@@ -25,6 +25,7 @@ class CommandType(Enum):
     CONFIG = "config"  # Configuration command
     DESKTOP = "desktop"  # Requester-scoped Desktop pairing
     MODEL = "model"  # Per-thread model override command
+    ROOM_MODEL = "room_model"  # Room-level model override command
     THREAD_MODE = "thread_mode"  # Room-level thread mode override command
     ENCRYPT = "encrypt"  # Room encryption enablement command
     E2EE = "e2ee"  # Encryption diagnostics command
@@ -43,6 +44,10 @@ _COMMAND_DOCS = {
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
     CommandType.DESKTOP: ("!desktop [setup|status|confirm|rotate|disconnect]", "Manage your Desktop target"),
     CommandType.MODEL: ("!model [name|list|reset]", "Show or switch the model used in the current thread"),
+    CommandType.ROOM_MODEL: (
+        "!room_model [name|list|reset]",
+        "Show or switch the default model used in the current room (room admin only)",
+    ),
     CommandType.THREAD_MODE: (
         "!thread_mode [room|thread|reset|show]",
         "Show or switch the thread mode used in the current room (room admin only)",
@@ -121,6 +126,7 @@ class _CommandParser:
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
     DESKTOP_PATTERN = re.compile(r"^!desktop(?:\s+(.+))?$", re.IGNORECASE)
     MODEL_PATTERN = re.compile(r"^!model(?:\s+(.+))?$", re.IGNORECASE)
+    ROOM_MODEL_PATTERN = re.compile(r"^!room[_-]?model(?:\s+(.+))?$", re.IGNORECASE)
     THREAD_MODE_PATTERN = re.compile(r"^!thread[_-]?mode(?:\s+(.+))?$", re.IGNORECASE)
     ENCRYPT_PATTERN = re.compile(r"^!encrypt(?:\s+(.+))?$", re.IGNORECASE)
     E2EE_PATTERN = re.compile(r"^!e2ee$", re.IGNORECASE)
@@ -224,6 +230,15 @@ class _CommandParser:
                 raw_text=message,
             )
 
+        match = self.ROOM_MODEL_PATTERN.match(message)
+        if match:
+            args_text = match.group(1).strip() if match.group(1) else ""
+            return Command(
+                type=CommandType.ROOM_MODEL,
+                args={"args_text": args_text},
+                raw_text=message,
+            )
+
         match = self.THREAD_MODE_PATTERN.match(message)
         if match:
             args_text = match.group(1).strip() if match.group(1) else ""
@@ -253,7 +268,7 @@ class _CommandParser:
         )
 
 
-def get_command_help(topic: str | None = None) -> str:  # noqa: PLR0911
+def get_command_help(topic: str | None = None) -> str:  # noqa: C901, PLR0911
     """Get help text for commands.
 
     Args:
@@ -399,7 +414,23 @@ How it works:
 - The override applies to all agents, teams, and the router from the next message in the thread
 - Model names come from the `models:` section of config.yaml
 - The override is scoped to one thread and survives restarts; other threads and rooms are unaffected
-- Room-wide overrides are configured separately via `room_models` in config.yaml"""
+- Use `!room_model` for a runtime room default, or `room_models` in config.yaml for an authored room default"""
+
+    if topic in {"room_model", "room-model", "roommodel"}:
+        return """**Room Model Command**
+
+Usage: `!room_model [name|list|reset]` - Show or switch the default model used in the current room
+
+**Examples:**
+- `!room_model` or `!room_model list` - Show the current room override and available models
+- `!room_model opus` - Make `opus` the default for every agent, team, and the router in this room
+- `!room_model reset` - Remove the runtime override and restore configured room or entity models
+
+How it works:
+- The override applies from the next model run and survives restarts without changing config.yaml
+- Thread overrides take precedence over this room default
+- The runtime room override takes precedence over `room_models` in config.yaml
+- Only Matrix room admins can set or reset the override"""
 
     if topic in {"encrypt", "e2ee", "encryption"}:
         return """**Encryption Commands**

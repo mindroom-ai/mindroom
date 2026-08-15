@@ -84,6 +84,7 @@ from mindroom.matrix_identifiers import (
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
+from mindroom.room_model_overrides import resolve_room_model_override
 from mindroom.room_thread_modes import resolve_room_thread_mode_override
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.thread_models import resolve_thread_model_override
@@ -1881,8 +1882,8 @@ class Config(BaseModel):
     ) -> ResolvedRuntimeModel:
         """Resolve the active runtime model plus its configured context window.
 
-        Precedence: explicit `active_model_name`, then a persisted per-thread
-        override, then the room override, then the entity's authored model.
+        Precedence: explicit `active_model_name`, persisted thread override,
+        persisted room override, configured room override, then authored entity model.
         """
         resolved_model_name = active_model_name
         if resolved_model_name is None and thread_id is not None:
@@ -1903,9 +1904,17 @@ class Config(BaseModel):
                 if runtime_paths is None:
                     msg = "runtime_paths are required to resolve a room-specific runtime model"
                     raise ValueError(msg)
-                from mindroom.entity_resolution import effective_entity_model_name  # noqa: PLC0415
+                room_override = resolve_room_model_override(
+                    runtime_paths,
+                    room_id,
+                    configured_models=self.models,
+                ).active
+                if room_override is not None:
+                    resolved_model_name = room_override
+                else:
+                    from mindroom.entity_resolution import effective_entity_model_name  # noqa: PLC0415
 
-                resolved_model_name = effective_entity_model_name(self, entity_name, room_id, runtime_paths)
+                    resolved_model_name = effective_entity_model_name(self, entity_name, room_id, runtime_paths)
             else:
                 resolved_model_name = self._entity_model_name(entity_name)
 
