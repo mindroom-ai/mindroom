@@ -94,13 +94,13 @@ def _deps(
     sent: list[tuple[str, str, str | None]] = []
     remaining_results = list(send_results) if send_results is not None else []
 
-    async def schedule_query(room_id: str) -> frozenset[str | None] | None:
+    async def schedule_query(_agent_name: str, room_id: str) -> frozenset[str | None] | None:
         queried_rooms.append(room_id)
         if schedule_error is not None:
             raise schedule_error
         return schedule_result
 
-    async def sender(room_id: str, body: str, thread_id: str | None) -> str | None:
+    async def sender(_agent_name: str, room_id: str, body: str, thread_id: str | None) -> str | None:
         sent.append((room_id, body, thread_id))
         if remaining_results:
             return remaining_results.pop(0)
@@ -156,6 +156,42 @@ async def test_scan_skips_malformed_unassigned_and_unconfigured_items(tmp_path: 
     assert "`ready` [medium]" in sent[0][1]
     assert "blocked" not in sent[0][1]
     assert "removed" in idle_checks
+
+
+@pytest.mark.asyncio
+async def test_scan_routes_schedule_reads_and_delivery_through_assigned_agent(tmp_path: Path) -> None:
+    """Each poke carries its assignee to I/O so room membership is resolved by the owning bot."""
+    todo_root = tmp_path / "todo"
+    _write_thread(todo_root, "scope", items=[_item("ready", assigned_agent="code")])
+    schedule_calls: list[tuple[str, str]] = []
+    send_calls: list[tuple[str, str, str, str | None]] = []
+
+    async def schedule_query(agent_name: str, room_id: str) -> frozenset[str | None]:
+        schedule_calls.append((agent_name, room_id))
+        return frozenset()
+
+    async def sender(
+        agent_name: str,
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+    ) -> str:
+        send_calls.append((agent_name, room_id, body, thread_id))
+        return "$event"
+
+    deps = TodoPokeDeps(
+        state_root=todo_root,
+        schedule_query=schedule_query,
+        idle_check=lambda _agent_name: True,
+        sender=sender,
+        clock=lambda: _NOW,
+    )
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
+    assert schedule_calls == [("code", "!room:localhost")]
+    assert [(agent, room, thread) for agent, room, _body, thread in send_calls] == [
+        ("code", "!room:localhost", "$thread"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -454,13 +490,18 @@ async def test_delivery_outcome_time_owns_cooldown_and_backstop_windows(tmp_path
     current_time = [_NOW]
     base_deps, queried_rooms, sent = _deps(todo_root, clock=lambda: current_time[0])
 
-    async def delayed_schedule_query(room_id: str) -> frozenset[str | None] | None:
+    async def delayed_schedule_query(agent_name: str, room_id: str) -> frozenset[str | None] | None:
         current_time[0] += timedelta(minutes=10)
-        return await base_deps.schedule_query(room_id)
+        return await base_deps.schedule_query(agent_name, room_id)
 
-    async def delayed_sender(room_id: str, body: str, thread_id: str | None) -> str | None:
+    async def delayed_sender(
+        agent_name: str,
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+    ) -> str | None:
         current_time[0] += timedelta(minutes=20)
-        return await base_deps.sender(room_id, body, thread_id)
+        return await base_deps.sender(agent_name, room_id, body, thread_id)
 
     deps = replace(
         base_deps,

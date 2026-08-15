@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.custom_tools.todo_poke import TodoPokeDeps, TodoPokeWorker, todo_poke_policy
 from mindroom.custom_tools.todo_state import state_root as todo_state_root
 from mindroom.entity_resolution import mindroom_user_id
@@ -84,38 +84,39 @@ class TodoPokeRuntimeCoordinator:
                 return False
         return True
 
-    def _router(self) -> AgentBot | TeamBot | None:
-        """Return the running router bot when todo poke I/O is ready."""
-        router_bot = self.bot_provider(ROUTER_AGENT_NAME)
-        if router_bot is None or not router_bot.running or router_bot.client is None:
+    def _agent_bot(self, agent_name: str) -> AgentBot | TeamBot | None:
+        """Return the assigned agent bot when todo poke I/O is ready."""
+        agent_bot = self.bot_provider(agent_name)
+        if agent_bot is None or not agent_bot.running or agent_bot.client is None:
             return None
-        return router_bot
+        return agent_bot
 
-    async def _schedule_query(self, room_id: str) -> frozenset[str | None] | None:
-        """Return pending schedule scopes, or None while router I/O is unavailable."""
-        router_bot = self._router()
-        if router_bot is None:
+    async def _schedule_query(self, agent_name: str, room_id: str) -> frozenset[str | None] | None:
+        """Return pending schedule scopes, or None while assigned-agent I/O is unavailable."""
+        agent_bot = self._agent_bot(agent_name)
+        if agent_bot is None:
             return None
-        client = router_bot.client
+        client = agent_bot.client
         if client is None:
             return None
         return await get_pending_schedule_thread_ids_for_room(client, room_id)
 
     async def _send_poke(
         self,
+        agent_name: str,
         room_id: str,
         body: str,
         thread_id: str | None,
     ) -> str | None:
-        """Send one router-originated todo poke that enters normal dispatch."""
-        router_bot = self._router()
+        """Send one assigned-agent todo poke that enters normal dispatch."""
+        agent_bot = self._agent_bot(agent_name)
         config = self.config_provider()
-        if router_bot is None or config is None:
+        if agent_bot is None or config is None:
             return None
 
         original_sender = mindroom_user_id(config, self.runtime_paths)
         extra_content = {ORIGINAL_SENDER_KEY: original_sender} if original_sender is not None else None
-        return await router_bot._hook_send_message(
+        return await agent_bot._hook_send_message(
             room_id,
             body,
             thread_id,

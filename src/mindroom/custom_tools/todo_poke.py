@@ -42,8 +42,8 @@ __all__ = [
     "todo_poke_policy",
 ]
 
-type _TodoScheduleQuery = Callable[[str], Awaitable[frozenset[str | None] | None]]
-type _TodoPokeSender = Callable[[str, str, str | None], Awaitable[str | None]]
+type _TodoScheduleQuery = Callable[[str, str], Awaitable[frozenset[str | None] | None]]
+type _TodoPokeSender = Callable[[str, str, str, str | None], Awaitable[str | None]]
 type _StateWarningKey = tuple[str, str]
 
 _VALID_STATUSES = {"open", *TERMINAL_STATUSES}
@@ -538,9 +538,12 @@ async def _pending_schedules_by_room(
     schedule_query: _TodoScheduleQuery,
 ) -> dict[str, frozenset[str | None]] | None:
     pending_by_room: dict[str, frozenset[str | None]] = {}
-    for room_id in sorted({scope.room_id for scope in scopes}):
+    query_agent_by_room: dict[str, str] = {}
+    for scope in scopes:
+        query_agent_by_room.setdefault(scope.room_id, scope.assigned_agent)
+    for room_id, agent_name in sorted(query_agent_by_room.items()):
         try:
-            pending_threads = await schedule_query(room_id)
+            pending_threads = await schedule_query(agent_name, room_id)
         except Exception as exc:
             logger.warning(
                 "todo_poke_schedule_query_failed",
@@ -628,6 +631,7 @@ async def _deliver_pokes(
         scope_key = _scope_key(scope)
         previous = session_poke_records.get(scope_key) or _poke_record(poke_state, scope)
         event_id = await deps.sender(
+            scope.assigned_agent,
             scope.room_id,
             _format_poke_message(scope),
             scope.thread_id,

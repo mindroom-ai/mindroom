@@ -84,14 +84,16 @@ def test_idle_check_includes_direct_and_running_team_bots(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_router_query_and_send_wiring(tmp_path: Path) -> None:
-    """Router I/O supplies schedule scopes and dispatches with the internal requester."""
+async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
+    """Todo poke I/O uses the assigned agent that owns membership in the target room."""
     router_bot = _bot()
     router_bot._hook_send_message = AsyncMock(return_value="$event")
+    agent_bot = _bot()
+    agent_bot._hook_send_message = AsyncMock(return_value="$event")
     coordinator = _coordinator(
         test_runtime_paths(tmp_path),
         _config(tmp_path),
-        {"router": router_bot},
+        {"router": router_bot, "code": agent_bot},
     )
 
     with (
@@ -104,17 +106,18 @@ async def test_router_query_and_send_wiring(tmp_path: Path) -> None:
             return_value="@mindroom_user:localhost",
         ),
     ):
-        pending = await coordinator._schedule_query("!room:localhost")
+        pending = await coordinator._schedule_query("code", "!room:localhost")
         event_id = await coordinator._send_poke(
+            "code",
             "!room:localhost",
             "@code Todo work is ready.",
             "$thread",
         )
 
     assert pending == frozenset({"$scheduled"})
-    schedule_query.assert_awaited_once_with(router_bot.client, "!room:localhost")
+    schedule_query.assert_awaited_once_with(agent_bot.client, "!room:localhost")
     assert event_id == "$event"
-    router_bot._hook_send_message.assert_awaited_once_with(
+    agent_bot._hook_send_message.assert_awaited_once_with(
         "!room:localhost",
         "@code Todo work is ready.",
         "$thread",
@@ -122,6 +125,7 @@ async def test_router_query_and_send_wiring(tmp_path: Path) -> None:
         {ORIGINAL_SENDER_KEY: "@mindroom_user:localhost"},
         trigger_dispatch=True,
     )
+    router_bot._hook_send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -130,9 +134,10 @@ async def test_adapters_skip_when_runtime_is_unavailable(tmp_path: Path) -> None
     coordinator = _coordinator(test_runtime_paths(tmp_path), _config(tmp_path), {})
 
     assert coordinator._agent_is_idle("code") is False
-    assert await coordinator._schedule_query("!room:localhost") is None
+    assert await coordinator._schedule_query("code", "!room:localhost") is None
     assert (
         await coordinator._send_poke(
+            "code",
             "!room:localhost",
             "@code Todo work is ready.",
             "$thread",
@@ -147,7 +152,7 @@ async def test_schedule_adapter_preserves_read_errors(tmp_path: Path) -> None:
     coordinator = _coordinator(
         test_runtime_paths(tmp_path),
         _config(tmp_path),
-        {"router": _bot()},
+        {"code": _bot()},
     )
 
     with (
@@ -157,7 +162,7 @@ async def test_schedule_adapter_preserves_read_errors(tmp_path: Path) -> None:
         ),
         pytest.raises(RuntimeError, match="state unavailable"),
     ):
-        await coordinator._schedule_query("!room:localhost")
+        await coordinator._schedule_query("code", "!room:localhost")
 
 
 @pytest.mark.asyncio
