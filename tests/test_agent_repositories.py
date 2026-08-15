@@ -87,6 +87,31 @@ def test_private_repository_name_uses_matrix_requester_localpart() -> None:
     assert derive_repository_name(prefix="MindRoom", worker_target=target) == "MindRoom-mind-basnijholt"
 
 
+def test_private_repository_name_preserves_github_safe_matrix_localpart() -> None:
+    """Stable requester punctuation must remain part of the exact repository name."""
+    target = _target(
+        agent_name="mind",
+        worker_scope="user_agent",
+        requester_id="@alice.smith:example.test",
+        private=True,
+    )
+
+    assert derive_repository_name(prefix="MindRoom", worker_target=target) == "MindRoom-mind-alice.smith"
+
+
+def test_private_repository_name_rejects_unrepresentable_matrix_localpart() -> None:
+    """Requester names that cannot be represented exactly must fail closed."""
+    target = _target(
+        agent_name="mind",
+        worker_scope="user_agent",
+        requester_id="@alice/bob:example.test",
+        private=True,
+    )
+
+    with pytest.raises(RepositoryBindingError, match="represented exactly"):
+        derive_repository_name(prefix="MindRoom", worker_target=target)
+
+
 def test_repository_name_sanitizes_hostile_slug_characters() -> None:
     """Names derived inside the control plane must never preserve path or URL syntax."""
     hostile = replace(_target(), routing_agent_name="../../Security Agent?token=secret")
@@ -94,17 +119,12 @@ def test_repository_name_sanitizes_hostile_slug_characters() -> None:
     assert derive_repository_name(prefix="MindRoom", worker_target=hostile) == "MindRoom-security-agent-token-secret"
 
 
-def test_repository_name_hashes_long_values_before_github_limit() -> None:
-    """Distinct oversized identities should remain deterministic and collision-resistant."""
-    first = replace(_target(), routing_agent_name="a" * 110 + "one")
-    second = replace(_target(), routing_agent_name="a" * 110 + "two")
+def test_repository_name_rejects_values_beyond_github_limit() -> None:
+    """An exact name that GitHub cannot represent must fail closed."""
+    target = replace(_target(), routing_agent_name="a" * 110)
 
-    first_name = derive_repository_name(prefix="MindRoom", worker_target=first)
-    second_name = derive_repository_name(prefix="MindRoom", worker_target=second)
-
-    assert len(first_name) <= 100
-    assert first_name != second_name
-    assert first_name.startswith("MindRoom-")
+    with pytest.raises(RepositoryBindingError, match="exceeds GitHub's limit"):
+        derive_repository_name(prefix="MindRoom", worker_target=target)
 
 
 @pytest.mark.parametrize(
