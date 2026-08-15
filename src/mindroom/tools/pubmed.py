@@ -65,4 +65,10 @@ def pubmed_tools() -> type[PubmedTools]:
     """Return PubMed tools for medical research and literature search."""
     from agno.tools.pubmed import PubmedTools
 
-    return PubmedTools
+    class MindRoomPubmedTools(PubmedTools):
+        """PubMed toolkit whose configured result limit is the call default."""
+
+        def search_pubmed(self, query: str, max_results: int | None = None) -> str:
+            return super().search_pubmed(query, max_results=max_results or self.max_results)
+
+    return MindRoomPubmedTools

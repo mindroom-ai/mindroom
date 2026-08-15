@@ -1,8 +1,9 @@
 """Test that ConfigField definitions match actual tool parameters from agno."""
 
 import inspect
+from pathlib import Path
 from types import UnionType
-from typing import Union, get_args, get_origin, get_type_hints
+from typing import Any, Union, cast, get_args, get_origin, get_type_hints
 
 import pytest
 from agno.tools import Toolkit
@@ -12,7 +13,7 @@ from agno.tools.dalle import DalleTools
 import mindroom.tools  # noqa: F401
 from mindroom.constants import RuntimePaths
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY
+from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, validate_authored_tool_entry_overrides
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 SKIP_CONFIG_FIELD_VALIDATION = {
@@ -50,6 +51,50 @@ def test_dalle_default_model_is_accepted_by_agno() -> None:
     assert isinstance(model_field.default, str)
     assert model_field.default
     DalleTools(model=model_field.default, api_key="sk-test")
+
+
+def test_youtube_languages_accepts_authored_string_list() -> None:
+    """YouTube language preferences should preserve the list expected by Agno."""
+    overrides = validate_authored_tool_entry_overrides("youtube", {"languages": ["en", "nl"]})
+
+    assert overrides == {"languages": ["en", "nl"]}
+
+
+def test_arxiv_download_directory_is_converted_to_path(tmp_path: Path) -> None:
+    """Authored ArXiv download paths should reach Agno as Path objects."""
+    tool_class = cast("Any", TOOL_REGISTRY["arxiv"]())
+
+    tool = tool_class(download_dir=str(tmp_path / "papers"))
+
+    assert tool.download_dir == tmp_path / "papers"
+
+
+def test_pubmed_configured_max_results_applies_when_call_omits_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Configured PubMed result limits should be the default for model calls."""
+    tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())
+    tool = tool_class(max_results=5)
+    captured: dict[str, int] = {}
+
+    def fetch_pubmed_ids(_query: str, max_results: int, _email: str) -> list[str]:
+        captured["max_results"] = max_results
+        return []
+
+    monkeypatch.setattr(tool, "fetch_pubmed_ids", fetch_pubmed_ids)
+    monkeypatch.setattr(tool, "fetch_details", lambda _ids: object())
+    monkeypatch.setattr(tool, "parse_details", lambda _root: [])
+
+    tool.search_pubmed("durable agents")
+
+    assert captured == {"max_results": 5}
+
+
+def test_zep_metadata_lists_only_model_callable_functions() -> None:
+    """Internal Zep initialization must not be advertised as a model-callable function."""
+    assert TOOL_METADATA["zep"].function_names == (
+        "add_zep_message",
+        "get_zep_memory",
+        "search_zep_memory",
+    )
 
 
 @pytest.mark.parametrize("tool_name", list(TOOL_REGISTRY.keys()))

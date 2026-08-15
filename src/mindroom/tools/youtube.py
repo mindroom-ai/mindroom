@@ -52,7 +52,7 @@ if TYPE_CHECKING:
         ConfigField(
             name="languages",
             label="Languages",
-            type="text",
+            type="string[]",
             required=False,
             default=None,
         ),
