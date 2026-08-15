@@ -2763,8 +2763,12 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agno(tmp_path: Path) -> None:
-    """A committed reset with no FINAL must reuse its op ID and directly publish the receipt."""
+@pytest.mark.parametrize("operation_status", ["pending", "completed"])
+async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agno(
+    tmp_path: Path,
+    operation_status: str,
+) -> None:
+    """A durable reset intent with no FINAL must reuse its op ID and directly publish the receipt."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -2827,7 +2831,10 @@ async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agn
             new=AsyncMock(),
         ),
         patch("mindroom.response_runner.resolve_oauth_reset_target") as resolve_reset_target,
-        patch("mindroom.response_runner.oauth_reset_operation_result", return_value=True),
+        patch(
+            "mindroom.response_runner.oauth_reset_operation_snapshot",
+            return_value=SimpleNamespace(status=operation_status, credential_existed=True),
+        ),
         patch(
             "mindroom.oauth.reset_execution.execute_oauth_connection_reset",
             new=AsyncMock(return_value="reset receipt"),
@@ -3144,7 +3151,10 @@ async def test_completed_oauth_reset_receipt_wins_live_continuation_cancellation
             new=AsyncMock(),
         ),
         patch("mindroom.response_runner.resolve_oauth_reset_target") as resolve_reset_target,
-        patch("mindroom.response_runner.oauth_reset_operation_result", return_value=True),
+        patch(
+            "mindroom.response_runner.oauth_reset_operation_snapshot",
+            return_value=SimpleNamespace(status="completed", credential_existed=True),
+        ),
         patch(
             "mindroom.oauth.reset_execution.execute_oauth_connection_reset",
             new=AsyncMock(return_value="reset receipt"),

@@ -119,6 +119,7 @@ class ApprovalResponseCoordinator:
         identified: tuple[tuple[ToolExecution, str, str, str], ...],
         *,
         requester_id: str,
+        observed_tools: tuple[ToolExecution, ...] | None = None,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> _ApprovalPausePlan:
         """Evaluate policy once and normalize exact calls with integer deadlines."""
@@ -169,6 +170,7 @@ class ApprovalResponseCoordinator:
             calls=calls,
             tool_bindings=await build_approval_tool_bindings(
                 identified,
+                observed_tools=observed_tools,
                 config=config,
                 runtime_paths=self.runtime_paths,
                 execution_identity=execution_identity,
@@ -271,6 +273,7 @@ class ApprovalResponseCoordinator:
         plan = await self.plan_pause(
             identified,
             requester_id=current.requester_id,
+            observed_tools=paused.observed_tools or paused.tools,
             execution_identity=execution_identity,
         )
         visible_text = plan.waiting_text or pending_text

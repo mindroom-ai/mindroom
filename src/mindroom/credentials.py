@@ -144,14 +144,12 @@ def _ensure_private_directory(path: Path, *, harden_existing: bool = False) -> N
         current_path = current_path.parent
 
     directories_to_chmod = list(reversed(missing_paths))
-    for directory_path in directories_to_chmod:
-        create_directory_durable(directory_path, mode=0o700)
     if harden_existing:
         for directory_path in _credential_owned_directory_chain(path):
             if directory_path not in directories_to_chmod:
                 directories_to_chmod.append(directory_path)
     for directory_path in directories_to_chmod:
-        _set_private_permissions(directory_path, 0o700)
+        create_directory_durable(directory_path, mode=0o700)
 
 
 def _set_private_permissions(path: Path, mode: int) -> None:

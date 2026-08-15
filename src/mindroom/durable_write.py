@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+from collections import OrderedDict
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from threading import Lock
 from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import safe_replace
@@ -15,14 +17,28 @@ if TYPE_CHECKING:
 
 type OverrideRecord = dict[str, str]
 _override_load_cache: dict[Path, tuple[int, dict[str, OverrideRecord]]] = {}
+_MAX_DURABLE_DIRECTORY_IDENTITIES = 4096
+_durable_directory_identities: OrderedDict[Path, tuple[int, int]] = OrderedDict()
+_durable_directory_identities_lock = Lock()
 
 
 def create_directory_durable(path: Path, *, mode: int) -> None:
-    """Create one directory and durably publish its private entry."""
+    """Create one directory and idempotently publish its private entry."""
     path.mkdir(mode=mode, exist_ok=True)
     path.chmod(mode)
+    stat = path.stat()
+    identity = (stat.st_dev, stat.st_ino)
+    with _durable_directory_identities_lock:
+        if _durable_directory_identities.get(path) == identity:
+            _durable_directory_identities.move_to_end(path)
+            return
     _fsync_directory_durable(path)
     _fsync_directory_durable(path.parent)
+    with _durable_directory_identities_lock:
+        _durable_directory_identities[path] = identity
+        _durable_directory_identities.move_to_end(path)
+        if len(_durable_directory_identities) > _MAX_DURABLE_DIRECTORY_IDENTITIES:
+            _durable_directory_identities.popitem(last=False)
 
 
 def delete_file_durable(path: Path) -> bool:

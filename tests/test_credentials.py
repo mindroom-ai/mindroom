@@ -434,6 +434,35 @@ class TestCredentialsManager:
             scoped_manager.base_path,
         ]
 
+    def test_existing_scoped_directory_retries_interrupted_durable_creation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Manager retry must republish an existing scope directory after creator failure."""
+        manager = CredentialsManager(tmp_path / "credentials")
+        scoped_root = tmp_path / "private_oauth"
+        attempted: list[Path] = []
+        real_create = credentials_module.create_directory_durable
+        failed_once = False
+
+        def fail_after_create(path: Path, *, mode: int) -> None:
+            nonlocal failed_once
+            attempted.append(path)
+            real_create(path, mode=mode)
+            if path == scoped_root and not failed_once:
+                failed_once = True
+                msg = "scope publication interrupted"
+                raise OSError(msg)
+
+        monkeypatch.setattr(credentials_module, "create_directory_durable", fail_after_create)
+
+        with pytest.raises(OSError, match="scope publication interrupted"):
+            manager.for_primary_runtime_scope("@user:example.test", "agent")
+        manager.for_primary_runtime_scope("@user:example.test", "agent")
+
+        assert attempted.count(scoped_root) == 2
+
     def test_encrypted_scoped_credentials_harden_existing_parent_directories(
         self,
         tmp_path: Path,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import threading
@@ -29,11 +30,11 @@ from mindroom.mcp.errors import MCPConnectionError, MCPProtocolError, MCPTimeout
 from mindroom.mcp.manager import MCPServerManager, _discovery_retry_delay_seconds
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
+from mindroom.oauth import credential_lifecycle
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     oauth_connection_generation,
     refresh_oauth_credentials,
-    reset_oauth_credentials,
 )
 from mindroom.oauth.providers import (
     OAuthClientConfig,
@@ -104,6 +105,7 @@ class _FakeClientSession:
     transport_extra_headers: ClassVar[list[dict[str, str]]] = []
     enforce_same_task_exit: ClassVar[bool] = False
     close_exception: ClassVar[BaseException | None] = None
+    close_attempt_count: ClassVar[int] = 0
 
     def __init__(
         self,
@@ -127,6 +129,7 @@ class _FakeClientSession:
 
     async def __aexit__(self, *_args: object) -> None:
         """Mark the fake session as closed when the context exits."""
+        _FakeClientSession.close_attempt_count += 1
         if _FakeClientSession.enforce_same_task_exit and asyncio.current_task() is not self.entered_task:
             msg = "Attempted to exit cancel scope in a different task than it was entered in"
             raise RuntimeError(msg)
@@ -204,6 +207,7 @@ def _reset_fake_session_state() -> Generator[None, None, None]:
     _FakeClientSession.transport_extra_headers = []
     _FakeClientSession.enforce_same_task_exit = False
     _FakeClientSession.close_exception = None
+    _FakeClientSession.close_attempt_count = 0
     yield
     dynamic_toolkits_module._loaded_tools.clear()
 
@@ -555,8 +559,19 @@ async def test_mcp_manager_rejects_stale_oauth_session_publication_and_retries_c
         return catalog
 
     async def replace_credentials() -> None:
-        assert await reset_oauth_credentials(credential_context) is True
-        _save_mcp_oauth_credentials(runtime_paths, worker_target, "account-b-token")
+        current = credential_lifecycle._load_oauth_credential_state(credential_context)
+        credential_lifecycle._publish_oauth_credentials_locked(
+            credential_context,
+            {
+                "token": "account-b-token",
+                "client_id": "public-client",
+                "scopes": [],
+                "_source": "oauth",
+                "_oauth_provider": "mcp_demo",
+            },
+            state=current,
+            advance_connection_generation=True,
+        )
 
     async def call_after_authorization_change(
         state: MCPServerState,
@@ -605,6 +620,79 @@ async def test_mcp_manager_rejects_stale_oauth_session_publication_and_retries_c
     assert request_state.oauth_access_token_hash == account_b_hash
     assert request_state.oauth_session_access_token_hash == account_b_hash
     assert request_state.oauth_credential_generation == request_state.oauth_session_credential_generation
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_does_not_replay_ambiguous_call_after_authorization_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed remote dispatch on one account cannot be replayed after credential replacement."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("write")]
+    _FakeClientSession.planned_tool_results = [
+        BrokenPipeError("transport closed after dispatch"),
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="replayed")]),
+    ]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "account-a-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    credential_context = manager._oauth_credential_context(
+        manager._require_state("demo"),
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    original_refresh = manager._refresh_server_catalog
+    replaced = False
+
+    async def replace_before_reconnect(
+        state: MCPServerState,
+        *,
+        notify: bool,
+        expected_refresh_revision: int | None = None,
+        auth_headers: Mapping[str, str] | None = None,
+        authorization_lease: _MCPAuthorizationLease | None = None,
+    ) -> bool:
+        nonlocal replaced
+        if expected_refresh_revision is not None and not replaced:
+            replaced = True
+            current = credential_lifecycle._load_oauth_credential_state(credential_context)
+            credential_lifecycle._publish_oauth_credentials_locked(
+                credential_context,
+                {
+                    "token": "account-b-token",
+                    "client_id": "public-client",
+                    "scopes": [],
+                    "_source": "oauth",
+                    "_oauth_provider": "mcp_demo",
+                },
+                state=current,
+                advance_connection_generation=True,
+            )
+        return await original_refresh(
+            state,
+            notify=notify,
+            expected_refresh_revision=expected_refresh_revision,
+            auth_headers=auth_headers,
+            authorization_lease=authorization_lease,
+        )
+
+    monkeypatch.setattr(manager, "_refresh_server_catalog", replace_before_reconnect)
+
+    with pytest.raises(MCPConnectionError, match="authorization changed after remote dispatch"):
+        await manager.call_tool(
+            "demo",
+            "write",
+            {"value": "once"},
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    assert replaced is True
+    assert _FakeClientSession.call_tool_invocation_count == 1
 
 
 @pytest.mark.asyncio
@@ -1496,6 +1584,55 @@ async def test_mcp_manager_retirement_fences_captured_state_and_new_requesters(
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_retirement_releases_fence_when_cleanup_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancellation after reset work cannot leave the requester key retired forever."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    base_state = manager._states["demo"]
+    credential_context = manager._oauth_credential_context(
+        base_state,
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    key = manager._request_session_key(base_state, credential_context.worker_target)
+    body_entered = asyncio.Event()
+    finish_body = asyncio.Event()
+
+    async def retire() -> None:
+        async with manager.retire_request_session("demo", credential_context=credential_context):
+            body_entered.set()
+            await finish_body.wait()
+
+    task = asyncio.create_task(retire())
+    await body_entered.wait()
+    await manager._state_lifecycle_lock.acquire()
+    try:
+        finish_body.set()
+        await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    finally:
+        manager._state_lifecycle_lock.release()
+
+    assert key not in manager._retired_request_keys
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_retires_stale_cached_session_for_current_connection_generation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1787,6 +1924,77 @@ async def test_mcp_manager_shutdown_is_terminal_for_later_sync(
     assert manager._config is None
     assert manager._states == {}
     assert manager._scoped_states == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_shutdown_drains_every_state_when_one_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One teardown failure cannot strand later captured sessions."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub(
+        {
+            "first": MCPServerConfig(transport="stdio", command="npx"),
+            "second": MCPServerConfig(transport="stdio", command="npx"),
+        },
+    )
+    await manager.sync_servers(config)
+    _FakeClientSession.close_exception = RuntimeError("close failed")
+
+    await manager.shutdown()
+
+    assert _FakeClientSession.close_attempt_count == 2
+    assert manager._states == {}
+    assert manager._scoped_states == {}
+    assert await manager.sync_servers(config) == set()
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_shutdown_finishes_drain_before_propagating_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Caller cancellation cannot abandon later sessions or make shutdown retry a no-op."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub(
+        {
+            "first": MCPServerConfig(transport="stdio", command="npx"),
+            "second": MCPServerConfig(transport="stdio", command="npx"),
+        },
+    )
+    await manager.sync_servers(config)
+    original_disconnect = manager._disconnect_state_when_idle
+    first_disconnect_started = asyncio.Event()
+    release_first_disconnect = asyncio.Event()
+    drained: list[str] = []
+
+    async def delayed_disconnect(state: MCPServerState) -> None:
+        drained.append(state.server_id)
+        if len(drained) == 1:
+            first_disconnect_started.set()
+            await release_first_disconnect.wait()
+        await original_disconnect(state)
+
+    monkeypatch.setattr(manager, "_disconnect_state_when_idle", delayed_disconnect)
+    shutdown_task = asyncio.create_task(manager.shutdown())
+    await first_disconnect_started.wait()
+    shutdown_task.cancel()
+    await asyncio.sleep(0)
+
+    assert not shutdown_task.done()
+    release_first_disconnect.set()
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown_task
+
+    assert drained == ["first", "second"]
+    assert manager._states == {}
+    assert manager._scoped_states == {}
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio

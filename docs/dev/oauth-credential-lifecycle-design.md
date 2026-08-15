@@ -23,7 +23,7 @@ OAuth operations are rare enough that this concurrency is not worth the correctn
 5. A provider operation that can consume or rotate remote state completes its matching local commit before cancellation propagates.
 6. Credential save and delete commits fsync their payload and parent-directory updates before reporting success.
 7. A destructive reset performs all fallible asynchronous cleanup before deleting local credentials.
-8. After deletion, reset performs only infallible in-memory retirement release before returning.
+8. After deletion, the durable pending intent remains the reset owner until completed-state publication succeeds, and only then does reset perform infallible in-memory retirement release before returning.
 9. Request actor identity remains raw for room and membership checks.
 10. Credential identity is canonicalized only when resolving `OAuthCredentialContext`.
 11. Provider adapters classify structured terminal refresh errors as `OAuthRefreshRejectedError` without exposing provider-controlled text.
@@ -39,10 +39,10 @@ OAuth operations are rare enough that this concurrency is not worth the correctn
 21. GitHub access tokens and PyGithub clients are owned together by one worker thread, while every managed call reloads authoritative credentials on its execution thread.
 22. OAuth-backed MCP connections revalidate their durable generation and token hash immediately before session publication and each admitted remote use.
 23. Every approval freezes the exact call ID, tool name, canonical arguments, invoking agent, and any sensitive nested target before execution.
-24. An OAuth reset is the sole call in its approval generation and uses `approval_id:generation:tool_call_id` as its stable lifecycle operation ID.
+24. An OAuth reset is the sole observed call in its paused run and uses `approval_id:generation:tool_call_id` as its stable lifecycle operation ID.
 25. Reset generation metadata durably records every pending intent, retains permanent completed tombstones only for replayable approval operations, and prunes completed direct or provider-driven intents.
 26. Every credential-use and publication transaction finishes pending reset deletion before reading, refreshing, or storing a credential.
-27. Claimed reset recovery publishes a receipt only for a read-only proven completed operation and never starts a missing or pending reset or resumes the stale paused Agno run.
+27. Claimed reset recovery re-enters only a durable pending or completed operation by its stable ID, never starts a missing reset, and never resumes the stale paused Agno run.
 28. Credential documents carry a scope-bound self-describing publication record, are durably saved before their counters are published, and repair an interrupted state-file commit under the operation lock.
 29. Pending reset deletion always takes precedence over credential-publication recovery.
 
@@ -144,10 +144,12 @@ The callback cannot preserve a refresh token that another operation rotated conc
 10. Recheck the approved connection generation and write the stable reset operation as pending together with new durable lease and connection generations.
 11. Durably delete the exact scoped credential file without first decoding it.
 12. Mark a replayable approval operation completed with its original file-existed result, retain that tombstone permanently, and prune non-replayable completion state.
-13. Release the in-memory MCP retirement fence and return the receipt even if cancellation arrived after commit.
+13. If completed-state publication fails after deletion, retain the claimed continuation and retry the durable pending operation by its stable ID.
+14. Release the in-memory MCP retirement fence and return the receipt even if cancellation arrived after full durable commit.
 
 All credential transactions finish any pending delete before using or publishing the scope.
 A retry of a completed operation returns the stored result without advancing the revision or deleting a credential created by a later callback.
+If a process dies while a stable operation is pending, claimed-continuation recovery re-enters that exact operation to finish deletion and completed-state publication.
 If a process dies after the reset commit but before FINAL delivery, claimed-continuation recovery proves the completed operation read-only, skips MCP retirement and deletion, and publishes the receipt directly without calling Agno continuation APIs.
 
 Dashboard disconnect uses the same transaction and fails without deleting credentials if MCP teardown cannot complete.
@@ -197,7 +199,7 @@ Focused tests cover observable lifecycle behavior rather than private lock chore
 - Logs never include refresh tokens, access tokens, or unrecognized provider-controlled error text.
 - Approval continuation fails closed when provider, service, scope, key, or routing agent changes.
 - Approval continuation fails closed when the persisted call reuses an ID with a changed name, canonical arguments, or invoking member.
-- OAuth reset is refused when another call shares its approval generation.
+- OAuth reset is refused when another call is observed in its paused run.
 - Reset deletes corrupt plaintext or encrypted credential files by exact scoped path and permits reconnect afterward.
 - A crash after pending intent hides the credential until deletion finishes, while completed-operation replay cannot delete a later callback credential.
 - Claimed reset recovery requires a completed stable operation, publishes FINAL directly, and never starts deletion or resumes Agno.

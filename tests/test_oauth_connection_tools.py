@@ -340,6 +340,32 @@ async def test_oauth_reset_must_be_only_call_in_approval_generation(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_oauth_reset_rejects_executed_non_confirmation_sibling(tmp_path: Path) -> None:
+    """A reset pause cannot hide an ordinary sibling that Agno already dispatched."""
+    _tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    ordinary_call = ToolExecution(
+        tool_call_id="ordinary-call",
+        tool_name="ordinary_side_effect",
+        tool_args={"value": 1},
+    )
+    reset_call = ToolExecution(
+        tool_call_id="reset-call",
+        tool_name="reset_oauth_connection",
+        tool_args={"provider_id": "google_drive"},
+        requires_confirmation=True,
+    )
+
+    with pytest.raises(RuntimeError, match="only tool call"):
+        await build_approval_tool_bindings(
+            ((reset_call, "reset-call", "reset_oauth_connection", "research"),),
+            observed_tools=(ordinary_call, reset_call),
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            execution_identity=build_execution_identity_from_runtime_context(context),
+        )
+
+
+@pytest.mark.asyncio
 async def test_reset_uses_stable_approval_operation_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -368,6 +394,33 @@ async def test_reset_uses_stable_approval_operation_id(
     assert result == "receipt"
     assert execute_reset.await_args.kwargs["operation_id"] == "approval-1:4:reset-call"
     assert execute_reset.await_args.kwargs["expected_connection_generation"] == "connection-generation-1"
+
+
+@pytest.mark.asyncio
+async def test_approved_reset_propagates_runtime_failure_for_durable_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approved reset failure must not become a normal completed Agno tool result."""
+    tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    context = replace(
+        context,
+        approval_operation=ApprovalToolOperation(
+            approval_id="approval-1",
+            generation=4,
+            tool_call_id="reset-call",
+            credential_generation="credential-generation-1",
+            connection_generation="connection-generation-1",
+        ),
+    )
+    execute_reset = AsyncMock(side_effect=OSError("state publication failed"))
+    monkeypatch.setattr(
+        "mindroom.custom_tools.oauth_connections.execute_oauth_connection_reset",
+        execute_reset,
+    )
+
+    with tool_runtime_context(context), pytest.raises(OSError, match="state publication failed"):
+        await tool.reset_oauth_connection("google_drive")
 
 
 @pytest.mark.asyncio

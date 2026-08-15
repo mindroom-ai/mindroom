@@ -2595,6 +2595,66 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
     assert stored_credentials["refresh_token"] == "new-refresh-token"
 
 
+@pytest.mark.asyncio
+async def test_callback_finishes_target_verification_after_state_consumption_before_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation cannot strand a consumed callback while target verification is waiting."""
+    runtime_paths = _runtime_paths(tmp_path)
+    provider = _fake_provider()
+    manager = get_runtime_credentials_manager(runtime_paths)
+    target = RequestCredentialsTarget(
+        runtime_paths=runtime_paths,
+        base_manager=manager,
+        target_manager=manager,
+        worker_scope=None,
+        agent_name=None,
+        execution_identity=None,
+    )
+    pending = SimpleNamespace(
+        agent_name=None,
+        execution_scope_override_provided=False,
+        execution_scope_override=None,
+        payload={"connection_generation": "generation-1"},
+        code_verifier=None,
+    )
+    verification_started = asyncio.Event()
+    release_verification = asyncio.Event()
+    exchange = AsyncMock()
+
+    async def verify(*_args: object) -> None:
+        verification_started.set()
+        await release_verification.wait()
+
+    monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
+    monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
+    monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
+    monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", verify)
+    monkeypatch.setattr(oauth_api, "exchange_and_store_oauth_credentials", exchange)
+    request = StarletteRequest(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": f"/api/oauth/{provider.id}/callback",
+            "query_string": b"code=test-code&state=test-state",
+            "headers": [],
+        },
+    )
+
+    callback_task = asyncio.create_task(oauth_api.callback(provider.id, request))
+    await verification_started.wait()
+    callback_task.cancel()
+    await asyncio.sleep(0)
+
+    assert not callback_task.done()
+    release_verification.set()
+    with pytest.raises(asyncio.CancelledError):
+        await callback_task
+    exchange.assert_awaited_once()
+
+
 def test_disconnect_cleanup_failure_preserves_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Disconnect does not delete credentials when fallible MCP cleanup fails."""
     runtime_paths = _runtime_paths(

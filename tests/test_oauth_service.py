@@ -522,6 +522,12 @@ async def test_pending_reset_operation_hides_old_credentials_and_reconnect_finis
         )
 
     assert credential_lifecycle.load_oauth_credentials(context) is None
+    pending_operation = credential_lifecycle.oauth_reset_operation_snapshot(
+        context,
+        "approval-1:0:reset-call",
+    )
+    assert pending_operation is not None
+    assert pending_operation.status == "pending"
     monkeypatch.setattr(credential_lifecycle, "delete_scoped_credentials", real_delete)
     pending_generation = oauth_connection_generation(context)
     replacement = await exchange_and_store_oauth_credentials(
@@ -538,6 +544,51 @@ async def test_pending_reset_operation_hides_old_credentials_and_reconnect_finis
         )
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_reset_retries_completed_state_publication_after_durable_delete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed completion write must retain a replayable reset debt and original receipt result."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+    operation_id = "approval-1:0:reset-call"
+    real_write_state = credential_lifecycle._write_oauth_credential_state
+    state_writes = 0
+
+    def fail_completed_publication(
+        target_context: OAuthCredentialContext,
+        state: credential_lifecycle._OAuthCredentialState,
+    ) -> None:
+        nonlocal state_writes
+        state_writes += 1
+        if state_writes == 2:
+            msg = "completed state publication failed"
+            raise OSError(msg)
+        real_write_state(target_context, state)
+
+    monkeypatch.setattr(credential_lifecycle, "_write_oauth_credential_state", fail_completed_publication)
+    with pytest.raises(OSError, match="completed state publication failed"):
+        await credential_lifecycle.reset_oauth_credentials(context, operation_id=operation_id)
+
+    assert credential_lifecycle._load_raw_oauth_credentials(context) is None
+    pending_operation = credential_lifecycle.oauth_reset_operation_snapshot(context, operation_id)
+    assert pending_operation is not None
+    assert pending_operation.status == "pending"
+    assert pending_operation.credential_existed is True
+
+    monkeypatch.setattr(credential_lifecycle, "_write_oauth_credential_state", real_write_state)
+    assert await credential_lifecycle.reset_oauth_credentials(context, operation_id=operation_id) is True
+    completed_operation = credential_lifecycle.oauth_reset_operation_snapshot(context, operation_id)
+    assert completed_operation is not None
+    assert completed_operation.status == "completed"
+    assert completed_operation.credential_existed is True
 
 
 @pytest.mark.asyncio

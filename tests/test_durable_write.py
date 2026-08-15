@@ -46,6 +46,32 @@ def test_durable_directory_creation_fsyncs_entry_and_parent(
     assert fsynced == [target, tmp_path]
 
 
+def test_durable_directory_creation_retries_failed_parent_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An existing directory must retry a parent fsync that failed after mkdir."""
+    target = tmp_path / "scope"
+    fsynced: list[Path] = []
+    failed_once = False
+
+    def fail_first_parent(directory: Path) -> None:
+        nonlocal failed_once
+        fsynced.append(directory)
+        if directory == tmp_path and not failed_once:
+            failed_once = True
+            msg = "parent fsync failed"
+            raise OSError(msg)
+
+    monkeypatch.setattr(durable_write, "_fsync_directory_durable", fail_first_parent)
+
+    with pytest.raises(OSError, match="parent fsync failed"):
+        create_directory_durable(target, mode=0o700)
+    create_directory_durable(target, mode=0o700)
+
+    assert fsynced == [target, tmp_path, target, tmp_path]
+
+
 def test_durable_delete_fsyncs_parent_after_unlink(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A successful delete must durably publish the parent-directory update."""
     target = tmp_path / "credential.json"

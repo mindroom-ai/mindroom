@@ -368,6 +368,7 @@ class PausedAttempt:
     run_id: str
     tools: tuple[ToolExecution, ...]
     requirements: tuple[RunRequirement, ...] = ()
+    observed_tools: tuple[ToolExecution, ...] = ()
     runtime_model_name: str | None = None
     team_member_model_names: tuple[tuple[str, str], ...] = ()
 
@@ -463,6 +464,7 @@ def _paused_attempt(
         run_id=run_id,
         tools=tuple(pending_tools),
         requirements=pending_requirements,
+        observed_tools=tuple(tools),
     )
 
 

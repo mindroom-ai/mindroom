@@ -67,7 +67,8 @@ agents:
 ### Approval And Requester Scope
 
 Every `reset_oauth_connection()` call requires a Matrix human-approval card even when the global `tool_approval` default is `auto_approve`.
-The reset must be the only call in its approval generation, and approval freezes its exact name, arguments, invoking agent, credential target, credential revision, and connection generation.
+The reset must be the only observed call in its paused run, and approval freezes its exact name, arguments, invoking agent, credential target, and connection generation.
+The credential revision is retained as audit metadata but refresh-only revision drift is allowed because it does not replace the authorized connection lineage.
 Only the original human requester can approve that pending call.
 Before changing credentials, the tool applies `authorization.agent_reply_permissions` for the current agent, including configured sender aliases.
 The resolved credential scope must be `user` or `user_agent`; shared credentials are refused.

@@ -452,17 +452,18 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
         execution_scope_override_provided=pending.execution_scope_override_provided,
         execution_scope_override=pending.execution_scope_override,
     )
-    await _verify_pending_target_binding(provider, pending.payload, target)
+
+    async def verify_and_store() -> None:
+        await _verify_pending_target_binding(provider, pending.payload, target)
+        await exchange_and_store_oauth_credentials(
+            _credential_context(provider, runtime_paths, target),
+            code,
+            pending.code_verifier,
+            expected_connection_generation=_pending_connection_generation(pending.payload),
+        )
 
     try:
-        await run_coroutine_until_complete(
-            exchange_and_store_oauth_credentials(
-                _credential_context(provider, runtime_paths, target),
-                code,
-                pending.code_verifier,
-                expected_connection_generation=_pending_connection_generation(pending.payload),
-            ),
-        )
+        await run_coroutine_until_complete(verify_and_store())
     except OAuthClaimValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OAuthProviderError as exc:

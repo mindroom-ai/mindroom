@@ -60,6 +60,10 @@ class _SanitizedGoogleRefreshError(RefreshError):
     """Refresh failure safe to expose to wrapped toolkit code and logs."""
 
 
+class _GoogleRefreshGrantMissingError(RuntimeError):
+    """Signal that a forced provider retry has no refresh grant to use."""
+
+
 class _OAuthAuthSource(Enum):
     """Credential source selected for one tool auth attempt."""
 
@@ -372,11 +376,16 @@ class ScopedOAuthClientMixin:
         def refresh_if_unchanged(current: Mapping[str, Any]) -> dict[str, Any] | None:
             if dict(current) != triggering_snapshot:
                 return None
+            if not current.get("refresh_token"):
+                raise _GoogleRefreshGrantMissingError
             return self._refresh_google_token_data(current, request, force=True)
 
         context = self._oauth_credential_context()
         try:
             result = refresh_oauth_credentials_sync(context, refresh_if_unchanged)
+        except _GoogleRefreshGrantMissingError:
+            state.last_failure = _GoogleRefreshFailure.MISSING
+            self._raise_google_refresh_failure(state.last_failure)
         except OAuthRefreshRejectedError:
             state.last_failure = _GoogleRefreshFailure.TERMINAL
             self._raise_google_refresh_failure(state.last_failure)

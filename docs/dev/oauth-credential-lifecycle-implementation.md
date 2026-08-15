@@ -30,9 +30,9 @@ One lifecycle module submits asynchronous callers and synchronous provider adapt
 - Keep GitHub tokens and PyGithub clients together in worker-thread-local state.
 - Revalidate every authenticated MCP connection and call against authoritative cross-process credential revision and token hash immediately before publication or remote use.
 - Use structured provider error codes and never log provider-controlled descriptions or token values.
-- Keep reset approval bound to the exact provider, service, scope, worker key, routing agent, credential revision, and connection generation.
+- Keep reset approval bound to the exact provider, service, scope, worker key, routing agent, and connection generation while retaining credential revision as audit metadata.
 - Freeze every approved call's exact ID, name, canonical arguments, and invoking agent.
-- Require reset to be the sole call in its approval generation.
+- Require reset to be the sole observed call in its paused run.
 - Key approved reset commits by `approval_id:generation:tool_call_id`, retain those completed tombstones permanently, and prune non-replayable direct or provider-driven completion state.
 - Finish pending reset deletion before every credential read, refresh, callback publication, or later reset.
 - Recover a claimed reset receipt directly without resuming Agno.
@@ -286,14 +286,15 @@ Return the dashboard disconnect receipt only after successful cleanup and deleti
 Resolve provider-specific requester credential identity once.
 Construct the context with the primary runtime credential manager.
 Persist provider ID, credential service, worker scope, worker key, routing agent, invoking agent, credential revision, and connection generation in approval bindings.
-Re-resolve and compare every field before approved execution.
+Re-resolve and compare the target identity plus connection generation before approved execution, while allowing refresh-only credential revision drift.
 Pass authorization into agent reconstruction and install persisted tool runtime and execution-identity contexts before reconstruction and resumed execution.
 
 - [ ] **Step 6: Make agent reset cancellation-safe by ordering**
 
 Return completed stable operations before retirement, fence the requester-session key, and skip retirement only when authoritative storage proves the connection generation changed after approval.
 Otherwise retire every cached same-key session regardless of lease-revision mismatch, then issue the requester-bound reconnect link immediately before the lifecycle reset transaction.
-If teardown or lifecycle reset raises an ordinary exception, log one bounded lifecycle-wide failure event and tell the caller to verify status before retrying.
+If an approved lifecycle reset raises after durable intent publication, propagate the interruption so the claimed continuation retains receipt-delivery ownership.
+For failures before durable intent publication, log one bounded lifecycle-wide failure event and tell the caller to verify status before retrying.
 If teardown is cancelled, propagate cancellation while credentials remain intact.
 After deletion, release only the in-memory retirement fence before building the receipt.
 

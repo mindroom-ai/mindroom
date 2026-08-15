@@ -451,6 +451,46 @@ def test_google_lazy_refresh_rejects_expired_access_only_snapshot(runtime_paths:
     assert tool.creds is None
 
 
+def test_google_forced_refresh_rejects_unexpired_access_only_snapshot(runtime_paths: RuntimePaths) -> None:
+    """A rejected bearer without a refresh grant cannot report forced-refresh success."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "unexpired-access-only-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    with pytest.raises(RefreshError, match="OAuth credential refresh failed"):
+        tool.creds.refresh(object())
+
+    assert tool._consume_oauth_connection_required() == (True, None)
+    assert tool.creds is None
+
+
 def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
     monkeypatch: pytest.MonkeyPatch,
     runtime_paths: RuntimePaths,
@@ -685,13 +725,14 @@ def test_google_lazy_refresh_serializes_local_snapshot_publication(  # noqa: PLR
 
     monkeypatch.setattr(tool, "_raw_credentials_from_token_data", block_first_publish)
     second_call_started = threading.Event()
+    credentials = tool.creds
 
     def second_refresh() -> None:
         second_call_started.set()
-        tool.creds.refresh(object())
+        credentials.refresh(object())
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(tool.creds.refresh, object())
+        first = executor.submit(credentials.refresh, object())
         assert first_publish_blocked.wait(timeout=5)
         second = executor.submit(second_refresh)
         assert second_call_started.wait(timeout=5)
@@ -703,7 +744,7 @@ def test_google_lazy_refresh_serializes_local_snapshot_publication(  # noqa: PLR
         second.result(timeout=5)
 
     assert provider_calls == 1
-    assert tool.creds.token == first_rotated_access_token
+    assert credentials.token == first_rotated_access_token
 
 
 def test_google_wrapper_constructor_canonicalizes_alias_without_runtime_context(

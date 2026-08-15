@@ -128,6 +128,7 @@ class MCPServerManager:
         self._on_catalog_change = on_catalog_change
         self._config: Config | None = None
         self._shutdown = False
+        self._shutdown_complete = asyncio.Event()
 
     def has_server(self, server_id: str) -> bool:
         """Return whether one configured server is tracked."""
@@ -215,23 +216,54 @@ class MCPServerManager:
         """Close all tracked sessions and background refresh tasks."""
         async with self._state_lifecycle_lock:
             if self._shutdown:
-                return
-            self._shutdown = True
-            self._config = None
-            shared_states = list(self._states.values())
-            scoped_states = list(self._scoped_states.values())
-            for state in (*shared_states, *scoped_states):
-                state.retired = True
-            self._states.clear()
-            self._scoped_states.clear()
-            self._request_retirement_locks.clear()
-            self._retired_request_keys.clear()
-        for state in shared_states:
-            await self._cancel_refresh_task(state)
-            await self._disconnect_state_when_idle(state)
-        for state in scoped_states:
-            await self._cancel_refresh_task(state)
-            await self._disconnect_state_when_idle(state)
+                shutdown_complete = self._shutdown_complete
+                shutdown_states: tuple[MCPServerState, ...] | None = None
+            else:
+                self._shutdown = True
+                self._config = None
+                shutdown_complete = self._shutdown_complete
+                seen_state_ids: set[int] = set()
+                captured_states: list[MCPServerState] = []
+                for state in (*self._states.values(), *self._scoped_states.values()):
+                    if id(state) in seen_state_ids:
+                        continue
+                    seen_state_ids.add(id(state))
+                    captured_states.append(state)
+                shutdown_states = tuple(captured_states)
+                for state in shutdown_states:
+                    state.retired = True
+        if shutdown_states is None:
+            await shutdown_complete.wait()
+            return
+        await run_coroutine_until_complete(self._drain_shutdown_states(shutdown_states))
+
+    async def _drain_shutdown_states(self, states: tuple[MCPServerState, ...]) -> None:
+        """Drain every captured state before publishing terminal manager shutdown."""
+        try:
+            for state in states:
+                try:
+                    await self._cancel_refresh_task(state)
+                except (asyncio.CancelledError, Exception) as exc:
+                    logger.warning(
+                        "MCP shutdown refresh cleanup failed",
+                        server_id=state.server_id,
+                        error_type=type(exc).__name__,
+                    )
+                try:
+                    await self._disconnect_state_when_idle(state)
+                except (asyncio.CancelledError, Exception) as exc:
+                    logger.warning(
+                        "MCP shutdown session cleanup failed",
+                        server_id=state.server_id,
+                        error_type=type(exc).__name__,
+                    )
+        finally:
+            async with self._state_lifecycle_lock:
+                self._states.clear()
+                self._scoped_states.clear()
+                self._request_retirement_locks.clear()
+                self._retired_request_keys.clear()
+                self._shutdown_complete.set()
 
     async def call_tool(
         self,
@@ -397,8 +429,7 @@ class MCPServerManager:
                         state.retired = False
                 raise
             finally:
-                async with self._state_lifecycle_lock:
-                    self._retired_request_keys.discard(key)
+                self._retired_request_keys.discard(key)
 
     def _oauth_connection_required(
         self,
@@ -646,22 +677,26 @@ class MCPServerManager:
         except MCPError:
             raise
 
-        await self._refresh_server_catalog(
-            state,
-            notify=True,
-            expected_refresh_revision=refresh_revision,
-            auth_headers=auth_headers,
-            authorization_lease=authorization_lease,
-        )
-        return await self._call_tool_with_lock(
-            state,
-            remote_tool_name,
-            arguments,
-            timeout_seconds=timeout_seconds,
-            authorization_lease=authorization_lease,
-            include_tools=include_tools,
-            exclude_tools=exclude_tools,
-        )
+        try:
+            await self._refresh_server_catalog(
+                state,
+                notify=True,
+                expected_refresh_revision=refresh_revision,
+                auth_headers=auth_headers,
+                authorization_lease=authorization_lease,
+            )
+            return await self._call_tool_with_lock(
+                state,
+                remote_tool_name,
+                arguments,
+                timeout_seconds=timeout_seconds,
+                authorization_lease=authorization_lease,
+                include_tools=include_tools,
+                exclude_tools=exclude_tools,
+            )
+        except _MCPAuthorizationChangedError as exc:
+            msg = f"MCP server '{state.server_id}' authorization changed after remote dispatch; retry manually"
+            raise MCPConnectionError(state.server_id, msg) from exc
 
     async def _call_tool_with_lock(
         self,

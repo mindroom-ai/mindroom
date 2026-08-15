@@ -80,4 +80,6 @@ class OAuthConnectionTools(Toolkit):
         except OAuthResetTargetError as exc:
             return f"Error: {exc}"
         except Exception:
+            if runtime_context.approval_operation is not None:
+                raise
             return "Error: OAuth connection reset did not complete; verify connection status, then retry."

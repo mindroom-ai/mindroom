@@ -65,7 +65,7 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
-from mindroom.oauth.credential_lifecycle import oauth_reset_operation_result
+from mindroom.oauth.credential_lifecycle import oauth_reset_operation_snapshot
 from mindroom.oauth.reset import resolve_oauth_reset_target, validate_oauth_reset_approval_bindings
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
@@ -418,8 +418,8 @@ class PostLockRequestPreparationError(RuntimeError):
         self.placeholder_event_id = placeholder_event_id
 
 
-class _CommittedOAuthResetRecoveryError(RuntimeError):
-    """Receipt recovery failed after durable reset completion was confirmed."""
+class _OAuthResetReceiptRecoveryError(RuntimeError):
+    """Receipt recovery failed after a durable reset operation was confirmed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -854,6 +854,7 @@ class ResponseRunner:
             plan = await self._approval_responses.plan_pause(
                 identified_tools,
                 requester_id=requester_id,
+                observed_tools=paused.observed_tools or paused.tools,
                 execution_identity=execution_identity,
             )
             response_event_id = progress.tracked_event_id
@@ -1140,7 +1141,7 @@ class ResponseRunner:
                     target=target,
                 ),
             )
-        except _CommittedOAuthResetRecoveryError:
+        except _OAuthResetReceiptRecoveryError:
             return FinalDeliveryOutcome(
                 terminal_status="suspended",
                 event_id=claimed.response_event_id,
@@ -1214,7 +1215,7 @@ class ResponseRunner:
             )
         except Exception as exc:
             msg = "Completed OAuth reset receipt recovery remains pending"
-            raise _CommittedOAuthResetRecoveryError(msg) from exc
+            raise _OAuthResetReceiptRecoveryError(msg) from exc
 
     async def _recover_completed_oauth_reset_outcome(
         self,
@@ -1228,11 +1229,15 @@ class ResponseRunner:
         recovery = await self._oauth_reset_recovery(claimed)
         if recovery is None:
             return None
-        completed = oauth_reset_operation_result(
-            recovery.credential_context,
-            recovery.operation.operation_id,
-        )
-        if completed is None:
+        try:
+            reset_operation = oauth_reset_operation_snapshot(
+                recovery.credential_context,
+                recovery.operation.operation_id,
+            )
+        except Exception as exc:
+            msg = "OAuth reset receipt recovery remains pending"
+            raise _OAuthResetReceiptRecoveryError(msg) from exc
+        if reset_operation is None:
             return None
         try:
             response_text = await execute_oauth_connection_reset(
@@ -1246,7 +1251,7 @@ class ResponseRunner:
             )
         except Exception as exc:
             msg = "Completed OAuth reset receipt recovery remains pending"
-            raise _CommittedOAuthResetRecoveryError(msg) from exc
+            raise _OAuthResetReceiptRecoveryError(msg) from exc
         try:
             outcome = await self._deliver_recovered_oauth_reset_outcome(
                 claimed,
@@ -1255,10 +1260,10 @@ class ResponseRunner:
             )
         except Exception as exc:
             msg = "Completed OAuth reset receipt recovery remains pending"
-            raise _CommittedOAuthResetRecoveryError(msg) from exc
+            raise _OAuthResetReceiptRecoveryError(msg) from exc
         if outcome.terminal_status != "completed":
             msg = "Completed OAuth reset receipt recovery remains pending"
-            raise _CommittedOAuthResetRecoveryError(msg)
+            raise _OAuthResetReceiptRecoveryError(msg)
         return outcome
 
     async def _deliver_recovered_oauth_reset_outcome(
@@ -1451,7 +1456,7 @@ class ResponseRunner:
                     claimed,
                     target=target,
                 )
-            except _CommittedOAuthResetRecoveryError:
+            except _OAuthResetReceiptRecoveryError:
                 self.deps.logger.exception(
                     "oauth_reset_receipt_recovery_failed_before_failure_fence",
                     approval_id=claimed.approval_id,
@@ -2074,7 +2079,7 @@ class ResponseRunner:
                     continuation,
                     target=target,
                 )
-            except _CommittedOAuthResetRecoveryError:
+            except _OAuthResetReceiptRecoveryError:
                 return None
             except Exception:
                 self.deps.logger.exception(

@@ -290,6 +290,14 @@ class OAuthCredentialsSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class _OAuthResetOperationSnapshot:
+    """Read-only durable state for one stable reset operation ID."""
+
+    status: Literal["pending", "completed"]
+    credential_existed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class _OAuthCredentialPublication:
     """Self-describing durable credential commit used to repair state publication."""
 
@@ -427,10 +435,24 @@ def oauth_connection_generation(context: OAuthCredentialContext) -> str:
 
 def oauth_reset_operation_result(context: OAuthCredentialContext, operation_id: str) -> bool | None:
     """Return one completed replayable reset result without starting or finishing work."""
-    operation = _load_oauth_credential_state(context).reset_operations.get(operation_id)
-    if operation is None or operation.status != "completed" or not operation.replayable:
+    operation = oauth_reset_operation_snapshot(context, operation_id)
+    if operation is None or operation.status != "completed":
         return None
     return operation.credential_existed
+
+
+def oauth_reset_operation_snapshot(
+    context: OAuthCredentialContext,
+    operation_id: str,
+) -> _OAuthResetOperationSnapshot | None:
+    """Return one replayable reset intent without starting or finishing its mutation."""
+    operation = _load_oauth_credential_state(context).reset_operations.get(operation_id)
+    if operation is None or not operation.replayable:
+        return None
+    return _OAuthResetOperationSnapshot(
+        status=operation.status,
+        credential_existed=operation.credential_existed,
+    )
 
 
 def _load_oauth_credential_state(context: OAuthCredentialContext) -> _OAuthCredentialState:
