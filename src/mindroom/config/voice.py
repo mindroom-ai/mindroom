@@ -127,5 +127,5 @@ class VoiceConfig(BaseModel):
     )
     intelligence: _VoiceLLMConfig = Field(
         default_factory=_VoiceLLMConfig,
-        description="Command intelligence configuration",
+        description="Transcript normalization configuration",
     )

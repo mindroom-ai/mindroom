@@ -122,7 +122,8 @@ Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-prox
 
 Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
 The current shared-only integrations are `spotify` and `homeassistant`.
-MCP `mcp_<server_id>` tools work on isolating worker scopes: OAuth-backed servers are requester-scoped, while non-OAuth servers always call through the shared server session without requester credentials.
+MCP `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow that scope, while non-OAuth servers always call through the shared server session without requester credentials.
+Use `user` or `user_agent` when OAuth state must be requester-isolated; `shared` reuses agent-scoped OAuth state.
 
 ## Automatic Dependency Installation
 

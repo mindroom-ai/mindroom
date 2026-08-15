@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="modelslabs",
     display_name="ModelsLabs",
-    description="AI model marketplace for generating videos, audio, and GIFs from text prompts",
+    description="AI model marketplace for generating images, videos, audio, and GIFs from text prompts",
     category=ToolCategory.DEVELOPMENT,  # From docs URL: /tools/toolkits/others/
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API key
     setup_type=SetupType.API_KEY,  # Uses api_key parameter

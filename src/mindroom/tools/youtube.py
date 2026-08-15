@@ -63,7 +63,6 @@ if TYPE_CHECKING:
         "get_video_timestamps",
         "get_youtube_video_captions",
         "get_youtube_video_data",
-        "get_youtube_video_id",
     ),
 )
 def youtube_tools() -> type[YouTubeTools]:

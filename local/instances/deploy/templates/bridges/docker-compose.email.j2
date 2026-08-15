@@ -1,7 +1,7 @@
 services:
   email:
     container_name: {{ instance_name }}-email-bridge
-    image: etkecc/postmoogle:latest
+    image: {{ image }}
     networks:
       - {{ instance_name }}_mindroom-network
       - mynetwork

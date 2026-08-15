@@ -66,8 +66,8 @@ Validate the complete configuration before starting MindRoom.
 Start a Matrix DM with the generated Telegram bridge bot.
 Use either:
 
-- `login phone +15551234567` for phone authentication.
-- `login qr` for QR authentication.
+- `login` for interactive phone authentication.
+- `login-qr` for QR authentication.
 
 Telegram normally sends the login code to an already authenticated Telegram client.
 Accounts with two-factor authentication receive an additional password prompt.

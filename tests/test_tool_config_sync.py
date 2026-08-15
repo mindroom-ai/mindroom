@@ -190,6 +190,35 @@ def test_daytona_converts_authored_sandbox_values(monkeypatch: pytest.MonkeyPatc
     assert captured["sandbox_labels"] == {"team": "agents"}
 
 
+def test_daytona_blank_optional_sandbox_values_become_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cleared dashboard fields should preserve Daytona's optional defaults."""
+    from agno.tools.daytona import DaytonaTools  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    def capture_init(_self: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
+    tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
+
+    tool_class(sandbox_language="", sandbox_env_vars="", sandbox_labels="")
+
+    assert captured["sandbox_language"] is None
+    assert captured["sandbox_env_vars"] is None
+    assert captured["sandbox_labels"] is None
+
+
+def test_pubmed_and_youtube_metadata_lists_only_model_callable_functions() -> None:
+    """Tool metadata must not advertise internal toolkit helpers."""
+    assert TOOL_METADATA["pubmed"].function_names == ("search_pubmed",)
+    assert TOOL_METADATA["youtube"].function_names == (
+        "get_video_timestamps",
+        "get_youtube_video_captions",
+        "get_youtube_video_data",
+    )
+
+
 def test_zep_metadata_lists_only_model_callable_functions() -> None:
     """Internal Zep initialization must not be advertised as a model-callable function."""
     assert TOOL_METADATA["zep"].function_names == (

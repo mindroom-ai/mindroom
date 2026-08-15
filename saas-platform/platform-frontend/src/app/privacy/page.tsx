@@ -41,7 +41,8 @@ export default function PrivacyPage() {
         <h2 className="text-xl font-semibold">Contact</h2>
         <p>
           Read the full <a className="text-primary" href="https://docs.mindroom.chat/privacy/">MindRoom privacy policy</a>.
-          For general questions, use <a className="text-primary" href="https://github.com/mindroom-ai/mindroom/issues">MindRoom GitHub issues</a> without posting personal data or private account details.
+          For private privacy, account, or data requests, email <a className="text-primary" href="mailto:support@mindroom.chat">support@mindroom.chat</a>.
+          For general policy questions, use <a className="text-primary" href="https://github.com/mindroom-ai/mindroom/issues">MindRoom GitHub issues</a> without posting personal data or private account details.
         </p>
       </section>
     </main>

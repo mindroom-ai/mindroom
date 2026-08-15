@@ -174,4 +174,5 @@ We may update this policy from time to time. The "Last updated" date will change
 
 For privacy questions, contact:
 
+- [support@mindroom.chat](mailto:support@mindroom.chat) for private privacy, account, or data requests
 - [MindRoom GitHub issues](https://github.com/mindroom-ai/mindroom/issues) for general policy questions; do not post personal data or private account details publicly

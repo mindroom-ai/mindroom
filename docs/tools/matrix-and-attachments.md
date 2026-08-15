@@ -89,12 +89,12 @@ matrix_message(action="react", target="$event123", message="✅")
 
 ## [`matrix_room`]
 
-`matrix_room` provides read-only room introspection through `matrix_room(action, room_id=None, limit=None, event_type=None, state_key=None, page_token=None)`.
+`matrix_room` provides read-only room introspection through `matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None)`.
 
 ### What It Does
 
 The supported actions are `room-info`, `members`, `threads`, and `state`.
-`room-info` returns cached room metadata including name, topic, encryption status, membership count, join rule, aliases, version, guest access, creator, and a power-level summary.
+`room-info` returns cached room metadata including name, topic, encryption status, membership count, join rule, canonical alias, version, guest access, creator, and a power-level summary.
 `members` returns joined users with display names, avatar URLs, and power levels.
 `threads` returns paginated thread-root previews with sender, timestamp, and reply count; it defaults `limit` to 20, clamps it from 1 through 50, and returns `next_token` plus `has_more` for pagination.
 `state` returns one exact state event when `event_type` is supplied, using an empty `state_key` by default.

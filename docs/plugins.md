@@ -10,7 +10,7 @@ icon: lucide/plug-2
 > Only install plugins you trust and have reviewed.
 
 MindRoom plugins extend agents with custom tools, [hooks](hooks.md), and skills.
-A plugin is a directory with a `mindroom.plugin.json` manifest, one or more Python modules, and optionally skill directories.
+A plugin is a directory with a `mindroom.plugin.json` manifest and optional Python modules or skill directories.
 Plugins are loaded from paths listed under `plugins:` in `config.yaml`.
 
 ## Plugin structure

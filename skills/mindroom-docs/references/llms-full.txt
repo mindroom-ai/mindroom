@@ -2057,7 +2057,7 @@ A filtered public startup-runtime env payload can still propagate from exported 
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
 That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
-OAuth-backed remote MCP tools use requester-scoped OAuth credentials and can be used with `worker_scope: user` or `worker_scope: user_agent`.
+OAuth-backed remote MCP tools follow the configured worker scope and can use `worker_scope: user` or `worker_scope: user_agent` for requester isolation.
 Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
 `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` also always stay local.
 `spotify` can still be proxied through the sandbox.
@@ -3326,7 +3326,8 @@ Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-prox
 
 Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
 The current shared-only integrations are `spotify` and `homeassistant`.
-MCP `mcp_<server_id>` tools work on isolating worker scopes: OAuth-backed servers are requester-scoped, while non-OAuth servers always call through the shared server session without requester credentials.
+MCP `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow that scope, while non-OAuth servers always call through the shared server session without requester credentials.
+Use `user` or `user_agent` when OAuth state must be requester-isolated; `shared` reuses agent-scoped OAuth state.
 
 ## Automatic Dependency Installation
 
@@ -6240,7 +6241,7 @@ Use these tools when you need OpenAI- or Google-style multimodal generation, pro
 - [`eleven_labs`] - Voice listing, sound effect generation, and text-to-speech.
 - [`desi_vocal`] - Hindi and Indian-language voice listing and text-to-speech.
 - [`lumalabs`] - Luma AI video generation and image-to-video workflows.
-- [`modelslabs`] - ModelsLab media generation for MP4, GIF, MP3, and WAV outputs.
+- [`modelslabs`] - ModelsLab media generation for PNG, JPG, MP4, GIF, MP3, and WAV outputs.
 
 ## Common Setup Notes
 
@@ -7176,12 +7177,12 @@ matrix_message(action="react", target="$event123", message="✅")
 
 ## [`matrix_room`]
 
-`matrix_room` provides read-only room introspection through `matrix_room(action, room_id=None, limit=None, event_type=None, state_key=None, page_token=None)`.
+`matrix_room` provides read-only room introspection through `matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None)`.
 
 ### What It Does
 
 The supported actions are `room-info`, `members`, `threads`, and `state`.
-`room-info` returns cached room metadata including name, topic, encryption status, membership count, join rule, aliases, version, guest access, creator, and a power-level summary.
+`room-info` returns cached room metadata including name, topic, encryption status, membership count, join rule, canonical alias, version, guest access, creator, and a power-level summary.
 `members` returns joined users with display names, avatar URLs, and power levels.
 `threads` returns paginated thread-root previews with sender, timestamp, and reply count; it defaults `limit` to 20, clamps it from 1 through 50, and returns `next_token` plus `has_more` for pagination.
 `state` returns one exact state event when `event_type` is supplied, using an empty `state_key` by default.
@@ -11665,7 +11666,7 @@ For workspace skills created during an agent turn, assume they become available 
 > Only install plugins you trust and have reviewed.
 
 MindRoom plugins extend agents with custom tools, [hooks](https://docs.mindroom.chat/hooks/), and skills.
-A plugin is a directory with a `mindroom.plugin.json` manifest, one or more Python modules, and optionally skill directories.
+A plugin is a directory with a `mindroom.plugin.json` manifest and optional Python modules or skill directories.
 Plugins are loaded from paths listed under `plugins:` in `config.yaml`.
 
 ## Plugin structure
@@ -14083,7 +14084,7 @@ voice:
     model: gpt-4o-transcribe
 ```
 
-Requires `OPENAI_API_KEY` environment variable.
+Requires `voice.stt.api_key` or a named `voice.stt.credentials_service`; the default OpenAI credential service can resolve stored credentials or `OPENAI_API_KEY`.
 
 ### Self-Hosted Whisper
 
@@ -17242,8 +17243,8 @@ Validate the complete configuration before starting MindRoom.
 Start a Matrix DM with the generated Telegram bridge bot.
 Use either:
 
-- `login phone +15551234567` for phone authentication.
-- `login qr` for QR authentication.
+- `login` for interactive phone authentication.
+- `login-qr` for QR authentication.
 
 Telegram normally sends the login code to an already authenticated Telegram client.
 Accounts with two-factor authentication receive an additional password prompt.

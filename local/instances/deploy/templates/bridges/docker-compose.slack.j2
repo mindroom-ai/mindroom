@@ -1,7 +1,7 @@
 services:
   slack:
     container_name: {{ instance_name }}-slack-bridge
-    image: dock.mau.dev/mautrix/slack:latest
+    image: {{ image }}
     networks:
       - {{ instance_name }}_mindroom-network
       - mynetwork

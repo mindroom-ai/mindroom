@@ -16,6 +16,8 @@ def _parse_string_mapping(value: dict[str, str] | str | None, *, field_name: str
     """Parse one JSON-authored mapping while preserving native mappings."""
     if value is None or isinstance(value, dict):
         return value
+    if not value.strip():
+        return None
     parsed = json.loads(value)
     if not isinstance(parsed, dict) or not all(
         isinstance(key, str) and isinstance(item, str) for key, item in parsed.items()
@@ -142,7 +144,7 @@ def _parse_string_mapping(value: dict[str, str] | str | None, *, field_name: str
             type="boolean",
             required=False,
             default=True,
-            description="Automatically create sandbox if none exists",
+            description="Create a fallback sandbox after a sandbox-management error",
         ),
         ConfigField(
             name="verify_ssl",
@@ -158,7 +160,7 @@ def _parse_string_mapping(value: dict[str, str] | str | None, *, field_name: str
             type="boolean",
             required=False,
             default=True,
-            description="Whether to reuse the same sandbox across agent sessions",
+            description="Whether to reuse the same sandbox within the current agent session",
         ),
         ConfigField(
             name="sandbox_public",
@@ -227,9 +229,11 @@ def daytona_tools() -> type[DaytonaTools]:
             add_instructions: bool = False,
             **kwargs: object,
         ) -> None:
-            resolved_language = (
-                CodeLanguage(sandbox_language.lower()) if isinstance(sandbox_language, str) else sandbox_language
-            )
+            normalized_language = sandbox_language.strip() if isinstance(sandbox_language, str) else sandbox_language
+            if isinstance(normalized_language, str):
+                resolved_language = CodeLanguage(normalized_language.lower()) if normalized_language else None
+            else:
+                resolved_language = normalized_language
             super().__init__(
                 api_key=api_key,
                 api_url=api_url,

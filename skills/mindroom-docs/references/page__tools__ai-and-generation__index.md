@@ -19,7 +19,7 @@ Use these tools when you need OpenAI- or Google-style multimodal generation, pro
 - [`eleven_labs`] - Voice listing, sound effect generation, and text-to-speech.
 - [`desi_vocal`] - Hindi and Indian-language voice listing and text-to-speech.
 - [`lumalabs`] - Luma AI video generation and image-to-video workflows.
-- [`modelslabs`] - ModelsLab media generation for MP4, GIF, MP3, and WAV outputs.
+- [`modelslabs`] - ModelsLab media generation for PNG, JPG, MP4, GIF, MP3, and WAV outputs.
 
 ## Common Setup Notes
 

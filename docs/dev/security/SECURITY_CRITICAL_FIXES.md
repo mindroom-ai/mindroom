@@ -138,8 +138,8 @@
 - ⚠️ Comprehensive monitoring/alerting not yet in place
 
 ## Risk Reduction Summary
-- **Initial Assessment:** 6.8/10 (HIGH)
-- **Current Estimate:** 5.8/10 (MEDIUM-HIGH) after P0/P1.1 hardening
+- **Initial Assessment:** Historical review identified high risk without a reproducible numeric methodology.
+- **Current Assessment:** Risk remains medium-high after P0/P1.1 hardening because the outstanding controls below are unresolved.
 - **Outstanding:** Secrets lifecycle verification, alerting/IR, pod hardening, dependency automation
 - **Production Ready:** ❌ No – maintain staging-only access until outstanding items close
 

@@ -1,7 +1,7 @@
 services:
   telegram:
     container_name: {{ instance_name }}-telegram-bridge
-    image: dock.mau.dev/mautrix/telegram:v0.15.3
+    image: {{ image }}
     networks:
       - {{ instance_name }}_mindroom-network
       - mynetwork

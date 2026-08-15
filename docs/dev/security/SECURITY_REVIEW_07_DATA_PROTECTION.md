@@ -244,10 +244,10 @@ def handle_payment_succeeded(invoice: dict) -> None:
 
 ✅ **No improvements needed** - Credit card data properly isolated to Stripe.
 
-### 4. Data Deletion Mechanisms - ✅ **IMPLEMENTED**
+### 4. Data Deletion Mechanisms - ⚠️ **PARTIAL**
 
-**Status**: PASS
-**Risk Level**: LOW
+**Status**: PARTIAL
+**Risk Level**: MEDIUM
 **Implementation Date**: September 15, 2025
 
 #### Current State
@@ -484,7 +484,7 @@ CREATE TABLE audit_logs (
 2. ✅ **Retention periods implemented** - hard-delete soft-deleted accounts after 7 days, ordinary audit logs after 90 days, and usage metrics after 365 days
 3. ✅ **Controlled storage** - Grace periods and cleanup procedures
 4. ⚠️ **No archival step** - the current cleanup task deletes eligible records directly
-5. ✅ **Comprehensive cleanup** - Via `/backend/tasks/cleanup.py` implementation
+5. ⚠️ **Bounded cleanup** - `/backend/tasks/cleanup.py` covers application accounts, ordinary audit logs, and usage metrics but not every processor or storage system
 
 **Retention Behavior in the Current Cleanup Task**:
 - Soft-deleted application accounts: 7-day grace period before hard deletion

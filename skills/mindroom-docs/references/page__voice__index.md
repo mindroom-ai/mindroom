@@ -58,7 +58,7 @@ voice:
     model: gpt-4o-transcribe
 ```
 
-Requires `OPENAI_API_KEY` environment variable.
+Requires `voice.stt.api_key` or a named `voice.stt.credentials_service`; the default OpenAI credential service can resolve stored credentials or `OPENAI_API_KEY`.
 
 ### Self-Hosted Whisper
 

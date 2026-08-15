@@ -324,12 +324,12 @@ Re-run this action plan after the above are delivered.
 
 ## Final Status Update (September 17, 2025)
 
-- **Risk Trend:** 6.8/10 → 5.8/10 (MEDIUM-HIGH). Further reduction blocked by open items above.
+- **Risk Trend:** The historical numeric estimate was unsupported; current evidence still indicates medium-high risk, with further reduction blocked by the open items above.
 - **Completed:** Admin authentication fixes, rate limiting, GDPR endpoints, log sanitization.
 - **Outstanding:** Secrets rotation confirmation, monitoring alerts, internal TLS, checklist backlog.
 
 **Platform Status:** Safe for restricted staging with trusted testers only. Do **not** expose publicly until remaining blockers are resolved and documentation is refreshed.
 
-> **Audit note (2026-03-18):** The 6.8→5.8 risk reduction is unsubstantiated — no scoring methodology or evidence ties specific fixes to numeric changes.
+> **Audit note (2026-03-18):** Earlier versions published a numeric risk reduction without a scoring methodology or evidence tying specific fixes to numeric changes.
 > Several items marked pending here have no target dates or responsible parties assigned.
 > The P3-P8 sections originated in the original write-up and require current source and deployment validation.

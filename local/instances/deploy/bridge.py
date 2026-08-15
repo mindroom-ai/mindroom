@@ -222,7 +222,7 @@ def _get_matrix_info(instance_name: str) -> tuple[str, str, str]:
     return matrix_type, matrix_domain, matrix_url
 
 
-def _create_bridge_docker_compose(bridge: BridgeConfig, bridge_template: dict[str, Any]) -> Path:  # noqa: ARG001
+def _create_bridge_docker_compose(bridge: BridgeConfig, bridge_template: dict[str, Any]) -> Path:
     """Create a docker-compose file for a bridge using Jinja2 template."""
     compose_file = Path(bridge.data_dir) / "docker-compose.yml"
 
@@ -242,6 +242,7 @@ def _create_bridge_docker_compose(bridge: BridgeConfig, bridge_template: dict[st
         "instance_name": bridge.instance_name,
         "port": bridge.port,
         "data_dir": bridge.data_dir,
+        "image": bridge_template["image"],
     }
 
     # Add bridge-specific variables
