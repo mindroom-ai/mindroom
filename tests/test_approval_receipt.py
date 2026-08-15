@@ -9,10 +9,12 @@ import pytest
 from agno.exceptions import ModelProviderError
 from agno.models.fallback import FallbackConfig, acall_model_with_fallback
 from agno.models.message import Message
+from agno.models.response import ModelResponse
 
 from mindroom import approval_receipt
 from mindroom.approval_receipt import build_approval_receipt
 from mindroom.event_journal import ApprovalCall, ApprovalDecision
+from mindroom.google_gemini import MindRoomGoogleGemini
 from mindroom.openai_models import MindRoomOpenAIResponses
 from tests.history_helpers import RecordingModel
 
@@ -156,9 +158,23 @@ async def test_model_call_hook_appends_one_trusted_approval_receipt_after_tool_r
     ]
 
 
-def test_openai_previous_response_chain_keeps_receipt_provider_visible() -> None:
+@pytest.mark.asyncio
+async def test_openai_previous_response_chain_keeps_receipt_provider_visible() -> None:
     """Stateful Responses requests must include the receipt after their chain boundary."""
     model = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")
+    seen_requests: list[tuple[dict[str, object], list[object]]] = []
+
+    async def record_request(*, messages: list[Message], **_kwargs: object) -> ModelResponse:
+        seen_requests.append(
+            (
+                model.get_request_params(messages=messages),
+                model._format_messages(messages),
+            ),
+        )
+        return ModelResponse(content="ok")
+
+    vars(model)["aresponse"] = record_request
+    approval_receipt.install_approval_receipt_hooks(model, None)
     messages = [
         Message(role="system", content="base rules"),
         Message(
@@ -180,14 +196,42 @@ def test_openai_previous_response_chain_keeps_receipt_provider_visible() -> None
     ]
 
     with approval_receipt.approval_receipt_context("trusted approval receipt"):
-        projection = approval_receipt._messages_with_approval_receipt(messages, model_id=id(model))
+        await model.aresponse(messages=messages)
 
-    assert projection is not None
-    assert model.get_request_params(messages=projection.outbound_messages)["previous_response_id"] == "resp_previous"
-    formatted_messages = model._format_messages(projection.outbound_messages)
+    request_params, formatted_messages = seen_requests[0]
+    assert request_params["previous_response_id"] == "resp_previous"
     assert formatted_messages[0] == {"role": "developer", "content": "trusted approval receipt"}
     assert formatted_messages[1]["type"] == "function_call_output"
     assert formatted_messages[1]["output"] == "published"
+
+
+@pytest.mark.asyncio
+async def test_gemini_fallback_preserves_system_prompt_from_openai_history() -> None:
+    """OpenAI response metadata must not replace Gemini's original system rules."""
+    primary = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")
+    fallback = MindRoomGoogleGemini(id="gemini-3.6-flash", api_key="test-key")
+    seen_system_message: list[object] = []
+
+    async def record_request(*, messages: list[Message], **_kwargs: object) -> ModelResponse:
+        _formatted_messages, system_message = fallback._format_messages(messages)
+        seen_system_message.append(system_message)
+        return ModelResponse(content="ok")
+
+    vars(primary)["aresponse"] = AsyncMock(side_effect=ModelProviderError("primary failed"))
+    vars(fallback)["aresponse"] = record_request
+    fallback_config = FallbackConfig(on_error=[fallback])
+    approval_receipt.install_approval_receipt_hooks(primary, fallback_config)
+    messages = [
+        Message(role="system", content="base rules"),
+        Message(role="assistant", content="calling tool", provider_data={"response_id": "resp_previous"}),
+        Message(role="tool", content="published", tool_call_id="call-1", tool_name="publish_report"),
+    ]
+
+    with approval_receipt.approval_receipt_context("trusted approval receipt"):
+        response = await acall_model_with_fallback(primary, fallback_config, messages=messages)
+
+    assert response.content == "ok"
+    assert seen_system_message == ["base rules\n\ntrusted approval receipt"]
 
 
 @pytest.mark.asyncio

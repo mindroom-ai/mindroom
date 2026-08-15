@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from agno.models.message import Message
 
@@ -28,6 +28,11 @@ _APPROVAL_RECEIPT_HEADER = (
     "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
     "paused tool calls were authorized. Do not infer approval policy from tool success alone."
 )
+
+
+@runtime_checkable
+class _ResponseChainReceiptModel(Protocol):
+    approval_receipt_after_response_id: bool
 
 
 def _receipt_call_label(tool_name: str, call_ordinal: int) -> str:
@@ -115,15 +120,20 @@ def _messages_with_approval_receipt(
     messages: list[Message],
     *,
     model_id: int,
+    after_response_id: bool = False,
 ) -> _ApprovalReceiptProjection | None:
     receipt_context = _context.get()
     if receipt_context is None or model_id in receipt_context.fired_model_ids:
         return None
     receipt_context.fired_model_ids.add(model_id)
     outbound = list(messages)
-    response_chain_index = next(
-        (index for index in range(len(outbound) - 1, -1, -1) if _is_response_chain_boundary(outbound[index])),
-        None,
+    response_chain_index = (
+        next(
+            (index for index in range(len(outbound) - 1, -1, -1) if _is_response_chain_boundary(outbound[index])),
+            None,
+        )
+        if after_response_id
+        else None
     )
     system_index = (
         None
@@ -174,11 +184,16 @@ def _install_approval_receipt_hook(model: Model) -> None:
         return
     setattr(model, _HOOK_ATTR, True)
     model_id = id(model)
+    after_response_id = isinstance(model, _ResponseChainReceiptModel) and model.approval_receipt_after_response_id
 
     async def _aresponse_with_approval_receipt(*args: object, **kwargs: object) -> ModelResponse:
         messages: object = kwargs.get("messages")
         if isinstance(messages, list):
-            projection = _messages_with_approval_receipt(cast("list[Message]", messages), model_id=model_id)
+            projection = _messages_with_approval_receipt(
+                cast("list[Message]", messages),
+                model_id=model_id,
+                after_response_id=after_response_id,
+            )
             if projection is None:
                 return await original_aresponse(*args, **kwargs)
             try:
@@ -186,7 +201,11 @@ def _install_approval_receipt_hook(model: Model) -> None:
             finally:
                 projection.publish_model_mutations()
         if args and isinstance(args[0], list):
-            projection = _messages_with_approval_receipt(cast("list[Message]", args[0]), model_id=model_id)
+            projection = _messages_with_approval_receipt(
+                cast("list[Message]", args[0]),
+                model_id=model_id,
+                after_response_id=after_response_id,
+            )
             if projection is None:
                 return await original_aresponse(*args, **kwargs)
             try:

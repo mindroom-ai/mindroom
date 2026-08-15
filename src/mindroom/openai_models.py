@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from agno.models.deepseek import DeepSeek
 from agno.models.llama_cpp import LlamaCpp
@@ -122,6 +122,8 @@ class MindRoomLlamaCpp(ChatToolArgumentsCompat, LlamaCpp):
 @dataclass
 class MindRoomOpenAIResponses(OpenAIResponses):
     """OpenAI Responses model that preserves native tool-search state."""
+
+    approval_receipt_after_response_id: ClassVar[bool] = True
 
     def get_request_params(
         self,
