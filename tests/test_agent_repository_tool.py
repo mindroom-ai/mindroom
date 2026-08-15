@@ -878,6 +878,58 @@ def test_origin_publication_preserves_existing_git_config_mode(tmp_path: Path) -
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
 
 
+def test_directory_fsync_failure_preserves_retryable_config_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A durability error after backup publication must keep enough state for retry."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    lock_path = tmp_path / "workspace.lock"
+    real_rename = agent_repositories_module._rename_at_no_replace
+    real_fsync = agent_repositories_module.os.fsync
+    backup_published = False
+    fsync_failed = False
+
+    def track_backup_publication(source_fd: int, source: str, destination_fd: int, destination: str) -> None:
+        nonlocal backup_published
+        real_rename(source_fd, source, destination_fd, destination)
+        if source == "config" and destination.startswith(".config.mindroom-backup"):
+            backup_published = True
+
+    def fail_first_directory_fsync_after_backup(file_fd: int) -> None:
+        nonlocal fsync_failed
+        if backup_published and not fsync_failed and stat.S_ISDIR(os.fstat(file_fd).st_mode):
+            fsync_failed = True
+            msg = "injected directory fsync failure"
+            raise OSError(msg)
+        real_fsync(file_fd)
+
+    monkeypatch.setattr(agent_repositories_module, "_rename_at_no_replace", track_backup_publication)
+    monkeypatch.setattr(agent_repositories_module.os, "fsync", fail_first_directory_fsync_after_backup)
+
+    with pytest.raises(OSError, match="injected directory fsync failure"):
+        configure_repository_workspace(
+            workspace=workspace,
+            clone_url=_lease().clone_url,
+            lock_path=lock_path,
+        )
+
+    assert backup_published
+    assert fsync_failed
+    assert not (workspace / ".git" / "config").exists()
+
+    configure_repository_workspace(
+        workspace=workspace,
+        clone_url=_lease().clone_url,
+        lock_path=lock_path,
+    )
+
+    assert _git(workspace, "remote", "get-url", "origin") == _lease().clone_url
+    assert not any(path.name.startswith(".config.mindroom-") for path in (workspace / ".git").iterdir())
+
+
 @pytest.mark.asyncio
 async def test_oversized_git_config_fails_without_mutation(tmp_path: Path) -> None:
     """Worker-controlled Git config must have a strict control-plane memory bound."""

@@ -1026,7 +1026,7 @@ def _replace_git_config_if_unchanged(
         os.fsync(git_fd)
     finally:
         os.close(staging_fd)
-        if not published:
+        if not published and not backup_exists:
             with suppress(FileNotFoundError):
                 os.unlink(_GIT_CONFIG_STAGE_NAME, dir_fd=git_fd)
         if backup_exists:
