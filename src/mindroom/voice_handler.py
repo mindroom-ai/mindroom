@@ -416,7 +416,7 @@ async def _handle_voice_message(
             runtime_paths,
         )
 
-        # Process transcription with AI for command/agent recognition
+        # Normalize mentions and light ASR errors without inventing commands
         formatted_message = await _process_transcription(
             transcription,
             config,

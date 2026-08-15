@@ -232,7 +232,7 @@ export function VoiceConfig() {
                 </span>
               </div>
               <div className="flex items-start justify-between gap-4">
-                <span className="text-muted-foreground">Command Model:</span>
+                <span className="text-muted-foreground">Transcript Model:</span>
                 <span className="font-mono text-right text-foreground">
                   {voiceConfig.intelligence.model}
                 </span>

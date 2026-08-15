@@ -231,13 +231,36 @@ def test_daytona_blank_optional_sandbox_values_become_none(monkeypatch: pytest.M
     assert captured["sandbox_labels"] is None
 
 
-def test_pubmed_and_youtube_metadata_lists_only_model_callable_functions() -> None:
+def test_tool_metadata_lists_only_model_callable_functions() -> None:
     """Tool metadata must not advertise internal toolkit helpers."""
     assert TOOL_METADATA["pubmed"].function_names == ("search_pubmed",)
     assert TOOL_METADATA["youtube"].function_names == (
         "get_video_timestamps",
         "get_youtube_video_captions",
         "get_youtube_video_data",
+    )
+    assert TOOL_METADATA["twilio"].function_names == ("get_call_details", "list_messages", "send_sms")
+    assert TOOL_METADATA["x"].function_names == (
+        "create_post",
+        "get_home_timeline",
+        "get_user_info",
+        "reply_to_post",
+        "search_posts",
+        "send_dm",
+    )
+    assert TOOL_METADATA["slack"].function_names == (
+        "download_file",
+        "get_channel_history",
+        "get_channel_info",
+        "get_thread",
+        "get_user_info",
+        "list_channels",
+        "list_users",
+        "search_messages",
+        "search_workspace",
+        "send_message",
+        "send_message_thread",
+        "upload_file",
     )
 
 

@@ -517,7 +517,6 @@
       "docs_url": "https://docs.agno.com/tools/toolkits/social/slack",
       "function_names": [
         "download_file",
-        "download_file_bytes",
         "get_channel_history",
         "get_channel_info",
         "get_thread",
@@ -835,8 +834,7 @@
       "function_names": [
         "get_call_details",
         "list_messages",
-        "send_sms",
-        "validate_phone_number"
+        "send_sms"
       ],
       "helper_text": null,
       "icon": "SiTwilio",
@@ -12944,7 +12942,6 @@
       "function_names": [
         "create_post",
         "get_home_timeline",
-        "get_my_info",
         "get_user_info",
         "reply_to_post",
         "search_posts",

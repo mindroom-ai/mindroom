@@ -2056,8 +2056,9 @@ Config-adjacent `.env` files are intentionally masked as files inside those Dock
 A filtered public startup-runtime env payload can still propagate from exported env vars and allowed `.env` values.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
-That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
-OAuth-backed remote MCP tools follow the configured worker scope and can use `worker_scope: user` or `worker_scope: user_agent` for requester isolation.
+That list includes `spotify` and `homeassistant`.
+Configured `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow the configured scope, while non-OAuth servers use the shared MCP session without requester credentials.
+Use `worker_scope: user` or `worker_scope: user_agent` when OAuth-backed remote MCP state must be requester-isolated.
 Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
 `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` also always stay local.
 `spotify` can still be proxied through the sandbox.
@@ -8380,7 +8381,7 @@ send_template_message(template_name="deployment_notice", language_code="en_US")
 
 ### What It Does
 
-The installed upstream tool exposes `send_sms()`, `get_call_details()`, `list_messages()`, and `validate_phone_number()`.
+The installed upstream tool exposes `send_sms()`, `get_call_details()`, and `list_messages()`.
 It supports two auth modes: `account_sid` plus `auth_token`, or `account_sid` plus `api_key` and `api_secret`.
 Optional `region` and `edge` are passed into the Twilio client for regional routing.
 `send_sms()` validates that both `to` and `from_` are in E.164 format before sending.
@@ -8417,7 +8418,6 @@ agents:
 send_sms("+15551234567", "+15557654321", "Build passed.")
 get_call_details("CA1234567890abcdef")
 list_messages(limit=10)
-validate_phone_number("+15551234567")
 ```
 
 ### Notes
@@ -8558,7 +8558,7 @@ email_user("Nightly report", "The report finished successfully.")
 
 ### What It Does
 
-The installed upstream tool exposes `create_post()`, `reply_to_post()`, `send_dm()`, `get_my_info()`, `get_user_info()`, `get_home_timeline()`, and `search_posts()`.
+The installed upstream tool exposes `create_post()`, `reply_to_post()`, `send_dm()`, `get_user_info()`, `get_home_timeline()`, and `search_posts()`.
 It uses `tweepy.Client` and passes through `wait_on_rate_limit`.
 `search_posts()` calls `search_recent_tweets()` and, when `include_post_metrics` is enabled, augments each returned post with reply, retweet, like, and quote counts.
 The implementation clamps `max_results` for search to the Twitter API's supported `10` to `100` range.
@@ -8596,7 +8596,6 @@ reply_to_post("1890123456789012345", "Thanks for the feedback.")
 ### Notes
 
 - A bearer token can support read-style endpoints such as search, but posting, replying, DMs, and home-timeline access generally need full OAuth user credentials.
-- Use `get_my_info()` to inspect the authenticated X account.
 - `reply_to_post()` builds a `twitter.com` URL in its response, while `create_post()` builds an `x.com` URL, so response formatting is currently inconsistent upstream.
 
 ## [`reddit`]
