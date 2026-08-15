@@ -193,6 +193,7 @@ Matrix sync callback
 | `thread_utils.py` | Thread analysis and agent detection |
 | `session_ids.py` | Leaf helpers for the canonical persisted room/thread session ID |
 | `thread_models.py` | Durable per-thread model overrides backing `!model` and the `thread_model` tool |
+| `room_model_overrides.py` | Durable per-room runtime model defaults backing `!room_model` |
 | `file_watcher.py` | File change detection for config hot-reload |
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
 | `stop.py` | StopManager for cancelling in-progress responses |

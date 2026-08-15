@@ -190,7 +190,7 @@ Plain replies that never reach threaded context still stay plain replies.
 - `!config <operation>` - Manage configuration
 - `!desktop [setup|status|confirm|rotate|disconnect]` - Manage your Desktop target
 - `!model [name|list|reset]` - Show or switch the model used in the current thread
-- `!room_model [name|list|reset]` - Show or switch the default model used in the current room (room admin only)
+- `!room_model [name|list|reset]` - Show the room model default or switch it (set/reset require a room admin)
 - `!thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room (room admin only)
 - `!encrypt [confirm]` - Enable end-to-end encryption for this room (irreversible, room admin only)
 - `!e2ee` - Show encryption diagnostics for this room

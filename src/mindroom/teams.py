@@ -1567,6 +1567,12 @@ def materialize_exact_team_members(
         )
         if unavailable_bases is not None:
             unavailable_bases.update(knowledge_resolution.unavailable)
+        runtime_model = config.resolve_runtime_model(
+            entity_name=agent_name,
+            room_id=execution_identity.room_id if execution_identity is not None else None,
+            thread_id=execution_identity.resolved_thread_id if execution_identity is not None else None,
+            runtime_paths=runtime_paths,
+        )
         return create_agent(
             agent_name,
             config,
@@ -1577,6 +1583,7 @@ def materialize_exact_team_members(
             else execution_identity.session_id
             if execution_identity
             else None,
+            active_model_name=runtime_model.model_name,
             knowledge=knowledge_resolution.knowledge,
             include_interactive_questions=False,
             include_openai_compat_guidance=include_openai_compat_guidance,

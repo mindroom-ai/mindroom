@@ -46,7 +46,7 @@ _COMMAND_DOCS = {
     CommandType.MODEL: ("!model [name|list|reset]", "Show or switch the model used in the current thread"),
     CommandType.ROOM_MODEL: (
         "!room_model [name|list|reset]",
-        "Show or switch the default model used in the current room (room admin only)",
+        "Show the room model default or switch it (set/reset require a room admin)",
     ),
     CommandType.THREAD_MODE: (
         "!thread_mode [room|thread|reset|show]",

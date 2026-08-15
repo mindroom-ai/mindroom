@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -16,6 +16,7 @@ from mindroom.commands.parsing import Command, CommandType, command_parser, get_
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.history.runtime import close_team_runtime_state_dbs
 from mindroom.message_target import MessageTarget
 from mindroom.room_model_overrides import (
     _store_path,
@@ -23,9 +24,14 @@ from mindroom.room_model_overrides import (
     resolve_room_model_override,
     set_room_model_override,
 )
+from mindroom.teams import materialize_exact_team_members
 from mindroom.thread_models import set_thread_model_override
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 ROOM_ID = "!room:localhost"
 
@@ -318,6 +324,65 @@ def test_runtime_room_override_precedence(tmp_path: Path, monkeypatch: pytest.Mo
         ).model_name
         == "large"
     )
+
+
+def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path: Path) -> None:
+    """Team members must use room defaults while retaining higher-priority thread choices."""
+    context = _room_model_context(tmp_path, AsyncMock())
+    set_room_model_override(
+        context.runtime_paths,
+        room_id=ROOM_ID,
+        model_name="large",
+        set_by="@admin:localhost",
+    )
+
+    members = materialize_exact_team_members(
+        ["assistant"],
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="team",
+            requester_id="@user:localhost",
+            room_id=ROOM_ID,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        ),
+    )
+    try:
+        assert members.agents[0].model is not None
+        assert members.agents[0].model.id == "large-model"
+    finally:
+        close_team_runtime_state_dbs(agents=members.agents, team_db=None)
+
+    thread_id = "$thread:localhost"
+    set_thread_model_override(
+        context.runtime_paths,
+        thread_id=thread_id,
+        model_name="default",
+        room_id=ROOM_ID,
+        set_by="@user:localhost",
+    )
+    thread_members = materialize_exact_team_members(
+        ["assistant"],
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="team",
+            requester_id="@user:localhost",
+            room_id=ROOM_ID,
+            thread_id=thread_id,
+            resolved_thread_id=thread_id,
+            session_id=f"{ROOM_ID}:{thread_id}",
+        ),
+    )
+    try:
+        assert thread_members.agents[0].model is not None
+        assert thread_members.agents[0].model.id == "default-model"
+    finally:
+        close_team_runtime_state_dbs(agents=thread_members.agents, team_db=None)
 
 
 def test_stale_runtime_room_override_falls_back_to_static_room_model(
