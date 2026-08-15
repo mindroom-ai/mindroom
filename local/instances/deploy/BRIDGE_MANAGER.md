@@ -184,7 +184,8 @@ Ports are automatically allocated and tracked to prevent conflicts.
 ## Docker Network
 
 Generated bridge services join the external `<instance>_mindroom-network` and `mynetwork` networks.
-`bridge.py start` creates either network when it is missing before starting the bridge container.
+`./bridge.py register <type> --instance <name>` creates either network when it is missing before generating the appservice registration.
+Run registration before `./bridge.py start <type> --instance <name>` so both networks exist.
 
 ## Troubleshooting
 
