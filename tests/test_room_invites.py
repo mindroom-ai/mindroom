@@ -7,6 +7,7 @@ memberships. This test module verifies that behavior.
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -23,7 +24,7 @@ from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks.matrix_admin import build_hook_matrix_admin
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
-from mindroom.matrix.invited_rooms_store import invited_rooms_path, save_invited_rooms
+from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms, save_invited_rooms
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
@@ -685,6 +686,42 @@ async def test_router_cleanup_preserves_room_created_after_lifecycle_loaded(
 
     assert bot._room_lifecycle.invited_rooms == {"!hook-created:localhost"}
     assert left_room_ids == ["!stale:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_router_cleanup_loads_invited_rooms_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Durable refresh must not perform file I/O on the event-loop thread."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    event_loop_thread_id = threading.get_ident()
+    load_thread_ids: list[int] = []
+
+    def record_load_thread(path: Path) -> set[str]:
+        load_thread_ids.append(threading.get_ident())
+        return load_invited_rooms(path)
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.load_invited_rooms", record_load_thread)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.matrix_state_for_runtime",
+        lambda *_args, **_kwargs: MatrixState(),
+    )
+
+    assert await bot._room_lifecycle._rooms_to_leave() == []
+    assert len(load_thread_ids) == 1
+    assert load_thread_ids[0] != event_loop_thread_id
 
 
 @pytest.mark.asyncio

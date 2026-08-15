@@ -205,11 +205,12 @@ class BotRoomLifecycle:
             return set()
         return load_invited_rooms(self._invited_rooms_file_path())
 
-    def _refresh_invited_rooms(self) -> None:
+    async def _refresh_invited_rooms(self) -> None:
         """Merge durable rooms written by other runtime components into memory."""
         if not self._should_persist_invited_rooms():
             return
-        room_ids = load_invited_rooms(self._invited_rooms_file_path()) | self.invited_rooms
+        durable_rooms = await asyncio.to_thread(load_invited_rooms, self._invited_rooms_file_path())
+        room_ids = durable_rooms | self.invited_rooms
         room_ids.difference_update(self._pending_forgotten_invited_rooms)
         self.invited_rooms = room_ids
 
@@ -295,7 +296,7 @@ class BotRoomLifecycle:
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.deps.get_configured_rooms())
         if self._should_persist_invited_rooms():
-            self._refresh_invited_rooms()
+            await self._refresh_invited_rooms()
             configured_rooms.update(self.invited_rooms)
         if self.deps.agent_name == ROUTER_AGENT_NAME:
             root_space_id = matrix_state_for_runtime(self.deps.runtime_paths).space_room_id
