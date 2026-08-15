@@ -12,6 +12,7 @@ import pytest
 
 import mindroom.authorization
 from mindroom import constants
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY, resolve_runtime_paths
@@ -81,13 +82,39 @@ def is_authorized_sender(
     )
 
 
-def is_sender_allowed_for_agent_reply(sender_id: str, agent_name: str, config: Config) -> bool:
+def is_sender_allowed_for_agent_reply(
+    sender_id: str,
+    agent_name: str,
+    config: Config,
+    membership_index: AgentReplyMembershipIndex | None = None,
+) -> bool:
     """Run reply-permission checks with the test config's bound runtime context."""
+    effective_membership_index = membership_index or AgentReplyMembershipIndex()
     return mindroom.authorization.is_sender_allowed_for_agent_reply(
         sender_id,
         agent_name,
         config,
         _runtime_paths_for(config),
+        membership_index=effective_membership_index,
+    )
+
+
+def is_sender_allowed_for_agent_reply_in_room(
+    sender_id: str,
+    agent_name: str,
+    config: Config,
+    room_id: str,
+    membership_index: AgentReplyMembershipIndex | None = None,
+) -> bool:
+    """Run the combined room and entity reply check for one room."""
+    effective_membership_index = membership_index or AgentReplyMembershipIndex()
+    return mindroom.authorization.is_sender_allowed_for_agent_reply_in_room(
+        sender_id,
+        agent_name,
+        config,
+        room_id,
+        _runtime_paths_for(config),
+        membership_index=effective_membership_index,
     )
 
 
@@ -146,6 +173,7 @@ async def responder_candidate_entities_for_room(
         sender_id,
         config,
         _runtime_paths_for(config),
+        AgentReplyMembershipIndex(),
     )
 
 
@@ -292,7 +320,7 @@ async def test_responder_candidates_refresh_empty_cached_ad_hoc_room() -> None:
             },
         },
     )
-    client = AsyncMock()
+    client = AsyncMock(spec=nio.AsyncClient)
     room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
     room.add_member("@mindroom_router:example.com", "Router", None)
     client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
@@ -984,6 +1012,35 @@ def test_agent_reply_permissions_with_aliases() -> None:
     assert is_sender_allowed_for_agent_reply("@bob:example.com", "analyst", config)
 
 
+def test_combined_agent_reply_authorization_requires_room_and_entity_access() -> None:
+    """A reply is allowed only when both independent authorization layers pass."""
+    sender_id = "@alice:example.com"
+    room_id = "!room:example.com"
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": False,
+            "room_permissions": {room_id: [sender_id]},
+            "agent_reply_permissions": {"assistant": [sender_id]},
+        },
+    )
+
+    assert is_sender_allowed_for_agent_reply_in_room(sender_id, "assistant", config, room_id)
+
+    config.authorization.room_permissions[room_id] = []
+    assert not is_sender_allowed_for_agent_reply_in_room(sender_id, "assistant", config, room_id)
+
+    config.authorization.room_permissions[room_id] = [sender_id]
+    config.authorization.agent_reply_permissions["assistant"].users = []
+    assert not is_sender_allowed_for_agent_reply_in_room(sender_id, "assistant", config, room_id)
+
+
 def test_agent_reply_permissions_do_not_bypass_bot_accounts() -> None:
     """Bridge bot accounts should still respect per-agent reply allowlists."""
     config = _config(
@@ -1157,6 +1214,283 @@ def test_agent_reply_permissions_domain_pattern_after_alias_resolution() -> None
     )
 
     assert is_sender_allowed_for_agent_reply("@telegram_111:example.com", "assistant", config)
+
+
+def test_agent_reply_permissions_normalize_legacy_list() -> None:
+    """Legacy list policies should expose the same typed static-user policy as structured config."""
+    authorization = AuthorizationConfig(
+        agent_reply_permissions={
+            "assistant": ["@alice:example.com"],
+        },
+    )
+
+    policy = authorization.agent_reply_permissions["assistant"]
+    assert policy.users == ["@alice:example.com"]
+    assert policy.joined_rooms == []
+
+
+def test_agent_reply_permissions_accept_structured_users() -> None:
+    """Structured users-only policies should preserve legacy reply behavior."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "agent_reply_permissions": {
+                "assistant": {"users": ["@alice:example.com"]},
+            },
+        },
+    )
+
+    assert is_sender_allowed_for_agent_reply("@alice:example.com", "assistant", config)
+    assert not is_sender_allowed_for_agent_reply("@bob:example.com", "assistant", config)
+
+
+def test_agent_reply_permissions_reject_duplicate_joined_rooms() -> None:
+    """A duplicated grant-room key should not create ambiguous policy state."""
+    with pytest.raises(ValueError, match="Duplicate joined_rooms are not allowed: project"):
+        AuthorizationConfig(
+            agent_reply_permissions={
+                "assistant": {"joined_rooms": ["project", "project"]},
+            },
+        )
+
+
+@pytest.mark.parametrize("joined_room", ["missing", "!raw:example.com", "#alias:example.com"])
+def test_agent_reply_permissions_reject_non_managed_room_keys(joined_room: str) -> None:
+    """Grant rooms must be configured managed keys rather than unresolved names or Matrix identifiers."""
+    with pytest.raises(ValueError, match="configured managed room keys"):
+        Config(
+            agents={
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Test assistant",
+                    "rooms": ["project"],
+                },
+            },
+            authorization={
+                "agent_reply_permissions": {
+                    "assistant": {"joined_rooms": [joined_room]},
+                },
+            },
+        )
+
+
+def test_agent_reply_permissions_accept_configured_managed_room_key() -> None:
+    """A configured managed key should be valid even without separate room metadata."""
+    config = Config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["project"],
+            },
+        },
+        authorization={
+            "agent_reply_permissions": {
+                "assistant": {"joined_rooms": ["project"]},
+            },
+        },
+    )
+
+    assert config.authorization.agent_reply_permissions["assistant"].joined_rooms == ["project"]
+
+
+def test_membership_only_reply_policy_grants_no_credential_management() -> None:
+    """Room membership must never become credential or OAuth management authority."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["project"],
+            },
+        },
+        authorization={
+            "agent_reply_permissions": {
+                "assistant": {"joined_rooms": ["project"]},
+            },
+        },
+    )
+
+    assert not is_sender_allowed_for_agent_credential_management(
+        "@alice:example.com",
+        "assistant",
+        config,
+    )
+
+
+async def _ready_reply_membership_index(
+    config: Config,
+    *,
+    joined_user_ids: list[str],
+) -> AgentReplyMembershipIndex:
+    runtime_paths = _runtime_paths_for(config)
+    room_id = "!project:example.com"
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("project", room_id, "#project:example.com", "Project")
+    state.save(runtime_paths=runtime_paths)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(user_id, None, None) for user_id in joined_user_ids],
+        room_id=room_id,
+    )
+    membership_index = AgentReplyMembershipIndex()
+    await membership_index.refresh(config, runtime_paths, client)
+    return membership_index
+
+
+@pytest.mark.asyncio
+async def test_joined_room_membership_allows_agent_reply(tmp_path: Path) -> None:
+    """Removing membership evaluation would deny a joined grant-room user."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["project"],
+            },
+        },
+        authorization={
+            "agent_reply_permissions": {
+                "assistant": {"joined_rooms": ["project"]},
+            },
+        },
+    )
+    membership_index = await _ready_reply_membership_index(
+        config,
+        joined_user_ids=["@alice:example.com"],
+    )
+
+    assert is_sender_allowed_for_agent_reply(
+        "@alice:example.com",
+        "assistant",
+        config,
+        membership_index,
+    )
+
+
+@pytest.mark.asyncio
+async def test_invited_user_is_not_allowed_by_joined_room_policy(tmp_path: Path) -> None:
+    """An invite absent from joined_members must never grant reply access."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["project"],
+            },
+        },
+        authorization={
+            "agent_reply_permissions": {
+                "assistant": {"joined_rooms": ["project"]},
+            },
+        },
+    )
+    membership_index = await _ready_reply_membership_index(config, joined_user_ids=[])
+
+    assert not is_sender_allowed_for_agent_reply(
+        "@invited:example.com",
+        "assistant",
+        config,
+        membership_index,
+    )
+
+
+@pytest.mark.asyncio
+async def test_static_users_and_joined_rooms_use_or_semantics(tmp_path: Path) -> None:
+    """Changing policy combination to all-of would reject static and membership grants."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["project"],
+            },
+        },
+        authorization={
+            "agent_reply_permissions": {
+                "assistant": {
+                    "users": ["@operator:example.com"],
+                    "joined_rooms": ["project"],
+                },
+            },
+        },
+    )
+    membership_index = await _ready_reply_membership_index(
+        config,
+        joined_user_ids=["@member:example.com"],
+    )
+
+    assert is_sender_allowed_for_agent_reply("@operator:example.com", "assistant", config, membership_index)
+    assert is_sender_allowed_for_agent_reply("@member:example.com", "assistant", config, membership_index)
+    assert not is_sender_allowed_for_agent_reply("@outsider:example.com", "assistant", config, membership_index)
+
+
+def test_internal_identity_bypasses_unready_membership_policy(tmp_path: Path) -> None:
+    """Membership readiness must not remove the existing internal participant bypass."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["project"],
+            },
+        },
+        authorization={
+            "agent_reply_permissions": {
+                "assistant": {"joined_rooms": ["project"]},
+            },
+        },
+    )
+    assistant_user_id = entity_ids(config, _runtime_paths_for(config))["assistant"].full_id
+
+    assert is_sender_allowed_for_agent_reply(
+        assistant_user_id,
+        "assistant",
+        config,
+        AgentReplyMembershipIndex(),
+    )
+
+
+def test_alias_of_internal_identity_does_not_inherit_internal_bypass(tmp_path: Path) -> None:
+    """Alias normalization must not turn an external sender into a runtime-owned identity."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["project"],
+            },
+        },
+        authorization={
+            "agent_reply_permissions": {
+                "assistant": {"joined_rooms": ["project"]},
+            },
+        },
+    )
+    runtime_paths = _runtime_paths_for(config)
+    assistant_user_id = entity_ids(config, runtime_paths)["assistant"].full_id
+    config.authorization.aliases = {
+        assistant_user_id: ["@external_bridge_user:example.com"],
+    }
+
+    assert not is_sender_allowed_for_agent_reply(
+        "@external_bridge_user:example.com",
+        "assistant",
+        config,
+        AgentReplyMembershipIndex(),
+    )
 
 
 def test_agent_reply_permissions_reject_unknown_entity() -> None:
@@ -1638,6 +1972,7 @@ def test_configured_responder_candidates_use_persisted_current_account_ids(tmp_p
         "@alice:example.com",
         config,
         runtime_paths,
+        AgentReplyMembershipIndex(),
     )
 
     assert [candidate.full_id for candidate in candidates] == ["@mindroom_assistant_oldns:example.com"]
@@ -1677,6 +2012,7 @@ def test_configured_team_responder_candidates_use_persisted_current_account_ids(
         "@alice:example.com",
         config,
         runtime_paths,
+        AgentReplyMembershipIndex(),
     )
 
     assert [candidate.full_id for candidate in candidates] == ["@mindroom_ops_oldns:example.com"]

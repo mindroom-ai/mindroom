@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -44,7 +44,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     )
 
     # Create router bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         config=config,
         storage_path=tmp_path,
@@ -139,7 +139,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     )
 
     # Create router bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         config=config,
         storage_path=tmp_path,
@@ -251,7 +251,7 @@ async def test_unknown_command_with_reply_starts_prompt_thread(tmp_path: Path) -
     )
 
     # Create router bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         config=config,
         storage_path=tmp_path,

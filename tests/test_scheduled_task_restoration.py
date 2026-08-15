@@ -9,11 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.bot import AgentBot
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     install_runtime_journal_support,
@@ -24,6 +25,8 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
 
 
 class TestScheduledTaskRestoration:
@@ -38,6 +41,8 @@ class TestScheduledTaskRestoration:
 
     @staticmethod
     def _install_runtime_support(bot: AgentBot) -> AgentBot:
+        if bot.agent_name == ROUTER_AGENT_NAME:
+            bot._reply_membership_sync = AgentReplyMembershipSync(bot._runtime_view.agent_reply_memberships)
         return install_runtime_journal_support(bot)
 
     @pytest.mark.asyncio
@@ -72,7 +77,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="RouterAgent",
         )
-        router_bot = AgentBot(
+        router_bot = make_test_agent_bot(
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
@@ -137,7 +142,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="GeneralAgent",
         )
-        regular_bot = AgentBot(
+        regular_bot = make_test_agent_bot(
             agent_user=regular_user,
             storage_path=tmp_path,
             config=config,
@@ -176,7 +181,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="RouterAgent",
         )
-        router_bot = AgentBot(
+        router_bot = make_test_agent_bot(
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
@@ -225,7 +230,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="RouterAgent",
         )
-        router_bot = AgentBot(
+        router_bot = make_test_agent_bot(
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
@@ -272,7 +277,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="RouterAgent",
         )
-        router_bot = AgentBot(
+        router_bot = make_test_agent_bot(
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
@@ -315,7 +320,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="RouterAgent",
         )
-        router_bot = AgentBot(
+        router_bot = make_test_agent_bot(
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
@@ -358,7 +363,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="RouterAgent",
         )
-        router_bot = AgentBot(
+        router_bot = make_test_agent_bot(
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
@@ -434,7 +439,7 @@ class TestScheduledTaskRestoration:
                 password="test",  # noqa: S106
                 display_name=display_name,
             )
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=user,
                 storage_path=tmp_path / agent_name,
                 config=config,

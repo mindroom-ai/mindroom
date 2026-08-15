@@ -24,7 +24,6 @@ from mindroom.scheduling import (
     CronSchedule,
     ScheduledTaskRecord,
     ScheduledWorkflow,
-    SchedulingRuntime,
     _existing_task_parse_context,
     _parse_workflow_schedule,
     _validate_conditional_workflow,
@@ -32,6 +31,9 @@ from mindroom.scheduling import (
     schedule_task,
 )
 from mindroom.scheduling_executor import execute_scheduled_workflow, send_scheduled_failure_notice
+from tests.authorization_helpers import (
+    make_test_scheduling_runtime,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -979,7 +981,7 @@ class TestIntegrationWithScheduling:
 
         with patch("mindroom.scheduling._run_cron_task", new=AsyncMock()):
             task_id, message = await schedule_task(
-                runtime=SchedulingRuntime(
+                runtime=make_test_scheduling_runtime(
                     client=client,
                     config=config,
                     runtime_paths=runtime_paths_for(config),
@@ -1063,7 +1065,7 @@ class TestIntegrationWithScheduling:
         )
 
         task_id, message = await schedule_task(
-            runtime=SchedulingRuntime(
+            runtime=make_test_scheduling_runtime(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
@@ -1158,7 +1160,7 @@ class TestIntegrationWithScheduling:
         )
 
         task_id, message = await schedule_task(
-            runtime=SchedulingRuntime(
+            runtime=make_test_scheduling_runtime(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths_for(config),

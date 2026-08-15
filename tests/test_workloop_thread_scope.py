@@ -55,6 +55,9 @@ from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     ignore_final_delivery_handoff,
@@ -219,7 +222,7 @@ def _tool_context(
     thread_id: str | None = None,
     resolved_thread_id: str | None = "$thread_root",
 ) -> ToolRuntimeContext:
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget(
             room_id=room_id,

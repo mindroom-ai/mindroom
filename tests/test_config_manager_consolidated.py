@@ -31,6 +31,9 @@ from mindroom.oauth.service import lookup_oauth_connect_token
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     load_config_yaml,
     make_conversation_reader_mock,
@@ -64,7 +67,7 @@ def _caller_context(
     requester_id: str = "@alice:example.org",
 ) -> ToolRuntimeContext:
     """Build a live config-manager caller context with a stable human requester."""
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name=agent_name,
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -524,7 +527,7 @@ class TestConsolidatedConfigManager:
         room.add_member("@mindroom_unconfigured_present_oldns:localhost", "Unconfigured Present", None)
         room.add_member("@user:localhost", "User", None)
         room.members_synced = True
-        runtime_context = ToolRuntimeContext(
+        runtime_context = make_test_tool_runtime_context(
             agent_name="present",
             target=MessageTarget.resolve(
                 room_id=room.room_id,

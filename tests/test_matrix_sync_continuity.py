@@ -17,7 +17,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import AgentBot, TeamBot, _create_best_effort_task_wrapper
+from mindroom.bot import AgentBot, _create_best_effort_task_wrapper
 from mindroom.cancellation import request_task_cancel
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent, PreparedTurn, RequesterCoalescingOwner
@@ -56,6 +56,8 @@ from tests.bot_helpers import (
     FencedRoomRecorder,
     _configured_team_test_config,
     _configured_team_user,
+    make_test_agent_bot,
+    make_test_team_bot,
 )
 from tests.conftest import (
     TEST_PASSWORD,
@@ -107,7 +109,7 @@ def _config(tmp_path: Path, *, authorize_senders: bool = False) -> Config:
 
 def _agent_bot(tmp_path: Path, *, agent_name: str = "code", authorize_senders: bool = False) -> AgentBot:
     config = _config(tmp_path, authorize_senders=authorize_senders)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,
             password=TEST_PASSWORD,
@@ -236,7 +238,7 @@ async def test_warm_join_decrypt_notice_waits_for_trusted_sync_containing_room(
 ) -> None:
     """Fenced Megolm events request recovery but stay visibly silent until trusted sync."""
     room_id = "!room:localhost"
-    bot = _agent_bot(tmp_path)
+    bot = _agent_bot(tmp_path, authorize_senders=True)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.outgoing_key_requests = {}
     bot._first_sync_done = True
@@ -289,7 +291,6 @@ async def test_warm_join_decrypt_notice_waits_for_trusted_sync_containing_room(
         capture_logs(),
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
         patch("mindroom.bot_room_lifecycle.join_room", new=join_while_sync_is_live),
-        patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch("mindroom.matrix.decrypt_failure._send_decrypt_failure_notice", new=notice),
     ):
         await bot.join_configured_rooms()
@@ -1080,6 +1081,7 @@ async def test_orchestrated_entity_start_defers_turn_recovery_to_coordinator(
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
         patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch("mindroom.bot.set_before_sync_response_callback") as set_before_sync_response_callback,
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
     ):
@@ -1090,6 +1092,10 @@ async def test_orchestrated_entity_start_defers_turn_recovery_to_coordinator(
     # replay stays gated until the coordinator releases it.
     start_worker.assert_called_once_with()
     release_turn_replay.assert_not_called()
+    if agent_name == ROUTER_AGENT_NAME:
+        set_before_sync_response_callback.assert_called_once_with(client, bot._before_sync_response_admission)
+    else:
+        set_before_sync_response_callback.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1128,7 +1134,7 @@ async def test_orchestrated_team_start_gates_turn_recovery_on_responder_fleet(
     """Team startup must leave turn-backed replay gated until its member fleet starts."""
     config = _configured_team_test_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    bot = TeamBot(
+    bot = make_test_team_bot(
         _configured_team_user(config, runtime_paths),
         tmp_path,
         config=config,

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
-from mindroom.authorization import is_sender_allowed_for_agent_reply
+from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -25,10 +25,11 @@ from mindroom.dispatch_handoff import PreparedIngress, payload_metadata_from_sou
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
+from mindroom.response_admission import admitted_response_decision
 from mindroom.turn_origin import original_sender_for_router_relay
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     import nio
     import structlog
@@ -199,6 +200,7 @@ class VisibleVoiceEchoDeps:
     delivery_gateway: DeliveryGateway
     turn_store: TurnStore
     ingress: IngressValidator
+    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
 
 
 @dataclass
@@ -285,11 +287,13 @@ class VisibleVoiceEchoLifecycle:
             self.deps.ingress.managed_entity_name_for_sender(user_id) == ROUTER_AGENT_NAME for user_id in room.users
         ):
             return False
-        return is_sender_allowed_for_agent_reply(
+        return is_sender_allowed_for_agent_reply_in_room(
             requester_user_id,
             ROUTER_AGENT_NAME,
             config,
+            room.room_id,
             self.deps.runtime.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
         )
 
     async def finish(
@@ -397,7 +401,15 @@ class VisibleVoiceEchoLifecycle:
         request: VisibleVoiceEchoRequest,
         barrier: _EchoBarrier,
     ) -> str | None:
-        async with _serialize_update(self._update_key(request)):
+        async with (
+            _serialize_update(self._update_key(request)),
+            admitted_response_decision(
+                self.deps.runtime.response_admission_gate,
+                self.deps.wait_for_admission_or_shutdown,
+            ),
+        ):
+            if not self._sender_is_authorized(request):
+                return None
             existing_event_id = self.deps.turn_store.visible_echo_for_source(request.source_event_id)
             if existing_event_id is not None:
                 _publish_echo_barrier(barrier, existing_event_id)
@@ -433,7 +445,15 @@ class VisibleVoiceEchoLifecycle:
         placeholder_event_id = (
             await asyncio.shield(handle.placeholder_task) if handle.placeholder_task is not None else None
         )
-        async with _serialize_update(self._update_key(request)):
+        async with (
+            _serialize_update(self._update_key(request)),
+            admitted_response_decision(
+                self.deps.runtime.response_admission_gate,
+                self.deps.wait_for_admission_or_shutdown,
+            ),
+        ):
+            if not self._sender_is_authorized(request):
+                return None
             finalized = self.deps.turn_store.finalized_visible_echo(request.source_event_id)
             if finalized is not None and (not finalized.is_fallback or is_fallback):
                 return finalized.event_id
@@ -480,6 +500,17 @@ class VisibleVoiceEchoLifecycle:
                 is_fallback=is_fallback,
             )
             return event_id
+
+    def _sender_is_authorized(self, request: VisibleVoiceEchoRequest) -> bool:
+        """Return whether the current router policy permits this echo requester."""
+        return is_sender_allowed_for_agent_reply_in_room(
+            request.requester_user_id,
+            self.deps.agent_name,
+            self.deps.runtime.config,
+            request.target.room_id,
+            self.deps.runtime.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
+        )
 
     async def _recover_visible_echo_event_id(self, request: VisibleVoiceEchoRequest) -> str | None:
         """Adopt one untracked marked echo before replay can send another."""

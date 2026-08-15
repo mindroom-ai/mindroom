@@ -44,6 +44,7 @@ from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 import mindroom.approval_manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.handled_turns as handled_turns_module
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
@@ -418,6 +419,7 @@ __all__ = [
     "delivered_matrix_side_effect",
     "dispatch_context_result",
     "drain_coalescing",
+    "enforce_turn_authorization",
     "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
@@ -591,6 +593,7 @@ def agent_response_should_respond(
         thread_history,
         config,
         runtime_paths,
+        AgentReplyMembershipIndex(),
         mentioned_agents,
         has_non_agent_mentions,
         sender_id=sender_id,
@@ -2827,9 +2830,18 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
     if "test_authorization" in request.node.parent.name:
         yield
     else:
-        with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
-            patch("mindroom.reaction_dispatch.is_authorized_sender", return_value=True),
-        ):
+        with ExitStack() as stack:
+            stack.enter_context(patch("mindroom.ingress_validation.is_authorized_sender", return_value=True))
+            if "enforce_turn_authorization" not in request.fixturenames:
+                stack.enter_context(
+                    patch(
+                        "mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room",
+                        return_value=True,
+                    ),
+                )
             yield
+
+
+@pytest.fixture
+def enforce_turn_authorization() -> None:
+    """Keep final TurnPolicy authorization active for tests that exercise it."""

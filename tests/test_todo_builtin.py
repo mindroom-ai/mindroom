@@ -19,6 +19,9 @@ from mindroom.session_ids import create_session_id
 from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -50,7 +53,7 @@ def _tool_context(
     thread_id: str | None = None,
     resolved_thread_id: str | None = "$thread-root",
 ) -> ToolRuntimeContext:
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name=agent_name,
         target=MessageTarget(
             room_id=room_id,

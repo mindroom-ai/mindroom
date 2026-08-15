@@ -32,7 +32,7 @@ from mindroom.commands.config_confirmation import (
     _add_confirmation_reactions,
     handle_confirmation_reaction,
 )
-from mindroom.commands.handler import CommandHandlerContext, handle_command
+from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
@@ -44,6 +44,9 @@ from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.plugins import PluginReloadResult
+from tests.authorization_helpers import (
+    make_test_command_handler_context,
+)
 from tests.conftest import make_conversation_reader_mock, write_config_yaml
 
 
@@ -417,7 +420,7 @@ class TestValueFormatting:
 async def test_handle_command_threads_config_path_to_config_commands(tmp_path: Path) -> None:
     """`!config` dispatch should use the orchestrator-owned config file path."""
     config_path = tmp_path / "custom-config.yaml"
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
         config=SimpleNamespace(
             authorization=_handler_authorization(
@@ -459,7 +462,7 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
 @pytest.mark.asyncio
 async def test_handle_command_config_disabled_by_default(tmp_path: Path) -> None:
     """Disabled config commands should reject before loading or previewing config."""
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
         config=SimpleNamespace(
             authorization=_handler_authorization(
@@ -502,7 +505,7 @@ async def test_handle_command_config_disabled_by_default(tmp_path: Path) -> None
 @pytest.mark.asyncio
 async def test_handle_command_config_enabled_requires_admin(tmp_path: Path) -> None:
     """Enabled config commands should still require a global admin."""
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
         config=SimpleNamespace(
             authorization=_handler_authorization(
@@ -545,7 +548,7 @@ async def test_handle_command_config_enabled_requires_admin(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_handle_command_records_response_event_id_for_standard_reply(tmp_path: Path) -> None:
     """Standard command replies should record the emitted Matrix response event ID."""
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -594,7 +597,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
         return_value=PluginReloadResult(HookRegistry.empty(), ("demo-plugin",), 1),
     )
 
-    admin_context = CommandHandlerContext(
+    admin_context = make_test_command_handler_context(
         client=AsyncMock(),
         config=SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -617,7 +620,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
     reload_plugins.assert_awaited_once()
     assert "demo-plugin" in admin_context.send_response.await_args.args[0]
 
-    user_context = CommandHandlerContext(
+    user_context = make_test_command_handler_context(
         **{**admin_context.__dict__, "config": SimpleNamespace(authorization=AuthorizationConfig(global_users=[]))},
     )
     await handle_command(
@@ -645,7 +648,7 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
     reload_plugins = AsyncMock(
         return_value=PluginReloadResult(HookRegistry.empty(), ("demo-plugin",), 0),
     )
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
         config=SimpleNamespace(
             authorization=AuthorizationConfig(
@@ -686,7 +689,7 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
         source={"content": {"body": "!reload-plugins"}},
     )
     reload_plugins = AsyncMock(side_effect=RuntimeError("Plugin hooks module not found: /tmp/demo/hooks.py"))
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
         config=SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -716,7 +719,7 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
 @pytest.mark.asyncio
 async def test_handle_command_config_set_confirmation_records_preview_event_id(tmp_path: Path) -> None:
     """Config preview replies should persist confirmation state and record the preview event ID."""
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
         config=SimpleNamespace(
             authorization=_handler_authorization(
@@ -788,7 +791,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
 @pytest.mark.asyncio
 async def test_handle_command_config_set_stays_retryable_after_post_send_failure(tmp_path: Path) -> None:
     """Confirmation setup failures should leave the command retryable."""
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
         config=SimpleNamespace(
             authorization=_handler_authorization(

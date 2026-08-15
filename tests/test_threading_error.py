@@ -8,13 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     drain_coalescing,
@@ -35,6 +35,8 @@ from tests.threading_helpers import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):
@@ -191,7 +193,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             tmp_path,
         )
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],
@@ -297,7 +299,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             tmp_path,
         )
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],
@@ -403,7 +405,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             tmp_path,
         )
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],
@@ -476,7 +478,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             tmp_path,
         )
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],

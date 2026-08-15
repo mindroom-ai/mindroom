@@ -87,6 +87,40 @@ from tests.conftest import (
     runtime_paths_for,
 )
 
+
+@pytest.mark.asyncio
+async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_reconciliation(
+    tmp_path: Path,
+) -> None:
+    """A refresh must finish its revoke pass without awaiting positive call starts."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+    router_bot = MagicMock()
+    router_bot.client = AsyncMock(spec=nio.AsyncClient)
+    router_bot.revoke_reply_authorized_calls = AsyncMock()
+    router_bot.reconcile_reply_authorized_calls = AsyncMock(side_effect=AssertionError("must be scheduled"))
+    worker_bot = MagicMock()
+    worker_bot.client = AsyncMock(spec=nio.AsyncClient)
+    worker_bot.revoke_reply_authorized_calls = AsyncMock()
+    worker_bot.reconcile_reply_authorized_calls = AsyncMock(side_effect=AssertionError("must be scheduled"))
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: router_bot,
+        "worker": worker_bot,
+    }
+
+    with patch.object(orchestrator.agent_reply_memberships, "refresh", new=AsyncMock()) as refresh:
+        await orchestrator.refresh_agent_reply_memberships()
+
+    refresh.assert_awaited_once_with(config, orchestrator.runtime_paths, router_bot.client)
+    router_bot.revoke_reply_authorized_calls.assert_awaited_once_with()
+    worker_bot.revoke_reply_authorized_calls.assert_awaited_once_with()
+    router_bot.schedule_reply_authorized_call_reconciliation.assert_called_once_with()
+    worker_bot.schedule_reply_authorized_call_reconciliation.assert_called_once_with()
+    router_bot.reconcile_reply_authorized_calls.assert_not_awaited()
+    worker_bot.reconcile_reply_authorized_calls.assert_not_awaited()
+
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
@@ -1250,6 +1284,11 @@ class TestMultiAgentOrchestrator:
         with (
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
+            patch.object(
+                orchestrator,
+                "refresh_agent_reply_memberships",
+                new=AsyncMock(),
+            ) as mock_refresh_agent_reply_memberships,
             patch("mindroom.orchestrator.get_rooms_for_entity", return_value=["lobby"]),
             patch("mindroom.orchestrator.resolve_room_aliases", return_value=["!room1:localhost"]),
             patch("mindroom.orchestrator.load_rooms", return_value={"lobby": MagicMock(room_id="!room1:localhost")}),
@@ -1260,6 +1299,7 @@ class TestMultiAgentOrchestrator:
         assert bot.rooms == ["!room1:localhost"]
         mock_ensure_user_in_rooms.assert_not_awaited()
         assert bot.ensure_rooms.await_count == 2
+        mock_refresh_agent_reply_memberships.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_setup_rooms_and_memberships_retries_invites_after_router_joins(self, tmp_path: Path) -> None:

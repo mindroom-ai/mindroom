@@ -18,6 +18,9 @@ from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
 from mindroom.matrix.voice_message import PreparedVoiceAudio
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -78,7 +81,7 @@ def _context(
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
     conversation_reader = make_conversation_reader_mock()
     conversation_reader.latest_thread_event_id = make_latest_thread_event_id_mock("$latest")
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
             room_id=room_id,

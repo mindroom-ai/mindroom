@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import nio
 
-from mindroom.authorization import is_authorized_sender
+from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_agent_reply_in_room
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms, join_room
@@ -23,9 +23,10 @@ from mindroom.matrix.invited_rooms_store import (
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.message_target import MessageTarget
-from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
 
 if TYPE_CHECKING:
+    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
     import structlog
@@ -56,12 +57,13 @@ class BotRoomLifecycleDeps:
 
     agent_name: str
     agent_user: AgentMatrixUser
-    runtime: SupportsClientConfig
+    runtime: SupportsClientConfigMemberships
     runtime_paths: RuntimePaths
     continuity_store: SyncContinuityStore
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     get_configured_rooms: Callable[[], Sequence[str]]
     send_response: _SendRoomResponse
+    admit_response: Callable[[], AbstractAsyncContextManager[None]]
     on_room_joined: Callable[[str], Awaitable[None]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
     on_room_left: Callable[[str], Awaitable[None]]
@@ -301,6 +303,20 @@ class BotRoomLifecycle:
         visible_to_sender_id: str | None = None,
     ) -> bool:
         """Send the router welcome message only when the room has no other history."""
+        if visible_to_sender_id is None:
+            if room_id in self.invited_rooms and room_id not in self.deps.get_configured_rooms():
+                self._logger().debug("Skipping requester-less welcome in an ad-hoc room", room_id=room_id)
+                return True
+            return await self._send_welcome_message_if_empty_admitted(room_id, None)
+        async with self.deps.admit_response():
+            return await self._send_welcome_message_if_empty_admitted(room_id, visible_to_sender_id)
+
+    async def _send_welcome_message_if_empty_admitted(
+        self,
+        room_id: str,
+        visible_to_sender_id: str | None,
+    ) -> bool:
+        """Check room history and deliver a welcome inside the caller's admission slot."""
         async with self._lock_for_room(self._welcome_locks, room_id):
             if room_id in self._welcomed_room_ids:
                 self._logger().debug("Welcome message already handled", room_id=room_id)
@@ -317,31 +333,21 @@ class BotRoomLifecycle:
                 return False
 
             if not response.chunk:
-                self._logger().info("Room is empty, sending welcome message", room_id=room_id)
-                welcome_msg = await generate_welcome_message_for_room(
-                    client,
-                    self._room_for_welcome(room_id),
+                if visible_to_sender_id is not None and not is_sender_allowed_for_agent_reply_in_room(
                     visible_to_sender_id,
+                    self.deps.agent_name,
                     self._config(),
+                    room_id,
                     self.deps.runtime_paths,
-                )
-                target = MessageTarget.resolve(
-                    room_id=room_id,
-                    thread_id=None,
-                    reply_to_event_id=None,
-                    room_mode=True,
-                )
-                event_id = await self.deps.send_response(
-                    target=target,
-                    response_text=welcome_msg,
-                    skip_mentions=True,
-                )
-                if event_id is None:
-                    self._logger().warning("Welcome message delivery failed", room_id=room_id)
-                    return False
-                self._welcomed_room_ids.add(room_id)
-                self._logger().info("Welcome message sent", room_id=room_id)
-                return True
+                    self.deps.runtime.agent_reply_memberships,
+                ):
+                    self._logger().debug(
+                        "invite_welcome_suppressed_by_reply_permissions",
+                        user_id=visible_to_sender_id,
+                        room_id=room_id,
+                    )
+                    return True
+                return await self._deliver_welcome(room_id, visible_to_sender_id)
 
             if len(response.chunk) != 1:
                 return True
@@ -355,6 +361,35 @@ class BotRoomLifecycle:
                 self._welcomed_room_ids.add(room_id)
                 self._logger().debug("Welcome message already sent", room_id=room_id)
             return True
+
+    async def _deliver_welcome(self, room_id: str, visible_to_sender_id: str | None) -> bool:
+        """Generate and deliver one welcome after its caller owns the send boundary."""
+        self._logger().info("Room is empty, sending welcome message", room_id=room_id)
+        welcome_msg = await generate_welcome_message_for_room(
+            self._client(),
+            self._room_for_welcome(room_id),
+            visible_to_sender_id,
+            self._config(),
+            self.deps.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
+        )
+        target = MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=None,
+            reply_to_event_id=None,
+            room_mode=True,
+        )
+        event_id = await self.deps.send_response(
+            target=target,
+            response_text=welcome_msg,
+            skip_mentions=True,
+        )
+        if event_id is None:
+            self._logger().warning("Welcome message delivery failed", room_id=room_id)
+            return False
+        self._welcomed_room_ids.add(room_id)
+        self._logger().info("Welcome message sent", room_id=room_id)
+        return True
 
     async def on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         """Handle one inbound invite using the configured room membership policy."""

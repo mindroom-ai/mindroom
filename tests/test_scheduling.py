@@ -43,6 +43,9 @@ from mindroom.scheduling import (
     scheduled_task_read_sort_key,
 )
 from mindroom.scheduling_executor import ScheduledWorkflowOutcome
+from tests.authorization_helpers import (
+    make_test_scheduling_runtime,
+)
 from tests.bot_helpers import _visible_message
 from tests.conftest import (
     bind_runtime_paths,
@@ -97,7 +100,7 @@ def _scheduling_runtime(
     conversation_reader: ConversationReader | None = None,
     matrix_admin: object | None = None,
 ) -> SchedulingRuntime:
-    return SchedulingRuntime(
+    return make_test_scheduling_runtime(
         client=client or AsyncMock(),
         config=config or MagicMock(),
         runtime_paths=runtime_paths or _runtime_paths(),

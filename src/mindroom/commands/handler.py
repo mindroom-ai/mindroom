@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
@@ -70,6 +71,7 @@ def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) ->
         room=room,
         conversation_reader=context.conversation_reader,
         matrix_admin=context.matrix_admin,
+        agent_reply_memberships=context.agent_reply_memberships,
     )
 
 
@@ -107,6 +109,7 @@ class CommandHandlerContext:
     record_handled_turn: Callable[[TurnRecord], Awaitable[None]]
     record_command_result: Callable[[str], Awaitable[None]]
     send_response: _CommandResponseSender
+    agent_reply_memberships: AgentReplyMembershipIndex
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]] | None = None
@@ -198,12 +201,20 @@ async def generate_welcome_message_for_room(
     sender_id: str | None,
     config: Config,
     runtime_paths: RuntimePaths,
+    agent_reply_memberships: AgentReplyMembershipIndex,
 ) -> str:
     """Generate a welcome message for callers without a live turn-policy candidate source."""
     if sender_id is None:
         candidate_entities = configured_routable_entity_ids_for_room(config, room.room_id, runtime_paths)
     else:
-        candidate_entities = await responder_candidate_entities_for_room(client, room, sender_id, config, runtime_paths)
+        candidate_entities = await responder_candidate_entities_for_room(
+            client,
+            room,
+            sender_id,
+            config,
+            runtime_paths,
+            agent_reply_memberships,
+        )
     return _format_welcome_message(candidate_entities, config, runtime_paths)
 
 
@@ -256,6 +267,7 @@ async def _desktop_agent_for_room(
             requester_user_id,
             context.config,
             context.runtime_paths,
+            context.agent_reply_memberships,
         )
     else:
         candidates = await context.responder_candidates_for_room(room, requester_user_id)
@@ -316,6 +328,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 requester_user_id,
                 context.config,
                 context.runtime_paths,
+                context.agent_reply_memberships,
             )
         else:
             candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)

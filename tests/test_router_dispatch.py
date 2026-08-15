@@ -10,7 +10,6 @@ import nio
 import pytest
 
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -37,6 +36,7 @@ from tests.bot_helpers import (
     _set_turn_store_tracker,
     _wrap_extracted_collaborators,
     make_mock_agent_user,
+    make_test_agent_bot,
 )
 from tests.conftest import (
     TEST_PASSWORD,
@@ -77,7 +77,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
@@ -154,7 +154,7 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_runtime_journal_support(bot)
         bot.rooms = ["!welcome:localhost"]
         bot.client = AsyncMock()
@@ -206,7 +206,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
@@ -312,7 +312,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _set_turn_store_tracker(bot, MagicMock())
         send_response = AsyncMock(return_value="$route")
@@ -477,7 +477,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        router_bot = AgentBot(
+        router_bot = make_test_agent_bot(
             AgentMatrixUser(
                 agent_name="router",
                 user_id="@mindroom_router:localhost",
@@ -489,7 +489,7 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        general_bot = AgentBot(
+        general_bot = make_test_agent_bot(
             AgentMatrixUser(
                 agent_name="general",
                 user_id="@mindroom_general:localhost",
@@ -567,7 +567,6 @@ class TestAgentBot(AgentBotTestBase):
         assert attachment_record is not None
 
         with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
@@ -615,7 +614,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
@@ -697,7 +696,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
@@ -784,7 +783,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         _set_turn_store_tracker(bot, MagicMock())
@@ -833,7 +832,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         install_send_response_mock(bot, AsyncMock(return_value=None))
@@ -877,7 +876,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
@@ -935,7 +934,7 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$router_guidance")
@@ -987,7 +986,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """After router routes an image, the selected agent should resolve it via attachments."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         tracker = MagicMock()
@@ -1026,7 +1025,6 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),

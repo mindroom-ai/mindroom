@@ -15,6 +15,8 @@ import nio
 import pytest
 
 import mindroom.hooks as hook_api
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
@@ -34,6 +36,7 @@ from mindroom.matrix import room_member_joins
 from mindroom.matrix.sync_certification import SyncTrustState
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -143,7 +146,15 @@ def _router_bot(
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(Config(bot_accounts=bot_accounts or [], mindroom_user=mindroom_user), runtime_paths)
     persist_entity_accounts(config, runtime_paths, usernames={ROUTER_AGENT_NAME: "mindroom_router"})
-    bot = AgentBot(_router_user(), tmp_path, config=config, runtime_paths=runtime_paths)
+    memberships = AgentReplyMembershipIndex()
+    bot = AgentBot(
+        _router_user(),
+        tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_reply_memberships=memberships,
+        agent_reply_membership_sync=AgentReplyMembershipSync(memberships),
+    )
     install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.homeserver = "http://localhost:8008"
@@ -161,7 +172,9 @@ def _agent_bot(tmp_path: Path) -> AgentBot:
         display_name="Helper",
         password=TEST_PASSWORD,
     )
-    return install_runtime_journal_support(AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths))
+    return install_runtime_journal_support(
+        make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths),
+    )
 
 
 def test_room_member_joined_is_a_builtin_hook_event() -> None:

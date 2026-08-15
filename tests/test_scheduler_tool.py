@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +16,9 @@ from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling import SchedulingRuntime, _extract_mentioned_agents_from_text
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -33,7 +37,7 @@ def _bind_runtime_paths(config: Config) -> Config:
 
 
 def _make_context(config: Config, *, matrix_admin: object | None = None) -> ToolRuntimeContext:
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
             room_id="!room:localhost",
@@ -115,6 +119,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         room=context.room,
         conversation_reader=context.conversation_reader,
         matrix_admin=matrix_admin,
+        agent_reply_memberships=context.agent_reply_memberships,
     )
     assert first_call == {
         "runtime": expected_runtime,
@@ -143,6 +148,30 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "new_thread": False,
         "history_limit": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_scheduler_tool_uses_current_config_for_authorization() -> None:
+    """A long-lived tool context must not schedule with its construction-time policy."""
+    tools = SchedulerTools()
+    old_config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    current_config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="Current Agent")}))
+    context = replace(
+        _make_context(old_config),
+        config_provider=lambda: current_config,
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.scheduler.schedule_task",
+            new=AsyncMock(return_value=("task123", "✅ Scheduled")),
+        ) as mock_schedule,
+        tool_runtime_context(context),
+    ):
+        await tools.schedule("tomorrow at 3pm check deployment", new_thread=False)
+
+    runtime = mock_schedule.await_args.kwargs["runtime"]
+    assert runtime.config is current_config
 
 
 @pytest.mark.asyncio
@@ -196,6 +225,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         runtime_paths=context.runtime_paths,
         room=context.room,
         conversation_reader=context.conversation_reader,
+        agent_reply_memberships=context.agent_reply_memberships,
     )
     assert mock_edit.await_count == 2
     assert mock_edit.await_args_list[0].kwargs == {

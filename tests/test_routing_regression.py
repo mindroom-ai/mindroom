@@ -41,7 +41,11 @@ from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
 from mindroom.text_ingress_dispatch import _run_admitted_router_relay
 from mindroom.thread_utils import AgentResponseDecision
-from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps, _ResponderAvailability
+from mindroom.turn_policy import PreparedDispatch, TurnPolicy, _ResponderAvailability
+from tests.authorization_helpers import (
+    make_test_turn_policy_deps,
+)
+from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -143,7 +147,7 @@ def setup_test_bot(
             usernames[agent.agent_name] = MatrixID.parse(agent.user_id).username
     persist_entity_accounts(config, runtime_paths, usernames=usernames)
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent,
         storage_path,
         config=config,
@@ -324,7 +328,7 @@ def test_active_response_follow_up_uses_actual_managed_sender_ids(tmp_path: Path
         usernames={"router": "actual_router", "research": "actual_research", "news": "actual_news"},
     )
     policy = TurnPolicy(
-        TurnPolicyDeps(
+        make_test_turn_policy_deps(
             runtime=SimpleNamespace(config=config, orchestrator=None, client=None),
             logger=MagicMock(),
             runtime_paths=runtime_paths,
@@ -421,7 +425,7 @@ def test_team_request_responder_filtering_uses_actual_member_ids(tmp_path: Path)
         },
     )
     policy = TurnPolicy(
-        TurnPolicyDeps(
+        make_test_turn_policy_deps(
             runtime=SimpleNamespace(config=config, orchestrator=None, client=None),
             logger=MagicMock(),
             runtime_paths=runtime_paths,
@@ -1409,7 +1413,7 @@ class TestRoutingRegression:
             display_name="Ops Team",
             user_id=ids["ops"].full_id,
         )
-        bot = TeamBot(
+        bot = make_test_team_bot(
             team_user,
             tmp_path,
             config=test_config,

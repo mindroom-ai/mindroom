@@ -789,7 +789,8 @@ Credentials support scoping via query parameters:
 - `agent_name` — scope credentials to a specific agent
 - `execution_scope` — scope credentials to a specific worker scope (e.g., `shared`, `unscoped`)
 
-When `agent_name` is present, credential routes require the authenticated dashboard requester to be allowed by `authorization.agent_reply_permissions` for that agent.
+When `agent_name` is present, credential routes require the authenticated dashboard requester to match the static `users` field of `authorization.agent_reply_permissions` for that agent.
+Membership in a policy's `joined_rooms` grants conversation access only and never grants credential-management access.
 Unauthorized agent-scoped requests return HTTP 403.
 Trusted upstream deployments should provide a Matrix requester identity through the configured Matrix user ID header or email-to-Matrix template.
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard requests manage credentials as the owner Matrix user.
@@ -1457,10 +1458,10 @@ authorization:
   default_room_access: false       # Default: false
   config_command_enabled: false    # Enable !config for global admin users; default: false
   aliases: {}                      # Map canonical Matrix user IDs to bridge aliases (see authorization docs)
-  agent_reply_permissions: {}      # Per-agent/team/router (or '*') reply allowlists; supports globs like '*:example.com'
+  agent_reply_permissions: {}      # Reply policies: user-list shorthand or {users, joined_rooms} with managed room keys
 
 # Managed room metadata (optional)
-# Keys are managed room aliases.
+# Keys are managed room keys.
 # Rooms listed here are created even before agents or teams are assigned.
 rooms:
   lobby:
@@ -1666,7 +1667,8 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.config_command_enabled` defaults to `false`; when set to `true`, `!config` still requires `global_users`
-- `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
+- `authorization.agent_reply_permissions` can restrict replies by static user/glob matches or current membership in configured managed rooms
+- `authorization.agent_reply_permissions.<entity>.joined_rooms` grants conversation access only and never dashboard credential or OAuth management
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
 - `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
@@ -3084,7 +3086,8 @@ That welcome message lists:
 - Quick command reference
 
 Startup welcomes with no requester list configured room responders when the room is statically configured.
-Startup welcomes for ad-hoc rooms send the general interaction guidance and quick command reference without an available-responder list.
+Startup does not send requester-less welcomes in persisted ad-hoc invite rooms because the original inviter cannot be re-authorized safely after restart.
+The live invite callback sends the requester-scoped welcome when the inviter currently has router reply access.
 
 Use `!hi` in any room to see the welcome message again.
 
@@ -12992,7 +12995,8 @@ Providers supply only provider-specific metadata and parsing behavior, such as O
 The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
-When an OAuth request targets an agent with `agent_name`, MindRoom also requires the authenticated dashboard requester to satisfy `authorization.agent_reply_permissions` for that agent.
+When an OAuth request targets an agent with `agent_name`, MindRoom also requires the authenticated dashboard requester to match the policy's static `users` entries in `authorization.agent_reply_permissions` for that agent.
+Membership in a policy's `joined_rooms` grants conversation access only and never grants OAuth-management access.
 Unauthorized agent-scoped OAuth connect, authorize, status, disconnect, and callback requests return HTTP 403 before credentials are exposed or changed.
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result.
 That connect token also carries the requester identity from the tool runtime, and MindRoom rejects redemption unless the authenticated dashboard user resolves to the same requester for scoped credentials.
@@ -15680,15 +15684,17 @@ authorization:
   # Optional: enable !config for global admin users
   config_command_enabled: false
 
-  # Optional: per-agent/team/router reply allowlists
+  # Optional: per-agent/team/router reply policies
   # Keys must match an agent name, team name, "router", or "*"
-  # Values are canonical Matrix user IDs or glob patterns (aliases are resolved)
-  # Examples: "*:example.com", "@admin:*", "*"
+  # Values may use the user-list shorthand or structured users/joined_rooms
   agent_reply_permissions:
     "*":
       - "@admin:example.com"
     code:
-      - "@admin:example.com"
+      users:
+        - "@admin:example.com"
+      joined_rooms:
+        - engineering
     research:
       - "@developer:example.com"
     router:
@@ -15827,12 +15833,19 @@ Use `authorization.agent_reply_permissions` to restrict which users each respond
 
 - The map key is an entity name: agent name, team name, `router`, or `*`.
 - The `*` key is a default rule for entities that do not have an explicit entry.
-- The value is a list of allowed Matrix user IDs.
-- Values support glob-style matching (for example `*:example.com`).
+- The value may be the existing list shorthand or a structured policy with `users` and `joined_rooms`.
+- `users` contains canonical Matrix user IDs or glob patterns such as `*:example.com`.
+- `joined_rooms` contains managed room keys, not display names, aliases, or raw room IDs.
 - A `*` user entry means "allow any sender" for that specific entity.
-- If an entity is not present in the map, it has no extra reply restriction.
+- If neither an explicit entity policy nor the `*` fallback exists, the entity has no extra reply restriction.
+- An explicit entity policy completely overrides the `*` policy, including when one of its lists is empty.
+- A structured policy allows replies when the sender matches `users` or is currently joined to any listed `joined_rooms` room.
+- An invite does not grant access, and a leave, kick, or ban revokes access.
+- MindRoom resolves every managed room key to its persisted stable Matrix room ID and fails closed while membership state is unresolved or being refreshed.
+- Grant-room membership can authorize an agent in a different configured or ad-hoc room, including a DM where the router is absent, as long as normal room authorization passes and the agent is present and available there.
 - Alias mapping from `authorization.aliases` is applied before matching, so bridged IDs inherit canonical user permissions.
-- The same allowlist gates dashboard credential and OAuth management when a request targets an agent with `agent_name`.
+- Room membership grants conversation access across text, voice, calls, reactions, external triggers, and delegated runs through the shared reply gate.
+- Room membership never grants dashboard credential or OAuth management access; those operations use only the policy's static `users` entries.
 - Unauthorized agent-scoped credential requests return HTTP 403 before credentials are read, written, connected, or disconnected.
 - Under trusted upstream auth, MindRoom checks the resolved Matrix requester from the configured Matrix user ID header or email-to-Matrix template.
 - Under standalone API-key auth, set `MINDROOM_OWNER_USER_ID` so agent-scoped credential management resolves to the owner Matrix user instead of the generic standalone principal.
@@ -15853,14 +15866,18 @@ authorization:
     "*":
       - "@alice:example.com"
     code:
-      - "@alice:example.com"
+      users:
+        - "@alice:example.com"
+      joined_rooms:
+        - engineering
     research:
-      - "@bob:example.com"
+      joined_rooms:
+        - research-project
     router:
       - "*"
 ```
 
-In this example, `*` restricts all entities to Alice by default, `research` overrides that and replies only to Bob, and `router` can reply to anyone.
+In this example, `*` restricts entities to Alice by default, `code` allows Alice or anyone joined to `engineering`, `research` overrides the wildcard and allows members of `research-project`, and `router` can reply to anyone.
 
 ## Bot Accounts
 
@@ -16583,8 +16600,9 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    The dependent-entity check runs again under the config update lock immediately before replacement.
 3. `ConfigReloadLifecycle.apply_with_response_admission()` serializes config reloads and MCP catalog replacements behind one global admission owner.
 4. Sampling the in-flight count and closing the shared `ResponseAdmissionGate` happen atomically, so a new response cannot race the decision to apply.
-   The gate covers Matrix-driven response lifecycles only.
-   Direct agent-run entry points that bypass the response lifecycle (`mindroom.api.openai_compat` and cascaded voice in `mindroom.matrix_rtc.call_tools`) are not admitted through it, so a replacement can still land underneath one of those runs.
+   The gate covers Matrix-driven response lifecycles, external-trigger delivery, call admission, and requester-driven call operations.
+   Text and router planning, commands, edit regeneration, interactive selections, visible router voice echoes, calls, and external triggers perform their final reply-policy check after admission and retain the slot through their direct side effect or response-runner handoff.
+   The OpenAI-compatible API in `mindroom.api.openai_compat` remains outside this gate because it does not use Matrix reply authorization.
    The gate stays closed, but is not held, across config loading and plan application.
    Holding it would stall the apply against itself: applying the plan stops bots, and stopping a bot drains its detached responses.
 5. While the gate is closed, a response waits before taking a lifecycle lock, incrementing the in-flight count, or publishing a placeholder.

@@ -629,12 +629,28 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_agent_reply_permissions(self) -> Config:
-        """Ensure per-agent reply permissions reference known entities."""
+        """Ensure reply policies reference known entities and managed room keys."""
         known_entities = set(self.agents) | set(self.teams) | {ROUTER_AGENT_NAME}
         known_entities.add("*")
         unknown_entities = sorted(set(self.authorization.agent_reply_permissions) - known_entities)
         if unknown_entities:
             msg = f"authorization.agent_reply_permissions contains unknown entities: {', '.join(unknown_entities)}"
+            raise ValueError(msg)
+
+        configured_managed_room_keys = {
+            room_key for room_key in self.get_all_configured_rooms() if not room_key.startswith(("!", "#"))
+        }
+        invalid_room_references = sorted(
+            f"{entity_name} -> {room_key}"
+            for entity_name, policy in self.authorization.agent_reply_permissions.items()
+            for room_key in policy.joined_rooms
+            if room_key not in configured_managed_room_keys
+        )
+        if invalid_room_references:
+            msg = (
+                "authorization.agent_reply_permissions joined_rooms must reference configured managed room keys: "
+                + ", ".join(invalid_room_references)
+            )
             raise ValueError(msg)
         return self
 

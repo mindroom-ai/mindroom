@@ -12,11 +12,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -82,11 +83,12 @@ class TestRoutingIntegration:
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
                 router=RouterConfig(model="default"),
+                authorization=AuthorizationConfig(default_room_access=True),
             ),
             test_runtime_paths(tmp_path),
         )
 
-        research_bot = AgentBot(
+        research_bot = make_test_agent_bot(
             research_agent,
             tmp_path,
             rooms=["!research:localhost"],
@@ -95,7 +97,7 @@ class TestRoutingIntegration:
             runtime_paths=runtime_paths_for(config),
         )
 
-        news_bot = AgentBot(
+        news_bot = make_test_agent_bot(
             news_agent,
             tmp_path,
             config,

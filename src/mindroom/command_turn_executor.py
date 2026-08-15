@@ -151,6 +151,7 @@ class CommandTurnExecutor:
             send_response=send_response,
             reload_plugins=reload_plugins,
             responder_candidates_for_room=self.deps.turn_policy.responder_candidates_for_room,
+            agent_reply_memberships=self.deps.runtime.agent_reply_memberships,
         )
         await handle_command(
             context=context,

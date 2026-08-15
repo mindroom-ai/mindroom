@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
 
 from mindroom.api import config_lifecycle
-from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_agent_reply
+from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.external_triggers.auth import (
     TriggerAuthError,
     TriggerSignatureHeaders,
@@ -34,12 +34,17 @@ from mindroom.external_triggers.store import (
     TriggerDeliverySnapshot,
 )
 from mindroom.logging_config import get_logger
+from mindroom.response_admission import (
+    ResponseAdmissionRefusedError,
+    admitted_response_decision,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     import nio
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_reads import ConversationReader
@@ -69,19 +74,44 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
     payload = _parse_payload(body)
     if trigger_snapshot.allowed_kinds and payload.kind not in trigger_snapshot.allowed_kinds:
         raise HTTPException(status_code=422, detail="External trigger kind is not allowed")
-    _validate_snapshot_policy_and_auth(trigger_snapshot, config, runtime_paths)
+    runtime = _require_external_trigger_runtime_binding(request, trigger_snapshot)
+    try:
+        async with admitted_response_decision(
+            runtime.response_admission_gate,
+            runtime.wait_for_admission_or_shutdown,
+        ):
+            config_lifecycle.rebind_current_request_snapshot(request)
+            config, runtime_paths, trigger_snapshot = await _request_config_and_trigger_snapshot(trigger_id, request)
+            if len(body) > trigger_snapshot.max_body_bytes:
+                raise HTTPException(status_code=413, detail="External trigger body exceeds configured limit")
+            signature_headers = _authenticate_trigger_request(
+                request,
+                body=body,
+                snapshot=trigger_snapshot,
+            )
+            payload = _parse_payload(body)
+            if trigger_snapshot.allowed_kinds and payload.kind not in trigger_snapshot.allowed_kinds:
+                raise HTTPException(status_code=422, detail="External trigger kind is not allowed")
+            runtime = _require_external_trigger_runtime_binding(request, trigger_snapshot)
+            _validate_snapshot_policy_and_auth(
+                trigger_snapshot,
+                config,
+                runtime_paths,
+                runtime.agent_reply_memberships,
+            )
+            await _require_external_trigger_runtime_ready(runtime, trigger_snapshot)
+            await _require_owner_joined_target_room(runtime, trigger_snapshot)
 
-    runtime = await _require_external_trigger_runtime(request, trigger_snapshot)
-    await _require_owner_joined_target_room(runtime, trigger_snapshot)
-
-    return await _claim_and_execute_trigger(
-        payload=payload,
-        signature_headers=signature_headers,
-        snapshot=trigger_snapshot,
-        config=config,
-        runtime_paths=runtime_paths,
-        runtime=runtime,
-    )
+            return await _claim_and_execute_trigger(
+                payload=payload,
+                signature_headers=signature_headers,
+                snapshot=trigger_snapshot,
+                config=config,
+                runtime_paths=runtime_paths,
+                runtime=runtime,
+            )
+    except ResponseAdmissionRefusedError as exc:
+        raise HTTPException(status_code=503, detail="External trigger runtime is not available") from exc
 
 
 async def _request_config_and_trigger_snapshot(
@@ -216,16 +246,17 @@ def _validate_snapshot_policy_and_auth(
     snapshot: TriggerDeliverySnapshot,
     config: Config,
     runtime_paths: RuntimePaths,
+    agent_reply_memberships: AgentReplyMembershipIndex,
 ) -> None:
-    if not is_authorized_sender(snapshot.owner_user_id, config, snapshot.resolved_room_id, runtime_paths):
-        raise HTTPException(status_code=403, detail="External trigger owner is not authorized for this room")
-    if not is_sender_allowed_for_agent_reply(
+    if not is_sender_allowed_for_agent_reply_in_room(
         snapshot.owner_user_id,
         snapshot.target.agent,
         config,
+        snapshot.resolved_room_id,
         runtime_paths,
+        agent_reply_memberships,
     ):
-        raise HTTPException(status_code=403, detail="External trigger owner is not authorized for this target")
+        raise HTTPException(status_code=403, detail="External trigger owner is not authorized for this target room")
 
 
 async def _read_bounded_body(request: Request, *, max_body_bytes: int) -> bytes:
@@ -335,20 +366,27 @@ async def _release_event_id_best_effort(
         )
 
 
-async def _require_external_trigger_runtime(
+def _require_external_trigger_runtime_binding(
     request: Request,
     snapshot: TriggerDeliverySnapshot,
 ) -> config_lifecycle.ExternalTriggerRuntime:
     runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
     if runtime is None or runtime.config_generation != snapshot.config_generation:
         raise HTTPException(status_code=503, detail="External trigger runtime is not available")
+    return runtime
+
+
+async def _require_external_trigger_runtime_ready(
+    runtime: config_lifecycle.ExternalTriggerRuntime,
+    snapshot: TriggerDeliverySnapshot,
+) -> None:
+    """Require current router and target delivery readiness for one trigger."""
     try:
         is_trigger_ready = await runtime.is_trigger_snapshot_ready(snapshot)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="External trigger target runtime is not available") from exc
     if not is_trigger_ready:
         raise HTTPException(status_code=503, detail="External trigger target runtime is not available")
-    return runtime
 
 
 async def _require_owner_joined_target_room(

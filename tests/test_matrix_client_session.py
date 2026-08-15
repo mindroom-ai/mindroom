@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock
 
 import nio
 import pytest
+from nio.client.sync_reset_fence import finish_sync_request, issue_sync_request, mark_room_reset
 
 from mindroom.constants import (
     CLASSIC_SYNC_TIMELINE_LIMIT,
@@ -27,6 +28,7 @@ from mindroom.matrix.client_session import (
     login_flows,
     login_with_token,
     matrix_client_config,
+    set_before_sync_response_callback,
 )
 
 
@@ -169,6 +171,142 @@ def test_matrix_client_config_supports_application_owned_classic_sync() -> None:
     assert config.backfill_limited_timelines is True
     assert config.backfill_persist_recovery is False
     assert config.store_sync_tokens is False
+
+
+@pytest.mark.asyncio
+async def test_before_sync_response_callback_precedes_timeline_admission() -> None:
+    """Control-plane invalidation must run before any event from that response."""
+    room_id = "!room:example.org"
+    user_id = "@mindroom_agent:example.org"
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": "hello", "msgtype": "m.text"},
+            "event_id": "$message:example.org",
+            "sender": "@alice:example.org",
+            "origin_server_ts": 1,
+            "room_id": room_id,
+            "type": "m.room.message",
+        },
+    )
+    response = nio.SyncResponse(
+        next_batch="s1",
+        rooms=nio.Rooms(
+            invite={},
+            join={
+                room_id: nio.RoomInfo(
+                    timeline=nio.Timeline(events=[event], limited=False, prev_batch=None),
+                    state=[],
+                    ephemeral=[],
+                    account_data=[],
+                ),
+            },
+            leave={},
+        ),
+        device_key_count=nio.DeviceOneTimeKeyCount(None, None),
+        device_list=nio.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+        account_data_events=[],
+    )
+    client = _MindRoomAsyncClient(
+        "https://example.org",
+        user_id,
+        config=matrix_client_config(
+            sync_storage=MatrixSyncStorage(store_tokens=False, persist_recovery=False),
+        ),
+    )
+    callback_order: list[str] = []
+
+    async def admit(
+        _room: nio.MatrixRoom,
+        _event: nio.Event,
+        _provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        callback_order.append("admission")
+
+    set_before_sync_response_callback(client, lambda _response: callback_order.append("before"))
+    client.add_event_admission_callback(admit)
+
+    await client.receive_response(response)
+
+    assert callback_order == ["before", "admission"]
+
+
+@pytest.mark.asyncio
+async def test_before_sync_response_callback_ignores_stale_generation() -> None:
+    """A response rejected by nio must not mutate control-plane authorization."""
+    response = nio.SyncResponse(
+        next_batch="stale",
+        rooms=nio.Rooms(invite={}, join={}, leave={}),
+        device_key_count=nio.DeviceOneTimeKeyCount(None, None),
+        device_list=nio.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+        account_data_events=[],
+    )
+    client = _MindRoomAsyncClient(
+        "https://example.org",
+        "@mindroom_agent:example.org",
+        config=matrix_client_config(
+            sync_storage=MatrixSyncStorage(store_tokens=False, persist_recovery=False),
+        ),
+    )
+    callback = Mock()
+    set_before_sync_response_callback(client, callback)
+    generation_token = cast("Any", client._sync_request_generation).set(object())
+    try:
+        await client.receive_response(response)
+    finally:
+        client._sync_request_generation.reset(generation_token)
+
+    callback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_before_sync_response_callback_uses_ordered_room_view() -> None:
+    """A locally reset room must be absent from control-plane pre-admission."""
+    room_id = "!reset:example.org"
+    response = nio.SyncResponse(
+        next_batch="ordered",
+        rooms=nio.Rooms(
+            invite={},
+            join={
+                room_id: nio.RoomInfo(
+                    timeline=nio.Timeline(events=[], limited=False, prev_batch=None),
+                    state=[],
+                    ephemeral=[],
+                    account_data=[],
+                ),
+            },
+            leave={},
+        ),
+        device_key_count=nio.DeviceOneTimeKeyCount(None, None),
+        device_list=nio.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+        account_data_events=[],
+    )
+    client = _MindRoomAsyncClient(
+        "https://example.org",
+        "@mindroom_agent:example.org",
+        config=matrix_client_config(
+            sync_storage=MatrixSyncStorage(store_tokens=False, persist_recovery=False),
+        ),
+    )
+    callback = Mock()
+    set_before_sync_response_callback(client, callback)
+    request_id = issue_sync_request(client._sync_reset_fence, "classic")
+    request_token = client._sync_request_id.set(request_id)
+    mark_room_reset(client._sync_reset_fence, room_id)
+    try:
+        await client.receive_response(response)
+    finally:
+        client._sync_request_id.reset(request_token)
+        finish_sync_request(client._sync_reset_fence, request_id)
+
+    accepted_response = callback.call_args.args[0]
+    assert isinstance(accepted_response, nio.SyncResponse)
+    assert room_id not in accepted_response.rooms.join
 
 
 @pytest.mark.asyncio

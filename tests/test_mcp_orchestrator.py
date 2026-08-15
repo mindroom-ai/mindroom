@@ -397,11 +397,13 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
         patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as mock_bind_runtime,
+        patch.object(orchestrator.agent_reply_memberships, "invalidate") as mock_invalidate_memberships,
     ):
         updated = await orchestrator._apply_config_update_plan(current_config, plan, ())
 
     assert updated is False
     mock_bind_runtime.assert_called_once_with(new_config, orchestrator.agent_bots)
+    mock_invalidate_memberships.assert_not_called()
 
 
 @pytest.mark.asyncio

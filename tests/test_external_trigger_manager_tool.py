@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.config.agent import AgentPrivateConfig
@@ -11,6 +12,9 @@ from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.external_trigger_manager import ExternalTriggerManagerTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
@@ -79,7 +83,7 @@ def _context(
     room_id: str = "lobby",
     config: Config | None = None,
 ) -> ToolRuntimeContext:
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="watcher",
         target=MessageTarget.resolve(
             room_id=room_id,
@@ -123,6 +127,28 @@ def test_create_trigger_uses_current_context_and_hides_public_key(tmp_path: Path
     }
     assert "public_key" not in payload["trigger"]
     assert payload["public_key_fingerprint"].startswith("sha256:")
+
+
+def test_external_trigger_admin_uses_current_policy(tmp_path: Path) -> None:
+    """A long-lived tool context must not retain revoked trigger-admin power."""
+    old_config = _config(admin_users=["@admin:example.org"])
+    current_config = _config(admin_users=[])
+    context = replace(
+        _context(tmp_path, requester_id="@admin:example.org", config=old_config),
+        config_provider=lambda: current_config,
+    )
+
+    with tool_runtime_context(context):
+        payload = _payload(
+            ExternalTriggerManagerTools().create_trigger(
+                "revoked-admin",
+                public_key=_PUBLIC_KEY,
+                target_agent="other",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "Only external trigger admins" in payload["message"]
 
 
 def test_private_agent_create_trigger_uses_owner_as_scope_owner(tmp_path: Path) -> None:

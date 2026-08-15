@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from threading import Event
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -24,6 +24,7 @@ from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail
 from mindroom.matrix_rtc.call_tools import (
+    CallAgentResponse,
     _CallAgentCache,
     _CallAgentRunState,
     _CallResponseTracker,
@@ -35,10 +36,13 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from mindroom.message_target import MessageTarget
@@ -46,6 +50,12 @@ if TYPE_CHECKING:
 
 AGENT = "helper"
 REQUESTER = "@alice:example.org"
+
+
+@asynccontextmanager
+async def _authorized_call_operation() -> AsyncIterator[bool]:
+    """Model a live admitted caller for call-tool unit tests."""
+    yield True
 
 
 class FakeAgnoAgent:
@@ -93,7 +103,7 @@ def _runtime_context(
     orchestrator: object | None = None,
 ) -> ToolRuntimeContext:
     """Build the real typed call context expected by production code."""
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name=AGENT,
         target=target,
         requester_id=REQUESTER,
@@ -122,7 +132,33 @@ def _wrap(function: Function):  # noqa: ANN202
         context=_context(),
         agent_name=AGENT,
         config=_config(),
+        authorize_operation=_authorized_call_operation,
     )
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_tool_does_not_run_after_authorization_is_revoked() -> None:
+    """A realtime provider cannot invoke a tool after current call access is denied."""
+    calls: list[dict[str, object]] = []
+
+    async def entrypoint(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return "unexpected"
+
+    @asynccontextmanager
+    async def denied_operation() -> AsyncIterator[bool]:
+        yield False
+
+    wrapped = _wrap_agno_function(
+        _function(entrypoint),
+        context=_context(),
+        agent_name=AGENT,
+        config=_config(),
+        authorize_operation=denied_operation,
+    )
+
+    assert await wrapped({"a": 2, "b": 3}) == "Call access was revoked before this tool could run."
+    assert calls == []
 
 
 def test_call_agent_cache_closes_history_storage_when_agent_build_fails(
@@ -383,6 +419,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         tool_support=StrictToolSupport(),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
     )
     assert len(tooling.tools) == 1
     assert tooling.instructions == "THE CHAT SYSTEM PROMPT"
@@ -425,6 +462,11 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
     contexts: list[ToolRuntimeContext] = []
     recorded_tool_uses: list[list[str]] = []
     runtime_paths = test_runtime_paths(tmp_path)
+    authorization_allowed = True
+
+    @asynccontextmanager
+    async def authorize_operation() -> AsyncIterator[bool]:
+        yield authorization_allowed
 
     class StrictToolSupport:
         def build_context(
@@ -435,7 +477,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
             agent_name: str | None = None,
             active_model_name: str | None = None,
         ) -> ToolRuntimeContext:
-            context = ToolRuntimeContext(
+            context = make_test_tool_runtime_context(
                 agent_name=agent_name or AGENT,
                 target=target,
                 requester_id=user_id or REQUESTER,
@@ -506,6 +548,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
         tool_support=StrictToolSupport(),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
+        authorize_operation=authorize_operation,
         session_id="!room:example.org:call:one",
         enable_responder=True,
         voice_instructions="Speak briefly.",
@@ -522,6 +565,11 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
     assert response.tool_names == ("weather",)
     assert response.turn_id is not None
     assert recorded_tool_uses == [["weather"]]
+    authorization_allowed = False
+    denied = await tooling.responder("Run another turn", recorded_tool_uses.append)
+    assert denied == CallAgentResponse(text="")
+    assert len(calls) == 1
+    authorization_allowed = True
     create_agent_mock.assert_called_once()
     turn, kwargs = calls[0]
     assert turn.entity_label == AGENT
@@ -678,7 +726,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
             agent_name: str | None = None,
             active_model_name: str | None = None,
         ) -> ToolRuntimeContext:
-            return ToolRuntimeContext(
+            return make_test_tool_runtime_context(
                 agent_name=agent_name or AGENT,
                 target=target,
                 requester_id=user_id or REQUESTER,
@@ -758,6 +806,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
         tool_support=StrictToolSupport(),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
         session_id="!room:example.org:call:metadata",
         enable_responder=True,
         active_model_name=active_model_name,
@@ -947,6 +996,7 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
         tool_support=ToolSupport(),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
         enable_responder=True,
         voice_instructions="Speak briefly.",
     )
@@ -1043,6 +1093,7 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
         tool_support=ToolSupport(),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
         enable_responder=True,
     )
     assert tooling.responder is not None
@@ -1100,6 +1151,7 @@ async def test_build_call_tools_includes_async_only_toolkit_functions(
         tool_support=tool_support,  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
     )
 
     assert len(tooling.tools) == 1
@@ -1145,6 +1197,7 @@ async def test_build_call_tools_includes_agno_added_knowledge_and_skill_function
         tool_support=tool_support,  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
     )
 
     assert tooling.tools == ("search_knowledge_base", "get_skill_instructions")
@@ -1198,6 +1251,7 @@ async def test_build_call_tools_hides_agno_added_knowledge_function_needing_appr
         tool_support=tool_support,  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
     )
 
     assert tooling.tools == ()
@@ -1250,6 +1304,7 @@ async def test_build_call_tools_hides_functions_needing_text_chat(
         tool_support=tool_support,  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
     )
 
     assert tooling.tools == ("safe",)
@@ -1268,4 +1323,5 @@ async def test_build_call_tools_requires_runtime_context(tmp_path: Path) -> None
             tool_support=tool_support,  # type: ignore[arg-type]
             room_id="!room:example.org",
             requester_id=REQUESTER,
+            authorize_operation=_authorized_call_operation,
         )

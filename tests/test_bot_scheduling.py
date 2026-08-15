@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
@@ -28,6 +27,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -52,6 +52,7 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.turn_dispatch_helpers import dispatch_test_turn
 
 if TYPE_CHECKING:
+    from mindroom.bot import AgentBot
     from mindroom.matrix.identity import MatrixID
 
 
@@ -162,7 +163,7 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     )
     config = _runtime_bound_config(Config())
     tmpdir = Path(tempfile.mkdtemp())
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmpdir,
         config=config,
@@ -483,7 +484,7 @@ class TestBotTaskRestoration:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _runtime_bound_config(Config(), Path(tmpdir))  # Empty config for testing
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -495,6 +496,7 @@ class TestBotTaskRestoration:
             # Mock the necessary methods
             with (
                 patch("mindroom.matrix.users.login") as mock_login,
+                patch("mindroom.bot.set_before_sync_response_callback") as set_before_sync_response_callback,
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
@@ -521,6 +523,10 @@ class TestBotTaskRestoration:
                 # Verify restore was called for the room with config
                 mock_restore.assert_called_once()
                 assert mock_restore.call_args.args[1] == "!test:server"
+                set_before_sync_response_callback.assert_called_once_with(
+                    mock_client,
+                    bot._before_sync_response_admission,
+                )
 
                 # Just verify restore was called - logger testing is complex with the bind() method
                 assert mock_restore.called
@@ -538,7 +544,7 @@ class TestBotTaskRestoration:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _runtime_bound_config(Config(), Path(tmpdir))  # Empty config for testing
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -608,7 +614,7 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
@@ -667,7 +673,7 @@ class TestCommandHandling:
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -726,7 +732,7 @@ class TestCommandHandling:
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -792,7 +798,7 @@ class TestCommandHandling:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -856,7 +862,7 @@ class TestCommandHandling:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -924,7 +930,7 @@ class TestCommandHandling:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -992,7 +998,7 @@ class TestCommandHandling:
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1118,7 +1124,7 @@ class TestCommandHandling:
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1186,7 +1192,7 @@ class TestCommandHandling:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1260,7 +1266,7 @@ class TestCommandHandling:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1318,7 +1324,7 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1426,7 +1432,7 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1545,7 +1551,7 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1615,7 +1621,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1680,7 +1686,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1753,7 +1759,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1840,7 +1846,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1941,7 +1947,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -2037,7 +2043,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -2107,7 +2113,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -2175,7 +2181,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -2266,7 +2272,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,

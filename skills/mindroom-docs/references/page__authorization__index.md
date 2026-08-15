@@ -31,15 +31,17 @@ authorization:
   # Optional: enable !config for global admin users
   config_command_enabled: false
 
-  # Optional: per-agent/team/router reply allowlists
+  # Optional: per-agent/team/router reply policies
   # Keys must match an agent name, team name, "router", or "*"
-  # Values are canonical Matrix user IDs or glob patterns (aliases are resolved)
-  # Examples: "*:example.com", "@admin:*", "*"
+  # Values may use the user-list shorthand or structured users/joined_rooms
   agent_reply_permissions:
     "*":
       - "@admin:example.com"
     code:
-      - "@admin:example.com"
+      users:
+        - "@admin:example.com"
+      joined_rooms:
+        - engineering
     research:
       - "@developer:example.com"
     router:
@@ -178,12 +180,19 @@ Use `authorization.agent_reply_permissions` to restrict which users each respond
 
 - The map key is an entity name: agent name, team name, `router`, or `*`.
 - The `*` key is a default rule for entities that do not have an explicit entry.
-- The value is a list of allowed Matrix user IDs.
-- Values support glob-style matching (for example `*:example.com`).
+- The value may be the existing list shorthand or a structured policy with `users` and `joined_rooms`.
+- `users` contains canonical Matrix user IDs or glob patterns such as `*:example.com`.
+- `joined_rooms` contains managed room keys, not display names, aliases, or raw room IDs.
 - A `*` user entry means "allow any sender" for that specific entity.
-- If an entity is not present in the map, it has no extra reply restriction.
+- If neither an explicit entity policy nor the `*` fallback exists, the entity has no extra reply restriction.
+- An explicit entity policy completely overrides the `*` policy, including when one of its lists is empty.
+- A structured policy allows replies when the sender matches `users` or is currently joined to any listed `joined_rooms` room.
+- An invite does not grant access, and a leave, kick, or ban revokes access.
+- MindRoom resolves every managed room key to its persisted stable Matrix room ID and fails closed while membership state is unresolved or being refreshed.
+- Grant-room membership can authorize an agent in a different configured or ad-hoc room, including a DM where the router is absent, as long as normal room authorization passes and the agent is present and available there.
 - Alias mapping from `authorization.aliases` is applied before matching, so bridged IDs inherit canonical user permissions.
-- The same allowlist gates dashboard credential and OAuth management when a request targets an agent with `agent_name`.
+- Room membership grants conversation access across text, voice, calls, reactions, external triggers, and delegated runs through the shared reply gate.
+- Room membership never grants dashboard credential or OAuth management access; those operations use only the policy's static `users` entries.
 - Unauthorized agent-scoped credential requests return HTTP 403 before credentials are read, written, connected, or disconnected.
 - Under trusted upstream auth, MindRoom checks the resolved Matrix requester from the configured Matrix user ID header or email-to-Matrix template.
 - Under standalone API-key auth, set `MINDROOM_OWNER_USER_ID` so agent-scoped credential management resolves to the owner Matrix user instead of the generic standalone principal.
@@ -204,14 +213,18 @@ authorization:
     "*":
       - "@alice:example.com"
     code:
-      - "@alice:example.com"
+      users:
+        - "@alice:example.com"
+      joined_rooms:
+        - engineering
     research:
-      - "@bob:example.com"
+      joined_rooms:
+        - research-project
     router:
       - "*"
 ```
 
-In this example, `*` restricts all entities to Alice by default, `research` overrides that and replies only to Bob, and `router` can reply to anyone.
+In this example, `*` restricts entities to Alice by default, `code` allows Alice or anyone joined to `engineering`, `research` overrides the wildcard and allows members of `research-project`, and `router` can reply to anyone.
 
 ## Bot Accounts
 

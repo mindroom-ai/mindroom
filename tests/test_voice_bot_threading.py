@@ -15,7 +15,6 @@ from agno.media import Audio
 
 from mindroom import inbound_turn_normalizer
 from mindroom.attachments import _attachment_id_for_event, load_attachment
-from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate
 from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.config.main import Config
@@ -32,6 +31,7 @@ from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.matrix.thread_membership import ThreadResolution
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -52,6 +52,7 @@ from tests.conftest import (
 from tests.turn_dispatch_helpers import prepared_turn_recorder
 
 if TYPE_CHECKING:
+    from mindroom.bot import AgentBot
     from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
     from mindroom.handled_turns import TurnRecord
 
@@ -59,7 +60,7 @@ if TYPE_CHECKING:
 def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
     """Construct an agent bot with the explicit runtime bound to the test config."""
     return install_runtime_journal_support(
-        AgentBot(
+        make_test_agent_bot(
             agent_user=agent_user,
             storage_path=storage_path,
             config=config,

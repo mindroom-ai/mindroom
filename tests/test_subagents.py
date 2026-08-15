@@ -14,6 +14,7 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.agent_descriptions import describe_agent
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -31,6 +32,9 @@ from mindroom.session_ids import create_session_id, parse_session_id
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import delivered_matrix_side_effect, make_conversation_reader_mock, make_relation_lookup
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
 
@@ -86,8 +90,7 @@ def _make_config(
     config.get_entity_thread_mode = MagicMock(return_value=thread_mode)
     config.get_agent_tools = MagicMock(side_effect=lambda agent_name: config.agents[agent_name].tool_names)
     config.render_prompt = MagicMock(return_value="Delegate only to listed agents.")
-    config.authorization.agent_reply_permissions = {}
-    config.authorization.resolve_alias.side_effect = lambda sender_id: sender_id
+    config.authorization = AuthorizationConfig()
     return config
 
 
@@ -112,7 +115,7 @@ def _make_context(
     effective_config = config or _make_config()
     _persist_subagent_accounts(effective_config, runtime_paths)
     room = _make_room(effective_config, runtime_paths, room_id, agent_name, room_agent_names)
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name=agent_name,
         target=MessageTarget.resolve(
             room_id=room_id,
@@ -212,6 +215,27 @@ async def test_agents_list_payload_structure(tmp_path: Path) -> None:
     assert all(set(row) == {"name", "can_delegate", "can_spawn", "description"} for row in payload["agents"])
     assert all(isinstance(row, dict) for row in payload["agents"])
     assert all(row["can_spawn"] is True for row in payload["agents"])
+
+
+@pytest.mark.asyncio
+async def test_agents_list_uses_current_authorization_after_reload(tmp_path: Path) -> None:
+    """A long-lived tool context must not expose agents revoked by a config reload."""
+    original_config = _make_config()
+    current_config = _make_config()
+    current_config.authorization = AuthorizationConfig(
+        agent_reply_permissions={
+            "research": AgentReplyPermission(users=[]),
+        },
+    )
+    ctx = replace(
+        _make_context(tmp_path, config=original_config),
+        config_provider=lambda: current_config,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().agents_list())
+
+    assert [row["name"] for row in payload["agents"]] == ["code"]
 
 
 @pytest.mark.asyncio

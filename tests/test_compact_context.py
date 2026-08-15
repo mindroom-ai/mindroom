@@ -20,7 +20,6 @@ from agno.session.summary import SessionSummary
 from agno.tools.function import Function
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
@@ -37,8 +36,12 @@ from mindroom.history.types import (
 )
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     FakeModel,
@@ -482,7 +485,7 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
 async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path: Path) -> None:
     """Lifecycle completion edits should reuse the outcome notice text."""
     config, runtime_paths = _make_config(tmp_path)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="test_agent",
             password=TEST_PASSWORD,
@@ -865,7 +868,7 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
         team_context.storage.upsert_session(team_context.session)
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="test_agent",
         target=MessageTarget(
             room_id="!room:localhost",
@@ -950,7 +953,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
         team_context.storage.upsert_session(team_context.session)
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="test_agent",
         target=MessageTarget(
             room_id="!room:localhost",
@@ -1031,7 +1034,7 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         scope_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
         scope_context.storage.upsert_session(scope_context.session)
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="test_agent",
         target=MessageTarget(
             room_id="!room:localhost",

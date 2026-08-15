@@ -23,6 +23,7 @@ from mindroom.matrix_identifiers import room_alias_identifier_candidates
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
@@ -120,18 +121,69 @@ def is_sender_allowed_for_agent_reply(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
 ) -> bool:
     """Check whether *agent_name* is allowed to reply to *sender_id*.
 
     Internal MindRoom identities (agents/teams/router and internal user) bypass
     this allowlist because they are system participants, not end users.
     """
-    if _is_sender_allowed_by_agent_reply_allowlist(sender_id, agent_name, config):
+    if _is_sender_allowed_by_static_agent_reply_policy(sender_id, agent_name, config):
+        return True
+
+    policy = config.authorization.agent_reply_policy(agent_name)
+    if policy is not None and membership_index.is_allowed(
+        sender_id,
+        policy.joined_rooms,
+        config.authorization,
+    ):
         return True
 
     # Internal MindRoom participants are not restricted by per-user reply lists.
     # Bridge bot accounts are intentionally not exempt.
     return sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
+
+
+def is_sender_allowed_for_agent_reply_in_room(
+    sender_id: str,
+    agent_name: str,
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+) -> bool:
+    """Require both current-room access and entity reply access."""
+    return is_sender_allowed_for_entity_replies_in_room(
+        sender_id,
+        (agent_name,),
+        config,
+        room_id,
+        runtime_paths,
+        membership_index,
+    )
+
+
+def is_sender_allowed_for_entity_replies_in_room(
+    sender_id: str,
+    entity_names: Iterable[str],
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+) -> bool:
+    """Require current-room access and reply access for every execution entity."""
+    if not is_authorized_sender(sender_id, config, room_id, runtime_paths):
+        return False
+    return all(
+        is_sender_allowed_for_agent_reply(
+            sender_id,
+            entity_name,
+            config,
+            runtime_paths,
+            membership_index,
+        )
+        for entity_name in entity_names
+    )
 
 
 def _current_internal_sender_ids_for_auth(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
@@ -143,19 +195,16 @@ def _current_internal_sender_ids_for_auth(config: Config, runtime_paths: Runtime
         return frozenset()
 
 
-def _is_sender_allowed_by_agent_reply_allowlist(sender_id: str, agent_name: str, config: Config) -> bool:
-    """Check only the configured per-agent reply allowlist for one sender."""
-    agent_reply_permissions = config.authorization.agent_reply_permissions
-    allowed_users = agent_reply_permissions.get(agent_name)
-    if allowed_users is None:
-        allowed_users = agent_reply_permissions.get("*")
-    if allowed_users is None:
+def _is_sender_allowed_by_static_agent_reply_policy(sender_id: str, agent_name: str, config: Config) -> bool:
+    """Check only the configured static users for one entity."""
+    policy = config.authorization.agent_reply_policy(agent_name)
+    if policy is None:
         return True
-    if "*" in allowed_users:
+    if "*" in policy.users:
         return True
 
     resolved_sender = config.authorization.resolve_alias(sender_id)
-    return any(fnmatchcase(resolved_sender, allowed_user) for allowed_user in allowed_users)
+    return any(fnmatchcase(resolved_sender, allowed_user) for allowed_user in policy.users)
 
 
 def is_sender_allowed_for_agent_credential_management(
@@ -164,7 +213,7 @@ def is_sender_allowed_for_agent_credential_management(
     config: Config,
 ) -> bool:
     """Check whether a dashboard requester may manage credentials for one agent."""
-    return _is_sender_allowed_by_agent_reply_allowlist(sender_id, agent_name, config)
+    return _is_sender_allowed_by_static_agent_reply_policy(sender_id, agent_name, config)
 
 
 def get_effective_sender_id_for_reply_permissions(
@@ -203,13 +252,20 @@ def filter_responders_by_sender_permissions(
     sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID]:
     """Return only responders that may reply to *sender_id* per config rules."""
     registry = entity_identity_registry(config, runtime_paths)
     result: list[MatrixID] = []
     for responder in responders:
         name = registry.current_entity_name_for_user_id(responder.full_id, include_router=False)
-        if name is not None and is_sender_allowed_for_agent_reply(sender_id, name, config, runtime_paths):
+        if name is not None and is_sender_allowed_for_agent_reply(
+            sender_id,
+            name,
+            config,
+            runtime_paths,
+            membership_index,
+        ):
             result.append(responder)
     return result
 
@@ -252,6 +308,7 @@ def _get_available_responders_for_sender(
     sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID]:
     """Return room responders that may reply to *sender_id*."""
     return filter_responders_by_sender_permissions(
@@ -259,6 +316,7 @@ def _get_available_responders_for_sender(
         sender_id,
         config,
         runtime_paths,
+        membership_index,
     )
 
 
@@ -296,6 +354,7 @@ async def _get_available_responders_for_sender_authoritative(
     sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID]:
     """Return sender-visible room responders, refreshing membership while the cache is unsynced."""
     cached_room_responders = get_available_responders_in_room(room, config, runtime_paths)
@@ -304,6 +363,7 @@ async def _get_available_responders_for_sender_authoritative(
         sender_id,
         config,
         runtime_paths,
+        membership_index,
     )
     if room.members_synced:
         return cached_visible_responders
@@ -329,6 +389,7 @@ async def _get_available_responders_for_sender_authoritative(
         sender_id,
         config,
         runtime_paths,
+        membership_index,
     )
     logger.info(
         "authoritative_room_membership_refreshed",
@@ -345,12 +406,19 @@ def responder_candidate_entities_from_cached_room(
     sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID]:
     """Return sender-visible responder candidates without refreshing Matrix membership."""
-    configured_entities = _configured_responder_candidates_for_room(room, sender_id, config, runtime_paths)
+    configured_entities = _configured_responder_candidates_for_room(
+        room,
+        sender_id,
+        config,
+        runtime_paths,
+        membership_index,
+    )
     if configured_entities is not None:
         return configured_entities
-    return _get_available_responders_for_sender(room, sender_id, config, runtime_paths)
+    return _get_available_responders_for_sender(room, sender_id, config, runtime_paths, membership_index)
 
 
 def _configured_responder_candidates_for_room(
@@ -358,6 +426,7 @@ def _configured_responder_candidates_for_room(
     sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID] | None:
     """Return configured-room responder candidates, or None for ad-hoc rooms."""
     room_alias = room.canonical_alias
@@ -370,7 +439,13 @@ def _configured_responder_candidates_for_room(
     )
     if not configured_entities:
         return None
-    return filter_responders_by_sender_permissions(configured_entities, sender_id, config, runtime_paths)
+    return filter_responders_by_sender_permissions(
+        configured_entities,
+        sender_id,
+        config,
+        runtime_paths,
+        membership_index,
+    )
 
 
 async def responder_candidate_entities_for_room(
@@ -379,11 +454,25 @@ async def responder_candidate_entities_for_room(
     sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID]:
     """Return sender-visible responder candidates without widening configured rooms."""
-    configured_entities = _configured_responder_candidates_for_room(room, sender_id, config, runtime_paths)
+    configured_entities = _configured_responder_candidates_for_room(
+        room,
+        sender_id,
+        config,
+        runtime_paths,
+        membership_index,
+    )
     if configured_entities is not None:
         return configured_entities
     if client is None:
-        return _get_available_responders_for_sender(room, sender_id, config, runtime_paths)
-    return await _get_available_responders_for_sender_authoritative(client, room, sender_id, config, runtime_paths)
+        return _get_available_responders_for_sender(room, sender_id, config, runtime_paths, membership_index)
+    return await _get_available_responders_for_sender_authoritative(
+        client,
+        room,
+        sender_id,
+        config,
+        runtime_paths,
+        membership_index,
+    )

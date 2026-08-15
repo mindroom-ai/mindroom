@@ -8,12 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import install_runtime_journal_support, replace_turn_controller_deps, wrap_extracted_collaborators
 from tests.identity_helpers import entity_ids
 
@@ -59,7 +59,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     )
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -169,7 +169,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     )
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,

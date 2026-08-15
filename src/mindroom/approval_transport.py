@@ -415,9 +415,10 @@ class ApprovalMatrixTransport:
         if not bot.running or bot.client is None:
             msg = f"Router approval transport is not ready to verify a card action in {room_id}"
             raise ToolApprovalTransportError(msg)
-        if room_id not in bot.approval_room_ids:
-            msg = f"Router approval transport cannot read {room_id} to verify a card action"
-            raise approval_manager.UnverifiableApprovalCardError(msg)
+        if not self._bot_has_approval_room(bot, room_id):
+            # Router-free agent rooms cannot contain cards from this transport.
+            # Abstain so ordinary replies continue through normal text ingress.
+            return None
         response = await bot.client.room_get_event(room_id, card_event_id)
         if isinstance(response, nio.RoomGetEventError) and response.status_code in {
             "M_FORBIDDEN",

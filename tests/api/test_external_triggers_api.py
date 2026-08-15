@@ -2,29 +2,36 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
+from unittest.mock import AsyncMock
 
+import nio
 import pytest
 import yaml
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from mindroom import constants
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
 from mindroom.api import external_triggers as external_triggers_api
 from mindroom.api import main as api_main
 from mindroom.config.main import Config
 from mindroom.external_triggers.auth import mint_trigger_capability, sign_trigger_request
 from mindroom.external_triggers.store import ExternalTriggerStore, ExternalTriggerTarget, TriggerDeliverySnapshot
+from mindroom.matrix.state import MatrixState
+from mindroom.response_admission import ResponseAdmissionGate
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
     from httpx import Response
@@ -182,11 +189,22 @@ def _create_capability_record(
     return token, snapshot
 
 
-def _bind_runtime(ready_snapshots: list[TriggerDeliverySnapshot]) -> object:
+def _bind_runtime(
+    ready_snapshots: list[TriggerDeliverySnapshot],
+    *,
+    agent_reply_memberships: AgentReplyMembershipIndex | None = None,
+    response_admission_gate: ResponseAdmissionGate | None = None,
+    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]] | None = None,
+) -> object:
     client = object()
+    admission_gate = response_admission_gate or ResponseAdmissionGate()
 
     async def is_trigger_snapshot_ready(snapshot: TriggerDeliverySnapshot) -> bool:
         ready_snapshots.append(snapshot)
+        return True
+
+    async def wait_for_admission() -> bool:
+        await admission_gate.wait_until_open()
         return True
 
     api_main.bind_external_trigger_runtime(
@@ -194,6 +212,9 @@ def _bind_runtime(ready_snapshots: list[TriggerDeliverySnapshot]) -> object:
         client=client,
         conversation_reader=object(),
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+        agent_reply_memberships=agent_reply_memberships or AgentReplyMembershipIndex(),
+        response_admission_gate=admission_gate,
+        wait_for_admission_or_shutdown=wait_for_admission_or_shutdown or wait_for_admission,
     )
     return client
 
@@ -230,12 +251,86 @@ async def test_runtime_config_type_error_is_not_masked(monkeypatch: pytest.Monke
         await external_triggers_api._request_config_and_trigger_snapshot("campground", cast("Request", object()))
 
 
+@pytest.mark.asyncio
+async def test_external_trigger_target_accepts_grant_room_member(tmp_path: Path) -> None:
+    """External trigger owners should pass target reply auth through the shared membership index."""
+    payload = _config_payload()
+    authorization = cast("dict[str, object]", payload["authorization"])
+    authorization["agent_reply_permissions"] = {
+        "research": {"joined_rooms": ["campground"]},
+    }
+    config = Config.model_validate(payload)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MATRIX_HOMESERVER": "https://example.org"},
+    )
+    grant_room_id = "!campground:example.org"
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("campground", grant_room_id, "#campground:example.org", "Campground")
+    state.save(runtime_paths=runtime_paths)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(_OWNER, None, None)],
+        room_id=grant_room_id,
+    )
+    memberships = AgentReplyMembershipIndex()
+    await memberships.refresh(config, runtime_paths, client)
+    _create_record(runtime_paths, config, _public_key_b64(Ed25519PrivateKey.generate()))
+    snapshot = ExternalTriggerStore(runtime_paths).delivery_snapshot(
+        "campground",
+        config=config,
+        config_generation=1,
+    )
+    assert snapshot is not None
+
+    external_triggers_api._validate_snapshot_policy_and_auth(
+        snapshot,
+        config,
+        runtime_paths,
+        memberships,
+    )
+
+
 async def _owner_joined(*_args: object, **_kwargs: object) -> bool:
     return True
 
 
 async def _owner_not_joined(*_args: object, **_kwargs: object) -> bool:
     return False
+
+
+async def _membership_authorized_runtime(
+    tmp_path: Path,
+) -> tuple[Config, constants.RuntimePaths, AgentReplyMembershipIndex, nio.AsyncClient]:
+    """Build a config and ready membership index for the trigger owner."""
+    config_path = tmp_path / "config.yaml"
+    payload = _config_payload()
+    authorization = cast("dict[str, object]", payload["authorization"])
+    authorization["agent_reply_permissions"] = {
+        "research": {"joined_rooms": ["campground"]},
+    }
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    config = Config.model_validate(payload)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MATRIX_HOMESERVER": "https://example.org"},
+    )
+    grant_room_id = "!campground:example.org"
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("campground", grant_room_id, "#campground:example.org", "Campground")
+    state.save(runtime_paths=runtime_paths)
+    membership_client = AsyncMock(spec=nio.AsyncClient)
+    membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+    membership_client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(_OWNER, None, None)],
+        room_id=grant_room_id,
+    )
+    memberships = AgentReplyMembershipIndex()
+    await memberships.refresh(config, runtime_paths, membership_client)
+    return config, runtime_paths, memberships, membership_client
 
 
 def _trigger_api_context(
@@ -605,6 +700,143 @@ def test_owner_permission_removed_blocks_delivery_before_replay_claim(
 
     assert response.status_code == 403
     assert not (runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_trigger_waiting_for_reload_rebinds_and_rechecks_current_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request queued behind reload must not deliver from its stale authorized snapshot."""
+    private_key = Ed25519PrivateKey.generate()
+    config_path = tmp_path / "config.yaml"
+    initial_config = _write_runtime_config(config_path)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    api_main.initialize_api_app(api_main.app, runtime_paths)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
+    _create_record(runtime_paths, initial_config, _public_key_b64(private_key))
+    gate = ResponseAdmissionGate()
+    assert gate.close_if_idle()
+    wait_started = asyncio.Event()
+
+    async def wait_for_admission() -> bool:
+        wait_started.set()
+        await gate.wait_until_open()
+        return True
+
+    ready_snapshots: list[TriggerDeliverySnapshot] = []
+    _bind_runtime(
+        ready_snapshots,
+        response_admission_gate=gate,
+        wait_for_admission_or_shutdown=wait_for_admission,
+    )
+    monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
+    execute = AsyncMock(return_value="$matrix-event")
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute)
+    body = _body()
+    request_task = None
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=api_main.app),
+            base_url="http://testserver",
+        ) as client:
+            request_task = asyncio.create_task(
+                client.post(
+                    "/api/triggers/campground",
+                    content=body,
+                    headers=_sign(private_key, body=body),
+                ),
+            )
+            await asyncio.wait_for(wait_started.wait(), timeout=1)
+
+            replacement = _write_runtime_config(config_path, owner_authorized=False)
+            assert config_lifecycle._publish_runtime_config_into_app(replacement, runtime_paths, api_main.app)
+            _bind_runtime(
+                ready_snapshots,
+                response_admission_gate=gate,
+                wait_for_admission_or_shutdown=wait_for_admission,
+            )
+            gate.reopen()
+            response = await request_task
+
+        assert response.status_code == 403
+        execute.assert_not_awaited()
+        assert not (runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
+    finally:
+        gate.reopen()
+        if request_task is not None:
+            if not request_task.done():
+                request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+        api_main.unbind_external_trigger_runtime(api_main.app)
+
+
+@pytest.mark.asyncio
+async def test_membership_authorized_trigger_waits_for_reload_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invalidated grant snapshot must be rechecked after admission reopens."""
+    private_key = Ed25519PrivateKey.generate()
+    config, runtime_paths, memberships, membership_client = await _membership_authorized_runtime(tmp_path)
+
+    api_main.initialize_api_app(api_main.app, runtime_paths)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
+    _create_record(runtime_paths, config, _public_key_b64(private_key))
+    gate = ResponseAdmissionGate()
+    assert gate.close_if_idle()
+    memberships.invalidate(config, reason="config_reload")
+    wait_started = asyncio.Event()
+
+    async def wait_for_admission() -> bool:
+        wait_started.set()
+        await gate.wait_until_open()
+        return True
+
+    ready_snapshots: list[TriggerDeliverySnapshot] = []
+    _bind_runtime(
+        ready_snapshots,
+        agent_reply_memberships=memberships,
+        response_admission_gate=gate,
+        wait_for_admission_or_shutdown=wait_for_admission,
+    )
+    monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
+    execute = AsyncMock(return_value="$matrix-event")
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute)
+    body = _body()
+    request_task = None
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=api_main.app),
+            base_url="http://testserver",
+        ) as client:
+            request_task = asyncio.create_task(
+                client.post(
+                    "/api/triggers/campground",
+                    content=body,
+                    headers=_sign(private_key, body=body),
+                ),
+            )
+            await asyncio.wait_for(wait_started.wait(), timeout=1)
+            await memberships.refresh(config, runtime_paths, membership_client)
+            gate.reopen()
+            response = await request_task
+
+        assert response.status_code == 202
+        execute.assert_awaited_once()
+    finally:
+        gate.reopen()
+        if request_task is not None:
+            if not request_task.done():
+                request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+        api_main.unbind_external_trigger_runtime(api_main.app)
 
 
 def test_owner_not_joined_blocks_delivery_before_replay_claim(

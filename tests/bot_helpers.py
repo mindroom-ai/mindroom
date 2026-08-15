@@ -83,6 +83,28 @@ if TYPE_CHECKING:
     from mindroom.turn_store import TurnStore
 
 
+def make_test_agent_bot(*args: Any, **kwargs: Any) -> AgentBot:  # noqa: ANN401
+    """Build a standalone test bot with an explicit real membership index."""
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: PLC0415
+    from mindroom.bot import AgentBot as RuntimeAgentBot  # noqa: PLC0415
+
+    if "agent_reply_memberships" not in kwargs:
+        membership_sync = kwargs.get("agent_reply_membership_sync")
+        kwargs["agent_reply_memberships"] = (
+            membership_sync.memberships if membership_sync is not None else AgentReplyMembershipIndex()
+        )
+    return RuntimeAgentBot(*args, **kwargs)
+
+
+def make_test_team_bot(*args: Any, **kwargs: Any) -> TeamBot:  # noqa: ANN401
+    """Build a standalone test team bot with an explicit real membership index."""
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: PLC0415
+    from mindroom.bot import TeamBot as RuntimeTeamBot  # noqa: PLC0415
+
+    kwargs.setdefault("agent_reply_memberships", AgentReplyMembershipIndex())
+    return RuntimeTeamBot(*args, **kwargs)
+
+
 def _stream_outcome(
     event_id: str | None,
     body: str,

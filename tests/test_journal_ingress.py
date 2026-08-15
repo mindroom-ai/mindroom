@@ -2945,6 +2945,29 @@ class TestTimelineMemberProvenance:
         assert ingress.timeline_member_event_class(event) is None
 
 
+class TestLiveRoomMembershipTransitions:
+    """Only durably admitted live membership deltas may update authorization state."""
+
+    async def test_live_transition_runs_but_recovered_and_history_do_not(self, alice: PrincipalStore) -> None:
+        """Replayed lifecycle rows must not regress a newer authoritative snapshot."""
+        on_live_transition = AsyncMock()
+        ingress = JournalIngress(
+            store=alice,
+            self_sender=BOT,
+            room_lifecycle_enabled=lambda: True,
+            on_live_room_membership_transition=on_live_transition,
+        )
+        live = member_event("$live")
+        recovered = member_event("$recovered")
+        history = member_event("$history")
+
+        await ingress._admit(room(), live, nio.TimelineEventProvenance.LIVE)
+        await ingress._admit(room(), recovered, nio.TimelineEventProvenance.RECOVERED)
+        await ingress._admit(room(), history, nio.TimelineEventProvenance.HISTORY)
+
+        on_live_transition.assert_awaited_once_with(ROOM, live)
+
+
 def message_event(
     event_id: str,
     msgtype: str,

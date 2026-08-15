@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import TeamBot
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.delivery_gateway import (
@@ -46,6 +46,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
+from tests.bot_helpers import make_test_team_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -65,6 +66,8 @@ from tests.identity_helpers import entity_ids
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.bot import TeamBot
+
 
 def _config(tmp_path: Path) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
@@ -73,6 +76,7 @@ def _config(tmp_path: Path) -> Config:
             agents={
                 "code": AgentConfig(display_name="Code", rooms=["!room:localhost"]),
             },
+            authorization=AuthorizationConfig(default_room_access=True),
         ),
         runtime_paths,
     )
@@ -150,7 +154,7 @@ def _team_bot(tmp_path: Path) -> TeamBot:
         display_name="Team Bot",
         password=TEST_PASSWORD,
     )
-    bot = TeamBot(
+    bot = make_test_team_bot(
         team_user,
         tmp_path,
         config=config,

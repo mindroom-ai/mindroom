@@ -14,7 +14,6 @@ from agno.media import Audio
 
 from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -37,6 +36,8 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
 from mindroom.voice_handler import prepare_voice_message
+from tests.authorization_helpers import isolated_membership_index
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     drain_coalescing,
@@ -54,6 +55,7 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import EditTextRequest
 
 
@@ -64,7 +66,7 @@ def _attach_runtime_paths(config: Config, tmp_path: Path) -> Config:
 def _agent_bot(*, agent_user: object, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
     """Construct an agent bot with the explicit runtime bound to the test config."""
     bot = install_runtime_journal_support(
-        AgentBot(
+        make_test_agent_bot(
             agent_user=agent_user,
             storage_path=storage_path,
             config=config,
@@ -93,6 +95,7 @@ async def _prepare_voice_message_with_runtime(
         event,
         config,
         runtime_paths=runtime_paths_for(config),
+        membership_index=isolated_membership_index(),
         thread_id=thread_id,
     )
 

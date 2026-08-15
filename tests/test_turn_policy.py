@@ -23,7 +23,10 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamMode, TeamOutcome
-from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps
+from mindroom.turn_policy import PreparedDispatch, TurnPolicy
+from tests.authorization_helpers import (
+    make_test_turn_policy_deps,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_visible_message,
@@ -71,7 +74,7 @@ def _policy_for(config: Config, agent_name: str) -> TurnPolicy:
     runtime_paths = runtime_paths_for(config)
     registry = entity_identity_registry(config, runtime_paths)
     return TurnPolicy(
-        TurnPolicyDeps(
+        make_test_turn_policy_deps(
             runtime=_RuntimeStub(client=None, config=config),
             logger=get_logger("test_turn_policy"),
             runtime_paths=runtime_paths,

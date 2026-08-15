@@ -12,12 +12,12 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-from mindroom.bot import TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_team_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -69,7 +69,7 @@ class TestTeamRoomMembership:
 
         # Create the team bot with configured rooms
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
-        bot = TeamBot(
+        bot = make_test_team_bot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
@@ -127,7 +127,7 @@ class TestTeamRoomMembership:
 
         # Create the team bot with no configured rooms
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
-        bot = TeamBot(
+        bot = make_test_team_bot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
@@ -199,7 +199,7 @@ class TestTeamRoomMembership:
             ),
             tmp_path,
         )
-        bot = TeamBot(
+        bot = make_test_team_bot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,

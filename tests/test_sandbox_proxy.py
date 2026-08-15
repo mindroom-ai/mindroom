@@ -63,7 +63,7 @@ from mindroom.tool_system.metadata import (
 )
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context, worker_progress_pump_scope
+from mindroom.tool_system.runtime_context import tool_runtime_context, worker_progress_pump_scope
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
 from mindroom.tool_system.worker_routing import (
@@ -78,6 +78,9 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     FakeCredentialsManager,
     make_conversation_reader_mock,
@@ -2879,7 +2882,7 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -2976,7 +2979,7 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
     expected_worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="code")
     assert expected_worker_key is not None
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -3086,7 +3089,7 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
     expected_worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="code")
     assert expected_worker_key is not None
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -4410,7 +4413,7 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
         captured_kwargs.update(kwargs)
         return object()
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -4463,7 +4466,7 @@ def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
         captured_snapshots.append(kwargs["kubernetes_tool_validation_snapshot"])
         return object()
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -4555,7 +4558,7 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
         assert worker_manager is fake_worker_manager
         return {}, None
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -4746,7 +4749,7 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -5466,7 +5469,7 @@ async def test_docker_backend_misconfiguration_raises_instead_of_running_locally
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",

@@ -112,6 +112,7 @@ class JournalDispatcher:
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
     runtime_generation: str = "unmanaged"
     on_own_membership_transition: Callable[[str, str, bool], Awaitable[None]] | None = None
+    on_live_room_membership_transition: Callable[[str, nio.RoomMemberEvent], Awaitable[None]] | None = None
     # Replaying a turn needs the agent fleet up, so the orchestrator releases
     # turn-backed replay separately from the rest of startup. Until it does,
     # those events stay pending; everything else drains immediately.
@@ -146,6 +147,7 @@ class JournalDispatcher:
             on_persist_failure=self.on_persist_failure or (lambda: None),
             on_delivery_recovery_needed=self.on_delivery_recovery_needed,
             on_own_membership_transition=self.on_own_membership_transition,
+            on_live_room_membership_transition=self.on_live_room_membership_transition,
         )
 
     def _remember_live_event(self, room: nio.MatrixRoom, event: nio.Event) -> None:
@@ -493,6 +495,14 @@ class JournalDispatcher:
         """Settle turn-backed events that produced no dispatch payload."""
         self._release_sources(event_ids)
         await self.store.settle_many(event_ids)
+
+    async def settle_running_event_intentionally_ignored(self) -> None:
+        """Settle the current callback's event before releasing an authorization fence."""
+        event = _RUNNING_EVENT.get()
+        if event is None:
+            msg = "A running event can only be settled inside its journal callback"
+            raise RuntimeError(msg)
+        await self.settle_intentionally_ignored_turn_sources((event.event_id,))
 
     def retry_turn_source(self, event_id: str) -> None:
         """Return one undelivered turn source to the worker."""

@@ -12,9 +12,10 @@ import nio
 import pytest_asyncio
 from nio.api import RelationshipType
 
-from mindroom.bot import AgentBot
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.event_journal import (
@@ -28,6 +29,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -42,6 +44,7 @@ from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
 
+    from mindroom.bot import AgentBot
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 
@@ -503,6 +506,7 @@ def _conversation_runtime(*, client: nio.AsyncClient | None = None) -> BotRuntim
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=True,
         orchestrator=None,
     )
@@ -554,11 +558,12 @@ class ThreadingBehaviorTestBase:
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
                 router=RouterConfig(model="default"),
+                authorization=AuthorizationConfig(default_room_access=True),
             ),
             tmp_path,
         )
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],

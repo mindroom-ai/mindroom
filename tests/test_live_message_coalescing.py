@@ -16,7 +16,6 @@ from structlog.testing import capture_logs
 
 from mindroom import coalescing
 from mindroom.attachments import _attachment_id_for_event, load_attachment, register_local_attachment
-from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent, is_coalescing_exempt_source_kind
 from mindroom.coalescing_batch import (
     CoalescingKey,
@@ -88,6 +87,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -111,6 +111,8 @@ from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_record
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
 
 
 def _coalescing_gate_is_idle(gate: CoalescingGate) -> bool:
@@ -153,7 +155,7 @@ def _make_bot(
         display_name="TestAgent",
         user_id=f"@mindroom_{agent_name}:localhost",
     )
-    bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
     wrap_extracted_collaborators(bot)
     replace_turn_controller_deps(

@@ -334,6 +334,7 @@ class JournalIngress:
     # ready for them, which the timeline callback cannot decide for itself.
     room_lifecycle_enabled: Callable[[], bool] = lambda: False
     on_event_admitted: Callable[[nio.MatrixRoom, nio.Event], None] = lambda _room, _event: None
+    on_live_room_membership_transition: Callable[[str, nio.RoomMemberEvent], Awaitable[None]] | None = None
     # A refused admission must also stop the sync checkpoint advancing past the
     # event, or the next process would never see it again.
     on_persist_failure: Callable[[], None] = lambda: None
@@ -408,6 +409,11 @@ class JournalIngress:
             )
             if isinstance(event, nio.RoomMemberEvent):
                 await self._apply_own_membership_transition(room.room_id, event, provenance)
+                if (
+                    provenance is nio.TimelineEventProvenance.LIVE
+                    and self.on_live_room_membership_transition is not None
+                ):
+                    await self.on_live_room_membership_transition(room.room_id, event)
         except DeliveryProjectionPendingError as error:
             self.on_delivery_recovery_needed()
             self.on_persist_failure()

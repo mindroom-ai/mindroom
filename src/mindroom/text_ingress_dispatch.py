@@ -19,7 +19,7 @@ from mindroom.constants import (
 from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.response_admission import ResponseAdmissionRefusedError
+from mindroom.response_admission import admitted_response_decision
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
     DispatchPipelineTiming,
@@ -103,45 +103,54 @@ async def dispatch_text_message(
         if prepared is None:
             return
         timing_scope_token = timing_scope_context.set(event_timing_scope(prepared.event.event_id))
-        if await _blocked_before_plan(
-            controller,
-            turn.room,
-            prepared,
+        async with admitted_response_decision(
+            controller.deps.runtime.response_admission_gate,
+            controller.deps.response_runner.wait_for_admission_or_shutdown,
         ):
-            return
-
-        message_attachment_ids, trusted_attachment_ids, router_extra_content = _attachment_parts(
-            prepared,
-            media_events=list(turn.media_events) or None,
-            requester_user_id=turn.requester_user_id,
-        )
-        if dispatch_timing is not None:
-            dispatch_timing.mark("dispatch_plan_start")
-        plan = await controller.deps.turn_policy.plan_turn(
-            turn.room,
-            prepared.event,
-            prepared.dispatch,
-            is_dm=await is_dm_room(controller._client(), turn.room.room_id),
-            has_active_response_for_target=controller.deps.response_runner.has_active_response_for_target,
-            extra_content=router_extra_content or None,
-            media_events=list(turn.media_events) or None,
-            router_event=turn.media_events[0]
-            if turn.media_events and len(prepared.handled_turn.source_event_ids) == 1
-            else turn.event,
-        )
-        if dispatch_timing is not None:
-            dispatch_timing.mark("dispatch_plan_ready")
-        await _apply_turn_plan(
-            controller,
-            turn.room,
-            prepared,
-            plan,
-            message_attachment_ids=message_attachment_ids,
-            trusted_attachment_ids=trusted_attachment_ids,
-            media_events=list(turn.media_events) or None,
-            turn_claim=turn_claim,
-            mark_claim_transferred=mark_claim_transferred,
-        )
+            if not controller.deps.turn_policy.can_reply_to_sender_in_room(
+                turn.requester_user_id,
+                turn.room.room_id,
+            ):
+                await controller.deps.visible_responses.settle_source_events_ignored(prepared.handled_turn)
+                return
+            if await _blocked_before_plan(
+                controller,
+                turn.room,
+                prepared,
+            ):
+                return
+            message_attachment_ids, trusted_attachment_ids, router_extra_content = _attachment_parts(
+                prepared,
+                media_events=list(turn.media_events) or None,
+                requester_user_id=turn.requester_user_id,
+            )
+            if dispatch_timing is not None:
+                dispatch_timing.mark("dispatch_plan_start")
+            plan = await controller.deps.turn_policy.plan_turn(
+                turn.room,
+                prepared.event,
+                prepared.dispatch,
+                is_dm=await is_dm_room(controller._client(), turn.room.room_id),
+                has_active_response_for_target=controller.deps.response_runner.has_active_response_for_target,
+                extra_content=router_extra_content or None,
+                media_events=list(turn.media_events) or None,
+                router_event=turn.media_events[0]
+                if turn.media_events and len(prepared.handled_turn.source_event_ids) == 1
+                else turn.event,
+            )
+            if dispatch_timing is not None:
+                dispatch_timing.mark("dispatch_plan_ready")
+            await _apply_turn_plan(
+                controller,
+                turn.room,
+                prepared,
+                plan,
+                message_attachment_ids=message_attachment_ids,
+                trusted_attachment_ids=trusted_attachment_ids,
+                media_events=list(turn.media_events) or None,
+                turn_claim=turn_claim,
+                mark_claim_transferred=mark_claim_transferred,
+            )
     finally:
         if not claim_transferred:
             controller.deps.turn_store.release_pending_turn_claim(turn_claim)
@@ -460,14 +469,11 @@ async def _run_admitted_router_relay(
     relay: Callable[[], Awaitable[None]],
 ) -> None:
     """Keep config application outside one router selection and relay delivery."""
-    admission_gate = controller.deps.runtime.response_admission_gate
-    while not admission_gate.admit():
-        if not await controller.deps.response_runner.wait_for_admission_or_shutdown():
-            raise ResponseAdmissionRefusedError
-    try:
+    async with admitted_response_decision(
+        controller.deps.runtime.response_admission_gate,
+        controller.deps.response_runner.wait_for_admission_or_shutdown,
+    ):
         await relay()
-    finally:
-        admission_gate.release()
 
 
 async def _execute_route_plan(

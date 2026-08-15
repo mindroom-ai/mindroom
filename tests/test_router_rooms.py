@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.bot import TeamBot, create_bot_for_entity
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
+from mindroom.bot import TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -16,6 +18,9 @@ from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.authorization_helpers import (
+    make_test_bot_for_entity,
+)
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -24,6 +29,12 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.identity_helpers import persist_entity_accounts
+
+
+def _router_membership_dependencies() -> tuple[AgentReplyMembershipIndex, AgentReplyMembershipSync]:
+    """Return one consistent shared index and router sync owner for factory tests."""
+    memberships = AgentReplyMembershipIndex()
+    return memberships, AgentReplyMembershipSync(memberships)
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -94,12 +105,15 @@ async def test_router_gets_all_configured_rooms(
     )
 
     # Create the router bot
-    router_bot = create_bot_for_entity(
+    memberships, membership_sync = _router_membership_dependencies()
+    router_bot = make_test_bot_for_entity(
         ROUTER_AGENT_NAME,
         router_user,
         config_with_rooms,
         runtime_paths_for(config_with_rooms),
         tmp_path,
+        agent_reply_memberships=memberships,
+        agent_reply_membership_sync=membership_sync,
     )
 
     # Check that the router has all rooms
@@ -135,7 +149,7 @@ def test_team_bot_uses_defaults_streaming_setting(
         password=TEST_PASSWORD,
     )
 
-    team_bot = create_bot_for_entity(
+    team_bot = make_test_bot_for_entity(
         "team1",
         team_user,
         config_with_rooms,
@@ -169,7 +183,7 @@ def test_team_bot_uses_persisted_member_usernames(
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
-    team_bot = create_bot_for_entity(
+    team_bot = make_test_bot_for_entity(
         "team1",
         AgentMatrixUser(
             agent_name="team1",
@@ -238,12 +252,15 @@ async def test_router_joins_rooms_on_start(
     )
 
     # Create and configure the router bot
-    router_bot = create_bot_for_entity(
+    memberships, membership_sync = _router_membership_dependencies()
+    router_bot = make_test_bot_for_entity(
         ROUTER_AGENT_NAME,
         router_user,
         config_with_rooms,
         runtime_paths_for(config_with_rooms),
         tmp_path,
+        agent_reply_memberships=memberships,
+        agent_reply_membership_sync=membership_sync,
     )
 
     # Mock the client

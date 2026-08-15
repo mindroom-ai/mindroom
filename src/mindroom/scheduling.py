@@ -31,6 +31,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 
 if TYPE_CHECKING:
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
@@ -177,6 +178,7 @@ class SchedulingRuntime:
     runtime_paths: RuntimePaths
     room: nio.MatrixRoom
     conversation_reader: ConversationReader
+    agent_reply_memberships: AgentReplyMembershipIndex
     matrix_admin: HookMatrixAdmin | None = None
 
 
@@ -1372,6 +1374,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         scheduled_by,
         config,
         runtime_paths,
+        runtime.agent_reply_memberships,
     )
 
     available_responders: list[MatrixID] = []
@@ -1387,6 +1390,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 scheduled_by,
                 config,
                 runtime_paths,
+                runtime.agent_reply_memberships,
                 available_responders_in_room=sender_visible_room_responders,
             )
 

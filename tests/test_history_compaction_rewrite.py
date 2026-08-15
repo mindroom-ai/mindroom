@@ -56,7 +56,10 @@ from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_na
 from mindroom.message_target import MessageTarget
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     FakeModel,
     make_conversation_reader_mock,
@@ -1066,7 +1069,7 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
 
     registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [matching])])
     client = AsyncMock()
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="router",
         target=MessageTarget(
             room_id="!room:localhost",

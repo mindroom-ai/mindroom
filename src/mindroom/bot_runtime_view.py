@@ -11,6 +11,7 @@ from mindroom.response_admission import ResponseAdmissionGate
 if TYPE_CHECKING:
     import nio
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.runtime_protocols import OrchestratorRuntime
@@ -27,6 +28,9 @@ class BotRuntimeView(Protocol):
 
     @property
     def runtime_paths(self) -> RuntimePaths: ...  # noqa: D102
+
+    @property
+    def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102
 
     @property
     def enable_streaming(self) -> bool: ...  # noqa: D102
@@ -48,6 +52,7 @@ class BotRuntimeState:
     client: nio.AsyncClient | None
     config: Config
     runtime_paths: RuntimePaths
+    agent_reply_memberships: AgentReplyMembershipIndex
     enable_streaming: bool
     orchestrator: OrchestratorRuntime | None
     # Orchestrator-owned and shared across bots. Lives here, not on ResponseRunner,

@@ -36,7 +36,10 @@ from mindroom.hooks.execution import emit, emit_collect, emit_final_response_tra
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, emit_custom_event, tool_runtime_context
+from mindroom.tool_system.runtime_context import emit_custom_event, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -550,7 +553,7 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
         room_id="!todo-room:localhost",
         servers=["localhost"],
     )
-    tool_context = ToolRuntimeContext(
+    tool_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget(
             room_id="!room:localhost",

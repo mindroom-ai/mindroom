@@ -25,6 +25,7 @@ import nio
 import pytest
 
 from mindroom import constants, interactive
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.attachments import register_local_attachment
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError
@@ -81,10 +82,13 @@ from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
-from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps
+from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
 from mindroom.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
+from tests.authorization_helpers import (
+    make_test_turn_policy_deps,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -98,7 +102,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable, Mapping
+    from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping
     from pathlib import Path
 
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
@@ -139,12 +143,18 @@ class _RecordingResponseRunner:
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     recovery_proof_checks: list[Callable[[], bool]] = field(default_factory=list)
     failure_callbacks: list[Callable[[], None] | None] = field(default_factory=list)
+    admission_waiter: Callable[[], Awaitable[bool]] | None = None
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
         return frozenset()
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:  # noqa: ARG002
         return False
+
+    async def wait_for_admission_or_shutdown(self) -> bool:
+        """Wait through a replacement when a focused test closes admission."""
+        assert self.admission_waiter is not None
+        return await self.admission_waiter()
 
     def reserve_waiting_human_message(
         self,
@@ -247,6 +257,9 @@ class _SpyTurnPolicy:
 
     def can_reply_to_sender(self, sender_id: str) -> bool:
         return self.inner.can_reply_to_sender(sender_id)
+
+    def can_reply_to_sender_in_room(self, sender_id: str, room_id: str) -> bool:
+        return self.inner.can_reply_to_sender_in_room(sender_id, room_id)
 
     def responder_availability(self) -> ResponderAvailability:
         return self.inner.responder_availability()
@@ -377,6 +390,7 @@ def _build_harness(
         client=make_matrix_client_mock(user_id=matrix_id.full_id),
         config=config,
         runtime_paths=runtime_paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=True,
         orchestrator=None,
     )
@@ -444,7 +458,7 @@ def _build_harness(
     )
     policy = _SpyTurnPolicy(
         TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=logger,
                 runtime_paths=runtime_paths,
@@ -547,6 +561,7 @@ def _build_harness(
                     delivery_gateway=cast("DeliveryGateway", gateway),
                     turn_store=turn_store,
                     ingress=ingress_validator,
+                    wait_for_admission_or_shutdown=runner.wait_for_admission_or_shutdown,
                 ),
             ),
             visible_responses=visible_responses,
@@ -1526,6 +1541,214 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     assert metadata is not None
     assert metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] == "general"
     assert harness.turn_store.is_handled(event.event_id) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_policy_planning_waits_for_config_replacement_before_authorizing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn prechecked before reload must plan against the replacement policy."""
+    runtime_paths = test_runtime_paths(tmp_path / "runtime")
+    old_config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={"general": [_SENDER]},
+            ),
+        ),
+        runtime_paths,
+    )
+    new_config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={"general": []},
+            ),
+        ),
+        runtime_paths,
+    )
+    harness = _build_harness(old_config, tmp_path)
+    room = _room_with_members(old_config, "general")
+    event = _text_event("please answer after the reload")
+    admission_gate = harness.controller.deps.runtime.response_admission_gate
+    assert admission_gate.close_if_idle()
+
+    plan_started = asyncio.Event()
+    gate_wait_started = asyncio.Event()
+    real_plan_turn = harness.policy.plan_turn
+
+    async def observed_plan_turn(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        plan_started.set()
+        return await real_plan_turn(*args, **kwargs)
+
+    async def wait_for_replacement() -> bool:
+        gate_wait_started.set()
+        await admission_gate.wait_until_open()
+        return True
+
+    monkeypatch.setattr(harness.policy, "plan_turn", observed_plan_turn)
+    harness.runner.admission_waiter = wait_for_replacement
+    delivery_task = asyncio.create_task(harness.deliver(room, event))
+    await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
+
+    assert not plan_started.is_set()
+    runtime = cast("BotRuntimeState", harness.controller.deps.runtime)
+    runtime.config = new_config
+    admission_gate.reopen()
+    await delivery_task
+
+    assert harness.policy.plan_turn_calls == 0
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_ingress_denial_waits_for_config_replacement_before_settling(
+    tmp_path: Path,
+) -> None:
+    """A transient pre-publication denial must not terminally discard the turn."""
+    runtime_paths = test_runtime_paths(tmp_path / "runtime")
+    old_config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={"general": []},
+            ),
+        ),
+        runtime_paths,
+    )
+    new_config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={"general": [_SENDER]},
+            ),
+        ),
+        runtime_paths,
+    )
+    harness = _build_harness(old_config, tmp_path)
+    room = _room_with_members(old_config, "general")
+    event = _text_event("authorize me after the reload")
+    admission_gate = harness.controller.deps.runtime.response_admission_gate
+    assert admission_gate.close_if_idle()
+
+    gate_wait_started = asyncio.Event()
+
+    async def wait_for_replacement() -> bool:
+        gate_wait_started.set()
+        await admission_gate.wait_until_open()
+        return True
+
+    harness.runner.admission_waiter = wait_for_replacement
+    delivery_task = asyncio.create_task(harness.deliver(room, event))
+    try:
+        await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
+        assert not delivery_task.done()
+        runtime = cast("BotRuntimeState", harness.controller.deps.runtime)
+        runtime.config = new_config
+    finally:
+        admission_gate.reopen()
+        await delivery_task
+
+    assert len(harness.runner.requests) == 1
+    assert harness.ignored_dispatch_sources == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_command_waits_for_config_replacement_and_rechecks_authorization(
+    tmp_path: Path,
+) -> None:
+    """A command prechecked before reload must not execute under a replacement deny policy."""
+    runtime_paths = test_runtime_paths(tmp_path / "runtime")
+    old_config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={ROUTER_AGENT_NAME: [_SENDER]},
+            ),
+        ),
+        runtime_paths,
+    )
+    new_config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={ROUTER_AGENT_NAME: []},
+            ),
+        ),
+        runtime_paths,
+    )
+    harness = _build_harness(old_config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(old_config, ROUTER_AGENT_NAME, "general")
+    event = _text_event("!help", event_id="$command-during-reload:localhost")
+    admission_gate = harness.controller.deps.runtime.response_admission_gate
+    assert admission_gate.close_if_idle()
+
+    gate_wait_started = asyncio.Event()
+
+    async def wait_for_replacement() -> bool:
+        gate_wait_started.set()
+        await admission_gate.wait_until_open()
+        return True
+
+    harness.runner.admission_waiter = wait_for_replacement
+    delivery_task = asyncio.create_task(harness.deliver(room, event))
+    await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
+
+    assert harness.gateway.sent == []
+    runtime = cast("BotRuntimeState", harness.controller.deps.runtime)
+    runtime.config = new_config
+    admission_gate.reopen()
+    await delivery_task
+
+    assert harness.gateway.sent == []
+    assert harness.ignored_dispatch_sources == []
+    assert harness.turn_store.is_handled(event.event_id)
+
+
+@pytest.mark.asyncio
+async def test_policy_decision_reserves_config_until_response_handoff(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reload cannot commit between reply authorization and runner handoff."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("keep this decision atomic")
+    pending_write_started = asyncio.Event()
+    continue_pending_write = asyncio.Event()
+    real_record_pending_turn = harness.turn_store.record_pending_turn
+
+    async def hold_pending_write(turn_record: TurnRecord) -> TurnRecord | None:
+        pending_write_started.set()
+        await continue_pending_write.wait()
+        return await real_record_pending_turn(turn_record)
+
+    monkeypatch.setattr(harness.turn_store, "record_pending_turn", hold_pending_write)
+    delivery_task = asyncio.create_task(harness.deliver(room, event))
+    await asyncio.wait_for(pending_write_started.wait(), timeout=1)
+
+    admission_gate = harness.controller.deps.runtime.response_admission_gate
+    reload_closed_gate = admission_gate.close_if_idle()
+    try:
+        assert not reload_closed_gate
+    finally:
+        if reload_closed_gate:
+            admission_gate.reopen()
+        continue_pending_write.set()
+        await delivery_task
+
+    assert len(harness.runner.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -2743,6 +2966,75 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 
     assert harness.turn_store.is_handled(selection.question_event_id) is True
     assert harness.turn_store.is_handled("$selection:localhost") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_interactive_selection_waits_for_reload_and_rechecks_authorization(
+    tmp_path: Path,
+) -> None:
+    """A queued selection must not acknowledge or answer after its requester is revoked."""
+    runtime_paths = test_runtime_paths(tmp_path / "runtime")
+    old_config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={"general": [_SENDER]},
+            ),
+        ),
+        runtime_paths,
+    )
+    new_config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            authorization=AuthorizationConfig(
+                default_room_access=True,
+                agent_reply_permissions={"general": []},
+            ),
+        ),
+        runtime_paths,
+    )
+    harness = _build_harness(old_config, tmp_path)
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(old_config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    source_event_id = "$selection-during-reload:localhost"
+    admission_gate = harness.controller.deps.runtime.response_admission_gate
+    assert admission_gate.close_if_idle()
+    gate_wait_started = asyncio.Event()
+
+    async def wait_for_replacement() -> bool:
+        gate_wait_started.set()
+        await admission_gate.wait_until_open()
+        return True
+
+    harness.runner.admission_waiter = wait_for_replacement
+    selection_task = asyncio.create_task(
+        harness.controller._handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id=_SENDER,
+            source_event_id=source_event_id,
+        ),
+    )
+    await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
+
+    assert harness.gateway.sent == []
+    runtime = cast("BotRuntimeState", harness.controller.deps.runtime)
+    runtime.config = new_config
+    admission_gate.reopen()
+    await selection_task
+
+    assert harness.gateway.sent == []
+    assert harness.runner.requests == []
+    assert harness.ignored_dispatch_sources == [(source_event_id,)]
 
 
 @pytest.mark.asyncio

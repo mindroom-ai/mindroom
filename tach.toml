@@ -24,6 +24,14 @@ exclude = ["**/*__pycache__", "**/*egg-info", "**/docs", "**/tests", "**/venv"]
 source_roots = ["src"]
 
 [[modules]]
+path = "mindroom.agent_reply_membership_sync"
+depends_on = ["mindroom.matrix.sync_loop"]
+visibility = [
+    "mindroom.bot",
+    "mindroom.orchestrator",
+]
+
+[[modules]]
 path = "mindroom.chunking"
 depends_on = []
 
@@ -300,6 +308,7 @@ depends_on = [
     "mindroom.dispatch_callback_outcome",
     "mindroom.entity_resolution",
     "mindroom.event_journal",
+    "mindroom.response_admission",
     "mindroom.user_stop_reconciliation",
 ]
 visibility = ["mindroom.bot"]
@@ -819,6 +828,7 @@ depends_on = [
     "mindroom.external_triggers.executor",
     "mindroom.external_triggers.models",
     "mindroom.external_triggers.replay_store",
+    "mindroom.response_admission",
 ]
 
 [[modules]]
@@ -1576,6 +1586,7 @@ depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindro
 [[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
+    "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
     "mindroom.event_journal_open",
     "mindroom.api.main",
@@ -1656,14 +1667,18 @@ depends_on = [
 path = "mindroom.response_admission"
 depends_on = []
 visibility = [
+    "mindroom.api.external_triggers",
     "mindroom.bot",
     "mindroom.bot_runtime_view",
+    "mindroom.matrix_rtc.call_manager",
     "mindroom.orchestration.config_lifecycle",
     "mindroom.orchestrator",
+    "mindroom.reaction_dispatch",
     "mindroom.response_runner",
     "mindroom.sync_restart_retry",
     "mindroom.text_ingress_dispatch",
     "mindroom.turn_controller",
+    "mindroom.visible_voice_echo",
 ]
 
 [[modules]]
@@ -2244,7 +2259,10 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.sync_loop"
 depends_on = ["mindroom.membership_models"]
-visibility = ["mindroom.bot"]
+visibility = [
+    "mindroom.agent_reply_membership_sync",
+    "mindroom.bot",
+]
 
 [[modules]]
 path = "mindroom.matrix.to_device"
@@ -2679,6 +2697,7 @@ depends_on = [
     "mindroom.matrix_rtc.transcript",
     "mindroom.matrix_rtc.voice_agent",
     "mindroom.model_defaults",
+    "mindroom.response_admission",
     "mindroom.session_ids",
 ]
 
@@ -2821,6 +2840,7 @@ depends_on = [
     "mindroom.post_response_effects",
     "mindroom.reaction_dispatch",
     "mindroom.matrix_delivery",
+    "mindroom.response_admission",
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.scheduling",
@@ -3530,6 +3550,7 @@ depends_on = [
     "mindroom.dispatch_handoff",
     "mindroom.dispatch_recovery_context",
     "mindroom.dispatch_source",
+    "mindroom.response_admission",
     "mindroom.turn_origin",
 ]
 visibility = [
@@ -4017,7 +4038,9 @@ from = ["mindroom.memory"]
 [[interfaces]]
 expose = [
     "OrchestratorRuntime",
+    "SupportsAgentReplyMemberships",
     "SupportsClientConfig",
+    "SupportsClientConfigMemberships",
     "SupportsClientConfigOrchestrator",
     "SupportsConfig",
     "SupportsConfigOrchestrator",
@@ -4133,6 +4156,7 @@ expose = [
     "olm_store_dir",
     "olm_store_exists",
     "restore_login",
+    "set_before_sync_response_callback",
 ]
 from = ["mindroom.matrix.client_session"]
 

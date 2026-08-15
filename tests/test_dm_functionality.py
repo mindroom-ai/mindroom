@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
@@ -17,6 +16,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     agent_response_should_respond,
@@ -214,7 +214,7 @@ class TestDMMessageContext:
             display_name="Test Agent",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
@@ -276,7 +276,7 @@ class TestDMIntegration:
             password=TEST_PASSWORD,
         )
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
@@ -331,7 +331,7 @@ class TestDMIntegration:
         )
 
         # Important: bot is NOT configured for the DM room
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
@@ -428,7 +428,7 @@ class TestDMIntegration:
         )
 
         # Agent is NOT configured for any rooms
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,

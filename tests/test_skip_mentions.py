@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY
@@ -30,6 +29,7 @@ from mindroom.hooks import MessageEnvelope, ResponseDraft
 from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -46,6 +46,8 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
 
 
 def test_should_skip_mentions_with_metadata() -> None:
@@ -91,7 +93,7 @@ def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:
         )
     runtime_paths = runtime_paths_for(config)
     current_ids = entity_ids(config, runtime_paths)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="email_agent",
             password=TEST_PASSWORD,

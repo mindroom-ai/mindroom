@@ -30,6 +30,9 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import bind_runtime_paths, make_latest_thread_event_id_mock, make_relation_lookup
 
 if TYPE_CHECKING:
@@ -58,7 +61,7 @@ def _tool_context(
     )
     conversation_reader = AsyncMock()
     conversation_reader.latest_thread_event_id = make_latest_thread_event_id_mock()
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="openclaw",
         target=MessageTarget.resolve(
             room_id="!room:localhost",

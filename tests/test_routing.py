@@ -14,13 +14,13 @@ import pytest
 import mindroom.routing
 import mindroom.thread_utils
 from mindroom.agents import describe_agent
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -32,6 +32,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
+    from mindroom.bot import AgentBot
     from mindroom.matrix.client import ResolvedVisibleMessage
 
 
@@ -111,7 +112,7 @@ def _agent_bot(*args: object, **kwargs: object) -> AgentBot:
     config = kwargs["config"]
     assert isinstance(config, Config)
     kwargs["runtime_paths"] = runtime_paths_for(config)
-    return AgentBot(*args, **kwargs)
+    return make_test_agent_bot(*args, **kwargs)
 
 
 def _agent_description_config() -> Config:

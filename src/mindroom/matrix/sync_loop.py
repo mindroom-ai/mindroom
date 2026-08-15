@@ -71,16 +71,24 @@ class OwnRoomMembership:
     identifies a visible transition; the response token identifies a leave
     section whose truncated timeline omitted it. ``rejoined_after`` records
     where the same response proves a later membership already began.
+    ``invited_room_ids`` also contains other non-joined or unresolved initial
+    Sliding Sync states because all of them require the same continuity fence.
     """
 
     joined_room_ids: frozenset[str]
     left_room_ids: frozenset[str]
+    invited_room_ids: frozenset[str]
     departures: tuple[ReportedDeparture, ...]
 
     @property
     def departed_room_ids(self) -> frozenset[str]:
         """Return the rooms this response reported at least one departure from."""
         return frozenset(departure.room_id for departure in self.departures)
+
+    @property
+    def continuity_lost_room_ids(self) -> frozenset[str]:
+        """Return rooms whose prior joined-members view is no longer authoritative."""
+        return self.departed_room_ids | self.invited_room_ids
 
 
 def own_membership_from_sync(response: nio.SyncResponse, *, self_user_id: str) -> OwnRoomMembership:
@@ -113,6 +121,7 @@ def own_membership_from_sync(response: nio.SyncResponse, *, self_user_id: str) -
     return OwnRoomMembership(
         joined_room_ids=frozenset(response.rooms.join),
         left_room_ids=left_room_ids,
+        invited_room_ids=frozenset(response.rooms.invite),
         departures=tuple(departures),
     )
 
@@ -129,10 +138,11 @@ def own_membership_from_sliding_sync(
     """
     joined_room_ids: set[str] = set()
     left_room_ids: set[str] = set()
+    invited_room_ids: set[str] = set()
     departures: list[ReportedDeparture] = []
     for room_id, room in response.rooms.items():
-        is_invite = room.membership == "invite" or (room.membership is None and bool(room.stripped_state))
-        final_membership_is_joined = room.membership not in _DEPARTED_MEMBERSHIPS and not is_invite
+        membership_unchanged = room.membership is None and not room.initial and not room.stripped_state
+        final_membership_is_joined = room.membership == "join" or membership_unchanged
         observed = _own_departures_in(
             room_id,
             room.timeline,
@@ -150,12 +160,15 @@ def own_membership_from_sliding_sync(
                 )
             departures.extend(observed)
             continue
-        if not is_invite:
+        if final_membership_is_joined:
             joined_room_ids.add(room_id)
+        else:
+            invited_room_ids.add(room_id)
         departures.extend(observed)
     return OwnRoomMembership(
         joined_room_ids=frozenset(joined_room_ids),
         left_room_ids=frozenset(left_room_ids),
+        invited_room_ids=frozenset(invited_room_ids),
         departures=tuple(departures),
     )
 
