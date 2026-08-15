@@ -149,7 +149,18 @@ def _ensure_private_directory(path: Path, *, harden_existing: bool = False) -> N
             if directory_path not in directories_to_chmod:
                 directories_to_chmod.append(directory_path)
     for directory_path in directories_to_chmod:
-        create_directory_durable(directory_path, mode=0o700)
+        try:
+            create_directory_durable(directory_path, mode=0o700)
+        except PermissionError as exc:
+            raise _private_permissions_error(directory_path, 0o700) from exc
+
+
+def _private_permissions_error(path: Path, mode: int) -> PermissionError:
+    """Build actionable ownership guidance for one credential permission failure."""
+    return PermissionError(
+        f"Cannot secure credential path '{path}' with mode {mode:#05o}. "
+        "Ensure the MindRoom OS user owns this path and can change its permissions.",
+    )
 
 
 def _set_private_permissions(path: Path, mode: int) -> None:
@@ -157,11 +168,7 @@ def _set_private_permissions(path: Path, mode: int) -> None:
     try:
         path.chmod(mode)
     except PermissionError as exc:
-        msg = (
-            f"Cannot secure credential path '{path}' with mode {mode:#05o}. "
-            "Ensure the MindRoom OS user owns this path and can change its permissions."
-        )
-        raise PermissionError(msg) from exc
+        raise _private_permissions_error(path, mode) from exc
 
 
 def _credential_owned_directory_chain(path: Path) -> list[Path]:

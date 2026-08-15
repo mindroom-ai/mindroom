@@ -390,7 +390,7 @@ async def _update_tools_statuses(
             credential_service = context.auth_provider_credential_services.get(auth_provider, auth_provider)
             provider_creds = (
                 await _load_oauth_provider_credentials(provider, context, oauth_credentials_cache)
-                if provider is not None
+                if provider is not None and (context.status_authoritative or use_request_target)
                 else get_credentials(
                     credential_service,
                     worker_target=context.worker_target,

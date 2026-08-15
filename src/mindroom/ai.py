@@ -2152,6 +2152,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     state.paused_run_event,
                     fallback_session_id=session_id,
                     fallback_run_id=attempt.attempt_run_id,
+                    additional_observed_tools=state.completed_tool_executions,
                 )
                 if paused_attempt is not None:
                     yield AttemptResolved(

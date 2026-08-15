@@ -40,6 +40,7 @@ from mindroom.oauth.credential_lifecycle import (
     oauth_credential_generation,
     reset_oauth_credentials,
 )
+from mindroom.oauth.google_drive import GOOGLE_DRIVE_READ_OAUTH_SCOPES
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthTokenResult
 from mindroom.oauth.service import oauth_credentials_worker_target
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -489,6 +490,101 @@ def test_google_forced_refresh_rejects_unexpired_access_only_snapshot(runtime_pa
 
     assert tool._consume_oauth_connection_required() == (True, None)
     assert tool.creds is None
+
+
+def test_google_drive_refreshes_expired_readonly_grant(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Drive's supported read-only grant must reach provider refresh before read authentication."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    worker_target = resolve_worker_target(
+        "user_agent",
+        "general",
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        ),
+    )
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "expired-readonly-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 1.0,
+            "scopes": list(GOOGLE_DRIVE_READ_OAUTH_SCOPES),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    def refresh(credentials: GoogleOAuthCredentials, _request: object) -> None:
+        credentials.token = "refreshed-readonly-token"  # noqa: S105
+        credentials.expiry = datetime(2100, 1, 1, tzinfo=UTC)
+
+    monkeypatch.setattr(GoogleOAuthCredentials, "refresh", refresh)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    assert tool._ensure_structured_auth() is None
+    assert tool.creds.token == "refreshed-readonly-token"  # noqa: S105
+
+
+def test_google_forced_refresh_rejects_unchanged_readonly_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """A forced retry cannot replay the same provider-rejected read-only bearer."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    worker_target = resolve_worker_target(
+        "user_agent",
+        "general",
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        ),
+    )
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "rejected-readonly-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GOOGLE_DRIVE_READ_OAUTH_SCOPES),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    monkeypatch.setattr(GoogleOAuthCredentials, "refresh", lambda _credentials, _request: None)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    with pytest.raises(RefreshError, match="OAuth credential refresh failed"):
+        tool.creds.refresh(object())
 
 
 def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(

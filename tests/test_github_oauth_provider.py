@@ -15,7 +15,11 @@ from authlib.common.errors import AuthlibBaseError
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, refresh_oauth_credentials
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialContext,
+    load_oauth_credentials_snapshot,
+    refresh_oauth_credentials,
+)
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import OAuthRefreshRejectedError
 
@@ -143,22 +147,19 @@ def test_github_refresh_persists_rotated_access_and_refresh_tokens(tmp_path: Pat
         "token_type": "bearer",
     }
 
+    context = OAuthCredentialContext(
+        provider=_provider(),
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
     with patch(
         "mindroom.oauth.providers.AsyncOAuth2Client.refresh_token",
         new=AsyncMock(return_value=refresh_response),
     ):
-        refreshed = asyncio.run(
-            refresh_oauth_credentials(
-                OAuthCredentialContext(
-                    provider=_provider(),
-                    runtime_paths=runtime_paths,
-                    credentials_manager=credentials_manager,
-                    worker_target=None,
-                ),
-            ),
-        )
+        refreshed = asyncio.run(refresh_oauth_credentials(context))
 
-    stored = credentials_manager.load_credentials("github_oauth")
+    stored = asyncio.run(load_oauth_credentials_snapshot(context)).credentials
     assert refreshed is not None
     assert refreshed["token"] == "rotated-access"  # noqa: S105
     assert refreshed["refresh_token"] == "rotated-refresh"  # noqa: S105

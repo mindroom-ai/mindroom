@@ -1498,6 +1498,64 @@ async def test_mcp_manager_allows_same_oauth_typed_tools_for_multiple_requesters
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_scopes_catalog_collision_failure_to_one_requester(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One requester's dynamic catalog cannot poison another requester's session."""
+    _patch_manager(monkeypatch)
+    runtime_paths = _runtime_paths(tmp_path)
+    alice_target = _worker_target("@alice:example.test")
+    bob_target = _worker_target("@bob:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, alice_target, "alice-token")
+    _save_mcp_oauth_credentials(runtime_paths, bob_target, "bob-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+
+    class _FakeToolkit:
+        def __init__(self) -> None:
+            self.functions = {"demo_danger": object()}
+            self.async_functions = {}
+            self.tools = ()
+
+    monkeypatch.setattr("mindroom.mcp.manager.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {"demo": _oauth_mcp_config().model_dump(exclude_none=True)},
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["shell", "mcp_demo"],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+
+    _FakeClientSession.tool_list = [_tool("danger")]
+    with pytest.raises(MCPProtocolError, match="demo_danger"):
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=alice_target,
+        )
+
+    _FakeClientSession.tool_list = [_tool("echo")]
+    bob_catalog = await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=bob_target,
+    )
+
+    assert [tool.function_name for tool in bob_catalog.tools] == ["demo_echo"]
+    assert manager._states["demo"].last_error is None
+    assert manager.failed_server_ids() == set()
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_retires_requester_oauth_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1733,11 +1791,11 @@ async def test_mcp_manager_preserves_empty_tool_arguments(
 
 
 @pytest.mark.asyncio
-async def test_mcp_manager_reconnects_after_call_failure(
+async def test_mcp_manager_reconnects_for_future_calls_without_replaying_ambiguous_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Reconnect once when a tool call fails on a stale transport."""
+    """Reconnect the transport but require an explicit retry after ambiguous dispatch."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     _FakeClientSession.planned_tool_results = [
@@ -1747,8 +1805,9 @@ async def test_mcp_manager_reconnects_after_call_failure(
     manager = MCPServerManager(_runtime_paths(tmp_path))
     config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
     await manager.sync_servers(config)
-    result = await manager.call_tool("demo", "echo", {"value": "ping"})
-    assert result.content == "pong"
+    with pytest.raises(MCPConnectionError, match="outcome is unknown; retry manually"):
+        await manager.call_tool("demo", "echo", {"value": "ping"})
+    assert _FakeClientSession.call_tool_invocation_count == 1
     assert len(_FakeClientSession.sessions) == 2
 
 
@@ -1769,9 +1828,10 @@ async def test_mcp_manager_closes_session_context_in_owner_task_during_reconnect
     config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
 
     await asyncio.create_task(manager.sync_servers(config))
-    result = await manager.call_tool("demo", "echo", {"value": "ping"})
+    with pytest.raises(MCPConnectionError, match="outcome is unknown; retry manually"):
+        await manager.call_tool("demo", "echo", {"value": "ping"})
 
-    assert result.content == "pong"
+    assert _FakeClientSession.call_tool_invocation_count == 1
     assert _FakeClientSession.sessions[0].closed is True
     assert len(_FakeClientSession.sessions) == 2
 
@@ -1810,9 +1870,10 @@ async def test_mcp_manager_reconnect_notifies_when_catalog_changes(
         CallToolResult(content=[mcp_types.TextContent(type="text", text="pong")]),
     ]
 
-    result = await manager.call_tool("demo", "echo", {"value": "ping"})
+    with pytest.raises(MCPConnectionError, match="outcome is unknown; retry manually"):
+        await manager.call_tool("demo", "echo", {"value": "ping"})
 
-    assert result.content == "pong"
+    assert _FakeClientSession.call_tool_invocation_count == 1
     assert catalog_changes == ["demo"]
     assert [tool.remote_name for tool in manager.get_catalog("demo").tools] == ["echo", "ping"]
 
@@ -2076,6 +2137,38 @@ async def test_mcp_manager_shutdown_fences_catalog_publication_after_discovery(
     assert captured_state.connected is False
 
 
+@pytest.mark.asyncio
+async def test_mcp_manager_shutdown_waits_for_state_already_removed_for_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shutdown must retain ownership of a state popped before its awaited drain."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    await manager.sync_servers(_ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")}))
+    drain_started = asyncio.Event()
+    allow_drain = asyncio.Event()
+    original_disconnect = manager._disconnect_state_when_idle
+
+    async def delayed_disconnect(state: MCPServerState) -> None:
+        drain_started.set()
+        await allow_drain.wait()
+        await original_disconnect(state)
+
+    monkeypatch.setattr(manager, "_disconnect_state_when_idle", delayed_disconnect)
+    removal_task = asyncio.create_task(manager._remove_server("demo"))
+    await drain_started.wait()
+    shutdown_task = asyncio.create_task(manager.shutdown())
+    await asyncio.sleep(0)
+
+    assert not shutdown_task.done()
+    allow_drain.set()
+    await removal_task
+    await shutdown_task
+    assert _FakeClientSession.sessions[0].closed is True
+
+
 def test_discovery_retry_delay_saturates_for_long_outages() -> None:
     """The backoff delay must stay at the cap for arbitrarily long outages instead of overflowing."""
     delays = [_discovery_retry_delay_seconds(failures) for failures in (1, 2, 3, 4, 5)]
@@ -2130,11 +2223,11 @@ async def test_mcp_manager_paginates_catalog_discovery(
 
 
 @pytest.mark.asyncio
-async def test_mcp_manager_deduplicates_concurrent_reconnects(
+async def test_mcp_manager_deduplicates_reconnects_without_replaying_concurrent_calls(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Reconnect only once when multiple in-flight callers hit the same stale transport."""
+    """Reconnect once, but never replay ambiguous concurrent remote dispatches."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     _FakeClientSession.parallel_call_gate = asyncio.Event()
@@ -2150,12 +2243,14 @@ async def test_mcp_manager_deduplicates_concurrent_reconnects(
         {"demo": MCPServerConfig(transport="stdio", command="npx", max_concurrent_calls=2)},
     )
     await manager.sync_servers(config)
-    first_result, second_result = await asyncio.gather(
+    results = await asyncio.gather(
         manager.call_tool("demo", "echo", {"value": "ping-1"}),
         manager.call_tool("demo", "echo", {"value": "ping-2"}),
+        return_exceptions=True,
     )
-    assert first_result.content == "pong"
-    assert second_result.content == "pong"
+    assert all(isinstance(result, MCPConnectionError) for result in results)
+    assert all("outcome is unknown; retry manually" in str(result) for result in results)
+    assert _FakeClientSession.call_tool_invocation_count == 2
     assert len(_FakeClientSession.sessions) == 2
 
 
@@ -2983,8 +3078,10 @@ async def test_mcp_manager_marks_oauth_typed_function_name_collisions_as_failed(
             worker_target=worker_target,
         )
 
-    assert manager.failed_server_ids() == {"demo"}
-    assert manager._states["demo"].last_error is not None
+    assert manager.failed_server_ids() == set()
+    assert manager._states["demo"].last_error is None
+    scoped_error = next(iter(manager._scoped_states.values())).last_error
+    assert isinstance(scoped_error, MCPProtocolError)
 
 
 @pytest.mark.asyncio
@@ -3025,8 +3122,9 @@ async def test_mcp_manager_marks_oauth_typed_bridge_function_name_collisions_as_
             worker_target=worker_target,
         )
 
-    assert manager.failed_server_ids() == {"demo"}
-    error = manager._states["demo"].last_error
+    assert manager.failed_server_ids() == set()
+    assert manager._states["demo"].last_error is None
+    error = next(iter(manager._scoped_states.values())).last_error
     assert isinstance(error, MCPProtocolError)
     assert "collides within server 'demo'" in str(error)
 
@@ -3092,6 +3190,41 @@ async def test_mcp_manager_cancellation_closes_transport_during_discovery(
         await sync_task
 
     assert _FakeClientSession.sessions
+    assert _FakeClientSession.sessions[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_cancellation_closes_transport_after_discovery_before_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancelling lease validation or catalog publication cannot orphan a discovered session."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+    discovered = asyncio.Event()
+    original_connect = manager._connect_and_discover
+
+    async def observed_connect(
+        state: MCPServerState,
+        *,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> MCPServerCatalog:
+        catalog = await original_connect(state, auth_headers=auth_headers)
+        discovered.set()
+        return catalog
+
+    monkeypatch.setattr(manager, "_connect_and_discover", observed_connect)
+    await manager._catalog_validation_lock.acquire()
+    sync_task = asyncio.create_task(manager.sync_servers(config))
+    await discovered.wait()
+    sync_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await sync_task
+
+    manager._catalog_validation_lock.release()
     assert _FakeClientSession.sessions[0].closed is True
 
 

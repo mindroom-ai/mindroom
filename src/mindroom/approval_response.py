@@ -348,10 +348,11 @@ class ApprovalResponseCoordinator:
             current = await self.request_failure(current, reason)
             if current is None:
                 return False
+        persisted_reason = current.failure_reason or reason
         manager = approval_manager.get_approval_store()
         if manager is None or not await manager.expire_continuation_cards(current.approval_id):
             return False
-        visible_reason = _USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else reason
+        visible_reason = _USER_STOP_VISIBLE_NOTE if persisted_reason == _USER_STOP_FAILURE_REASON else persisted_reason
         target = continuation_target(current)
         delivered = await self.delivery_gateway.edit_text(
             EditTextRequest(

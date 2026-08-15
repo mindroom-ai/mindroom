@@ -1122,12 +1122,27 @@ class ResponseRunner:
         target: MessageTarget,
     ) -> FinalDeliveryOutcome | None:
         """Recover success debt before a live interruption can become terminal failure."""
-        delivery = await run_coroutine_until_complete(
-            self._approval_responses.final_delivery(claimed, recover=True),
+        successful_delivery = await run_coroutine_until_complete(
+            self._approval_responses.successful_final_delivery(claimed, recover=True),
         )
-        if delivery is not None:
-            if delivery.acknowledged_event_id is not None:
-                return self._approval_outcome_from_delivery(delivery)
+        if successful_delivery is not None:
+            if successful_delivery.acknowledged_event_id is not None:
+                return self._approval_outcome_from_delivery(successful_delivery)
+            return FinalDeliveryOutcome(
+                terminal_status="suspended",
+                event_id=claimed.response_event_id,
+                is_visible_response=True,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
+            )
+        failure_delivery = await run_coroutine_until_complete(
+            self._approval_responses.final_delivery(claimed),
+        )
+        if failure_delivery is not None:
+            if failure_delivery.acknowledged_event_id is not None:
+                if not await self.deps.approval_store.finish_approval_continuation(claimed.approval_id):
+                    msg = "Recovered approval failure delivery lost its journal ownership"
+                    raise RuntimeError(msg)
+                return self._approval_failure_outcome_from_delivery(claimed, failure_delivery)
             return FinalDeliveryOutcome(
                 terminal_status="suspended",
                 event_id=claimed.response_event_id,
@@ -1161,12 +1176,12 @@ class ResponseRunner:
         nested = payload.get("m.new_content")
         visible = cast("dict[str, Any]", nested) if isinstance(nested, dict) else payload
         semantic = visible.get(DURABLE_FINAL_OUTCOME_KEY)
-        semantic_body: object = None
-        interactive_metadata = None
-        if isinstance(semantic, dict):
-            stored_semantic = cast("dict[str, object]", semantic)
-            semantic_body = stored_semantic.get("body")
-            interactive_metadata = InteractiveMetadata.from_metadata(stored_semantic.get("interactive"))
+        if not isinstance(semantic, dict):
+            msg = "Approval final delivery has no durable success outcome"
+            raise TypeError(msg)
+        stored_semantic = cast("dict[str, object]", semantic)
+        semantic_body = stored_semantic.get("body")
+        interactive_metadata = InteractiveMetadata.from_metadata(stored_semantic.get("interactive"))
         body = semantic_body if isinstance(semantic_body, str) else visible.get("body")
         if not isinstance(body, str):
             body = "Tool approval continuation completed"
@@ -1178,6 +1193,31 @@ class ResponseRunner:
             delivery_kind="edited" if delivery.edits_event_id is not None else "sent",
             extra_content=visible,
             interactive_metadata=interactive_metadata,
+        )
+
+    @staticmethod
+    def _approval_failure_outcome_from_delivery(
+        claimed: ApprovalContinuation,
+        delivery: MatrixDelivery,
+    ) -> FinalDeliveryOutcome:
+        """Restore one acknowledged failure FINAL without inventing success semantics."""
+        acknowledged_event_id = delivery.acknowledged_event_id
+        if acknowledged_event_id is None:
+            msg = "Approval failure delivery is not acknowledged"
+            raise RuntimeError(msg)
+        payload = dict(delivery.payload)
+        nested = payload.get("m.new_content")
+        visible = cast("dict[str, Any]", nested) if isinstance(nested, dict) else payload
+        body = visible.get("body")
+        failure_reason = claimed.failure_reason or (body if isinstance(body, str) else None)
+        return FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id=delivery.edits_event_id or acknowledged_event_id,
+            is_visible_response=True,
+            final_visible_body=body if isinstance(body, str) else None,
+            delivery_kind="edited" if delivery.edits_event_id is not None else "sent",
+            failure_reason=failure_reason or "Tool approval continuation failed safely.",
+            extra_content=visible,
         )
 
     async def _recover_claimed_approval_lifecycle(
@@ -1406,9 +1446,18 @@ class ResponseRunner:
         target: MessageTarget,
     ) -> tuple[bool, str | None]:
         """Complete acknowledged FINAL debt, or retain unacknowledged delivery ownership."""
-        delivery = await self._approval_responses.final_delivery(claimed, recover=True)
-        if delivery is None:
-            return False, None
+        successful_delivery = await self._approval_responses.successful_final_delivery(claimed, recover=True)
+        if successful_delivery is None:
+            failure_delivery = await self._approval_responses.final_delivery(claimed)
+            if failure_delivery is None:
+                return False, None
+            if failure_delivery.acknowledged_event_id is None:
+                return True, None
+            if not await self.deps.approval_store.finish_approval_continuation(claimed.approval_id):
+                msg = "Recovered approval failure delivery lost its journal ownership"
+                raise RuntimeError(msg)
+            return True, failure_delivery.edits_event_id or failure_delivery.acknowledged_event_id
+        delivery = successful_delivery
         if delivery.acknowledged_event_id is None:
             return True, None
         recovered_outcome = self._approval_outcome_from_delivery(delivery)
@@ -2316,10 +2365,56 @@ class ResponseRunner:
             owns_final, event_id = await self._recover_frozen_approval_final(owned, target=target)
             if owns_final:
                 return True, event_id
-        if owned.state != "ready" and not self._approval_continuation_is_authorized(owned):
+        authorized = self._approval_continuation_is_authorized(owned)
+        if owned.state == "claimed" and not authorized:
+            recovered_reset = await self._recover_revoked_oauth_reset(owned, target=target)
+            if recovered_reset is not None:
+                return True, recovered_reset
+        if owned.state != "ready" and not authorized:
             return True, await self._settle_unauthorized_approval_continuation(owned)
         recovered, event_id = await self._recover_nonready_approval(owned, target=target)
         return recovered, event_id
+
+    async def _recover_revoked_oauth_reset(
+        self,
+        claimed: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> str | None:
+        """Finish proved reset debt after revocation without publishing reconnect material."""
+        from mindroom.oauth.reset_execution import complete_oauth_connection_reset  # noqa: PLC0415
+
+        try:
+            recovery = await self._oauth_reset_recovery(claimed)
+        except RuntimeError:
+            return None
+        if recovery is None:
+            return None
+        operation = oauth_reset_operation_snapshot(
+            recovery.credential_context,
+            recovery.operation.operation_id,
+        )
+        if operation is None:
+            return None
+        await complete_oauth_connection_reset(
+            recovery.credential_context,
+            mcp_servers=self.deps.runtime.config.mcp_servers,
+            operation_id=recovery.operation.operation_id,
+            expected_connection_generation=recovery.operation.connection_generation,
+        )
+        outcome = await self._deliver_recovered_oauth_reset_outcome(
+            claimed,
+            target=target,
+            response_text=(
+                "OAuth connection reset completed. Current authorization no longer permits "
+                "publishing a reconnect link in this conversation."
+            ),
+        )
+        return await self._finalize_recovered_oauth_reset_receipt(
+            claimed,
+            target=target,
+            outcome=outcome,
+        )
 
     def _approval_continuation_is_authorized(self, continuation: ApprovalContinuation) -> bool:
         """Recheck current reply and credential-management authority before any replay."""

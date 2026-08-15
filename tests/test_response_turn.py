@@ -305,6 +305,39 @@ def test_paused_attempt_preserves_non_confirmation_siblings_for_sensitive_bindin
     assert paused.observed_tools == (ordinary_tool, reset_tool)
 
 
+def test_paused_team_attempt_merges_recursive_tool_history() -> None:
+    """Nested team side effects must remain visible beside a requirement-only reset."""
+    ordinary_tool = ToolExecution(
+        tool_call_id="ordinary-call",
+        tool_name="ordinary_side_effect",
+        tool_args={"value": 1},
+    )
+    reset_tool = ToolExecution(
+        tool_call_id="reset-call",
+        tool_name="reset_oauth_connection",
+        tool_args={"provider_id": "google"},
+        requires_confirmation=True,
+    )
+    response = TeamRunOutput(
+        status=RunStatus.paused,
+        session_id="session-1",
+        run_id="run-1",
+        tools=[],
+        requirements=[RunRequirement(reset_tool)],
+    )
+
+    paused = response_turn_module.paused_attempt_from_response(
+        response,
+        fallback_session_id=None,
+        fallback_run_id=None,
+        additional_observed_tools=(ordinary_tool,),
+    )
+
+    assert paused is not None
+    assert paused.tools == (reset_tool,)
+    assert paused.observed_tools == (ordinary_tool, reset_tool)
+
+
 def test_paused_attempt_rejects_confirmation_entries_without_call_ids() -> None:
     """A paused call without durable identity must fail closed instead of being silently skipped."""
     invalid_tool = ToolExecution(tool_name="missing-id", requires_confirmation=True)

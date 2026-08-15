@@ -366,6 +366,32 @@ async def test_oauth_reset_rejects_executed_non_confirmation_sibling(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_oauth_reset_rejects_requirement_only_reset_with_observed_sibling(tmp_path: Path) -> None:
+    """A requirement-only reset cannot hide a separately observed ordinary call."""
+    _tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    ordinary_call = ToolExecution(
+        tool_call_id="ordinary-call",
+        tool_name="ordinary_side_effect",
+        tool_args={"value": 1},
+    )
+    reset_call = ToolExecution(
+        tool_call_id="reset-call",
+        tool_name="reset_oauth_connection",
+        tool_args={"provider_id": "google_drive"},
+        requires_confirmation=True,
+    )
+
+    with pytest.raises(RuntimeError, match="only tool call"):
+        await build_approval_tool_bindings(
+            ((reset_call, "reset-call", "reset_oauth_connection", "research"),),
+            observed_tools=(ordinary_call,),
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            execution_identity=build_execution_identity_from_runtime_context(context),
+        )
+
+
+@pytest.mark.asyncio
 async def test_reset_uses_stable_approval_operation_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -45,10 +45,19 @@ async def build_approval_tool_bindings(
     from mindroom.oauth.reset import build_oauth_reset_approval_bindings  # noqa: PLC0415
 
     reset_calls = tuple(item for item in identified_tools if item[2] == _OAUTH_RESET_TOOL_NAME)
-    observed_call_count = len(observed_tools) if observed_tools is not None else len(identified_tools)
-    if reset_calls and observed_call_count != 1:
-        msg = "OAuth reset must be the only tool call in its paused run"
-        raise RuntimeError(msg)
+    if reset_calls:
+        reset_call_ids = {item[1] for item in reset_calls}
+        identified_call_ids = {item[1] for item in identified_tools}
+        observed = observed_tools if observed_tools is not None else tuple(item[0] for item in identified_tools)
+        observed_call_ids = {tool.tool_call_id for tool in observed if tool.tool_call_id}
+        if (
+            len(reset_calls) != 1
+            or len(reset_call_ids) != 1
+            or any(not tool.tool_call_id for tool in observed)
+            or identified_call_ids | observed_call_ids != reset_call_ids
+        ):
+            msg = "OAuth reset must be the only tool call in its paused run"
+            raise RuntimeError(msg)
     reset_bindings = await build_oauth_reset_approval_bindings(
         identified_tools,
         config=config,

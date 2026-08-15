@@ -46,6 +46,29 @@ async def retire_and_reset_oauth_credentials(
         )
 
 
+async def complete_oauth_connection_reset(
+    context: OAuthCredentialContext,
+    *,
+    mcp_servers: Mapping[str, MCPServerConfig],
+    operation_id: str,
+    expected_connection_generation: str,
+    before_reset: Callable[[], None] | None = None,
+) -> bool:
+    """Finish one existing stable reset intent without replaying completed teardown."""
+    completed_result = oauth_reset_operation_result(context, operation_id)
+    if completed_result is not None:
+        if before_reset is not None:
+            before_reset()
+        return completed_result
+    return await retire_and_reset_oauth_credentials(
+        context,
+        mcp_servers=mcp_servers,
+        operation_id=operation_id,
+        expected_connection_generation=expected_connection_generation,
+        before_reset=before_reset,
+    )
+
+
 async def execute_oauth_connection_reset(
     provider_id: str,
     *,
@@ -75,12 +98,7 @@ async def execute_oauth_connection_reset(
         connect_url = oauth_connect_url(provider, runtime_paths, worker_target=resolved_worker_target)
 
     try:
-        completed_result = (
-            oauth_reset_operation_result(reset_target.credential_context, operation_id)
-            if operation_id is not None
-            else None
-        )
-        if completed_result is None:
+        if operation_id is None or expected_connection_generation is None:
             deleted = await retire_and_reset_oauth_credentials(
                 reset_target.credential_context,
                 mcp_servers=config.mcp_servers,
@@ -89,8 +107,13 @@ async def execute_oauth_connection_reset(
                 before_reset=mint_connect_url,
             )
         else:
-            mint_connect_url()
-            deleted = completed_result
+            deleted = await complete_oauth_connection_reset(
+                reset_target.credential_context,
+                mcp_servers=config.mcp_servers,
+                operation_id=operation_id,
+                expected_connection_generation=expected_connection_generation,
+                before_reset=mint_connect_url,
+            )
     except Exception as exc:
         logger.warning(
             "oauth_connection_reset_failed",

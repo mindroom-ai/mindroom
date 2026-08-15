@@ -2414,6 +2414,7 @@ async def team_response(  # noqa: C901, PLR0915
                 response,
                 fallback_session_id=ctx.session_id,
                 fallback_run_id=attempt_run_id,
+                additional_observed_tools=run_tool_executions,
             )
             if paused_attempt is not None:
                 return replace(
@@ -3246,6 +3247,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         event,
                         fallback_session_id=ctx.session_id,
                         fallback_run_id=attempt_run_id,
+                        additional_observed_tools=completed_tool_executions,
                     )
                     if paused_attempt is not None:
                         yield AttemptResolved(

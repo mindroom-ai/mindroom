@@ -43,7 +43,7 @@ For [`openclaw_compat`], that means `matrix_message` is added directly and `atta
 
 The toolkit exposes only `reset_oauth_connection(provider_id)`.
 The provider must back one of the current agent's configured tools through that tool's `auth_provider` metadata.
-The call prepares a requester-bound reconnect link, deletes the matching local scoped credential under the same lock used by token refresh, and disconnects the matching requester-scoped MCP OAuth session when applicable.
+The call first retires the matching requester-scoped MCP OAuth session when applicable, then durably prepares a requester-bound reconnect link, and finally deletes the matching local scoped credential under the same lock used by token refresh.
 The reset does not revoke the grant at the external provider.
 Calling it when no local credential exists is safe and still returns a fresh reconnect link.
 The reset ends the current agent run after returning its reconnect receipt, so already-materialized provider clients cannot reuse the removed credential.
@@ -80,7 +80,9 @@ Providers that define requester-scoped credentials, such as GitHub, may resolve 
 - `oauth_connections` always runs in the primary MindRoom runtime, even if it appears in `worker_tools`.
 - Invalid, unavailable, unconfigured, or unauthorized provider requests fail before credential deletion or MCP session disconnection.
 - Use the returned link to reconnect, then retry the original provider-backed tool call.
-- If the process restarts after deletion but before the receipt is delivered, MindRoom proves that reset completed, skips deletion and MCP retirement, and delivers a fresh receipt without disturbing a later reconnection.
+- If the process restarts with a pending reset, MindRoom re-enters only that stable operation to finish deletion and completed-state publication.
+- If the process restarts after completed-state publication but before the receipt is delivered, MindRoom proves completion read-only, skips deletion and MCP retirement, and delivers a fresh receipt without disturbing a later reconnection.
+- If no durable reset operation exists, recovery never starts deletion.
 - The returned link expires after 10 minutes; run `reset_oauth_connection()` again to issue a fresh link.
 
 ## [`subagents`]

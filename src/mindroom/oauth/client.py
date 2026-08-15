@@ -64,6 +64,10 @@ class _GoogleRefreshGrantMissingError(RuntimeError):
     """Signal that a forced provider retry has no refresh grant to use."""
 
 
+class _GoogleRefreshResultUnchangedError(RuntimeError):
+    """Signal that forced refresh retained the provider-rejected bearer."""
+
+
 class _OAuthAuthSource(Enum):
     """Credential source selected for one tool auth attempt."""
 
@@ -374,17 +378,20 @@ class ScopedOAuthClientMixin:
         triggering_snapshot = dict(state.snapshot)
 
         def refresh_if_unchanged(current: Mapping[str, Any]) -> dict[str, Any] | None:
-            if dict(current) != triggering_snapshot:
-                return None
-            if not current.get("refresh_token"):
-                raise _GoogleRefreshGrantMissingError
-            return self._refresh_google_token_data(current, request, force=True)
+            return self._refresh_google_token_if_snapshot_current(current, triggering_snapshot, request)
 
         context = self._oauth_credential_context()
         try:
-            result = refresh_oauth_credentials_sync(context, refresh_if_unchanged)
+            result = refresh_oauth_credentials_sync(
+                context,
+                refresh_if_unchanged,
+                scope_validator=self._stored_credentials_have_required_scopes,
+            )
         except _GoogleRefreshGrantMissingError:
             state.last_failure = _GoogleRefreshFailure.MISSING
+            self._raise_google_refresh_failure(state.last_failure)
+        except _GoogleRefreshResultUnchangedError:
+            state.last_failure = _GoogleRefreshFailure.PROVIDER
             self._raise_google_refresh_failure(state.last_failure)
         except OAuthRefreshRejectedError:
             state.last_failure = _GoogleRefreshFailure.TERMINAL
@@ -406,6 +413,24 @@ class ScopedOAuthClientMixin:
         state.snapshot.update(result.credentials)
         self._google_credential_key = (context, result.generation)
         state.last_succeeded = True
+
+    def _refresh_google_token_if_snapshot_current(
+        self,
+        current: Mapping[str, Any],
+        triggering_snapshot: Mapping[str, Any],
+        request: object,
+    ) -> dict[str, Any] | None:
+        """Refresh only the bearer that triggered this provider retry."""
+        if dict(current) != dict(triggering_snapshot):
+            return None
+        if not current.get("refresh_token"):
+            raise _GoogleRefreshGrantMissingError
+        refreshed = self._refresh_google_token_data(current, request, force=True)
+        if refreshed is not None and (refreshed.get("token") or refreshed.get("access_token")) == (
+            triggering_snapshot.get("token") or triggering_snapshot.get("access_token")
+        ):
+            raise _GoogleRefreshResultUnchangedError
+        return refreshed
 
     def _raise_google_refresh_failure(self, failure: _GoogleRefreshFailure) -> NoReturn:
         """Replay one sanitized refresh outcome to the current caller thread."""
@@ -556,6 +581,7 @@ class ScopedOAuthClientMixin:
             result = refresh_oauth_credentials_sync(
                 context,
                 lambda current: self._refresh_google_token_data(current, google_requests.Request()),
+                scope_validator=self._stored_credentials_have_required_scopes,
             )
             token_data = result.credentials
             if (

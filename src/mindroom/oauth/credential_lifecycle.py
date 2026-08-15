@@ -824,14 +824,24 @@ async def _refresh_oauth_credentials_locked(
 def refresh_oauth_credentials_sync(
     context: OAuthCredentialContext,
     refresh: Callable[[Mapping[str, Any]], dict[str, Any] | None],
+    *,
+    scope_validator: Callable[[dict[str, Any]], bool] | None = None,
 ) -> OAuthCredentialsRefreshResult:
     """Run one synchronous provider adapter on the OAuth transaction owner."""
-    return _run_oauth_transaction_sync(_refresh_oauth_credentials_sync_transaction(context, refresh))
+    return _run_oauth_transaction_sync(
+        _refresh_oauth_credentials_sync_transaction(
+            context,
+            refresh,
+            scope_validator=scope_validator,
+        ),
+    )
 
 
 async def _refresh_oauth_credentials_sync_transaction(
     context: OAuthCredentialContext,
     refresh: Callable[[Mapping[str, Any]], dict[str, Any] | None],
+    *,
+    scope_validator: Callable[[dict[str, Any]], bool] | None,
 ) -> OAuthCredentialsRefreshResult:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
         state = _prepare_oauth_credential_state_locked(context)
@@ -844,7 +854,12 @@ async def _refresh_oauth_credentials_sync_transaction(
                 generation=state.generation,
                 connection_generation=state.connection_generation,
             )
-        if not oauth_credentials_usable(context.provider, context.runtime_paths, credentials):
+        if not oauth_credentials_usable(
+            context.provider,
+            context.runtime_paths,
+            credentials,
+            scope_validator=scope_validator,
+        ):
             _log_oauth_refresh_skipped(context, credentials, reason="unusable_credentials")
             return OAuthCredentialsRefreshResult(
                 credentials=credentials,
@@ -1227,6 +1242,7 @@ def oauth_credentials_usable(  # noqa: PLR0911
     credentials: dict[str, object] | None,
     *,
     now: float | None = None,
+    scope_validator: Callable[[dict[str, Any]], bool] | None = None,
 ) -> bool:
     """Return whether stored OAuth credentials can currently authenticate provider calls."""
     client_config = provider.client_config(runtime_paths)
@@ -1234,7 +1250,11 @@ def oauth_credentials_usable(  # noqa: PLR0911
         return False
     if not oauth_credentials_match_client_id(client_config, credentials):
         return False
-    if not oauth_credentials_have_required_scopes(provider, credentials):
+    if not (
+        scope_validator(credentials)
+        if scope_validator is not None
+        else oauth_credentials_have_required_scopes(provider, credentials)
+    ):
         return False
     if not oauth_credentials_satisfy_identity_policy(provider, runtime_paths, credentials):
         return False

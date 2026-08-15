@@ -386,6 +386,7 @@ def paused_attempt_from_response(
     *,
     fallback_session_id: str | None,
     fallback_run_id: str | None,
+    additional_observed_tools: Sequence[ToolExecution] = (),
 ) -> PausedAttempt | None:
     """Extract confirmation requirements from one persisted paused Agno run."""
     if response.status != RunStatus.paused:
@@ -395,6 +396,7 @@ def paused_attempt_from_response(
         requirements=response.requirements or (),
         session_id=response.session_id or fallback_session_id,
         run_id=response.run_id or fallback_run_id,
+        additional_observed_tools=additional_observed_tools,
     )
 
 
@@ -403,6 +405,7 @@ def paused_attempt_from_event(
     *,
     fallback_session_id: str | None,
     fallback_run_id: str | None,
+    additional_observed_tools: Sequence[ToolExecution] = (),
 ) -> PausedAttempt | None:
     """Extract confirmation requirements from one streamed Agno pause event."""
     return _paused_attempt(
@@ -410,6 +413,7 @@ def paused_attempt_from_event(
         requirements=event.requirements or (),
         session_id=event.session_id or fallback_session_id,
         run_id=event.run_id or fallback_run_id,
+        additional_observed_tools=additional_observed_tools,
     )
 
 
@@ -419,6 +423,7 @@ def _paused_attempt(
     requirements: Sequence[RunRequirement],
     session_id: str | None,
     run_id: str | None,
+    additional_observed_tools: Sequence[ToolExecution] = (),
 ) -> PausedAttempt | None:
     """Build one restartable pause from Agno's common pause fields."""
     if any(_has_unsupported_approval_requirement(requirement) for requirement in requirements):
@@ -459,13 +464,36 @@ def _paused_attempt(
             known_call_ids.add(tool.tool_call_id)
     if not pending_tools or session_id is None or run_id is None:
         return None
+    observed_tools = _merged_observed_tools(additional_observed_tools, tools, pending_tools)
     return PausedAttempt(
         session_id=session_id,
         run_id=run_id,
         tools=tuple(pending_tools),
         requirements=pending_requirements,
-        observed_tools=tuple(tools),
+        observed_tools=observed_tools,
     )
+
+
+def _merged_observed_tools(
+    additional_tools: Sequence[ToolExecution],
+    response_tools: Sequence[ToolExecution],
+    pending_tools: Sequence[ToolExecution],
+) -> tuple[ToolExecution, ...]:
+    """Deduplicate the complete tool history while preserving first-seen order."""
+    observed_tools: list[ToolExecution] = []
+    observed_call_ids: set[str] = set()
+    observed_without_call_id: set[int] = set()
+    for tool in (*additional_tools, *response_tools, *pending_tools):
+        if tool.tool_call_id:
+            if tool.tool_call_id in observed_call_ids:
+                continue
+            observed_call_ids.add(tool.tool_call_id)
+        elif id(tool) in observed_without_call_id:
+            continue
+        else:
+            observed_without_call_id.add(id(tool))
+        observed_tools.append(tool)
+    return tuple(observed_tools)
 
 
 @dataclass(frozen=True)

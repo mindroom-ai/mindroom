@@ -2247,6 +2247,65 @@ async def test_team_response_passes_run_id_to_team_arun() -> None:
 
 
 @pytest.mark.asyncio
+async def test_team_response_pause_preserves_recursive_observed_tool_history() -> None:
+    """A blocking team pause must retain nested completed siblings for reset isolation."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+    ordinary_tool = ToolExecution(
+        tool_call_id="ordinary-call",
+        tool_name="ordinary_side_effect",
+        tool_args={"value": 1},
+        result="done",
+    )
+    reset_tool = ToolExecution(
+        tool_call_id="reset-call",
+        tool_name="reset_oauth_connection",
+        tool_args={"provider_id": "google"},
+        requires_confirmation=True,
+    )
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(
+        return_value=TeamRunOutput(
+            status=RunStatus.paused,
+            run_id="run-123",
+            session_id="session-team",
+            requirements=[RunRequirement(reset_tool)],
+            member_responses=[
+                RunOutput(
+                    status=RunStatus.completed,
+                    agent_name="GeneralAgent",
+                    tools=[ordinary_tool],
+                ),
+            ],
+        ),
+    )
+    fake_agent = _make_test_agent("GeneralAgent")
+
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        pytest.raises(ResponsePausedForApproval) as raised,
+    ):
+        await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(run_id="run-123", session_id="session-team"),
+        )
+
+    assert raised.value.paused.tools == (reset_tool,)
+    assert raised.value.paused.observed_tools == (ordinary_tool, reset_tool)
+
+
+@pytest.mark.asyncio
 async def test_team_response_raises_cancelled_error_for_cancelled_runs() -> None:
     """Gracefully cancelled team runs should surface as CancelledError."""
     config = _build_test_config()
@@ -2790,13 +2849,20 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
         tool_args={"value": 1},
         requires_confirmation=True,
     )
+    ordinary_tool = ToolExecution(
+        tool_call_id="call-team-stream-ordinary",
+        tool_name="ordinary_side_effect",
+        tool_args={"value": 1},
+        result="done",
+    )
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield TeamToolCallCompletedEvent(tool=ordinary_tool)
         yield TeamRunPausedEvent(
             run_id="run-paused",
             session_id="session-team",
             content="Approval required",
-            tools=[tool],
+            tools=[],
             requirements=[RunRequirement(tool)],
         )
 
@@ -2831,6 +2897,7 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
     assert raised.value.paused.run_id == "run-paused"
     assert raised.value.paused.tools == (tool,)
     assert raised.value.paused.team_member_model_names == (("general", "large"),)
+    assert raised.value.paused.observed_tools == (ordinary_tool, tool)
 
 
 @pytest.mark.asyncio

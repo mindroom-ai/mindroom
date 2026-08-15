@@ -26,8 +26,11 @@ from mindroom.oauth.google_drive import (
     GOOGLE_DRIVE_WRITE_SCOPE,
     google_drive_oauth_provider,
 )
-from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.oauth.service import oauth_connect_url, oauth_credentials_have_scopes
+from mindroom.oauth.service import (
+    OAUTH_MISSING_WRITE_SCOPE_REASON,
+    oauth_connection_required,
+    oauth_credentials_have_scopes,
+)
 from mindroom.tool_system.metadata import coerce_optional_finite_number
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 from mindroom.workspaces import resolve_workspace_relative_path
@@ -205,17 +208,9 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         if not oauth_credentials_have_scopes(token_data, GOOGLE_DRIVE_READ_OAUTH_SCOPES):
             return None
 
-        connect_url = oauth_connect_url(
-            self._oauth_provider,
-            self._runtime_paths,
-            worker_target=self._oauth_credential_context().worker_target,
-        )
-        error = OAuthConnectionRequired(
-            "Google Drive reconnect required to grant write access. "
-            f"Reconnect with this MindRoom link, then retry the write: {connect_url}",
-            provider_id=self._oauth_provider.id,
-            connect_url=connect_url,
-            reason="missing_write_scope",
+        error = oauth_connection_required(
+            self._oauth_credential_context(),
+            reason=OAUTH_MISSING_WRITE_SCOPE_REASON,
         )
         return self._structured_auth_failure(error)
 

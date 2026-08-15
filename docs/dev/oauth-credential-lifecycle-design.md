@@ -23,7 +23,7 @@ OAuth operations are rare enough that this concurrency is not worth the correctn
 5. A provider operation that can consume or rotate remote state completes its matching local commit before cancellation propagates.
 6. Credential save and delete commits fsync their payload and parent-directory updates before reporting success.
 7. A destructive reset performs all fallible asynchronous cleanup before deleting local credentials.
-8. After deletion, the durable pending intent remains the reset owner until completed-state publication succeeds, and only then does reset perform infallible in-memory retirement release before returning.
+8. After deletion, the durable pending intent remains the reset owner until completed-state publication succeeds, while the in-memory MCP fence may release during exceptional unwinding because every later credential transaction must finish that pending intent before use.
 9. Request actor identity remains raw for room and membership checks.
 10. Credential identity is canonicalized only when resolving `OAuthCredentialContext`.
 11. Provider adapters classify structured terminal refresh errors as `OAuthRefreshRejectedError` without exposing provider-controlled text.
@@ -63,8 +63,8 @@ There is no separate refresh lock and singleflight lock.
 
 ### Connection flow owner
 
-`src/mindroom/oauth/service.py` continues to own connect tokens, authorization links, success redirects, and user-facing connection instructions.
-It exposes one `oauth_connection_required()` factory that chooses connect versus reconnect wording and structured reason metadata.
+`src/mindroom/oauth/service.py` continues to own connect tokens, authorization links, success redirects, scope-upgrade instructions, and user-facing connection instructions.
+It exposes one `oauth_connection_required()` factory that chooses connect, reconnect, or scope-upgrade wording and structured reason metadata.
 Google, GitHub, MCP, API, and configuration callers do not build those exceptions independently.
 
 ### Provider adapters
@@ -82,8 +82,8 @@ Google Drive constructs managed credentials with quota configuration already pre
 `src/mindroom/custom_tools/github.py` reloads managed credentials for every call and stores each worker thread's token and PyGithub client together.
 An older call may finish on its own thread, but it cannot overwrite another worker's newer client.
 
-`src/mindroom/mcp/manager.py` treats an OAuth token hash as an authorization lease.
-It tracks both the desired hash and the hash that built the connected session, validates both immediately before catalog publication and tool use, and reacquires authoritative credentials when either changes.
+`src/mindroom/mcp/manager.py` treats the durable credential revision plus OAuth token hash as an authorization lease.
+It tracks both the desired lease and the lease that built the connected session, validates both immediately before catalog publication and tool use, and reacquires authoritative credentials when either changes.
 
 ### Reset authorization
 
@@ -202,7 +202,9 @@ Focused tests cover observable lifecycle behavior rather than private lock chore
 - OAuth reset is refused when another call is observed in its paused run.
 - Reset deletes corrupt plaintext or encrypted credential files by exact scoped path and permits reconnect afterward.
 - A crash after pending intent hides the credential until deletion finishes, while completed-operation replay cannot delete a later callback credential.
-- Claimed reset recovery requires a completed stable operation, publishes FINAL directly, and never starts deletion or resumes Agno.
+- Claimed reset recovery requires an existing pending or completed stable operation and never resumes Agno.
+- Pending recovery re-enters only that operation to finish deletion and completed-state publication, while completed recovery is read-only and publishes FINAL directly.
+- Missing-operation recovery never starts deletion.
 - Agent approval continuation reconstructs OAuth-backed toolkits inside the same runtime and execution-identity context used for resumed calls.
 - Agent and voice toolkit construction receive authorization explicitly, so alias canonicalization does not depend on an ambient call context.
 - Long-lived Google clients discard valid cached access tokens after reset, disconnect, terminal invalidation, or canonical scope change.

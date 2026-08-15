@@ -836,7 +836,11 @@ async def test_user_stop_preserves_a_claimed_frozen_final_until_success_recovery
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
-        payload={"body": "finished", "formatted_body": "finished"},
+        payload={
+            "body": "finished",
+            "formatted_body": "finished",
+            DURABLE_FINAL_OUTCOME_KEY: {"body": "finished", "interactive": None},
+        },
         edits_event_id="$waiting",
     )
     assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
@@ -1565,6 +1569,46 @@ async def test_claimed_oauth_reset_rechecks_current_authorization_before_recover
         config=runner.deps.runtime.config,
     )
     recover.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_claimed_committed_reset_wins_later_authorization_revocation(tmp_path: Path) -> None:
+    """A durable reset operation must settle accurately without exposing a reconnect link."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    claimed = ApprovalContinuation(
+        approval_id="approval-reset-committed-before-revocation",
+        run_id="run-paused",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="claimed",
+    )
+    target = _target(thread_id="$thread", reply_to_event_id="$source")
+
+    with (
+        patch.object(runner, "_recover_frozen_approval_final", new=AsyncMock(return_value=(False, None))),
+        patch.object(runner, "_approval_continuation_is_authorized", return_value=False),
+        patch.object(
+            runner,
+            "_recover_revoked_oauth_reset",
+            new=AsyncMock(return_value="$waiting"),
+            create=True,
+        ) as recover_reset,
+        patch.object(runner, "_recover_nonready_approval", new=AsyncMock()) as recover_nonready,
+        patch.object(runner, "_settle_unauthorized_approval_continuation", new=AsyncMock()) as settle_denial,
+    ):
+        result = await runner._recover_preclaim_approval_owner(claimed, target=target)
+
+    assert result == (True, "$waiting")
+    recover_reset.assert_awaited_once_with(claimed, target=target)
+    recover_nonready.assert_not_awaited()
+    settle_denial.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2732,7 +2776,11 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
-        payload={"body": "finished", "formatted_body": "finished"},
+        payload={
+            "body": "finished",
+            "formatted_body": "finished",
+            DURABLE_FINAL_OUTCOME_KEY: {"body": "finished", "interactive": None},
+        },
         edits_event_id="$waiting",
     )
     assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
@@ -3016,6 +3064,44 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
     build_lifecycle.assert_not_called()
     assert await store.approval_continuation(continuation.approval_id) is None
     assert not await store.is_pending("$source")
+
+
+@pytest.mark.asyncio
+async def test_failure_settlement_renders_persisted_winning_reason(tmp_path: Path) -> None:
+    """A stale competing caller cannot overwrite the durable failure CAS winner."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    winner = ApprovalContinuation(
+        approval_id="approval-failure-reason-winner",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="failing",
+        failure_reason="Original durable failure",
+    )
+    assert await store.create_approval_continuation(winner) == winner
+    edit_text = AsyncMock(return_value=False)
+    approval_store = MagicMock(expire_continuation_cards=AsyncMock(return_value=True))
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=approval_store,
+        ),
+    ):
+        assert not await runner._approval_responses.settle_failure(winner, "cancelled_by_user")
+
+    assert edit_text.await_args.args[0].new_text == "Original durable failure"
 
 
 @pytest.mark.asyncio

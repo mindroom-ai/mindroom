@@ -162,7 +162,8 @@ The API route will wrap the complete lock-wait-through-save coroutine in `run_co
 A completed replayable operation stores the original file-existed result and remains as a permanent tombstone so a stale retry cannot delete credentials from a later callback.
 Every locked credential transaction must finish a pending reset delete before it reads or publishes credentials.
 Cancellation before lock ownership must abort reset, while cancellation after commit must return the deletion result so the caller can publish its receipt.
-MCP reset callers must enter requester-session retirement, mint the reconnect link after teardown, invoke the credential transaction, and release only the in-memory fence afterward.
+MCP reset callers must enter requester-session retirement, mint the reconnect link after teardown, invoke the credential transaction, and release the in-memory fence afterward.
+If completed-state publication fails after deletion, durable pending state remains authoritative even when exceptional unwinding releases the in-memory fence.
 
 - [ ] **Step 6: Reduce `oauth.service` to connection-flow ownership**
 

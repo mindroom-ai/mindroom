@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
 OAUTH_CONNECT_TOKEN_TTL_MINUTES = 10
 OAUTH_REFRESH_REJECTED_REASON = "refresh_rejected"
+OAUTH_MISSING_WRITE_SCOPE_REASON = "missing_write_scope"
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = OAUTH_CONNECT_TOKEN_TTL_MINUTES * 60
 _OAUTH_CONNECT_TOKEN_KIND = "conversation_oauth_connect"  # noqa: S105
 _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
@@ -56,6 +57,7 @@ _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
 )
 __all__ = [
     "OAUTH_CONNECT_TOKEN_TTL_MINUTES",
+    "OAUTH_MISSING_WRITE_SCOPE_REASON",
     "OAUTH_REFRESH_REJECTED_REASON",
     "OAuthConnectTarget",
     "OAuthCredentialContext",
@@ -313,11 +315,15 @@ def oauth_connection_required(
         context.runtime_paths,
         worker_target=context.worker_target,
     )
-    instruction = (
-        build_oauth_reconnect_instruction(context.provider, connect_url)
-        if reason == OAUTH_REFRESH_REJECTED_REASON
-        else build_oauth_connect_instruction(context.provider, connect_url)
-    )
+    if reason == OAUTH_REFRESH_REJECTED_REASON:
+        instruction = build_oauth_reconnect_instruction(context.provider, connect_url)
+    elif reason == OAUTH_MISSING_WRITE_SCOPE_REASON:
+        instruction = (
+            f"{context.provider.display_name} reconnect required to grant write access. "
+            f"Reconnect with this MindRoom link, then retry the write: {connect_url}"
+        )
+    else:
+        instruction = build_oauth_connect_instruction(context.provider, connect_url)
     return OAuthConnectionRequired(
         instruction,
         provider_id=context.provider.id,
