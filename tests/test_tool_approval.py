@@ -383,8 +383,9 @@ async def test_legacy_action_without_router_transport_is_ignored(tmp_path: Path)
     }
 
 
+@pytest.mark.parametrize("error_code", ["M_FORBIDDEN", "M_NOT_FOUND"])
 @pytest.mark.asyncio
-async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path) -> None:
+async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path, error_code: str) -> None:
     """A definitive Matrix refusal cannot make an unregistered action retry forever."""
     cards = MagicMock()
     cards.pending_approval_card = AsyncMock(return_value=None)
@@ -394,7 +395,7 @@ async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path) -> N
     client = MagicMock(
         user_id="@mindroom_router:localhost",
         room_get_event=AsyncMock(
-            return_value=nio.RoomGetEventError("not joined", status_code="M_FORBIDDEN"),
+            return_value=nio.RoomGetEventError("unavailable", status_code=error_code),
         ),
     )
     router = MagicMock(
@@ -437,7 +438,7 @@ async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path) -> N
     assert warning.call_args.args == ("unverifiable_legacy_approval_action_ignored",)
     assert warning.call_args.kwargs["room_id"] == "!room:localhost"
     assert warning.call_args.kwargs["card_event_id"] == "$approval"
-    assert "M_FORBIDDEN" in warning.call_args.kwargs["transport_reason"]
+    assert error_code in warning.call_args.kwargs["transport_reason"]
 
 
 @pytest.mark.asyncio

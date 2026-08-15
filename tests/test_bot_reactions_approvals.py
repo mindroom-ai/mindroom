@@ -1838,32 +1838,32 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
-        cards = bot._journal_store.principal("router@shared")
-        transport = approval_transport.ApprovalMatrixTransport(
-            runtime_paths=runtime_paths,
-            bot_provider=lambda _name: None,
-            cards_provider=lambda: cards,
-        )
-        manager = initialize_approval_store(
-            runtime_paths,
-            cards=cards,
-            resolve_action_delivery=transport.resolve_approval_action_delivery,
-        )
         dispatched: list[str] = []
-        on_approval = bot._journal_dispatcher.callbacks.on_approval
-
-        async def record_dispatch(dispatch_room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
-            dispatched.append(event.event_id)
-            await on_approval(dispatch_room, event)
-
-        bot._journal_dispatcher.callbacks = replace(
-            bot._journal_dispatcher.callbacks,
-            on_approval=record_dispatch,
-        )
-        ignored = _approval_action_event("$legacy-action", status="approved")
-        later = _approval_action_event("$later-action", status="invalid")
 
         try:
+            cards = bot._journal_store.principal("router@shared")
+            transport = approval_transport.ApprovalMatrixTransport(
+                runtime_paths=runtime_paths,
+                bot_provider=lambda _name: None,
+                cards_provider=lambda: cards,
+            )
+            initialize_approval_store(
+                runtime_paths,
+                cards=cards,
+                resolve_action_delivery=transport.resolve_approval_action_delivery,
+            )
+            on_approval = bot._journal_dispatcher.callbacks.on_approval
+
+            async def record_dispatch(dispatch_room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+                dispatched.append(event.event_id)
+                await on_approval(dispatch_room, event)
+
+            bot._journal_dispatcher.callbacks = replace(
+                bot._journal_dispatcher.callbacks,
+                on_approval=record_dispatch,
+            )
+            ignored = _approval_action_event("$legacy-action", status="approved")
+            later = _approval_action_event("$later-action", status="invalid")
             with patch.object(approval_manager.logger, "warning") as warning:
                 await bot._journal_dispatcher.admit_out_of_band(
                     room,
@@ -1878,10 +1878,11 @@ class TestAgentBot(AgentBotTestBase):
                     EventClass.ACTIONABLE,
                 )
                 await bot._journal_dispatcher.drain_once()
-            await _cancel_dispatch_retry(bot)
         finally:
-            await manager.shutdown()
-            await shutdown_approval_runtime()
+            try:
+                await _cancel_dispatch_retry(bot)
+            finally:
+                await shutdown_approval_runtime()
 
         assert dispatched == [ignored.event_id, later.event_id]
         assert await bot._journal_dispatcher.store.pending() == ()
