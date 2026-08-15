@@ -486,6 +486,21 @@ def _normalized_github_repository(url: str) -> tuple[str, str, str] | None:
     return transport, organization.casefold(), repository.casefold()
 
 
+def _workspace_path_without_symlinks(workspace: Path) -> Path:
+    expanded_workspace = workspace.expanduser()
+    absolute_workspace = expanded_workspace if expanded_workspace.is_absolute() else Path.cwd() / expanded_workspace
+    current = Path(absolute_workspace.anchor)
+    for part in absolute_workspace.parts[1:]:
+        if part == "..":
+            msg = "Agent repository workspace path must not contain parent traversal"
+            raise RepositoryBindingError(msg)
+        current /= part
+        if current.is_symlink():
+            msg = "Agent repository workspace path must not contain symlinks"
+            raise RepositoryBindingError(msg)
+    return absolute_workspace
+
+
 def configure_repository_workspace(
     *,
     workspace: Path,
@@ -493,45 +508,47 @@ def configure_repository_workspace(
     lock_path: Path,
 ) -> Path:
     """Initialize one workspace and set its immutable credential-free origin."""
-    resolved_workspace = workspace.expanduser().resolve()
-    resolved_workspace.mkdir(parents=True, exist_ok=True)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
     expected = _normalized_github_repository(clone_url)
     if expected is None or expected[0] != "https":
         msg = "Agent repository workspace requires a canonical credential-free HTTPS origin"
         raise RepositoryBindingError(msg)
+    workspace_path = _workspace_path_without_symlinks(workspace)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     with advisory_file_lock(lock_path):
-        git_metadata = resolved_workspace / ".git"
+        workspace_path = _workspace_path_without_symlinks(workspace_path)
+        workspace_path.mkdir(parents=True, exist_ok=True)
+        workspace_path = _workspace_path_without_symlinks(workspace_path)
+        git_metadata = workspace_path / ".git"
         if git_metadata.is_symlink() or (git_metadata.exists() and not git_metadata.is_dir()):
             msg = "Agent repository workspace Git metadata must be a local directory"
             raise RepositoryBindingError(msg)
         if not git_metadata.exists():
-            initialized = _run_local_git(resolved_workspace, "init", "--initial-branch=main")
+            initialized = _run_local_git(workspace_path, "init", "--initial-branch=main")
             if initialized.returncode != 0:
                 msg = "Could not initialize the agent repository workspace"
                 raise RepositoryBindingError(msg)
 
-        remotes = _run_local_git(resolved_workspace, "remote")
+        remotes = _run_local_git(workspace_path, "remote")
         if remotes.returncode != 0:
             msg = "Could not inspect the agent repository workspace remotes"
             raise RepositoryBindingError(msg)
         if "origin" in remotes.stdout.splitlines():
             raw_fetch_urls = _run_local_git(
-                resolved_workspace,
+                workspace_path,
                 "config",
                 "--local",
                 "--get-all",
                 "remote.origin.url",
             )
             raw_push_urls = _run_local_git(
-                resolved_workspace,
+                workspace_path,
                 "config",
                 "--local",
                 "--get-all",
                 "remote.origin.pushurl",
             )
-            fetch_urls = _run_local_git(resolved_workspace, "remote", "get-url", "--all", "origin")
-            push_urls = _run_local_git(resolved_workspace, "remote", "get-url", "--push", "--all", "origin")
+            fetch_urls = _run_local_git(workspace_path, "remote", "get-url", "--all", "origin")
+            push_urls = _run_local_git(workspace_path, "remote", "get-url", "--push", "--all", "origin")
             raw_fetch_values = raw_fetch_urls.stdout.splitlines()
             raw_push_values = raw_push_urls.stdout.splitlines()
             if not raw_push_values:
@@ -552,10 +569,10 @@ def configure_repository_workspace(
             ):
                 msg = "Agent repository workspace has an origin for a different repository"
                 raise RepositoryOriginConflictError(msg)
-            return resolved_workspace
+            return workspace_path
 
-        added = _run_local_git(resolved_workspace, "remote", "add", "origin", clone_url)
+        added = _run_local_git(workspace_path, "remote", "add", "origin", clone_url)
         if added.returncode != 0:
             msg = "Could not configure the agent repository workspace origin"
             raise RepositoryBindingError(msg)
-    return resolved_workspace
+    return workspace_path
