@@ -109,7 +109,7 @@ Skills are watched separately via `_watch_skills_task()` with cache invalidation
 
 The `src/mindroom/orchestration/` subpackage contains helpers extracted from the monolithic orchestrator:
 
-- **`runtime.py`** — Sync loop helpers: `sync_forever_with_restart()` with linear backoff (capped at 60s), `cancel_task()`, and `create_logged_task()` for safe asyncio task creation.
+- **`runtime.py`** — Sync loop helpers: `sync_forever_with_restart()` with exponential backoff capped at 60 seconds, `cancel_task()`, and `create_logged_task()` for safe asyncio task creation.
 - **`config_lifecycle.py`** — Debounced config-reload and shared replacement-admission lifecycle: `ConfigReloadLifecycle` owns reload queueing, serialized global response draining for config and MCP replacements, and the load → diff → plan sequencing that dispatches config plans back to the orchestrator.
 - **`config_updates.py`** — Config diffing and reload planning: `build_config_update_plan()` computes a `ConfigUpdatePlan` by calling `_identify_entities_to_restart()`, which diffs old and new configs using `model_dump(exclude_none=True)`.
 - **`plugin_watch.py`** — Plugin hot-reload watcher: `watch_plugins_task()` polls configured plugin roots, with `PluginWatchState` owning the watcher baselines and dirty-state revision.
@@ -158,7 +158,7 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 ## Concurrency
 
 - Each bot runs its own sync loop via `sync_forever_with_restart()`
-- Sync loop failures trigger automatic restart with linear backoff (5s, 10s, 15s, ... up to 60s max)
+- Sync loop failures trigger automatic restart with capped exponential backoff (5s, 10s, 20s, 40s, then 60s maximum)
 - Watchdog-driven restarts of stalled sync loops add 0–10s of random jitter on top of the backoff so a loop-wide stall does not restart every sync loop as one thundering herd
 - An automatic receive-loop restart replaces only the sync task and its watchdog, so in-flight responses keep their original owner and finish across the restart
 - The response runtime is drained and cancelled only when the bot itself stops: a config reload replacing the entity, entity removal, or process shutdown
