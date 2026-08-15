@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import subprocess
+import time
 from dataclasses import dataclass, field
 from threading import Event, Timer
 from typing import TYPE_CHECKING
@@ -649,6 +651,29 @@ def test_git_config_parser_has_processing_timeout(
 
     assert observed_timeouts
     assert all(timeout <= 5 for timeout in observed_timeouts)
+
+
+def test_git_config_parser_does_not_follow_include_paths(tmp_path: Path) -> None:
+    """Inspection must reject includes without opening worker-selected control-plane paths."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    included_fifo = tmp_path / "included-config"
+    os.mkfifo(included_fifo)
+    config_path = workspace / ".git" / "config"
+    config_path.write_text(f"[include]\n\tpath = {included_fifo}\n", encoding="utf-8")
+    config_before = config_path.read_bytes()
+
+    started = time.monotonic()
+    with pytest.raises(RepositoryOriginConflictError):
+        configure_repository_workspace(
+            workspace=workspace,
+            clone_url=_lease().clone_url,
+            lock_path=tmp_path / "workspace.lock",
+        )
+
+    assert time.monotonic() - started < 1
+    assert config_path.read_bytes() == config_before
 
 
 @pytest.mark.asyncio

@@ -629,7 +629,7 @@ def _parse_git_config_entries(payload: bytes) -> tuple[tuple[str, str], ...]:
     try:
         config_text = payload.decode("utf-8")
         result = subprocess.run(
-            ["git", "config", "--file", "-", "--null", "--list"],
+            ["git", "config", "--no-includes", "--file", "-", "--null", "--list"],
             input=config_text,
             check=False,
             capture_output=True,
