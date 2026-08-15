@@ -6,7 +6,9 @@ import asyncio
 import inspect
 import json
 import os
+import stat
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from threading import Event, Timer
@@ -784,6 +786,96 @@ def test_concurrent_git_config_write_is_not_erased_during_failure(
     config_after = config_path.read_bytes()
     assert concurrent_change in config_after
     assert _lease().clone_url.encode() not in config_after
+
+
+@pytest.mark.parametrize(
+    ("crash_point", "exit_code"),
+    [
+        ("before_backup", 21),
+        ("before_publication", 22),
+        ("after_publication", 23),
+    ],
+)
+def test_interrupted_git_config_publication_recovers_on_retry(
+    tmp_path: Path,
+    crash_point: str,
+    exit_code: int,
+) -> None:
+    """Process death at each publication boundary must leave a retryable workspace."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    lock_path = tmp_path / "workspace.lock"
+    crash_script = """
+import os
+import sys
+from pathlib import Path
+
+import mindroom.agent_repositories as repositories
+
+real_rename = repositories._rename_at_no_replace
+
+def crash_during_config_publication(source_fd, source, destination_fd, destination):
+    point = sys.argv[4]
+    publishing_backup = source == "config" and destination.startswith(".config.mindroom-backup")
+    publishing_config = destination == "config" and source.startswith(".config.mindroom-stage")
+    if point == "before_backup" and publishing_backup:
+        os._exit(21)
+    if point == "before_publication" and publishing_config:
+        os._exit(22)
+    real_rename(source_fd, source, destination_fd, destination)
+    if point == "after_publication" and publishing_config:
+        os._exit(23)
+
+repositories._rename_at_no_replace = crash_during_config_publication
+repositories.configure_repository_workspace(
+    workspace=Path(sys.argv[1]),
+    clone_url=sys.argv[3],
+    lock_path=Path(sys.argv[2]),
+)
+"""
+
+    crashed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            crash_script,
+            str(workspace),
+            str(lock_path),
+            _lease().clone_url,
+            crash_point,
+        ],
+        check=False,
+    )
+
+    assert crashed.returncode == exit_code
+    assert any(path.name.startswith(".config.mindroom-") for path in (workspace / ".git").iterdir())
+
+    configure_repository_workspace(
+        workspace=workspace,
+        clone_url=_lease().clone_url,
+        lock_path=lock_path,
+    )
+
+    assert _git(workspace, "remote", "get-url", "origin") == _lease().clone_url
+    assert not any(path.name.startswith(".config.mindroom-") for path in (workspace / ".git").iterdir())
+
+
+def test_origin_publication_preserves_existing_git_config_mode(tmp_path: Path) -> None:
+    """Adding origin must not broaden an existing Git config's permissions."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    config_path = workspace / ".git" / "config"
+    config_path.chmod(0o600)
+
+    configure_repository_workspace(
+        workspace=workspace,
+        clone_url=_lease().clone_url,
+        lock_path=tmp_path / "workspace.lock",
+    )
+
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
 
 
 @pytest.mark.asyncio
