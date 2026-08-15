@@ -8,6 +8,8 @@ import types
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.version import Version
 
 
 @pytest.fixture
@@ -238,3 +240,18 @@ def test_wheel_force_include_does_not_bundle_avatar_assets() -> None:
     force_include = data["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
 
     assert "avatars" not in force_include
+
+
+def test_runtime_dependency_accepts_only_the_durable_nio_minor() -> None:
+    """The release wheel must install alongside the exact durable nio candidate."""
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    dependencies = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
+    requirement = Requirement(
+        next(dependency for dependency in dependencies if dependency.startswith("mindroom-nio")),
+    )
+
+    assert requirement.name == "mindroom-nio"
+    assert requirement.extras == {"e2e"}
+    assert Version("0.38.99") not in requirement.specifier
+    assert Version("0.39.0") in requirement.specifier
+    assert Version("0.40.0") not in requirement.specifier
