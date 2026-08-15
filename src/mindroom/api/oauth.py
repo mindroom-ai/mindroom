@@ -20,6 +20,7 @@ from mindroom.api.credentials_target import (
     worker_target_for_credentials_target,
 )
 from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
@@ -406,6 +407,45 @@ async def success(provider_id: str, request: Request) -> HTMLResponse:
     return HTMLResponse(html)
 
 
+async def _exchange_and_store_callback_credentials(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    target: RequestCredentialsTarget,
+    *,
+    code: str,
+    code_verifier: str | None,
+) -> None:
+    """Exchange one consumed callback code and durably publish its credentials."""
+    token_result = await provider.exchange_code(
+        code,
+        runtime_paths,
+        code_verifier=code_verifier,
+    )
+    provider.validate_claims(token_result, runtime_paths)
+    safe_result = sanitized_oauth_token_result(provider, token_result)
+    worker_target = worker_target_for_credentials_target(target)
+    credentials_manager = target.base_manager
+    lock_path = scoped_oauth_credentials_refresh_lock_path(
+        provider.credential_service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    async with async_exclusive_file_lock(lock_path):
+        existing_credentials = load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=target.allowed_shared_services,
+        )
+        token_data = _token_data_preserving_refresh_token(existing_credentials, safe_result.token_data)
+        save_scoped_credentials(
+            provider.credential_service,
+            token_data,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+
 @router.get("/{provider_id}/callback")
 async def callback(provider_id: str, request: Request) -> RedirectResponse:
     """Handle a provider OAuth callback and store scoped credentials."""
@@ -434,34 +474,15 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
     _verify_pending_target_binding(provider, pending.payload, target)
 
     try:
-        token_result = await provider.exchange_code(
-            code,
-            runtime_paths,
-            code_verifier=pending.code_verifier,
+        await run_coroutine_until_complete(
+            _exchange_and_store_callback_credentials(
+                provider,
+                runtime_paths,
+                target,
+                code=code,
+                code_verifier=pending.code_verifier,
+            ),
         )
-        provider.validate_claims(token_result, runtime_paths)
-        safe_result = sanitized_oauth_token_result(provider, token_result)
-        worker_target = worker_target_for_credentials_target(target)
-        credentials_manager = target.base_manager
-        lock_path = scoped_oauth_credentials_refresh_lock_path(
-            provider.credential_service,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-        async with async_exclusive_file_lock(lock_path):
-            existing_credentials = load_scoped_credentials(
-                provider.credential_service,
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-                allowed_shared_services=target.allowed_shared_services,
-            )
-            token_data = _token_data_preserving_refresh_token(existing_credentials, safe_result.token_data)
-            save_scoped_credentials(
-                provider.credential_service,
-                token_data,
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-            )
     except OAuthClaimValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OAuthProviderError as exc:

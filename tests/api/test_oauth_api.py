@@ -8,6 +8,9 @@ import asyncio
 import base64
 import hashlib
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,9 +21,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import HTTPError, HTTPStatusError, Request, Response
+from starlette.requests import Request as StarletteRequest
 
 from mindroom import constants
 from mindroom.api import auth, main
+from mindroom.api import oauth as oauth_api
+from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
 from mindroom.credentials import (
@@ -2420,6 +2426,103 @@ def test_callback_saves_credentials_under_refresh_lock(tmp_path: Path, monkeypat
             )
 
     assert callback_response.status_code == 307
+
+
+@pytest.mark.asyncio
+async def test_callback_saves_exchanged_credentials_before_propagating_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after code exchange must not strand a consumed callback."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+        },
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    exchange_completed = asyncio.Event()
+    lock_waiting = asyncio.Event()
+    release_lock = asyncio.Event()
+
+    async def exchange(
+        provider: OAuthProvider,
+        code: str,
+        _client_config: OAuthClientConfig,
+        _runtime_paths: constants.RuntimePaths,
+        code_verifier: str | None,
+    ) -> OAuthTokenResult:
+        assert code == "test-code"
+        assert code_verifier is None
+        exchange_completed.set()
+        return OAuthTokenResult(
+            token_data={
+                "token": "new-access-token",
+                "refresh_token": "new-refresh-token",
+                "client_id": "client-id",
+                "scopes": ["scope.read"],
+                "_source": "oauth",
+                "_oauth_provider": provider.id,
+            },
+        )
+
+    provider = replace(_fake_provider(), token_exchanger=exchange)
+    target = RequestCredentialsTarget(
+        runtime_paths=runtime_paths,
+        base_manager=manager,
+        target_manager=manager,
+        worker_scope=None,
+        agent_name=None,
+        execution_identity=None,
+    )
+    pending = SimpleNamespace(
+        agent_name=None,
+        execution_scope_override_provided=False,
+        execution_scope_override=None,
+        payload=None,
+        code_verifier=None,
+    )
+
+    async def allow_request(_request: StarletteRequest) -> None:
+        return None
+
+    @asynccontextmanager
+    async def blocked_lock(_path: Path) -> AsyncIterator[None]:
+        lock_waiting.set()
+        await release_lock.wait()
+        yield None
+
+    monkeypatch.setattr(oauth_api, "_require_oauth_api_user", allow_request)
+    monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
+    monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
+    monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", lambda *_args: None)
+    monkeypatch.setattr(oauth_api, "async_exclusive_file_lock", blocked_lock)
+    request = StarletteRequest(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": f"/api/oauth/{provider.id}/callback",
+            "query_string": b"code=test-code&state=test-state",
+            "headers": [],
+        },
+    )
+
+    callback_task = asyncio.create_task(oauth_api.callback(provider.id, request))
+    await exchange_completed.wait()
+    await lock_waiting.wait()
+    callback_task.cancel()
+    await asyncio.sleep(0)
+
+    assert not callback_task.done()
+    release_lock.set()
+    with pytest.raises(asyncio.CancelledError):
+        await callback_task
+    stored_credentials = manager.load_credentials(provider.credential_service)
+    assert stored_credentials is not None
+    assert stored_credentials["token"] == "new-access-token"
+    assert stored_credentials["refresh_token"] == "new-refresh-token"
 
 
 def test_disconnect_deletes_credentials_under_refresh_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
