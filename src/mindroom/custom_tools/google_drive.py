@@ -179,7 +179,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         connect_url = oauth_connect_url(
             self._oauth_provider,
             self._runtime_paths,
-            worker_target=self._worker_target,
+            worker_target=self._oauth_credential_context().worker_target,
         )
         error = OAuthConnectionRequired(
             "Google Drive reconnect required to grant write access. "

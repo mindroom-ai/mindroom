@@ -188,8 +188,8 @@ async def test_tag_thread_defaults_to_context_thread_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tag_thread_preserves_bridge_actor_while_worker_identity_is_canonical() -> None:
-    """Live Matrix operations need the joined alias while worker ownership uses its canonical principal."""
+async def test_tag_thread_preserves_bridge_actor_across_general_tool_identity() -> None:
+    """Non-OAuth tool identity must keep the joined alias as its actor and owner."""
     alias = "@telegram_alice:localhost"
     canonical = "@alice:localhost"
     tool = ThreadTagsTools()
@@ -213,7 +213,7 @@ async def test_tag_thread_preserves_bridge_actor_while_worker_identity_is_canoni
 
     assert payload["status"] == "ok"
     assert context.requester_id == alias
-    assert build_execution_identity_from_runtime_context(context).requester_id == canonical
+    assert build_execution_identity_from_runtime_context(context).requester_id == alias
     mock_set.assert_awaited_once_with(
         context.client,
         context.room_id,

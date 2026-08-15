@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, oauth_credentials_worker_target
+from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, resolve_oauth_credential_context
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
@@ -99,11 +99,15 @@ def resolve_oauth_reset_target(
         msg = "OAuth reset target does not belong to the invoking agent."
         raise OAuthResetTargetError(msg)
 
-    credential_target = oauth_credentials_worker_target(
+    credential_context = resolve_oauth_credential_context(
         provider,
+        runtime_paths,
+        get_runtime_credentials_manager(runtime_paths),
         resolved_worker_target,
         execution_identity=execution_identity,
+        authorization=config.authorization,
     )
+    credential_target = credential_context.worker_target
     if (
         credential_target is None
         or credential_target.worker_scope not in {"user", "user_agent"}
@@ -113,12 +117,7 @@ def resolve_oauth_reset_target(
         raise OAuthResetTargetError(msg)
     return _ResolvedOAuthResetTarget(
         agent_name=agent_name,
-        credential_context=OAuthCredentialContext(
-            provider=provider,
-            runtime_paths=runtime_paths,
-            credentials_manager=get_runtime_credentials_manager(runtime_paths),
-            worker_target=credential_target,
-        ),
+        credential_context=credential_context,
     )
 
 

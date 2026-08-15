@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
+import os
+import threading
 import time
-from dataclasses import dataclass
+from contextvars import copy_context
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from mindroom.background_tasks import run_coroutine_until_complete
@@ -14,7 +18,7 @@ from mindroom.credentials import (
     save_scoped_credentials,
     scoped_credentials_path,
 )
-from mindroom.file_locks import advisory_file_lock, async_exclusive_file_lock
+from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import (
     OAuthClaimValidationError,
@@ -26,9 +30,11 @@ from mindroom.oauth.providers import (
 from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Mapping
+    from collections.abc import Callable, Collection, Coroutine, Mapping
+    from concurrent.futures import Future as ConcurrentFuture
     from pathlib import Path
 
+    from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.oauth.providers import OAuthClientConfig, OAuthProvider
@@ -87,6 +93,82 @@ _SCOPE_IMPLICATIONS = {
 logger = get_logger(__name__)
 
 
+class _OAuthTransactionLoop:
+    """Process-local event loop that owns every OAuth credential transaction."""
+
+    def __init__(self) -> None:
+        self.pid = os.getpid()
+        self._loop = asyncio.new_event_loop()
+        self._ready = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="mindroom-oauth-transactions",
+            daemon=True,
+        )
+        self._thread.start()
+        self._ready.wait()
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._ready.set()
+        self._loop.run_forever()
+
+    def submit[Result](self, coroutine: Coroutine[Any, Any, Result]) -> ConcurrentFuture[Result]:
+        """Submit one transaction while preserving the caller's context variables."""
+        if threading.get_ident() == self._thread.ident:
+            msg = "OAuth transactions cannot synchronously submit to their own event loop"
+            raise RuntimeError(msg)
+        return cast(
+            "ConcurrentFuture[Result]",
+            copy_context().run(asyncio.run_coroutine_threadsafe, coroutine, self._loop),
+        )
+
+    @property
+    def alive(self) -> bool:
+        """Return whether this process still has a usable transaction owner."""
+        return self.pid == os.getpid() and self._thread.is_alive()
+
+
+_oauth_transaction_loop: _OAuthTransactionLoop | None = None
+_oauth_transaction_loop_guard = threading.Lock()
+
+
+def _reset_oauth_transaction_loop_after_fork() -> None:
+    """Discard parent-process thread state in a forked child."""
+    global _oauth_transaction_loop, _oauth_transaction_loop_guard
+    _oauth_transaction_loop = None
+    _oauth_transaction_loop_guard = threading.Lock()
+
+
+if os.name == "posix":
+    os.register_at_fork(after_in_child=_reset_oauth_transaction_loop_after_fork)
+
+
+def _get_oauth_transaction_loop() -> _OAuthTransactionLoop:
+    """Return the lazy process-lifetime OAuth transaction owner."""
+    global _oauth_transaction_loop
+    with _oauth_transaction_loop_guard:
+        if _oauth_transaction_loop is None or not _oauth_transaction_loop.alive:
+            _oauth_transaction_loop = _OAuthTransactionLoop()
+        return _oauth_transaction_loop
+
+
+async def _run_oauth_transaction[Result](coroutine: Coroutine[Any, Any, Result]) -> Result:
+    """Await one transaction without allowing caller cancellation to interrupt its commit."""
+
+    async def wait_for_transaction() -> Result:
+        transaction_loop = await asyncio.to_thread(_get_oauth_transaction_loop)
+        future = transaction_loop.submit(coroutine)
+        return await asyncio.wrap_future(future)
+
+    return await run_coroutine_until_complete(wait_for_transaction())
+
+
+def _run_oauth_transaction_sync[Result](coroutine: Coroutine[Any, Any, Result]) -> Result:
+    """Block a synchronous tool on work owned entirely by the transaction loop."""
+    return _get_oauth_transaction_loop().submit(coroutine).result()
+
+
 @dataclass(frozen=True, slots=True)
 class OAuthCredentialContext:
     """Canonical runtime identity for one OAuth credential scope."""
@@ -111,20 +193,52 @@ def oauth_credentials_worker_target(
     worker_target: ResolvedWorkerTarget | None,
     *,
     execution_identity: ToolExecutionIdentity | None = None,
+    authorization: AuthorizationConfig | None = None,
 ) -> ResolvedWorkerTarget | None:
-    """Return the credential target required by one provider's identity policy."""
-    if not provider.requester_scoped_credentials:
-        return worker_target
+    """Return one OAuth-only canonical target under the provider identity policy."""
     identity = execution_identity or (worker_target.execution_identity if worker_target is not None else None)
-    if identity is None or not identity.requester_id:
-        return None
+    if identity is not None and identity.requester_id and authorization is not None:
+        identity = replace(identity, requester_id=authorization.resolve_alias(identity.requester_id))
+    if provider.requester_scoped_credentials:
+        if identity is None or not identity.requester_id:
+            return None
+        worker_scope = "user"
+    elif worker_target is None or identity is None or identity == worker_target.execution_identity:
+        return worker_target
+    else:
+        worker_scope = worker_target.worker_scope
     return resolve_worker_target(
-        "user",
+        worker_scope,
         worker_target.routing_agent_name if worker_target is not None else identity.agent_name,
         execution_identity=identity,
         tenant_id=worker_target.tenant_id if worker_target is not None else None,
         account_id=worker_target.account_id if worker_target is not None else None,
         private_agent_names=worker_target.private_agent_names if worker_target is not None else None,
+    )
+
+
+def resolve_oauth_credential_context(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+    authorization: AuthorizationConfig | None = None,
+    allowed_shared_services: frozenset[str] | None = None,
+) -> OAuthCredentialContext:
+    """Resolve the canonical identity and storage target for one OAuth credential scope."""
+    return OAuthCredentialContext(
+        provider=provider,
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=oauth_credentials_worker_target(
+            provider,
+            worker_target,
+            execution_identity=execution_identity,
+            authorization=authorization,
+        ),
+        allowed_shared_services=allowed_shared_services,
     )
 
 
@@ -147,8 +261,14 @@ async def refresh_oauth_credentials_with_result(
     context: OAuthCredentialContext,
 ) -> OAuthCredentialsRefreshResult:
     """Serialize provider refresh and publication for one credential scope."""
+    return await _run_oauth_transaction(_refresh_oauth_credentials_transaction(context))
+
+
+async def _refresh_oauth_credentials_transaction(
+    context: OAuthCredentialContext,
+) -> OAuthCredentialsRefreshResult:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
-        return await run_coroutine_until_complete(_refresh_oauth_credentials_locked(context))
+        return await _refresh_oauth_credentials_locked(context)
 
 
 async def _refresh_oauth_credentials_locked(
@@ -172,8 +292,15 @@ def refresh_oauth_credentials_sync(
     context: OAuthCredentialContext,
     refresh: Callable[[Mapping[str, Any]], dict[str, Any] | None],
 ) -> OAuthCredentialsRefreshResult:
-    """Synchronously refresh one scope under the shared operation lock."""
-    with advisory_file_lock(_operation_lock_path(context)):
+    """Run one synchronous provider adapter on the OAuth transaction owner."""
+    return _run_oauth_transaction_sync(_refresh_oauth_credentials_sync_transaction(context, refresh))
+
+
+async def _refresh_oauth_credentials_sync_transaction(
+    context: OAuthCredentialContext,
+    refresh: Callable[[Mapping[str, Any]], dict[str, Any] | None],
+) -> OAuthCredentialsRefreshResult:
+    async with async_exclusive_file_lock(_operation_lock_path(context)):
         credentials = load_oauth_credentials(context)
         if credentials is None:
             _log_oauth_refresh_skipped(context, None, reason="missing_credentials")
@@ -182,10 +309,15 @@ def refresh_oauth_credentials_sync(
             _log_oauth_refresh_skipped(context, credentials, reason="unusable_credentials")
             return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False)
         try:
-            refreshed_credentials = refresh(credentials)
+            refreshed_credentials = await asyncio.to_thread(refresh, credentials)
         except OAuthProviderError as exc:
             _raise_normalized_refresh_error(context, credentials, exc)
         return _publish_refresh_result(context, credentials, refreshed_credentials)
+
+
+def refresh_oauth_credentials_blocking(context: OAuthCredentialContext) -> dict[str, Any] | None:
+    """Refresh through the async provider contract for one synchronous tool call."""
+    return _run_oauth_transaction_sync(_refresh_oauth_credentials_transaction(context)).credentials
 
 
 async def exchange_and_store_oauth_credentials(
@@ -194,10 +326,18 @@ async def exchange_and_store_oauth_credentials(
     code_verifier: str | None,
 ) -> dict[str, Any]:
     """Exchange one code and publish its credential snapshot atomically."""
+    return await _run_oauth_transaction(
+        _exchange_and_store_oauth_credentials_transaction(context, code, code_verifier),
+    )
+
+
+async def _exchange_and_store_oauth_credentials_transaction(
+    context: OAuthCredentialContext,
+    code: str,
+    code_verifier: str | None,
+) -> dict[str, Any]:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
-        return await run_coroutine_until_complete(
-            _exchange_and_store_oauth_credentials_locked(context, code, code_verifier),
-        )
+        return await _exchange_and_store_oauth_credentials_locked(context, code, code_verifier)
 
 
 async def _exchange_and_store_oauth_credentials_locked(
@@ -227,14 +367,14 @@ async def _exchange_and_store_oauth_credentials_locked(
 
 async def reset_oauth_credentials(
     context: OAuthCredentialContext,
-    *,
-    before_delete: Callable[[], Awaitable[None]] | None = None,
 ) -> bool:
-    """Run fallible cleanup, then delete one credential without a later await."""
+    """Delete one credential as a serialized transaction."""
+    return await _run_oauth_transaction(_reset_oauth_credentials_transaction(context))
+
+
+async def _reset_oauth_credentials_transaction(context: OAuthCredentialContext) -> bool:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
         credentials = load_oauth_credentials(context)
-        if before_delete is not None:
-            await before_delete()
         if credentials is None:
             return False
         delete_scoped_credentials(

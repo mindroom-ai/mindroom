@@ -14,6 +14,7 @@ from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_r
 if TYPE_CHECKING:
     from agno.tools.function import ToolResult
 
+    from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.mcp.config import MCPServerConfig
@@ -63,6 +64,7 @@ class MindRoomMCPToolkit(Toolkit):
         runtime_paths: RuntimePaths | None = None,
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
+        oauth_authorization: AuthorizationConfig | None = None,
     ) -> None:
         super().__init__(
             name=catalog.tool_name if catalog is not None else (tool_name or server_id),
@@ -75,6 +77,7 @@ class MindRoomMCPToolkit(Toolkit):
         self.runtime_paths = runtime_paths
         self.credentials_manager = credentials_manager
         self.worker_target = worker_target
+        self.oauth_authorization = oauth_authorization
         self.call_timeout_seconds = float(call_timeout_seconds) if call_timeout_seconds is not None else None
         self.include_tools = _normalize_tool_name_filter(include_tools)
         self.exclude_tools = _normalize_tool_name_filter(exclude_tools)
@@ -84,6 +87,7 @@ class MindRoomMCPToolkit(Toolkit):
                 cached_catalog = self.manager.cached_request_catalog(
                     self.server_id,
                     worker_target=self.worker_target,
+                    authorization=self.oauth_authorization,
                 )
                 if cached_catalog is not None:
                     self.catalog = cached_catalog
@@ -177,6 +181,7 @@ class MindRoomMCPToolkit(Toolkit):
             self.server_id,
             credentials_manager=self.credentials_manager,
             worker_target=self.worker_target,
+            authorization=self.oauth_authorization,
         )
 
     async def _oauth_connection_status(self) -> str:
@@ -240,6 +245,7 @@ class MindRoomMCPToolkit(Toolkit):
                 timeout_seconds=self.call_timeout_seconds,
                 credentials_manager=self.credentials_manager,
                 worker_target=self.worker_target,
+                authorization=self.oauth_authorization,
             )
         except OAuthConnectionRequired as exc:
             return self._oauth_payload(exc)
@@ -254,6 +260,7 @@ class MindRoomMCPToolkit(Toolkit):
                 timeout_seconds=self.call_timeout_seconds,
                 credentials_manager=self.credentials_manager,
                 worker_target=self.worker_target,
+                authorization=self.oauth_authorization,
             )
 
         return Function(

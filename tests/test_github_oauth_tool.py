@@ -746,7 +746,7 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
     )
     refreshed = _oauth_credentials("rotated-access", refresh_token=ROTATED_REFRESH_TOKEN)
 
-    async def refresh_credentials(*_args: object, **_kwargs: object) -> dict[str, object]:
+    def refresh_credentials(*_args: object, **_kwargs: object) -> dict[str, object]:
         save_scoped_credentials(
             "github_oauth",
             refreshed,
@@ -756,7 +756,7 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
         return refreshed
 
     with (
-        patch("mindroom.custom_tools.github.refresh_oauth_credentials", side_effect=refresh_credentials),
+        patch("mindroom.custom_tools.github.refresh_oauth_credentials_blocking", side_effect=refresh_credentials),
         patch("mindroom.custom_tools.github.Github", return_value=_FakeGithub()),
     ):
         tool = tool_class(
@@ -812,12 +812,12 @@ def test_terminal_refresh_failure_returns_safe_connection_payload(tmp_path: Path
     )
     logger = _CapturingLogger()
 
-    async def reject_refresh(*_args: object, **_kwargs: object) -> None:
+    def reject_refresh(*_args: object, **_kwargs: object) -> None:
         msg = f"OAuth token refresh failed: invalid_grant {leaked_secret}"
         raise OAuthRefreshRejectedError(msg, oauth_error="invalid_grant")
 
     with (
-        patch("mindroom.custom_tools.github.refresh_oauth_credentials", side_effect=reject_refresh),
+        patch("mindroom.custom_tools.github.refresh_oauth_credentials_blocking", side_effect=reject_refresh),
         patch("mindroom.custom_tools.github.logger", logger),
     ):
         result = tool_class(

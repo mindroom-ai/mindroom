@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from html import escape
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -22,7 +23,7 @@ from mindroom.api.credentials_target import (
 from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
-from mindroom.mcp.oauth import disconnect_mcp_oauth_request_session
+from mindroom.mcp.oauth import retire_mcp_oauth_request_session
 from mindroom.oauth import (
     OAuthClaimValidationError,
     OAuthClientConfigResolution,
@@ -36,6 +37,7 @@ from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials,
     refresh_oauth_credentials,
     reset_oauth_credentials,
+    resolve_oauth_credential_context,
 )
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import (
@@ -144,18 +146,39 @@ def _resolve_oauth_credentials_target(
 ) -> RequestCredentialsTarget:
     if provider.requester_scoped_credentials:
         # Requester-scoped providers always bind to the user's store, so agent scope overrides cannot change it.
-        return resolve_requester_credentials_target(
+        target = resolve_requester_credentials_target(
             request,
             agent_name=agent_name,
             service_names=(provider.credential_service,),
         )
-    return resolve_request_credentials_target(
-        request,
-        agent_name=agent_name,
-        service_names=(provider.credential_service,),
-        execution_scope_override_provided=execution_scope_override_provided,
-        execution_scope_override=execution_scope_override,
-        allow_private_scopes=True,
+    else:
+        target = resolve_request_credentials_target(
+            request,
+            agent_name=agent_name,
+            service_names=(provider.credential_service,),
+            execution_scope_override_provided=execution_scope_override_provided,
+            execution_scope_override=execution_scope_override,
+            allow_private_scopes=True,
+        )
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    context = resolve_oauth_credential_context(
+        provider,
+        target.runtime_paths,
+        target.base_manager,
+        worker_target_for_credentials_target(target),
+        execution_identity=target.execution_identity,
+        authorization=snapshot.runtime_config.authorization if snapshot.runtime_config is not None else None,
+        allowed_shared_services=target.allowed_shared_services,
+    )
+    worker_target = context.worker_target
+    if worker_target is None or worker_target.worker_key is None:
+        return target
+    return replace(
+        target,
+        target_manager=target.base_manager.for_worker(worker_target.worker_key),
+        worker_scope=worker_target.worker_scope,
+        agent_name=worker_target.routing_agent_name,
+        execution_identity=worker_target.execution_identity,
     )
 
 
@@ -254,6 +277,12 @@ def _verify_connect_target_authorized(
         "oauth",
         runtime_paths=runtime_paths,
     )
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    if dashboard_identity.requester_id and snapshot.runtime_config is not None:
+        dashboard_identity = replace(
+            dashboard_identity,
+            requester_id=snapshot.runtime_config.authorization.resolve_alias(dashboard_identity.requester_id),
+        )
     if connect_target.requester_id and connect_target.requester_id != dashboard_identity.requester_id:
         raise HTTPException(status_code=403, detail="OAuth connect link does not belong to the current user")
 
@@ -306,11 +335,11 @@ def _credential_context(
     runtime_paths: RuntimePaths,
     target: RequestCredentialsTarget,
 ) -> OAuthCredentialContext:
-    return OAuthCredentialContext(
-        provider=provider,
-        runtime_paths=runtime_paths,
-        credentials_manager=target.base_manager,
-        worker_target=worker_target_for_credentials_target(target),
+    return resolve_oauth_credential_context(
+        provider,
+        runtime_paths,
+        target.base_manager,
+        worker_target_for_credentials_target(target),
         allowed_shared_services=target.allowed_shared_services,
     )
 
@@ -516,16 +545,10 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
 
-    async def disconnect_mcp() -> None:
-        assert config is not None
-        await disconnect_mcp_oauth_request_session(
-            config.mcp_servers,
-            provider.id,
-            worker_target=context.worker_target,
-        )
-
-    await reset_oauth_credentials(
-        context,
-        before_delete=disconnect_mcp if config is not None else None,
-    )
+    async with retire_mcp_oauth_request_session(
+        config.mcp_servers if config is not None else {},
+        provider.id,
+        worker_target=context.worker_target,
+    ):
+        await reset_oauth_credentials(context)
     return {"status": "disconnected", "provider": provider.id}

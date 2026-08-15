@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -25,7 +26,7 @@ from mindroom.oauth.reset import (
     build_oauth_reset_approval_bindings,
     validate_oauth_reset_approval_bindings,
 )
-from mindroom.oauth.service import lookup_oauth_connect_token
+from mindroom.oauth.service import lookup_oauth_connect_token, oauth_credentials_worker_target
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
@@ -35,6 +36,7 @@ from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_targe
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, write_config_yaml
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.credentials import CredentialsManager
@@ -248,14 +250,20 @@ async def test_reset_oauth_connection_canonicalizes_bridge_alias_scope(tmp_path:
         aliases={"@alice:example.org": [alias]},
     )
     assert worker_target.execution_identity is not None
-    assert worker_target.execution_identity.requester_id == "@alice:example.org"
+    assert worker_target.execution_identity.requester_id == alias
     credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
     provider = google_drive_oauth_provider()
+    canonical_worker_target = oauth_credentials_worker_target(
+        provider,
+        worker_target,
+        authorization=context.config.authorization,
+    )
+    assert canonical_worker_target is not None
     save_scoped_credentials(
         provider.credential_service,
         {"refresh_token": "canonical-refresh-token"},
         credentials_manager=credentials_manager,
-        worker_target=worker_target,
+        worker_target=canonical_worker_target,
     )
 
     with tool_runtime_context(context):
@@ -266,7 +274,7 @@ async def test_reset_oauth_connection_canonicalizes_bridge_alias_scope(tmp_path:
         load_scoped_credentials(
             provider.credential_service,
             credentials_manager=credentials_manager,
-            worker_target=worker_target,
+            worker_target=canonical_worker_target,
         )
         is None
     )
@@ -333,8 +341,8 @@ async def test_reset_oauth_connection_denies_unauthorized_requester_before_side_
         provider,
         "unauthorized-refresh-token",
     )
-    disconnect = AsyncMock()
-    monkeypatch.setattr(oauth_connections_module, "disconnect_mcp_oauth_request_session", disconnect)
+    retire = MagicMock()
+    monkeypatch.setattr(oauth_connections_module, "retire_mcp_oauth_request_session", retire)
 
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)
@@ -348,7 +356,7 @@ async def test_reset_oauth_connection_denies_unauthorized_requester_before_side_
         )
         == credentials
     )
-    disconnect.assert_not_awaited()
+    retire.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -365,8 +373,8 @@ async def test_reset_oauth_connection_denies_provider_not_backing_agent_tool_bef
         provider,
         "unavailable-refresh-token",
     )
-    disconnect = AsyncMock()
-    monkeypatch.setattr(oauth_connections_module, "disconnect_mcp_oauth_request_session", disconnect)
+    retire = MagicMock()
+    monkeypatch.setattr(oauth_connections_module, "retire_mcp_oauth_request_session", retire)
 
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)
@@ -380,7 +388,7 @@ async def test_reset_oauth_connection_denies_provider_not_backing_agent_tool_bef
         )
         == credentials
     )
-    disconnect.assert_not_awaited()
+    retire.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -397,9 +405,9 @@ async def test_reset_oauth_connection_denies_unconfigured_provider_before_side_e
         provider,
         "unconfigured-refresh-token",
     )
-    disconnect = AsyncMock()
+    retire = MagicMock()
     monkeypatch.setattr(oauth_reset_module, "load_oauth_providers", lambda *_args: {})
-    monkeypatch.setattr(oauth_connections_module, "disconnect_mcp_oauth_request_session", disconnect)
+    monkeypatch.setattr(oauth_connections_module, "retire_mcp_oauth_request_session", retire)
 
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)
@@ -413,7 +421,7 @@ async def test_reset_oauth_connection_denies_unconfigured_provider_before_side_e
         )
         == credentials
     )
-    disconnect.assert_not_awaited()
+    retire.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -463,11 +471,14 @@ async def test_reset_oauth_connection_preserves_credentials_when_mcp_teardown_fa
         provider,
         "mcp-close-failure-refresh-token",
     )
-    monkeypatch.setattr(
-        oauth_connections_module,
-        "disconnect_mcp_oauth_request_session",
-        AsyncMock(side_effect=RuntimeError("close failed")),
-    )
+
+    @asynccontextmanager
+    async def failed_retirement(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
+        message = "close failed"
+        raise RuntimeError(message)
+        yield
+
+    monkeypatch.setattr(oauth_connections_module, "retire_mcp_oauth_request_session", failed_retirement)
 
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)
@@ -500,13 +511,15 @@ async def test_reset_oauth_connection_cancellation_during_teardown_preserves_cre
     teardown_started = asyncio.Event()
     hold_teardown = asyncio.Event()
 
-    async def blocked_teardown(*_args: object, **_kwargs: object) -> None:
+    @asynccontextmanager
+    async def blocked_teardown(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
         teardown_started.set()
         await hold_teardown.wait()
+        yield
 
     monkeypatch.setattr(
         oauth_connections_module,
-        "disconnect_mcp_oauth_request_session",
+        "retire_mcp_oauth_request_session",
         blocked_teardown,
     )
 

@@ -556,6 +556,7 @@ def test_build_oauth_reconnect_instruction_explains_loopback_device_handoff() ->
         "Google Drive session for this agent expired or is no longer valid. "
         "Open this MindRoom link in a browser on the computer where the MindRoom process is running, "
         "not on a phone or another computer. If needed, open this conversation there or copy the complete "
-        "link into that browser. After reconnecting, retry the request: "
+        "link into that browser. After reconnecting, retry the request. "
+        "This link is valid for 10 minutes; if it expires, rerun the original request for a fresh link: "
         f"{connect_url}"
     )

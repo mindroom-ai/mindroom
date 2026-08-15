@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from mindroom.mcp.toolkit import require_mcp_server_manager
@@ -12,7 +13,7 @@ from mindroom.oauth.discovery import (
 from mindroom.oauth.providers import OAuthProvider
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import AsyncIterator, Iterable
 
     from mindroom.mcp.config import MCPOAuthConfig, MCPServerConfig
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -53,19 +54,21 @@ def _mcp_oauth_server_id_for_provider_id(
     return None
 
 
-async def disconnect_mcp_oauth_request_session(
+@asynccontextmanager
+async def retire_mcp_oauth_request_session(
     mcp_servers: dict[str, MCPServerConfig],
     provider_id: str,
     *,
     worker_target: ResolvedWorkerTarget | None,
-) -> None:
-    """Close the active worker-scoped MCP OAuth session for one generated provider."""
+) -> AsyncIterator[None]:
+    """Fence a generated provider's requester session for an OAuth reset transaction."""
     server_id = _mcp_oauth_server_id_for_provider_id(mcp_servers, provider_id)
-    if server_id is None:
+    manager = require_mcp_server_manager() if server_id is not None else None
+    if manager is None or server_id is None:
+        yield
         return
-    manager = require_mcp_server_manager()
-    if manager is not None:
-        await manager.disconnect_request_session(server_id, worker_target=worker_target)
+    async with manager.retire_request_session(server_id, worker_target=worker_target):
+        yield
 
 
 def _display_name(server_id: str, auth_config: MCPOAuthConfig) -> str:

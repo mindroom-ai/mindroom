@@ -17,9 +17,11 @@ from mindroom.oauth.credential_lifecycle import (
     oauth_credentials_usable,
     oauth_credentials_worker_target,
     refresh_oauth_credentials,
+    refresh_oauth_credentials_blocking,
     refresh_oauth_credentials_sync,
     refresh_oauth_credentials_with_result,
     reset_oauth_credentials,
+    resolve_oauth_credential_context,
     sanitized_oauth_token_result,
 )
 from mindroom.oauth.providers import (
@@ -70,9 +72,11 @@ __all__ = [
     "oauth_provider_service_account_configured",
     "oauth_success_redirect_url",
     "refresh_oauth_credentials",
+    "refresh_oauth_credentials_blocking",
     "refresh_oauth_credentials_sync",
     "refresh_oauth_credentials_with_result",
     "reset_oauth_credentials",
+    "resolve_oauth_credential_context",
     "sanitized_oauth_token_result",
 ]
 
@@ -276,11 +280,15 @@ def build_oauth_reconnect_instruction(
             f"{provider.display_name} session for this agent expired or is no longer valid. "
             "Open this MindRoom link in a browser on the computer where the MindRoom process is running, "
             "not on a phone or another computer. If needed, open this conversation there or copy the complete "
-            f"link into that browser. After reconnecting, retry the request: {connect_url}"
+            "link into that browser. After reconnecting, retry the request. "
+            f"This link is valid for {OAUTH_CONNECT_TOKEN_TTL_MINUTES} minutes; if it expires, "
+            f"rerun the original request for a fresh link: {connect_url}"
         )
     return (
         f"{provider.display_name} session for this agent expired or is no longer valid. "
-        f"Reconnect it with this MindRoom link, then retry the request: {connect_url}"
+        "Reconnect it with this MindRoom link, then retry the request. "
+        f"This link is valid for {OAUTH_CONNECT_TOKEN_TTL_MINUTES} minutes; if it expires, "
+        f"rerun the original request for a fresh link: {connect_url}"
     )
 
 

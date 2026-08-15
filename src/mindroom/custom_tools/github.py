@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import threading
-from contextvars import copy_context
 from functools import wraps
 from html import unescape
 from typing import TYPE_CHECKING, Protocol, cast
@@ -18,8 +15,8 @@ from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     load_oauth_credentials,
     oauth_credentials_usable,
-    oauth_credentials_worker_target,
-    refresh_oauth_credentials,
+    refresh_oauth_credentials_blocking,
+    resolve_oauth_credential_context,
 )
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import (
@@ -32,6 +29,7 @@ from mindroom.oauth.service import (
     OAUTH_REFRESH_REJECTED_REASON,
     oauth_connection_required,
 )
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -112,22 +110,18 @@ class GithubTools(AgnoGithubTools):
         token = credentials.get("token") or credentials.get("access_token")
         return _normalized_access_token(token)
 
-    def _oauth_credentials_worker_target(self) -> ResolvedWorkerTarget | None:
+    def _oauth_credential_context(self) -> OAuthCredentialContext:
         execution_identity = active_tool_execution_identity(None)
         if execution_identity is None and self._worker_target is not None:
             execution_identity = self._worker_target.execution_identity
-        return oauth_credentials_worker_target(
+        runtime_context = get_tool_runtime_context()
+        return resolve_oauth_credential_context(
             self._oauth_provider,
+            self._runtime_paths,
+            self._credentials_manager,
             self._worker_target,
             execution_identity=execution_identity,
-        )
-
-    def _oauth_credential_context(self) -> OAuthCredentialContext:
-        return OAuthCredentialContext(
-            provider=self._oauth_provider,
-            runtime_paths=self._runtime_paths,
-            credentials_manager=self._credentials_manager,
-            worker_target=self._oauth_credentials_worker_target(),
+            authorization=runtime_context.config.authorization if runtime_context is not None else None,
         )
 
     def _connection_required(self, *, reason: str | None = None) -> OAuthConnectionRequired:
@@ -137,29 +131,7 @@ class GithubTools(AgnoGithubTools):
         context = self._oauth_credential_context()
         if self._oauth_provider.requester_scoped_credentials and context.worker_target is None:
             return None
-        refresh = refresh_oauth_credentials(context)
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(refresh)
-
-        result: list[dict[str, object] | None] = []
-        errors: list[BaseException] = []
-        context = copy_context()
-
-        def run_refresh() -> None:
-            try:
-                refreshed = context.run(asyncio.run, refresh)
-                result.append(cast("dict[str, object] | None", refreshed))
-            except BaseException as exc:
-                errors.append(exc)
-
-        thread = threading.Thread(target=run_refresh, name="mindroom-github-oauth-refresh")
-        thread.start()
-        thread.join()
-        if errors:
-            raise errors[0]
-        return result[0]
+        return refresh_oauth_credentials_blocking(context)
 
     def _ensure_authenticated(self) -> None:
         if self._explicit_access_token:

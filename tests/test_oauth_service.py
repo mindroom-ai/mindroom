@@ -193,8 +193,8 @@ def _assert_no_token_values_logged(logger: _CapturingLogger) -> None:
 @pytest.mark.asyncio
 async def test_same_scope_refresh_serializes_provider_rotation(tmp_path: Path) -> None:
     """A later same-scope refresh observes the first committed rotation."""
-    first_started = asyncio.Event()
-    release_first = asyncio.Event()
+    first_started = threading.Event()
+    release_first = threading.Event()
     seen: list[str] = []
 
     async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -202,7 +202,7 @@ async def test_same_scope_refresh_serializes_provider_rotation(tmp_path: Path) -
         seen.append(refresh_token)
         if refresh_token == CHAIN_0:
             first_started.set()
-            await release_first.wait()
+            await asyncio.to_thread(release_first.wait)
             return _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
         assert refresh_token == CHAIN_1
         return None
@@ -210,7 +210,7 @@ async def test_same_scope_refresh_serializes_provider_rotation(tmp_path: Path) -
     context = _context(tmp_path, _FakeOAuthProvider(refresh))
     _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
     first = asyncio.create_task(refresh_oauth_credentials_with_result(context))
-    await first_started.wait()
+    await asyncio.to_thread(first_started.wait)
     second = asyncio.create_task(refresh_oauth_credentials_with_result(context))
     await asyncio.sleep(0)
     assert seen == [CHAIN_0]
@@ -227,14 +227,14 @@ async def test_same_scope_refresh_serializes_provider_rotation(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_different_scopes_refresh_concurrently(tmp_path: Path) -> None:
     """Independent credential scopes do not share one global transaction."""
-    both_started = asyncio.Event()
+    both_started = threading.Event()
     started: set[str] = set()
 
     async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
         started.add(str(credentials["token"]))
         if len(started) == 2:
             both_started.set()
-        await asyncio.wait_for(both_started.wait(), timeout=1)
+        await asyncio.to_thread(both_started.wait)
         return _credentials("updated", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
 
     provider = _FakeOAuthProvider(refresh)
@@ -254,14 +254,14 @@ async def test_different_scopes_refresh_concurrently(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_callback_waits_for_refresh_and_preserves_rotated_refresh_token(tmp_path: Path) -> None:
     """Callback publication preserves the latest committed token chain, not its stale predecessor."""
-    refresh_started = asyncio.Event()
-    release_refresh = asyncio.Event()
-    exchange_started = asyncio.Event()
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
+    exchange_started = threading.Event()
 
     async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
         assert credentials["refresh_token"] == CHAIN_0
         refresh_started.set()
-        await release_refresh.wait()
+        await asyncio.to_thread(release_refresh.wait)
         rotated = _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
         rotated["_oauth_claims"] = {"sub": "subject-1"}
         rotated["_oauth_claims_verified"] = True
@@ -282,7 +282,7 @@ async def test_callback_waits_for_refresh_and_preserves_rotated_refresh_token(tm
     _save(context, original)
 
     refresh_task = asyncio.create_task(refresh_oauth_credentials_with_result(context))
-    await refresh_started.wait()
+    await asyncio.to_thread(refresh_started.wait)
     callback_task = asyncio.create_task(exchange_and_store_oauth_credentials(context, "code", None))
     await asyncio.sleep(0)
     assert not exchange_started.is_set()
@@ -299,19 +299,19 @@ async def test_callback_waits_for_refresh_and_preserves_rotated_refresh_token(tm
 @pytest.mark.asyncio
 async def test_refresh_publishes_rotation_before_propagating_cancellation(tmp_path: Path) -> None:
     """A remotely rotated refresh grant is committed before cancellation escapes."""
-    provider_rotated = asyncio.Event()
-    release_provider_result = asyncio.Event()
+    provider_rotated = threading.Event()
+    release_provider_result = threading.Event()
 
     async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
         assert credentials["refresh_token"] == CHAIN_0
         provider_rotated.set()
-        await release_provider_result.wait()
+        await asyncio.to_thread(release_provider_result.wait)
         return _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
 
     context = _context(tmp_path, _FakeOAuthProvider(refresh))
     _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
     refresh_task = asyncio.create_task(refresh_oauth_credentials_with_result(context))
-    await provider_rotated.wait()
+    await asyncio.to_thread(provider_rotated.wait)
 
     refresh_task.cancel()
     await asyncio.sleep(0)
@@ -398,7 +398,7 @@ async def test_nonterminal_refresh_failure_preserves_credentials_and_bounds_logs
 
 def test_sync_refresh_uses_same_scope_transaction(tmp_path: Path) -> None:
     """The synchronous provider adapter delegates persistence to the lifecycle."""
-    seen_thread = threading.get_ident()
+    caller_thread = threading.get_ident()
     observed: list[str] = []
 
     async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
@@ -408,7 +408,7 @@ def test_sync_refresh_uses_same_scope_transaction(tmp_path: Path) -> None:
     _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
 
     def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
-        assert threading.get_ident() == seen_thread
+        assert threading.get_ident() != caller_thread
         observed.append(str(credentials["refresh_token"]))
         return _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
 
@@ -417,3 +417,42 @@ def test_sync_refresh_uses_same_scope_transaction(tmp_path: Path) -> None:
     assert result.refreshed is True
     assert observed == [CHAIN_0]
     assert _load(context) == result.credentials
+
+
+@pytest.mark.asyncio
+async def test_sync_refresh_on_event_loop_cannot_deadlock_behind_async_same_scope_transaction(
+    tmp_path: Path,
+) -> None:
+    """Sync tools wait on an independent transaction loop, never on their blocked caller loop."""
+    async_refresh_started = threading.Event()
+    release_async_refresh = threading.Event()
+    caller_thread = threading.get_ident()
+    sync_refresh_thread: list[int] = []
+
+    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any] | None:
+        if credentials["refresh_token"] != CHAIN_0:
+            return None
+        async_refresh_started.set()
+        await asyncio.to_thread(release_async_refresh.wait)
+        return _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=1.0)
+
+    context = _context(tmp_path, _FakeOAuthProvider(refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    async_task = asyncio.create_task(refresh_oauth_credentials_with_result(context))
+    await asyncio.to_thread(async_refresh_started.wait)
+
+    releaser = threading.Thread(target=release_async_refresh.set)
+    releaser.start()
+
+    def sync_refresh(credentials: Mapping[str, Any]) -> None:
+        sync_refresh_thread.append(threading.get_ident())
+        assert credentials["refresh_token"] == CHAIN_1
+
+    sync_result = refresh_oauth_credentials_sync(context, sync_refresh)
+    releaser.join()
+    async_result = await async_task
+
+    assert async_result.refreshed is True
+    assert sync_result.credentials == async_result.credentials
+    assert sync_refresh_thread
+    assert sync_refresh_thread[0] != caller_thread

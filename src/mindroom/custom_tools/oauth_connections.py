@@ -8,7 +8,7 @@ from agno.tools import Toolkit
 
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management
 from mindroom.logging_config import get_logger
-from mindroom.mcp.oauth import disconnect_mcp_oauth_request_session
+from mindroom.mcp.oauth import retire_mcp_oauth_request_session
 from mindroom.oauth.credential_lifecycle import reset_oauth_credentials
 from mindroom.oauth.reset import OAuthResetTargetError, resolve_oauth_reset_target
 from mindroom.oauth.service import (
@@ -82,18 +82,13 @@ class OAuthConnectionTools(Toolkit):
 
         connect_url = oauth_connect_url(provider, self.runtime_paths, worker_target=worker_target)
 
-        async def disconnect_mcp() -> None:
-            await disconnect_mcp_oauth_request_session(
+        try:
+            async with retire_mcp_oauth_request_session(
                 config.mcp_servers,
                 provider.id,
                 worker_target=worker_target,
-            )
-
-        try:
-            deleted = await reset_oauth_credentials(
-                reset_target.credential_context,
-                before_delete=disconnect_mcp,
-            )
+            ):
+                deleted = await reset_oauth_credentials(reset_target.credential_context)
         except Exception as exc:
             logger.warning(
                 "oauth_mcp_session_disconnect_failed",

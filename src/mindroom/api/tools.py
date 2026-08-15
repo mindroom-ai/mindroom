@@ -37,6 +37,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
@@ -65,6 +66,7 @@ class _ResolvedToolAvailabilityContext:
     auth_provider_credential_services: dict[str, str]
     oauth_providers: dict[str, OAuthProvider]
     runtime_paths: RuntimePaths
+    oauth_authorization: AuthorizationConfig | None = None
 
 
 def _effective_allowed_shared_services(
@@ -287,6 +289,7 @@ def _resolve_tool_availability_context(
         },
         oauth_providers=oauth_providers,
         runtime_paths=runtime_paths,
+        oauth_authorization=config.authorization,
     )
 
 
@@ -354,7 +357,11 @@ def _update_tools_statuses(
             tool["environment_auth_configured"] = environment_auth_configured
             credential_service = context.auth_provider_credential_services.get(auth_provider, auth_provider)
             provider_target = (
-                oauth_credentials_worker_target(provider, context.worker_target)
+                oauth_credentials_worker_target(
+                    provider,
+                    context.worker_target,
+                    authorization=context.oauth_authorization,
+                )
                 if provider is not None
                 else context.worker_target
             )

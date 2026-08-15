@@ -20,6 +20,7 @@ from mindroom.oauth.credential_lifecycle import (
     oauth_credentials_match_client_id,
     oauth_credentials_satisfy_identity_policy,
     refresh_oauth_credentials_sync,
+    resolve_oauth_credential_context,
 )
 from mindroom.oauth.providers import (
     OAuthConnectionRequired,
@@ -34,6 +35,8 @@ from mindroom.oauth.service import (
     oauth_connection_required,
 )
 from mindroom.tool_system.dependencies import ensure_tool_deps
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -160,11 +163,17 @@ class ScopedOAuthClientMixin:
         return load_oauth_credentials(self._oauth_credential_context())
 
     def _oauth_credential_context(self) -> OAuthCredentialContext:
-        return OAuthCredentialContext(
-            provider=self._oauth_provider,
-            runtime_paths=self._runtime_paths,
-            credentials_manager=self._creds_manager,
-            worker_target=self._worker_target,
+        execution_identity = active_tool_execution_identity(None)
+        if execution_identity is None and self._worker_target is not None:
+            execution_identity = self._worker_target.execution_identity
+        runtime_context = get_tool_runtime_context()
+        return resolve_oauth_credential_context(
+            self._oauth_provider,
+            self._runtime_paths,
+            self._creds_manager,
+            self._worker_target,
+            execution_identity=execution_identity,
+            authorization=runtime_context.config.authorization if runtime_context is not None else None,
         )
 
     def _connection_required(self, *, reason: str | None = None) -> OAuthConnectionRequired:

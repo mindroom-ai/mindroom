@@ -31,7 +31,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.oauth import oauth_connect_url_requires_host_browser
 from mindroom.oauth.registry import load_oauth_providers
-from mindroom.oauth.service import oauth_connect_url
+from mindroom.oauth.service import oauth_connect_url, oauth_credentials_worker_target
 from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.catalog import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.runtime_context import (
@@ -377,7 +377,13 @@ def _build_oauth_onboarding_guidance(
         provider = providers.get(provider_id)
         if provider is None:
             continue
-        connect_url = oauth_connect_url(provider, runtime_paths, worker_target=worker_target)
+        credential_target = oauth_credentials_worker_target(
+            provider,
+            worker_target,
+            execution_identity=target_identity,
+            authorization=config.authorization,
+        )
+        connect_url = oauth_connect_url(provider, runtime_paths, worker_target=credential_target)
         requires_host_browser = oauth_connect_url_requires_host_browser(connect_url)
         any_requires_host_browser = any_requires_host_browser or requires_host_browser
         tools_label = ", ".join(f"`{tool_name}`" for tool_name in tool_names)

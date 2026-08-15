@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping
 from contextlib import asynccontextmanager
@@ -22,7 +23,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.mcp.config import MCPServerConfig
-from mindroom.mcp.errors import MCPProtocolError, MCPTimeoutError, MCPToolCallError
+from mindroom.mcp.errors import MCPConnectionError, MCPProtocolError, MCPTimeoutError, MCPToolCallError
 from mindroom.mcp.manager import MCPServerManager, _discovery_retry_delay_seconds
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
@@ -901,8 +902,8 @@ async def test_mcp_manager_oauth_refresh_lock_is_per_scope(
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
-    both_refreshes_entered = asyncio.Event()
-    release_refreshes = asyncio.Event()
+    both_refreshes_entered = threading.Event()
+    release_refreshes = threading.Event()
     active_refreshes = 0
     max_active_refreshes = 0
 
@@ -913,7 +914,7 @@ async def test_mcp_manager_oauth_refresh_lock_is_per_scope(
         max_active_refreshes = max(max_active_refreshes, active_refreshes)
         if active_refreshes == 2:
             both_refreshes_entered.set()
-        await both_refreshes_entered.wait()
+        await asyncio.to_thread(both_refreshes_entered.wait)
         release_refreshes.set()
         active_refreshes -= 1
         if refresh_token == ALICE_CHAIN_0:
@@ -932,7 +933,7 @@ async def test_mcp_manager_oauth_refresh_lock_is_per_scope(
     bob_task = asyncio.create_task(
         manager._oauth_access_token(state, credentials_manager=credentials_manager, worker_target=bob_target),
     )
-    await asyncio.wait_for(release_refreshes.wait(), timeout=1)
+    await asyncio.to_thread(release_refreshes.wait)
     alice_token, bob_token = await asyncio.gather(alice_task, bob_task)
 
     assert alice_token == ALICE_ACCESS_1
@@ -1122,11 +1123,11 @@ async def test_mcp_manager_allows_same_oauth_typed_tools_for_multiple_requesters
 
 
 @pytest.mark.asyncio
-async def test_mcp_manager_disconnects_requester_oauth_session(
+async def test_mcp_manager_retires_requester_oauth_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Disconnect should close only the current requester's OAuth-backed MCP session."""
+    """Retirement should close only the current requester's OAuth-backed MCP session."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
@@ -1142,11 +1143,54 @@ async def test_mcp_manager_disconnects_requester_oauth_session(
     alice_session = _FakeClientSession.sessions[0]
     bob_session = _FakeClientSession.sessions[1]
 
-    await manager.disconnect_request_session("demo", worker_target=alice_target)
+    async with manager.retire_request_session("demo", worker_target=alice_target):
+        pass
 
     assert alice_session.closed is True
     assert bob_session.closed is False
     assert len(manager._scoped_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_retirement_fences_captured_state_and_new_requesters(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reset retirement must prevent detached stale-token reconnects until deletion commits."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    captured_state = next(iter(manager._scoped_states.values()))
+    captured_headers = {"Authorization": "Bearer alice-token"}
+
+    async with manager.retire_request_session("demo", worker_target=worker_target):
+        assert captured_state.retired is True
+        with pytest.raises(MCPConnectionError, match="retired"):
+            await manager._refresh_server_catalog(
+                captured_state,
+                notify=False,
+                auth_headers=captured_headers,
+            )
+        with pytest.raises(OAuthConnectionRequired):
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+        assert manager._scoped_states == {}
+
+    assert len(_FakeClientSession.sessions) == 1
+    assert _FakeClientSession.sessions[0].closed is True
 
 
 @pytest.mark.asyncio

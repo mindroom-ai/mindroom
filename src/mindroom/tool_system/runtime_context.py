@@ -313,13 +313,12 @@ class ToolRuntimeSupport:
         agent_name: str | None = None,
     ) -> ToolExecutionIdentity:
         """Build the serializable execution identity used for worker routing."""
-        requester_id = self.runtime.config.authorization.resolve_alias(user_id or self.matrix_id.full_id)
         return build_tool_execution_identity(
             channel="matrix",
             agent_name=agent_name or self.agent_name,
             transport_agent_name=self.agent_name,
             runtime_paths=self.runtime_paths,
-            requester_id=requester_id,
+            requester_id=user_id or self.matrix_id.full_id,
             room_id=target.room_id,
             thread_id=target.resolved_thread_id,
             resolved_thread_id=target.resolved_thread_id,
@@ -404,7 +403,7 @@ def build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -
         agent_name=context.agent_name,
         transport_agent_name=context.transport_agent_name or context.agent_name,
         runtime_paths=context.runtime_paths,
-        requester_id=context.config.authorization.resolve_alias(context.requester_id),
+        requester_id=context.requester_id,
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
         resolved_thread_id=target.resolved_thread_id,
@@ -422,7 +421,7 @@ def execution_identity_matches_tool_runtime_context(
     return (
         execution_identity.channel == "matrix"
         and execution_identity.agent_name == context.agent_name
-        and execution_identity.requester_id == context.config.authorization.resolve_alias(context.requester_id)
+        and execution_identity.requester_id == context.requester_id
         and execution_identity.room_id == target.room_id
         and execution_identity.thread_id in valid_thread_ids
         and execution_identity.resolved_thread_id == target.resolved_thread_id

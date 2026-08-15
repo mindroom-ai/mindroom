@@ -6,7 +6,7 @@
 **Goal:** Replace distributed OAuth mutation logic with one serialized credential lifecycle owner.
 
 **Architecture:** An immutable `OAuthCredentialContext` identifies one provider and credential scope.
-One lifecycle module serializes every provider operation and local mutation on one cross-process lock, while `oauth.service` owns links and connection prompts.
+One lifecycle module submits asynchronous callers and synchronous provider adapters to a process-lifetime transaction loop, serializes every provider operation and local mutation on one cross-process lock, and leaves `oauth.service` ownership of links and connection prompts.
 
 **Tech Stack:** Python 3.13, asyncio, dataclasses, advisory file locks, FastAPI, Agno toolkits, Google Auth, Authlib, pytest test specifications, Ruff, ty, Vulture, pre-commit.
 
@@ -18,8 +18,10 @@ One lifecycle module serializes every provider operation and local mutation on o
 - Keep all OAuth credential mutations in `src/mindroom/oauth/credential_lifecycle.py`.
 - Use one operation lock per provider credential scope.
 - Hold the operation lock across provider I/O and its matching local commit.
+- Run synchronous provider adapters off the caller event loop through the same transaction owner.
 - Complete remote-token-producing operations locally before propagating cancellation.
 - Perform fallible MCP teardown before destructive credential deletion.
+- Fence retired MCP requester-session generations until credential deletion commits.
 - Use structured provider error codes and never log provider-controlled descriptions or token values.
 - Keep reset approval bound to the exact provider, service, scope, worker key, and routing agent.
 - Do not run tests or CI, per user instruction.
@@ -40,14 +42,16 @@ One lifecycle module serializes every provider operation and local mutation on o
 
 - Produces: `OAuthCredentialContext(provider, runtime_paths, credentials_manager, worker_target, allowed_shared_services=None)`.
 - Produces: `OAuthCredentialsRefreshResult(credentials, refreshed)`.
-- Produces: `oauth_credentials_worker_target(provider, worker_target, execution_identity=None)`.
+- Produces: `oauth_credentials_worker_target(provider, worker_target, execution_identity=None, authorization=None)`.
+- Produces: `resolve_oauth_credential_context(...)` as the OAuth-only alias-canonicalization boundary.
 - Produces: `load_oauth_credentials(context)`.
 - Produces: `refresh_oauth_credentials(context)` and `refresh_oauth_credentials_with_result(context)`.
+- Produces: `refresh_oauth_credentials_blocking(context)` for synchronous callers of the asynchronous provider contract.
 - Produces: `refresh_oauth_credentials_sync(context, refresh)` for synchronous provider adapters.
 - Produces: `exchange_and_store_oauth_credentials(context, code, code_verifier)`.
-- Produces: `reset_oauth_credentials(context, before_delete=None)`.
+- Produces: `reset_oauth_credentials(context)`.
 - Produces: credential validation and sanitization helpers currently housed in `oauth.service`.
-- Consumes: `OAuthProvider`, `RuntimePaths`, `CredentialsManager`, `ResolvedWorkerTarget`, `async_exclusive_file_lock`, `advisory_file_lock`, and scoped credential storage functions.
+- Consumes: `OAuthProvider`, `RuntimePaths`, `CredentialsManager`, `ResolvedWorkerTarget`, `AuthorizationConfig`, `async_exclusive_file_lock`, and scoped credential storage functions.
 
 - [ ] **Step 1: Replace optimistic-race test specifications with serialized lifecycle specifications**
 
@@ -59,20 +63,20 @@ Add specifications equivalent to:
 @pytest.mark.asyncio
 async def test_same_scope_refresh_serializes_provider_rotation(tmp_path: Path) -> None:
     context = _credential_context(tmp_path, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
-    first_started = asyncio.Event()
-    release_first = asyncio.Event()
+    first_started = threading.Event()
+    release_first = threading.Event()
     seen: list[str] = []
 
     async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any] | None:
         seen.append(str(credentials["refresh_token"]))
         if credentials["refresh_token"] == CHAIN_0:
             first_started.set()
-            await release_first.wait()
+            await asyncio.to_thread(release_first.wait)
             return _credentials("access-1", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
         return None
 
     first = asyncio.create_task(refresh_oauth_credentials_with_result(replace(context, provider=_provider(refresh))))
-    await first_started.wait()
+    await asyncio.to_thread(first_started.wait)
     second = asyncio.create_task(refresh_oauth_credentials_with_result(replace(context, provider=_provider(refresh))))
     release_first.set()
 
@@ -111,8 +115,9 @@ Do not export a mutation-capable lock context.
 
 - [ ] **Step 3: Implement asynchronous serialized refresh**
 
-Acquire the operation lock before loading credentials and retain it through provider refresh, terminal invalidation, or publication.
-Acquire the lock cancellably, then use `run_coroutine_until_complete()` around only the locked provider-operation-to-commit section.
+Submit the complete transaction to the process-lifetime OAuth transaction loop.
+Acquire the operation lock there before loading credentials and retain it through provider refresh, terminal invalidation, or publication.
+Use `run_coroutine_until_complete()` around the submitted transaction so an accepted remote mutation reaches local commit before caller cancellation propagates.
 On `OAuthRefreshRejectedError`, attach safe pre-invalidation metadata, delete the locked snapshot, emit one bounded warning, and re-raise.
 On a returned rotation, save it before releasing the lock.
 Remove stale retry, snapshot reconciliation, and the second singleflight lock.
@@ -129,7 +134,7 @@ def refresh_oauth_credentials_sync(
     ...
 ```
 
-Use the same operation-lock path with `advisory_file_lock()`.
+Submit the synchronous adapter to the same transaction loop and run its blocking provider callback in a worker thread while retaining the asynchronous operation lock.
 Apply the same missing, unusable, no-refresh-needed, success, terminal rejection, and bounded logging semantics as the asynchronous operation.
 
 - [ ] **Step 5: Move callback publication and reset into the lifecycle module**
@@ -137,8 +142,8 @@ Apply the same missing, unusable, no-refresh-needed, success, terminal rejection
 `exchange_and_store_oauth_credentials()` must acquire the operation lock before calling `provider.exchange_code()` and retain it through claim validation, refresh-token preservation, and save.
 The API route will wrap the complete lock-wait-through-save coroutine in `run_coroutine_until_complete()` after consuming state.
 
-`reset_oauth_credentials()` must acquire the operation lock, await `before_delete()` when supplied, and delete only after cleanup succeeds.
-No await may occur after deletion.
+`reset_oauth_credentials()` must acquire the operation lock and delete the credential snapshot without owning MCP transport cleanup.
+MCP reset callers must enter requester-session retirement before invoking the credential transaction and release only the in-memory fence afterward.
 
 - [ ] **Step 6: Reduce `oauth.service` to connection-flow ownership**
 
@@ -249,7 +254,7 @@ Use lifecycle load and refresh for status.
 
 - [ ] **Step 4: Make disconnect cleanup precede deletion**
 
-Pass MCP session teardown as `before_delete` to `reset_oauth_credentials()`.
+Enter MCP requester-session retirement before calling `reset_oauth_credentials()`.
 Propagate teardown failure without deleting credentials.
 Return the dashboard disconnect receipt only after successful cleanup and deletion.
 
@@ -263,10 +268,10 @@ Re-resolve and compare every field before approved execution.
 - [ ] **Step 6: Make agent reset cancellation-safe by ordering**
 
 Issue the requester-bound reconnect link first.
-Pass MCP teardown into the lifecycle reset transaction.
+Enter MCP requester-session retirement around the lifecycle reset transaction.
 If teardown raises an ordinary exception, log bounded metadata and return an error stating that credentials remain unchanged.
 If teardown is cancelled, propagate cancellation while credentials remain intact.
-After deletion, build and return the receipt without awaiting again.
+After deletion, release only the in-memory retirement fence before building the receipt.
 
 ### Task 4: Remove obsolete behavior and align documentation
 

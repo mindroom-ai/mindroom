@@ -22,7 +22,7 @@ OAuth operations are rare enough that this concurrency is not worth the correctn
 4. Refresh, authorization-code exchange, reset, disconnect, and provider-driven lazy refresh serialize on that same lock.
 5. A provider operation that can consume or rotate remote state completes its matching local commit before cancellation propagates.
 6. A destructive reset performs all fallible asynchronous cleanup before deleting local credentials.
-7. No asynchronous suspension occurs after a reset deletes credentials and before its result is returned.
+7. After deletion, reset performs only infallible in-memory retirement release before returning.
 8. Request actor identity remains raw for room and membership checks.
 9. Credential identity is canonicalized only when resolving `OAuthCredentialContext`.
 10. Provider adapters classify structured terminal refresh errors as `OAuthRefreshRejectedError` without exposing provider-controlled text.
@@ -38,7 +38,9 @@ OAuth operations are rare enough that this concurrency is not worth the correctn
 `OAuthCredentialContext` is an immutable runtime value object.
 Consumers construct it once and pass it to lifecycle operations instead of repeatedly passing a service name, manager, and worker target.
 
-The module uses one operation-lock path through the existing synchronous and asynchronous file-lock helpers.
+The module owns one lazy process-lifetime transaction event loop used by both asynchronous callers and synchronous provider adapters.
+Every transaction acquires the same asynchronous cross-process operation lock on that owner loop.
+Synchronous provider work runs in a worker thread while the transaction loop retains the operation lock, so a synchronous tool cannot deadlock behind work that needs its caller event loop.
 Lock contexts remain private so callers cannot perform mutations outside lifecycle operations.
 There is no separate refresh lock and singleflight lock.
 
@@ -62,7 +64,9 @@ Google-specific `RefreshError` parsing remains in the adapter, but persistence, 
 It returns the canonical credential context plus the invoking agent name.
 It does not delete credentials or build links.
 
-`src/mindroom/custom_tools/oauth_connections.py` issues a reconnect link, asks the lifecycle owner to run MCP teardown before deletion, and renders the receipt.
+`src/mindroom/mcp/manager.py` owns requester-session generations and rejects refresh, reconnect, or calls through a retired generation.
+
+`src/mindroom/custom_tools/oauth_connections.py` issues a reconnect link, enters MCP retirement, asks the lifecycle owner to delete the credential, and renders the receipt.
 If teardown is cancelled or fails, deletion does not occur.
 
 ## Data Flow
@@ -70,12 +74,13 @@ If teardown is cancelled or fails, deletion does not occur.
 ### Refresh
 
 1. Resolve one `OAuthCredentialContext`.
-2. Acquire its operation lock.
-3. Load the current credential snapshot.
-4. Return immediately when credentials are missing, unusable, or do not need refresh.
-5. Call the provider refresh adapter while retaining the operation lock.
-6. Save a returned rotation or delete the rejected current grant.
-7. Release the lock.
+2. Submit the transaction to the process OAuth transaction loop.
+3. Acquire its operation lock.
+4. Load the current credential snapshot.
+5. Return immediately when credentials are missing, unusable, or do not need refresh.
+6. Call the provider refresh adapter while retaining the operation lock.
+7. Save a returned rotation or delete the rejected current grant.
+8. Release the lock.
 
 Later same-scope refresh callers observe the committed snapshot and do not repeat an unnecessary rotation.
 Different credential scopes continue concurrently because their lock paths differ.
@@ -97,11 +102,11 @@ The callback cannot preserve a refresh token that another operation rotated conc
 
 1. Resolve and revalidate the exact approved credential context.
 2. Create the requester-bound reconnect link before any destructive mutation.
-3. Acquire the operation lock.
-4. Close an active requester-scoped MCP session when applicable.
-5. If cleanup fails or is cancelled, release the lock and retain credentials.
-6. Delete the credential snapshot.
-7. Return the reset receipt without another asynchronous suspension.
+3. Mark the matching MCP requester-session generation retired so captured callers cannot reconnect it.
+4. Close the retired session and keep its key fenced against new sessions.
+5. If retirement fails or is cancelled, retain credentials and restore the tracked generation when possible.
+6. Submit credential deletion to the transaction loop and delete under the operation lock.
+7. Release the in-memory MCP retirement fence and return the receipt.
 
 Dashboard disconnect uses the same transaction and fails without deleting credentials if MCP teardown cannot complete.
 
@@ -120,7 +125,7 @@ Waiting for an operation lock is cancellable unless pending OAuth state has alre
 Refresh becomes cancellation-safe after its operation lock is acquired because a remote provider may rotate a token during the call.
 Callback operation-lock wait, exchange, and save are cancellation-safe after pending state is consumed because the one-time state and authorization code cannot be replayed safely.
 Reset teardown remains cancellable because credentials are still intact at that point.
-Deletion is the reset commit point and has no following await before the result is returned.
+Deletion is the reset commit point, and the only following work releases the in-memory retirement fence without provider or transport I/O.
 
 ## Testing
 
@@ -132,7 +137,10 @@ Focused tests cover observable lifecycle behavior rather than private lock chore
 - Reset waits behind refresh, closes MCP state, deletes once, and cannot resurrect credentials.
 - Cancellation or failure during MCP teardown leaves credentials intact.
 - Different credential scopes refresh concurrently.
+- A synchronous refresh invoked from an event-loop thread cannot deadlock behind an asynchronous same-scope transaction.
+- Retired MCP generations cannot reconnect with captured stale authorization headers or create a replacement session before deletion commits.
 - Google lazy refresh, GitHub refresh, MCP refresh, API status refresh, and dashboard callback all use the same operation-lock path.
+- Bridge aliases canonicalize only for OAuth credential targets, reset links authorize for the alias, and callbacks store in the canonical scope.
 - Terminal refresh rejection returns the same structured reconnect reason and instruction from every consumer.
 - Logs never include refresh tokens, access tokens, or unrecognized provider-controlled error text.
 - Approval continuation fails closed when provider, service, scope, key, or routing agent changes.

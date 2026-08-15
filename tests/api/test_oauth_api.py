@@ -8,13 +8,14 @@ import asyncio
 import base64
 import hashlib
 import json
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -2202,6 +2203,84 @@ def test_requester_scoped_conversation_link_for_user_agent_uses_user_store(tmp_p
     )
 
 
+def test_bridge_alias_reset_link_authorizes_and_callback_stores_canonical_scope(tmp_path: Path) -> None:
+    """An alias-issued reset link must survive browser authorization and callback binding."""
+    alias = "@telegram_alice:example.org"
+    canonical = "@alice:example.org"
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(
+            worker_scope="user_agent",
+            authorization={
+                "aliases": {canonical: [alias]},
+                "agent_reply_permissions": {"general": [canonical]},
+            },
+        ),
+    )
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider(
+        provider_id="github",
+        credential_service="github_oauth",
+        requester_scoped_credentials=True,
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=alias,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    raw_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    config = main._app_context(api_app).runtime_config
+    assert config is not None
+    context = oauth_service.resolve_oauth_credential_context(
+        provider,
+        runtime_paths,
+        get_runtime_credentials_manager(runtime_paths),
+        raw_target,
+        authorization=config.authorization,
+    )
+    assert context.worker_target is not None
+    assert context.worker_target.execution_identity is not None
+    assert context.worker_target.execution_identity.requester_id == canonical
+    context.credentials_manager.for_primary_runtime_scope(canonical, None).save_credentials(
+        provider.credential_service,
+        {"refresh_token": "old-refresh-token"},
+    )
+    asyncio.run(oauth_service.reset_oauth_credentials(context))
+    connect_url = urlparse(
+        oauth_service.oauth_connect_url(provider, runtime_paths, worker_target=context.worker_target),
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            authorize_response = client.get(
+                f"{connect_url.path}?{connect_url.query}",
+                headers=trusted_upstream_headers(matrix_user_id=alias),
+                follow_redirects=False,
+            )
+            state = _state_from_auth_url(authorize_response.headers["location"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                headers=trusted_upstream_headers(matrix_user_id=alias),
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 307
+    assert callback_response.status_code == 307
+    manager = get_runtime_credentials_manager(runtime_paths)
+    canonical_credentials = manager.for_primary_runtime_scope(canonical, None).load_credentials(
+        provider.credential_service,
+    )
+    alias_credentials = manager.for_primary_runtime_scope(alias, None).load_credentials(provider.credential_service)
+    assert canonical_credentials is not None
+    assert canonical_credentials["token"] == "github-access-token"
+    assert alias_credentials is None
+
+
 def test_shared_scope_plugin_oauth_token_uses_agent_store_not_shared_or_worker_path(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -2387,9 +2466,9 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
         },
     )
     manager = get_runtime_credentials_manager(runtime_paths)
-    exchange_completed = asyncio.Event()
-    lock_waiting = asyncio.Event()
-    release_lock = asyncio.Event()
+    exchange_completed = threading.Event()
+    lock_waiting = threading.Event()
+    release_lock = threading.Event()
 
     async def exchange(
         provider: OAuthProvider,
@@ -2435,7 +2514,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
     @asynccontextmanager
     async def blocked_lock(_path: Path) -> AsyncIterator[None]:
         lock_waiting.set()
-        await release_lock.wait()
+        await asyncio.to_thread(release_lock.wait)
         yield None
 
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", allow_request)
@@ -2455,13 +2534,13 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
     )
 
     callback_task = asyncio.create_task(oauth_api.callback(provider.id, request))
-    await lock_waiting.wait()
+    await asyncio.to_thread(lock_waiting.wait)
     callback_task.cancel()
     await asyncio.sleep(0)
 
     assert not callback_task.done()
     release_lock.set()
-    await exchange_completed.wait()
+    await asyncio.to_thread(exchange_completed.wait)
     with pytest.raises(asyncio.CancelledError):
         await callback_task
     stored_credentials = manager.load_credentials(provider.credential_service)
@@ -2495,11 +2574,14 @@ def test_disconnect_cleanup_failure_preserves_credentials(tmp_path: Path, monkey
             "_oauth_provider": provider.id,
         },
     )
-    monkeypatch.setattr(
-        oauth_api,
-        "disconnect_mcp_oauth_request_session",
-        AsyncMock(side_effect=RuntimeError("close failed")),
-    )
+
+    @asynccontextmanager
+    async def failed_retirement(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
+        message = "close failed"
+        raise RuntimeError(message)
+        yield
+
+    monkeypatch.setattr(oauth_api, "retire_mcp_oauth_request_session", failed_retirement)
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
@@ -4049,7 +4131,7 @@ def test_status_keeps_connected_when_proactive_refresh_fails_for_still_valid_tok
 
     monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
-    monkeypatch.setattr("mindroom.oauth.service.time.time", lambda: 1000.0)
+    monkeypatch.setattr("mindroom.oauth.credential_lifecycle.time.time", lambda: 1000.0)
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
@@ -4120,7 +4202,7 @@ def test_status_disconnects_after_terminal_refresh_rejection(
 
     monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
     monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
-    monkeypatch.setattr("mindroom.oauth.service.time.time", lambda: 1000.0)
+    monkeypatch.setattr("mindroom.oauth.credential_lifecycle.time.time", lambda: 1000.0)
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:

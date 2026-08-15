@@ -19,6 +19,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -45,8 +46,10 @@ class _DummyManager:
         timeout_seconds: float | None = None,
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
+        authorization: AuthorizationConfig | None = None,
     ) -> ToolResult:
         """Record the call and return a fixed tool result."""
+        del authorization
         self.calls.append((server_id, remote_tool_name, arguments, credentials_manager, worker_target, timeout_seconds))
         return ToolResult(content="ok")
 
@@ -57,9 +60,10 @@ class _OAuthRequiredManager:
         _server_id: str,
         *,
         worker_target: ResolvedWorkerTarget | None,
+        authorization: AuthorizationConfig | None = None,
     ) -> MCPServerCatalog | None:
         """No requester catalog is cached before the OAuth connection exists."""
-        del worker_target
+        del worker_target, authorization
         return None
 
     async def get_request_catalog(
@@ -68,9 +72,10 @@ class _OAuthRequiredManager:
         *,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
+        authorization: AuthorizationConfig | None = None,
     ) -> MCPServerCatalog:
         """Force the bridge path to emit the existing OAuth-required payload."""
-        del credentials_manager, worker_target
+        del credentials_manager, worker_target, authorization
         message = "Example MCP is not connected for this agent."
         raise OAuthConnectionRequired(
             message,
@@ -101,8 +106,10 @@ class _RequesterAwareManager:
         *,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
+        authorization: AuthorizationConfig | None = None,
     ) -> MCPServerCatalog:
         """Return the requester-specific catalog and record its scope."""
+        del authorization
         self.catalog_requests.append((server_id, credentials_manager, worker_target))
         return self.catalog
 
@@ -115,8 +122,10 @@ class _RequesterAwareManager:
         timeout_seconds: float | None = None,
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
+        authorization: AuthorizationConfig | None = None,
     ) -> ToolResult:
         """Record the requester-scoped MCP call and return a fixed result."""
+        del authorization
         self.calls.append((server_id, remote_tool_name, arguments, credentials_manager, worker_target, timeout_seconds))
         return ToolResult(content="ok")
 
@@ -125,8 +134,10 @@ class _RequesterAwareManager:
         server_id: str,
         *,
         worker_target: ResolvedWorkerTarget | None,
+        authorization: AuthorizationConfig | None = None,
     ) -> MCPServerCatalog | None:
         """Return a cached requester catalog for typed OAuth tool registration."""
+        del authorization
         self.cached_catalog_requests.append((server_id, worker_target))
         return self.catalog
 

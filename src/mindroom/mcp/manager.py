@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, cast
+from weakref import WeakValueDictionary
 
 import mcp.types as mcp_types
 from mcp import ClientSession
@@ -32,6 +33,7 @@ from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials,
     oauth_credentials_usable,
     refresh_oauth_credentials_with_result,
+    resolve_oauth_credential_context,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.oauth.service import (
@@ -42,11 +44,12 @@ from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loa
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
     from agno.tools.function import ToolResult
     from mcp.client.session import MessageHandlerFnT
 
+    from mindroom.config.auth import AuthorizationConfig
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.constants import RuntimePaths
@@ -92,6 +95,8 @@ class MCPServerManager:
         self.runtime_paths = runtime_paths
         self._states: dict[str, MCPServerState] = {}
         self._scoped_states: dict[_MCPSessionKey, MCPServerState] = {}
+        self._request_retirement_locks: WeakValueDictionary[_MCPSessionKey, asyncio.Lock] = WeakValueDictionary()
+        self._retired_request_keys: set[_MCPSessionKey] = set()
         self._catalog_validation_lock = asyncio.Lock()
         self._on_catalog_change = on_catalog_change
         self._config: Config | None = None
@@ -173,13 +178,17 @@ class MCPServerManager:
         self._shutdown = True
         self._config = None
         for state in list(self._states.values()):
+            state.retired = True
             await self._cancel_refresh_task(state)
             await self._disconnect_state_when_idle(state)
         for state in list(self._scoped_states.values()):
+            state.retired = True
             await self._cancel_refresh_task(state)
             await self._disconnect_state_when_idle(state)
         self._states.clear()
         self._scoped_states.clear()
+        self._request_retirement_locks.clear()
+        self._retired_request_keys.clear()
 
     async def call_tool(
         self,
@@ -190,6 +199,7 @@ class MCPServerManager:
         timeout_seconds: float | None = None,
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
+        authorization: AuthorizationConfig | None = None,
     ) -> ToolResult:
         """Call one remote MCP tool through the cached session."""
         state = self._require_state(server_id)
@@ -198,6 +208,7 @@ class MCPServerManager:
                 server_id,
                 credentials_manager=credentials_manager,
                 worker_target=worker_target,
+                authorization=authorization,
             )
             if (
                 request_state.catalog is None
@@ -232,12 +243,14 @@ class MCPServerManager:
         *,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
+        authorization: AuthorizationConfig | None = None,
     ) -> MCPServerCatalog:
         """Return a worker-scoped catalog for one OAuth-backed MCP server."""
         state, auth_headers = await self._request_state_and_headers(
             server_id,
             credentials_manager=credentials_manager,
             worker_target=worker_target,
+            authorization=authorization,
         )
         if state.catalog is None or state.stale or state.last_error is not None or not state.connected:
             await self._refresh_server_catalog(state, notify=False, auth_headers=auth_headers)
@@ -253,39 +266,63 @@ class MCPServerManager:
         server_id: str,
         *,
         worker_target: ResolvedWorkerTarget | None,
+        authorization: AuthorizationConfig | None = None,
     ) -> MCPServerCatalog | None:
         """Return an already-discovered worker-scoped catalog without network or credential I/O."""
         base_state = self._states.get(server_id)
         if base_state is None or base_state.config.auth is None:
             return None
         try:
-            key = self._request_session_key(base_state, worker_target)
+            credential_context = self._oauth_credential_context(
+                base_state,
+                worker_target=worker_target,
+                authorization=authorization,
+            )
+            key = self._request_session_key(base_state, credential_context.worker_target)
         except OAuthConnectionRequired:
             return None
         state = self._scoped_states.get(key)
-        if state is None or state.catalog is None or state.stale or state.last_error is not None:
+        if state is None or state.retired or state.catalog is None or state.stale or state.last_error is not None:
             return None
         return state.catalog
 
-    async def disconnect_request_session(
+    @asynccontextmanager
+    async def retire_request_session(
         self,
         server_id: str,
         *,
         worker_target: ResolvedWorkerTarget | None,
-    ) -> None:
-        """Close a worker-scoped OAuth MCP session, if one is active."""
+    ) -> AsyncIterator[None]:
+        """Fence one requester generation while its OAuth credential is reset."""
         base_state = self._states.get(server_id)
         if base_state is None or base_state.config.auth is None:
+            yield
             return
         try:
             key = self._request_session_key(base_state, worker_target)
         except OAuthConnectionRequired:
+            yield
             return
-        state = self._scoped_states.pop(key, None)
-        if state is None:
-            return
-        await self._cancel_refresh_task(state)
-        await self._disconnect_state_when_idle(state)
+        retirement_lock = self._request_retirement_locks.setdefault(key, asyncio.Lock())
+        async with retirement_lock:
+            self._retired_request_keys.add(key)
+            state = self._scoped_states.get(key)
+            if state is not None:
+                state.retired = True
+            try:
+                if state is not None:
+                    await self._cancel_refresh_task(state)
+                    async with state.lock:
+                        await self._disconnect_state_when_idle(state)
+                    if self._scoped_states.get(key) is state:
+                        self._scoped_states.pop(key)
+                yield
+            except BaseException:
+                if state is not None and self._scoped_states.get(key) is state:
+                    state.retired = False
+                raise
+            finally:
+                self._retired_request_keys.discard(key)
 
     def _oauth_connection_required(
         self,
@@ -305,12 +342,14 @@ class MCPServerManager:
         *,
         worker_target: ResolvedWorkerTarget | None,
         credentials_manager: CredentialsManager | None = None,
+        authorization: AuthorizationConfig | None = None,
     ) -> OAuthCredentialContext:
-        return OAuthCredentialContext(
-            provider=mcp_oauth_provider(state.server_id, state.config),
-            runtime_paths=self.runtime_paths,
-            credentials_manager=credentials_manager or get_runtime_credentials_manager(self.runtime_paths),
-            worker_target=worker_target,
+        return resolve_oauth_credential_context(
+            mcp_oauth_provider(state.server_id, state.config),
+            self.runtime_paths,
+            credentials_manager or get_runtime_credentials_manager(self.runtime_paths),
+            worker_target,
+            authorization=authorization,
         )
 
     def _request_session_key(
@@ -371,12 +410,14 @@ class MCPServerManager:
         *,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
+        authorization: AuthorizationConfig | None = None,
     ) -> str:
         manager = credentials_manager or get_runtime_credentials_manager(self.runtime_paths)
         context = self._oauth_credential_context(
             state,
             worker_target=worker_target,
             credentials_manager=manager,
+            authorization=authorization,
         )
         provider = context.provider
         try:
@@ -408,6 +449,7 @@ class MCPServerManager:
         *,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
+        authorization: AuthorizationConfig | None = None,
     ) -> tuple[MCPServerState, Mapping[str, str]]:
         base_state = self._require_state(server_id)
         if base_state.config.auth is None:
@@ -415,18 +457,32 @@ class MCPServerManager:
             raise MCPConnectionError(server_id, msg)
         if base_state.last_error is not None:
             raise base_state.last_error
+        credential_context = self._oauth_credential_context(
+            base_state,
+            worker_target=worker_target,
+            credentials_manager=credentials_manager,
+            authorization=authorization,
+        )
+        worker_target = credential_context.worker_target
         key = self._request_session_key(base_state, worker_target)
+        if key in self._retired_request_keys:
+            raise oauth_connection_required(credential_context)
         state = self._scoped_states.get(key)
         if state is None:
             state = MCPServerState(server_id=server_id, config=base_state.config)
             self._scoped_states[key] = state
 
         async with state.lock:
+            if state.retired or key in self._retired_request_keys:
+                raise oauth_connection_required(credential_context)
             access_token = await self._oauth_access_token(
                 base_state,
                 credentials_manager=credentials_manager,
                 worker_target=worker_target,
+                authorization=authorization,
             )
+            if state.retired or key in self._retired_request_keys:
+                raise oauth_connection_required(credential_context)
             token_hash = hashlib.sha256(access_token.encode("utf-8")).hexdigest()
             if state.oauth_access_token_hash != token_hash:
                 async with state.call_lock.write():
@@ -446,6 +502,7 @@ class MCPServerManager:
         timeout_seconds: float,
         auth_headers: Mapping[str, str] | None = None,
     ) -> ToolResult:
+        self._require_active_state(state)
         refresh_revision = state.refresh_revision
         try:
             return await self._call_tool_with_lock(state, remote_tool_name, arguments, timeout_seconds=timeout_seconds)
@@ -475,6 +532,7 @@ class MCPServerManager:
         timeout_seconds: float,
     ) -> ToolResult:
         async with state.semaphore, state.call_lock.read():
+            self._require_active_state(state)
             if state.session is None or state.catalog is None or not state.connected:
                 if state.last_error is not None:
                     raise state.last_error
@@ -517,8 +575,10 @@ class MCPServerManager:
         expected_refresh_revision: int | None = None,
         auth_headers: Mapping[str, str] | None = None,
     ) -> bool:
+        self._require_active_state(state)
         should_notify_catalog_change = False
         async with state.lock:
+            self._require_active_state(state)
             if expected_refresh_revision is not None and state.refresh_revision != expected_refresh_revision:
                 return False
             state.refresh_revision += 1
@@ -550,6 +610,9 @@ class MCPServerManager:
                     )
                     return False
 
+                if state.retired:
+                    await self._disconnect_state(state)
+                    self._require_active_state(state)
                 state.catalog = catalog
                 state.connected = True
                 state.last_error = None
@@ -735,7 +798,7 @@ class MCPServerManager:
         return config.get_entities_referencing_tools({mcp_tool_name(server_id)})
 
     def _schedule_refresh_task(self, state: MCPServerState, *, delay_seconds: float = 0.0) -> None:
-        if self._shutdown or state.config.auth is not None:
+        if self._shutdown or state.retired or state.config.auth is not None:
             return
         existing_task = state.refresh_task
         if existing_task is not None and not existing_task.done() and existing_task is not asyncio.current_task():
@@ -778,6 +841,7 @@ class MCPServerManager:
         state = self._states.pop(server_id, None)
         if state is None:
             return
+        state.retired = True
         await self._cancel_refresh_task(state)
         await self._remove_scoped_server_states(server_id)
         await self._disconnect_state_when_idle(state)
@@ -786,6 +850,7 @@ class MCPServerManager:
         scoped_keys = [key for key in self._scoped_states if key.server_id == server_id]
         for key in scoped_keys:
             state = self._scoped_states.pop(key)
+            state.retired = True
             await self._cancel_refresh_task(state)
             await self._disconnect_state_when_idle(state)
 
@@ -852,10 +917,17 @@ class MCPServerManager:
         return state
 
     def _require_catalog_tool(self, state: MCPServerState, remote_tool_name: str) -> None:
+        self._require_active_state(state)
         catalog = state.catalog if state.catalog is not None else self.get_catalog(state.server_id)
         if remote_tool_name not in {tool.remote_name for tool in catalog.tools}:
             msg = f"MCP tool '{remote_tool_name}' is not in the cached catalog for server '{state.server_id}'"
             raise MCPProtocolError(state.server_id, msg)
+
+    @staticmethod
+    def _require_active_state(state: MCPServerState) -> None:
+        if state.retired:
+            msg = f"MCP server '{state.server_id}' requester session generation is retired"
+            raise MCPConnectionError(state.server_id, msg)
 
     @staticmethod
     def _function_name_collision_messages(

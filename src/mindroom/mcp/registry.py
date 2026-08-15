@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
     from agno.tools import Toolkit
 
+    from mindroom.config.auth import AuthorizationConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
@@ -176,7 +177,11 @@ def _available_catalog(
         return None
 
 
-def _tool_factory(server_id: str, server_config: MCPServerConfig) -> Callable[[], type[Toolkit]]:
+def _tool_factory(
+    server_id: str,
+    server_config: MCPServerConfig,
+    authorization: AuthorizationConfig | None,
+) -> Callable[[], type[Toolkit]]:
     def factory() -> type[Toolkit]:
         class BoundMindRoomMCPToolkit(MindRoomMCPToolkit):
             def __init__(
@@ -206,6 +211,7 @@ def _tool_factory(server_id: str, server_config: MCPServerConfig) -> Callable[[]
                     runtime_paths=runtime_paths,
                     credentials_manager=credentials_manager,
                     worker_target=worker_target,
+                    oauth_authorization=authorization,
                 )
 
         BoundMindRoomMCPToolkit.__name__ = f"MindRoomMCPToolkit_{server_id}"
@@ -248,6 +254,10 @@ def resolved_mcp_tool_state(
     metadata: dict[str, ToolMetadata] = {}
     for server_id, server_config in _desired_server_entries(config).items():
         tool_name = mcp_tool_name(server_id)
-        registry[tool_name] = _tool_factory(server_id, server_config)
+        registry[tool_name] = _tool_factory(
+            server_id,
+            server_config,
+            config.authorization if config is not None else None,
+        )
         metadata[tool_name] = _tool_metadata(server_id, server_config)
     return registry, metadata
