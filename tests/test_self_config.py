@@ -12,6 +12,7 @@ import yaml
 from mindroom.agents import create_agent
 from mindroom.api import config_lifecycle, main
 from mindroom.config.agent import AgentConfig
+from mindroom.config.agent_repository import AgentRepositoriesConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSpaceConfig
@@ -27,6 +28,7 @@ _BOUND_RUNTIME_PATHS: dict[int, RuntimePaths] = {}
 
 def _make_config(
     agents: dict[str, AgentConfig] | None = None,
+    agent_repositories: AgentRepositoriesConfig | None = None,
     knowledge_bases: dict[str, KnowledgeBaseConfig] | None = None,
     defaults: DefaultsConfig | None = None,
     models: dict[str, ModelConfig] | None = None,
@@ -34,6 +36,7 @@ def _make_config(
     """Create a Config, write it to a temp file, and return both."""
     config = Config(
         agents=agents or {},
+        agent_repositories=agent_repositories,
         knowledge_bases=knowledge_bases or {},
         defaults=defaults or DefaultsConfig(),
         models=models if models is not None else _DEFAULT_MODELS,
@@ -314,6 +317,59 @@ class TestUpdateOwnConfig:
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].tool_names == ["self_config"]
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_tools_cannot_opt_into_agent_repository(self) -> None:
+        """Repository capability assignment must remain an operator-owned opt-in."""
+        _, config_path = _make_config(
+            agents={
+                "coder": AgentConfig(
+                    display_name="Coder",
+                    role="Code",
+                    tools=["self_config"],
+                    worker_scope="shared",
+                ),
+            },
+            agent_repositories=AgentRepositoriesConfig(organization="example-org", prefix="MindRoom"),
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+
+            result = tool.update_own_config(tools=["self_config", "agent_repository"])
+
+            assert "Error" in result
+            assert "privileged tools" in result
+            assert "agent_repository" in result
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].tool_names == ["self_config"]
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_tools_cannot_remove_but_can_retain_agent_repository(self) -> None:
+        """Self-config may edit other tools without changing the operator-owned opt-in."""
+        _, config_path = _make_config(
+            agents={
+                "coder": AgentConfig(
+                    display_name="Coder",
+                    role="Code",
+                    tools=["self_config", "agent_repository"],
+                    worker_scope="shared",
+                ),
+            },
+            agent_repositories=AgentRepositoriesConfig(organization="example-org", prefix="MindRoom"),
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+
+            removal = tool.update_own_config(tools=["self_config"])
+            retained = tool.update_own_config(tools=["self_config", "agent_repository", "calculator"])
+
+            assert "Error" in removal
+            assert "privileged tools" in removal
+            assert "Successfully" in retained
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].tool_names == ["self_config", "agent_repository", "calculator"]
         finally:
             config_path.unlink(missing_ok=True)
 

@@ -39,8 +39,14 @@
 {{- if not .Values.agentRepositories.brokerTokenSecret.name -}}
 {{- fail "agentRepositories.brokerTokenSecret.name is required when agentRepositories.enabled=true" -}}
 {{- end -}}
-{{- if not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" .Values.agentRepositories.brokerTokenSecret.name) -}}
+{{- $brokerSecretName := .Values.agentRepositories.brokerTokenSecret.name -}}
+{{- if or (gt (len $brokerSecretName) 253) (not (regexMatch "^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*$" $brokerSecretName)) -}}
 {{- fail "agentRepositories.brokerTokenSecret.name must be a valid Kubernetes Secret name" -}}
+{{- end -}}
+{{- range $label := splitList "." $brokerSecretName -}}
+{{- if gt (len $label) 63 -}}
+{{- fail "agentRepositories.brokerTokenSecret.name must be a valid Kubernetes Secret name" -}}
+{{- end -}}
 {{- end -}}
 {{- if not .Values.agentRepositories.brokerTokenSecret.key -}}
 {{- fail "agentRepositories.brokerTokenSecret.key is required when agentRepositories.enabled=true" -}}

@@ -55,8 +55,11 @@ _EXPECTED_LEASE_FIELDS = frozenset(
 )
 _AGENT_VAULT_ENSURE_PATH = "/v1/internal/mindroom/repositories/ensure"
 _DEFAULT_AGENT_VAULT_NAME_PREFIX = "agent-vault"
+_AGENT_VAULT_PREFLIGHT_TIMEOUT_SECONDS = 30
 _AGENT_VAULT_ENSURE_TIMEOUT_SECONDS = 5 * 60
-_BROKER_HTTP_TIMEOUT_SECONDS = _AGENT_VAULT_ENSURE_TIMEOUT_SECONDS + 15.0
+_BROKER_HTTP_TIMEOUT_SECONDS = _AGENT_VAULT_PREFLIGHT_TIMEOUT_SECONDS + _AGENT_VAULT_ENSURE_TIMEOUT_SECONDS + 15.0
+_MAX_GIT_CONFIG_BYTES = 1024 * 1024
+_GIT_CONFIG_PARSE_TIMEOUT_SECONDS = 5.0
 
 
 class RepositoryBindingError(RuntimeError):
@@ -518,10 +521,7 @@ def _atomic_write_at(directory_fd: int, name: str, payload: bytes, *, mode: int)
     try:
         file_fd = os.open(temporary_name, flags, mode, dir_fd=directory_fd)
         try:
-            remaining = memoryview(payload)
-            while remaining:
-                written = os.write(file_fd, remaining)
-                remaining = remaining[written:]
+            _write_all(file_fd, payload)
             os.fsync(file_fd)
         finally:
             os.close(file_fd)
@@ -531,6 +531,13 @@ def _atomic_write_at(directory_fd: int, name: str, payload: bytes, *, mode: int)
         with suppress(FileNotFoundError):
             os.unlink(temporary_name, dir_fd=directory_fd)
         raise
+
+
+def _write_all(file_fd: int, payload: bytes) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = os.write(file_fd, remaining)
+        remaining = remaining[written:]
 
 
 def _remote_origin_config(clone_url: str) -> bytes:
@@ -560,7 +567,7 @@ def _initialize_git_directory(git_fd: int, clone_url: str) -> None:
     _atomic_write_at(git_fd, "config", config, mode=0o644)
 
 
-def _open_git_config(git_fd: int) -> tuple[int, int]:
+def _open_git_config(git_fd: int) -> int:
     try:
         config_fd = os.open("config", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=git_fd)
     except OSError as exc:
@@ -571,23 +578,76 @@ def _open_git_config(git_fd: int) -> tuple[int, int]:
         os.close(config_fd)
         msg = "Agent repository workspace Git metadata files must be local regular files"
         raise RepositoryBindingError(msg)
-    return config_fd, stat.S_IMODE(config_stat.st_mode)
+    return config_fd
 
 
-def _read_git_config_entries(config_fd: int) -> tuple[tuple[str, str], ...]:
-    os.lseek(config_fd, 0, os.SEEK_SET)
-    result = subprocess.run(
-        ["git", "config", "--file", f"/dev/fd/{config_fd}", "--null", "--list"],
-        check=False,
-        capture_output=True,
-        text=True,
-        pass_fds=(config_fd,),
+def _read_git_config_payload(config_fd: int) -> bytes:
+    config_stat_before = os.fstat(config_fd)
+    if config_stat_before.st_size > _MAX_GIT_CONFIG_BYTES:
+        msg = "Agent repository workspace Git config is too large"
+        raise RepositoryBindingError(msg)
+
+    chunks: list[bytes] = []
+    offset = 0
+    while offset <= _MAX_GIT_CONFIG_BYTES:
+        chunk = os.pread(
+            config_fd,
+            min(64 * 1024, _MAX_GIT_CONFIG_BYTES + 1 - offset),
+            offset,
+        )
+        if not chunk:
+            break
+        chunks.append(chunk)
+        offset += len(chunk)
+    payload = b"".join(chunks)
+    if len(payload) > _MAX_GIT_CONFIG_BYTES:
+        msg = "Agent repository workspace Git config is too large"
+        raise RepositoryBindingError(msg)
+
+    config_stat_after = os.fstat(config_fd)
+    before = (
+        config_stat_before.st_dev,
+        config_stat_before.st_ino,
+        config_stat_before.st_size,
+        config_stat_before.st_mtime_ns,
+        config_stat_before.st_ctime_ns,
     )
-    if result.returncode != 0:
+    after = (
+        config_stat_after.st_dev,
+        config_stat_after.st_ino,
+        config_stat_after.st_size,
+        config_stat_after.st_mtime_ns,
+        config_stat_after.st_ctime_ns,
+    )
+    if before != after or len(payload) != config_stat_after.st_size:
+        msg = "Agent repository workspace Git config changed during inspection"
+        raise RepositoryBindingError(msg)
+    return payload
+
+
+def _parse_git_config_entries(payload: bytes) -> tuple[tuple[str, str], ...]:
+    try:
+        config_text = payload.decode("utf-8")
+        result = subprocess.run(
+            ["git", "config", "--file", "-", "--null", "--list"],
+            input=config_text,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_CONFIG_PARSE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+        msg = "Could not inspect the agent repository workspace Git metadata"
+        raise RepositoryBindingError(msg) from exc
+    if result.returncode != 0 or len(result.stdout.encode("utf-8")) > _MAX_GIT_CONFIG_BYTES:
         msg = "Could not inspect the agent repository workspace Git metadata"
         raise RepositoryBindingError(msg)
     records = result.stdout.removesuffix("\0").split("\0") if result.stdout else []
     return tuple(record.partition("\n")[::2] for record in records)
+
+
+def _read_git_config_entries(config_fd: int) -> tuple[tuple[str, str], ...]:
+    return _parse_git_config_entries(_read_git_config_payload(config_fd))
 
 
 def _origin_urls_from_config(
@@ -644,16 +704,73 @@ def _git_directory_is_current(workspace_fd: int, git_fd: int) -> bool:
     )
 
 
-def _append_origin_to_git_config(git_fd: int, config_fd: int, config_mode: int, clone_url: str) -> None:
-    _fetch_urls, _push_urls, has_origin = _origin_urls_from_config(_read_git_config_entries(config_fd))
+def _git_config_is_current(git_fd: int, config_fd: int) -> bool:
+    try:
+        current_stat = os.stat("config", dir_fd=git_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    opened_stat = os.fstat(config_fd)
+    return (
+        stat.S_ISREG(current_stat.st_mode)
+        and opened_stat.st_nlink == 1
+        and current_stat.st_nlink == 1
+        and (current_stat.st_dev, current_stat.st_ino) == (opened_stat.st_dev, opened_stat.st_ino)
+    )
+
+
+def _restore_git_config(config_fd: int, payload: bytes) -> None:
+    os.ftruncate(config_fd, 0)
+    os.lseek(config_fd, 0, os.SEEK_SET)
+    _write_all(config_fd, payload)
+    os.fsync(config_fd)
+
+
+def _append_and_verify_git_config(git_fd: int, config_fd: int, appended: bytes, expected: bytes) -> None:
+    _write_all(config_fd, appended)
+    os.fsync(config_fd)
+    if not _git_config_is_current(git_fd, config_fd) or _read_git_config_payload(config_fd) != expected:
+        msg = "Agent repository workspace Git config changed during configuration"
+        raise RepositoryBindingError(msg)
+
+
+def _append_origin_to_git_config(git_fd: int, config_fd: int, clone_url: str) -> None:
+    config = _read_git_config_payload(config_fd)
+    _fetch_urls, _push_urls, has_origin = _origin_urls_from_config(_parse_git_config_entries(config))
     if has_origin:
         msg = "Agent repository workspace origin changed during configuration"
         raise RepositoryOriginConflictError(msg)
-    config_stat = os.fstat(config_fd)
-    config = os.pread(config_fd, config_stat.st_size, 0)
-    if config and not config.endswith(b"\n"):
-        config += b"\n"
-    _atomic_write_at(git_fd, "config", config + _remote_origin_config(clone_url), mode=config_mode)
+    separator = b"\n" if config and not config.endswith(b"\n") else b""
+    appended = separator + _remote_origin_config(clone_url)
+    expected = config + appended
+    if len(expected) > _MAX_GIT_CONFIG_BYTES:
+        msg = "Agent repository workspace Git config is too large"
+        raise RepositoryBindingError(msg)
+
+    try:
+        write_fd = os.open("config", os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW, dir_fd=git_fd)
+    except OSError as exc:
+        msg = "Agent repository workspace Git config changed during configuration"
+        raise RepositoryBindingError(msg) from exc
+    try:
+        if not _git_config_is_current(git_fd, write_fd):
+            msg = "Agent repository workspace Git config changed during configuration"
+            raise RepositoryBindingError(msg)
+        opened_stat = os.fstat(config_fd)
+        write_stat = os.fstat(write_fd)
+        if (opened_stat.st_dev, opened_stat.st_ino) != (write_stat.st_dev, write_stat.st_ino):
+            msg = "Agent repository workspace Git config changed during configuration"
+            raise RepositoryBindingError(msg)
+        if _read_git_config_payload(write_fd) != config:
+            msg = "Agent repository workspace Git config changed during configuration"
+            raise RepositoryBindingError(msg)
+
+        try:
+            _append_and_verify_git_config(git_fd, write_fd, appended, expected)
+        except Exception:
+            _restore_git_config(write_fd, config)
+            raise
+    finally:
+        os.close(write_fd)
 
 
 def _github_transport_and_path(url: str) -> tuple[str, str] | None:
@@ -723,7 +840,7 @@ def configure_repository_workspace(
                     _initialize_git_directory(git_fd, clone_url)
                 else:
                     _require_complete_git_directory(git_fd)
-                    config_fd, config_mode = _open_git_config(git_fd)
+                    config_fd = _open_git_config(git_fd)
                     try:
                         fetch_urls, push_urls, has_origin = _origin_urls_from_config(
                             _read_git_config_entries(config_fd),
@@ -739,7 +856,7 @@ def configure_repository_workspace(
                             if not _git_directory_is_current(workspace_fd, git_fd):
                                 msg = "Agent repository workspace Git metadata changed during configuration"
                                 raise RepositoryBindingError(msg)
-                            _append_origin_to_git_config(git_fd, config_fd, config_mode, clone_url)
+                            _append_origin_to_git_config(git_fd, config_fd, clone_url)
                     finally:
                         os.close(config_fd)
 

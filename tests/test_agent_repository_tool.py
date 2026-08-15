@@ -571,6 +571,87 @@ async def test_git_directory_swap_cannot_redirect_origin_write(
 
 
 @pytest.mark.asyncio
+async def test_git_config_swap_cannot_redirect_origin_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Origin mutation must not replace a config that changed after inspection."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    config_path = workspace / ".git" / "config"
+    inspected_config = config_path.with_name("config-inspected")
+    config_before = config_path.read_bytes()
+    hostile_config = b'[remote "origin"]\n\turl = git@github.com:other/repository.git\n'
+    original_read_git_config_payload = agent_repositories_module._read_git_config_payload
+    inspection_count = 0
+
+    def swap_after_final_config_inspection(config_fd: int) -> bytes:
+        nonlocal inspection_count
+        result = original_read_git_config_payload(config_fd)
+        inspection_count += 1
+        if inspection_count == 2:
+            config_path.rename(inspected_config)
+            config_path.write_bytes(hostile_config)
+        return result
+
+    monkeypatch.setattr(agent_repositories_module, "_read_git_config_payload", swap_after_final_config_inspection)
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert inspection_count == 2
+    assert payload["status"] == "error"
+    assert inspected_config.read_bytes() == config_before
+    assert config_path.read_bytes() == hostile_config
+
+
+@pytest.mark.asyncio
+async def test_oversized_git_config_fails_without_mutation(tmp_path: Path) -> None:
+    """Worker-controlled Git config must have a strict control-plane memory bound."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    config_path = workspace / ".git" / "config"
+    config_path.write_bytes(config_path.read_bytes() + b"#" + (b"x" * (2 * 1024 * 1024)) + b"\n")
+    config_before = config_path.read_bytes()
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert payload["status"] == "error"
+    assert "too large" in payload["error"]
+    assert config_path.read_bytes() == config_before
+
+
+def test_git_config_parser_has_processing_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git config parsing must not consume an unbounded control-plane worker thread."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    real_run = subprocess.run
+    observed_timeouts: list[float] = []
+
+    def require_timeout(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, float)
+        observed_timeouts.append(timeout)
+        return real_run(*args, **kwargs)  # type: ignore[call-overload,return-value]
+
+    monkeypatch.setattr(agent_repositories_module.subprocess, "run", require_timeout)
+
+    configure_repository_workspace(
+        workspace=workspace,
+        clone_url=_lease().clone_url,
+        lock_path=tmp_path / "workspace.lock",
+    )
+
+    assert observed_timeouts
+    assert all(timeout <= 5 for timeout in observed_timeouts)
+
+
+@pytest.mark.asyncio
 async def test_symlinked_workspace_root_fails_without_mutating_target(tmp_path: Path) -> None:
     """An agent-controlled workspace link must not redirect trusted Git writes."""
     external = tmp_path / "external"
