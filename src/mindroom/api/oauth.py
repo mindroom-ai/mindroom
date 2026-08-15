@@ -23,7 +23,6 @@ from mindroom.api.credentials_target import (
 from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
-from mindroom.mcp.oauth import retire_mcp_oauth_request_session
 from mindroom.oauth import (
     OAuthClaimValidationError,
     OAuthClientConfigResolution,
@@ -37,10 +36,10 @@ from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials,
     oauth_credential_generation,
     refresh_oauth_credentials,
-    reset_oauth_credentials,
     resolve_oauth_credential_context,
 )
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
+from mindroom.oauth.reset_execution import retire_and_reset_oauth_credentials
 from mindroom.oauth.service import (
     OAuthConnectTarget,
     consume_oauth_connect_token,
@@ -559,10 +558,9 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
 
-    async with retire_mcp_oauth_request_session(
-        config.mcp_servers if config is not None else {},
-        provider.id,
-        worker_target=context.worker_target,
-    ):
-        await reset_oauth_credentials(context)
+    await retire_and_reset_oauth_credentials(
+        context,
+        mcp_servers=config.mcp_servers if config is not None else {},
+        operation_id=None,
+    )
     return {"status": "disconnected", "provider": provider.id}

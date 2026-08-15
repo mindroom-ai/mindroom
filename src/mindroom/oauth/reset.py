@@ -167,7 +167,9 @@ def validate_oauth_reset_approval_bindings(
     for tool_call_id, tool_name, invoking_agent, approved in calls:
         if tool_name != _OAUTH_RESET_TOOL_NAME or not approved:
             continue
-        binding = bindings.get(tool_call_id)
+        stored_binding = bindings.get(tool_call_id)
+        nested_binding = stored_binding.get("oauth_reset") if stored_binding is not None else None
+        binding = cast("Mapping[str, object]", nested_binding) if isinstance(nested_binding, dict) else stored_binding
         provider_id = binding.get("provider_id") if binding is not None else None
         if not isinstance(provider_id, str) or not provider_id:
             msg = "Approved OAuth credential target is missing; run the reset again."

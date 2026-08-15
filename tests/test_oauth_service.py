@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import threading
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, cast
@@ -10,7 +11,12 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
+from mindroom.credentials import (
+    get_runtime_credentials_manager,
+    load_scoped_credentials,
+    save_scoped_credentials,
+    scoped_credentials_path,
+)
 from mindroom.oauth import credential_lifecycle
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
@@ -120,11 +126,19 @@ class _FakeOAuthProvider:
         )
 
 
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+def _runtime_paths(tmp_path: Path, *, process_env: Mapping[str, str] | None = None) -> RuntimePaths:
+    return resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=process_env or {},
+    )
 
 
-def _worker_target(requester_id: str = "@alice:example.test") -> ResolvedWorkerTarget:
+def _worker_target(
+    requester_id: str = "@alice:example.test",
+    *,
+    worker_scope: str = "shared",
+) -> ResolvedWorkerTarget:
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="code",
@@ -136,7 +150,7 @@ def _worker_target(requester_id: str = "@alice:example.test") -> ResolvedWorkerT
         tenant_id="tenant",
         account_id=None,
     )
-    return resolve_worker_target("shared", "code", identity)
+    return resolve_worker_target(worker_scope, "code", identity)
 
 
 def _credentials(token: str, refresh_token: str, *, expires_at: float) -> dict[str, Any]:
@@ -239,17 +253,150 @@ async def test_different_scopes_refresh_concurrently(tmp_path: Path) -> None:
         return _credentials("updated", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
 
     provider = _FakeOAuthProvider(refresh)
-    alice = _context(tmp_path, provider, worker_target=_worker_target("@alice:example.test"))
-    bob = _context(tmp_path, provider, worker_target=_worker_target("@bob:example.test"))
+    alice = _context(
+        tmp_path,
+        provider,
+        worker_target=_worker_target("@alice:example.test", worker_scope="user"),
+    )
+    bob = _context(
+        tmp_path,
+        provider,
+        worker_target=_worker_target("@bob:example.test", worker_scope="user"),
+    )
+    assert scoped_credentials_path(
+        alice.provider.credential_service,
+        credentials_manager=alice.credentials_manager,
+        worker_target=alice.worker_target,
+    ) != scoped_credentials_path(
+        bob.provider.credential_service,
+        credentials_manager=bob.credentials_manager,
+        worker_target=bob.worker_target,
+    )
+    assert credential_lifecycle._operation_lock_path(alice) != credential_lifecycle._operation_lock_path(bob)
     _save(alice, _credentials("alice", CHAIN_0, expires_at=1.0))
     _save(bob, _credentials("bob", CHAIN_0, expires_at=1.0))
 
-    await asyncio.gather(
-        refresh_oauth_credentials_with_result(alice),
-        refresh_oauth_credentials_with_result(bob),
+    await asyncio.wait_for(
+        asyncio.gather(
+            refresh_oauth_credentials_with_result(alice),
+            refresh_oauth_credentials_with_result(bob),
+        ),
+        timeout=2,
     )
 
     assert started == {"alice", "bob"}
+
+
+@pytest.mark.parametrize("encrypted", [False, True], ids=("plaintext", "encrypted"))
+@pytest.mark.asyncio
+async def test_reset_deletes_unreadable_scoped_file_and_allows_reconnect(
+    tmp_path: Path,
+    *,
+    encrypted: bool,
+) -> None:
+    """Reset must remove the exact file even when credential decoding fails."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    process_env = (
+        {
+            "MINDROOM_CREDENTIALS_ENCRYPTION_KEY": base64.urlsafe_b64encode(b"x" * 32).decode(),
+        }
+        if encrypted
+        else {}
+    )
+    runtime_paths = _runtime_paths(tmp_path, process_env=process_env)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    credentials_manager.save_credentials("demo_oauth_client", {"client_id": "public-client"})
+    context = OAuthCredentialContext(
+        provider=cast("OAuthProvider", _FakeOAuthProvider(unused_refresh)),
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=_worker_target(),
+    )
+    credentials_path = scoped_credentials_path(
+        context.provider.credential_service,
+        credentials_manager=context.credentials_manager,
+        worker_target=context.worker_target,
+    )
+    credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    credentials_path.write_bytes(b"not-a-readable-credential")
+
+    assert await credential_lifecycle.reset_oauth_credentials(context) is True
+    assert not credentials_path.exists()
+
+    reconnected = await exchange_and_store_oauth_credentials(
+        context,
+        "replacement-code",
+        None,
+        expected_generation=credential_lifecycle.oauth_credential_generation(context),
+    )
+    assert reconnected["token"] == "callback-access"  # noqa: S105
+    assert _load(context) == reconnected
+
+
+@pytest.mark.asyncio
+async def test_completed_reset_operation_cannot_delete_later_callback_credentials(tmp_path: Path) -> None:
+    """A stale recovery retry must return its original result without resetting a newer account."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+    operation_id = "approval-1:0:reset-call"
+
+    assert await credential_lifecycle.reset_oauth_credentials(context, operation_id=operation_id) is True
+    replacement = await exchange_and_store_oauth_credentials(
+        context,
+        "replacement-code",
+        None,
+        expected_generation=credential_lifecycle.oauth_credential_generation(context),
+    )
+
+    assert await credential_lifecycle.reset_oauth_credentials(context, operation_id=operation_id) is True
+    assert _load(context) == replacement
+
+
+@pytest.mark.asyncio
+async def test_pending_reset_operation_fails_closed_and_finishes_on_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A crash between durable intent and unlink must hide the old credential until deletion finishes."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+    real_delete = credential_lifecycle.delete_scoped_credentials
+
+    def crash_before_delete(*_args: object, **_kwargs: object) -> bool:
+        message = "simulated host interruption"
+        raise OSError(message)
+
+    monkeypatch.setattr(credential_lifecycle, "delete_scoped_credentials", crash_before_delete)
+    with pytest.raises(OSError, match="simulated host interruption"):
+        await credential_lifecycle.reset_oauth_credentials(
+            context,
+            operation_id="approval-1:0:reset-call",
+        )
+
+    assert credential_lifecycle.load_oauth_credentials(context) is None
+    with pytest.raises(OAuthProviderError, match="reset is incomplete"):
+        credential_lifecycle.oauth_credential_generation(context)
+
+    monkeypatch.setattr(credential_lifecycle, "delete_scoped_credentials", real_delete)
+    assert (
+        await credential_lifecycle.reset_oauth_credentials(
+            context,
+            operation_id="approval-1:0:reset-call",
+        )
+        is True
+    )
+    assert _load(context) is None
 
 
 @pytest.mark.asyncio

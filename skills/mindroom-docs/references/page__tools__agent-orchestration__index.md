@@ -67,6 +67,7 @@ agents:
 ### Approval And Requester Scope
 
 Every `reset_oauth_connection()` call requires a Matrix human-approval card even when the global `tool_approval` default is `auto_approve`.
+The reset must be the only call in its approval generation, and approval freezes its exact name, arguments, invoking agent, and credential target.
 Only the original human requester can approve that pending call.
 Before changing credentials, the tool applies `authorization.agent_reply_permissions` for the current agent, including configured sender aliases.
 The resolved credential scope must be `user` or `user_agent`; shared credentials are refused.
@@ -78,6 +79,7 @@ Providers that define requester-scoped credentials, such as GitHub, may resolve 
 - `oauth_connections` always runs in the primary MindRoom runtime, even if it appears in `worker_tools`.
 - Invalid, unavailable, unconfigured, or unauthorized provider requests fail before credential deletion or MCP session disconnection.
 - Use the returned link to reconnect, then retry the original provider-backed tool call.
+- If the process restarts after deletion but before the receipt is delivered, MindRoom replays the same reset operation and delivers the receipt without deleting a later reconnection.
 - The returned link expires after 10 minutes; run `reset_oauth_connection()` again to issue a fresh link.
 
 ## [`subagents`]

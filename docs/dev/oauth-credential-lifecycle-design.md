@@ -38,6 +38,11 @@ OAuth operations are rare enough that this concurrency is not worth the correctn
 20. Google Drive applies quota configuration before lifecycle refresh wrapping and never clones a managed tracked credential while building a service.
 21. GitHub access tokens and PyGithub clients are owned together by one worker thread, while every managed call reloads authoritative credentials on its execution thread.
 22. OAuth-backed MCP connections publish and use sessions only when their desired token hash, connected-session token hash, and request authorization lease match.
+23. Every approval freezes the exact call ID, tool name, canonical arguments, invoking agent, and any sensitive nested target before execution.
+24. An OAuth reset is the sole call in its approval generation and uses `approval_id:generation:tool_call_id` as its stable lifecycle operation ID.
+25. Reset generation metadata durably records pending intents and permanent completed tombstones with the original deletion result.
+26. Every credential-use and publication transaction finishes pending reset deletion before reading, refreshing, or storing a credential.
+27. Claimed reset recovery publishes the idempotent reset receipt directly and never resumes the stale paused Agno run.
 
 ## Architecture
 
@@ -86,8 +91,12 @@ It does not delete credentials or build links.
 
 `src/mindroom/mcp/manager.py` owns requester-session generations and rejects refresh, reconnect, or calls through a retired generation.
 
-`src/mindroom/custom_tools/oauth_connections.py` issues a reconnect link, enters MCP retirement, asks the lifecycle owner to delete the credential, and renders the receipt.
+`src/mindroom/oauth/reset_execution.py` issues a reconnect link, enters MCP retirement, asks the lifecycle owner to delete the credential, and renders the receipt.
+`src/mindroom/custom_tools/oauth_connections.py` owns only live-request authorization and error translation around that executor.
 If teardown is cancelled or fails, deletion does not occur.
+
+`src/mindroom/approval_bindings.py` freezes and validates every paused call descriptor.
+OAuth reset bindings add the exact canonical credential target under that generic descriptor and reject a reset mixed with any other call.
 
 ## Data Flow
 
@@ -127,8 +136,14 @@ The callback cannot preserve a refresh token that another operation rotated conc
 4. Close the retired session and keep its key fenced against new sessions.
 5. If retirement fails or is cancelled, retain credentials and restore the tracked generation when possible.
 6. Submit credential deletion to the transaction loop and wait cancellably for the operation lock.
-7. Advance the durable credential revision and durably delete the credential under the operation lock without another suspension point.
-8. Release the in-memory MCP retirement fence and return the receipt even if cancellation arrived after commit.
+7. Write the stable reset operation as pending together with the new durable credential revision.
+8. Durably delete the exact scoped credential file without first decoding it.
+9. Mark the operation completed with its original file-existed result and retain that tombstone permanently.
+10. Release the in-memory MCP retirement fence and return the receipt even if cancellation arrived after commit.
+
+All credential transactions finish any pending delete before using or publishing the scope.
+A retry of a completed operation returns the stored result without advancing the revision or deleting a credential created by a later callback.
+If a process dies after the reset commit but before FINAL delivery, claimed-continuation recovery reuses the same operation ID and publishes the receipt directly without calling Agno continuation APIs.
 
 Dashboard disconnect uses the same transaction and fails without deleting credentials if MCP teardown cannot complete.
 
@@ -149,7 +164,7 @@ Refresh becomes cancellation-safe after its operation lock is acquired because a
 Callback operation-lock wait, exchange, and save are cancellation-safe after pending state is consumed because the one-time state and authorization code cannot be replayed safely.
 Reset teardown remains cancellable because credentials are still intact at that point.
 Operation-lock waiting remains cancellable and does not mutate credentials.
-Revision advancement plus deletion is the reset commit point, and the only following work releases the in-memory retirement fence without provider or transport I/O.
+Pending-intent publication, durable deletion, and completed-tombstone publication form the reset commit sequence.
 Cancellation after that commit is consumed so the approved destructive tool can return its reconnect receipt.
 
 ## Testing
@@ -176,6 +191,11 @@ Focused tests cover observable lifecycle behavior rather than private lock chore
 - Terminal refresh rejection returns the same structured reconnect reason and instruction from every consumer.
 - Logs never include refresh tokens, access tokens, or unrecognized provider-controlled error text.
 - Approval continuation fails closed when provider, service, scope, key, or routing agent changes.
+- Approval continuation fails closed when the persisted call reuses an ID with a changed name, canonical arguments, or invoking member.
+- OAuth reset is refused when another call shares its approval generation.
+- Reset deletes corrupt plaintext or encrypted credential files by exact scoped path and permits reconnect afterward.
+- A crash after pending intent hides the credential until deletion finishes, while completed-operation replay cannot delete a later callback credential.
+- Claimed reset recovery reuses its stable operation ID, publishes FINAL directly, and never resumes Agno.
 - Agent approval continuation reconstructs OAuth-backed toolkits inside the same runtime and execution-identity context used for resumed calls.
 - Agent and voice toolkit construction receive authorization explicitly, so alias canonicalization does not depend on an ambient call context.
 - Long-lived Google clients discard valid cached access tokens after reset, disconnect, terminal invalidation, or canonical scope change.

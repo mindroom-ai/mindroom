@@ -16,6 +16,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
+from mindroom.approval_bindings import canonical_tool_arguments
 from mindroom.approval_execution import AgentApprovalExecution
 from mindroom.approval_receipt import approval_receipt_context, build_approval_receipt
 from mindroom.approval_response import (
@@ -100,7 +101,12 @@ from mindroom.teams import (
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
+from mindroom.tool_system.runtime_context import (
+    ApprovalToolOperation,
+    LiveToolDispatchContext,
+    ToolDispatchContext,
+    runtime_context_from_dispatch_context,
+)
 from mindroom.tool_system.worker_routing import (
     parse_tool_execution_identity_payload,
     run_with_tool_execution_identity,
@@ -1138,9 +1144,107 @@ class ResponseRunner:
         owns_final, event_id = await self._recover_frozen_approval_final(claimed, target=target)
         if owns_final:
             return event_id
+        recovered_reset = await self._recover_completed_oauth_reset(claimed, target=target)
+        if recovered_reset is not None:
+            return recovered_reset
         reason = "Tool approval continuation was interrupted before final delivery and denied safely."
         settled = await self._approval_responses.settle_failure(claimed, reason)
         return claimed.response_event_id if settled else None
+
+    async def _recover_completed_oauth_reset(
+        self,
+        claimed: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> str | None:
+        """Replay one approved reset by stable operation ID and deliver its receipt directly."""
+        from mindroom.oauth.reset_execution import execute_oauth_connection_reset  # noqa: PLC0415
+
+        if len(claimed.calls) != 1:
+            return None
+        call = claimed.calls[0]
+        if call.tool_name != "reset_oauth_connection" or call.decision is not ContinuationDecision.APPROVED:
+            return None
+        binding = claimed.tool_bindings.get(call.tool_call_id)
+        if binding is None:
+            msg = "Approved OAuth credential target is missing; run the reset again."
+            raise RuntimeError(msg)
+        reset_binding = binding.get("oauth_reset") if binding is not None else None
+        reset_target = cast("dict[str, object]", reset_binding) if isinstance(reset_binding, dict) else None
+        provider_id = reset_target.get("provider_id") if reset_target is not None else None
+        if not isinstance(provider_id, str) or not provider_id:
+            msg = "Approved OAuth credential target is missing; run the reset again."
+            raise RuntimeError(msg)
+        if (
+            binding.get("tool_name") != call.tool_name
+            or binding.get("invoking_agent") != call.invoking_agent
+            or binding.get("arguments_json") != canonical_tool_arguments({"provider_id": provider_id})
+        ):
+            msg = "Approved OAuth reset call changed; run the reset again."
+            raise RuntimeError(msg)
+        execution_identity = self._approval_continuation_execution_identity(claimed)
+        validate_oauth_reset_approval_bindings(
+            calls=((call.tool_call_id, call.tool_name, call.invoking_agent, True),),
+            bindings=claimed.tool_bindings,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            execution_identity=execution_identity,
+        )
+        operation = ApprovalToolOperation(
+            approval_id=claimed.approval_id,
+            generation=claimed.generation,
+            tool_call_id=call.tool_call_id,
+        )
+        response_text = await execute_oauth_connection_reset(
+            provider_id,
+            agent_name=call.invoking_agent,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            execution_identity=execution_identity,
+            operation_id=operation.operation_id,
+        )
+        request = self._approval_response_request(claimed, target=target)
+        outcome = await self.deps.delivery_gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=target,
+                existing_event_id=claimed.response_event_id,
+                existing_event_is_placeholder=False,
+                response_text=response_text,
+                identity=self._response_identity(
+                    request,
+                    response_kind="team" if claimed.entity_kind == "team" else "ai",
+                ),
+                tool_trace=None,
+                extra_content=_merge_response_extra_content(
+                    {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
+                    claimed.attachment_ids,
+                ),
+                defer_source_handoff=True,
+            ),
+        )
+        if outcome.terminal_status != "completed":
+            msg = "Recovered OAuth reset receipt did not reach durable final delivery"
+            raise RuntimeError(msg)
+        lifecycle = self._build_lifecycle(
+            identity=self._response_identity(
+                request,
+                response_kind="team" if claimed.entity_kind == "team" else "ai",
+            ),
+            request=request,
+        )
+        await lifecycle.finalize(
+            outcome,
+            build_post_response_outcome=lambda _final: self._approval_post_response_outcome(
+                claimed,
+                target=target,
+                run_succeeded=True,
+            ),
+            post_response_deps=lambda: self._approval_post_response_deps(claimed),
+        )
+        if not await self.deps.approval_store.finish_approval_continuation(claimed.approval_id):
+            msg = "Recovered OAuth reset receipt lost its journal ownership"
+            raise RuntimeError(msg)
+        return outcome.event_id
 
     async def _recover_frozen_approval_final(
         self,
@@ -1397,6 +1501,7 @@ class ResponseRunner:
             correlation_id=self._correlation_id_for_request(request),
             source_envelope=request.response_envelope,
         )
+        tool_dispatch = self._bind_approval_operation(tool_dispatch, continuation)
         if tool_dispatch.execution_identity != execution_identity:
             msg = "Approval continuation execution identity no longer matches its target"
             raise RuntimeError(msg)
@@ -1442,6 +1547,7 @@ class ResponseRunner:
                         else continuation.runtime_model_name,
                         decisions=decisions,
                         denial_reasons=denial_reasons,
+                        tool_bindings=continuation.tool_bindings,
                         refresh_scheduler=self._knowledge_refresh_scheduler(),
                         member_model_names=dict(continuation.team_member_model_names) or None,
                         history_scope=continuation.history_scope,
@@ -1464,6 +1570,27 @@ class ResponseRunner:
                     tool_trace_collector=tool_trace_collector,
                 )
         return response_text
+
+    @staticmethod
+    def _bind_approval_operation(
+        tool_dispatch: ToolDispatchContext,
+        continuation: ApprovalContinuation,
+    ) -> ToolDispatchContext:
+        """Attach a stable reset side-effect identity only to its sole approved call."""
+        if not isinstance(tool_dispatch, LiveToolDispatchContext) or len(continuation.calls) != 1:
+            return tool_dispatch
+        call = continuation.calls[0]
+        if call.tool_name != "reset_oauth_connection" or call.decision is not ContinuationDecision.APPROVED:
+            return tool_dispatch
+        operation = ApprovalToolOperation(
+            approval_id=continuation.approval_id,
+            generation=continuation.generation,
+            tool_call_id=call.tool_call_id,
+        )
+        return replace(
+            tool_dispatch,
+            runtime_context=replace(tool_dispatch.runtime_context, approval_operation=operation),
+        )
 
     @staticmethod
     def _approval_continuation_execution_identity(

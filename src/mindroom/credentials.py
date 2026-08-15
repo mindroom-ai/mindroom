@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from mindroom import runtime_env_policy as _runtime_env_policy
 from mindroom.credential_policy import credential_service_policy
-from mindroom.durable_write import delete_file_durable, replace_file_durable
+from mindroom.durable_write import create_directory_durable, delete_file_durable, replace_file_durable
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.worker_routing import worker_root_path
 
@@ -143,9 +143,9 @@ def _ensure_private_directory(path: Path, *, harden_existing: bool = False) -> N
         missing_paths.append(current_path)
         current_path = current_path.parent
 
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-
     directories_to_chmod = list(reversed(missing_paths))
+    for directory_path in directories_to_chmod:
+        create_directory_durable(directory_path, mode=0o700)
     if harden_existing:
         for directory_path in _credential_owned_directory_chain(path):
             if directory_path not in directories_to_chmod:
@@ -414,7 +414,7 @@ class CredentialsManager:
             raise ValueError(msg)
         _atomic_write_private_file(credentials_path, json.dumps(credentials, indent=2).encode("utf-8"))
 
-    def delete_credentials(self, service: str) -> None:
+    def delete_credentials(self, service: str) -> bool:
         """Delete credentials for a service.
 
         Args:
@@ -422,7 +422,7 @@ class CredentialsManager:
 
         """
         credentials_path = self.get_credentials_path(service)
-        delete_file_durable(credentials_path)
+        return delete_file_durable(credentials_path)
 
     def list_services(self) -> list[str]:
         """List all services with stored credentials.
@@ -869,7 +869,7 @@ def delete_scoped_credentials(
     *,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
-) -> None:
+) -> bool:
     """Delete credentials for a service from the current worker scope when available."""
     normalized_service = validate_service_name(service)
     target_manager = _scoped_credentials_target_manager(
@@ -877,4 +877,4 @@ def delete_scoped_credentials(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
-    target_manager.delete_credentials(normalized_service)
+    return target_manager.delete_credentials(normalized_service)

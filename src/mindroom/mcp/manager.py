@@ -434,17 +434,9 @@ class MCPServerManager:
         self,
         state: MCPServerState,
         *,
-        credentials_manager: CredentialsManager | None,
-        worker_target: ResolvedWorkerTarget | None,
-        authorization: AuthorizationConfig | None = None,
+        credential_context: OAuthCredentialContext,
     ) -> str:
-        manager = credentials_manager or get_runtime_credentials_manager(self.runtime_paths)
-        context = self._oauth_credential_context(
-            state,
-            worker_target=worker_target,
-            credentials_manager=manager,
-            authorization=authorization,
-        )
+        context = credential_context
         provider = context.provider
         try:
             refresh_result = await refresh_oauth_credentials_with_result(context)
@@ -503,9 +495,7 @@ class MCPServerManager:
                 raise oauth_connection_required(credential_context)
             access_token = await self._oauth_access_token(
                 base_state,
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-                authorization=authorization,
+                credential_context=credential_context,
             )
             if state.retired or key in self._retired_request_keys:
                 raise oauth_connection_required(credential_context)

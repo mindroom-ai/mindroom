@@ -17,6 +17,14 @@ type OverrideRecord = dict[str, str]
 _override_load_cache: dict[Path, tuple[int, dict[str, OverrideRecord]]] = {}
 
 
+def create_directory_durable(path: Path, *, mode: int) -> None:
+    """Create one directory and durably publish its private entry."""
+    path.mkdir(mode=mode, exist_ok=True)
+    path.chmod(mode)
+    _fsync_directory_durable(path)
+    _fsync_directory_durable(path.parent)
+
+
 def delete_file_durable(path: Path) -> bool:
     """Unlink one file and durably publish its directory update."""
     try:

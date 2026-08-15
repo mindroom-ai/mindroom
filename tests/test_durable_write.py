@@ -9,6 +9,7 @@ import pytest
 
 from mindroom import durable_write
 from mindroom.durable_write import (
+    create_directory_durable,
     delete_file_durable,
     load_cached_override_records,
     replace_file_durable,
@@ -28,6 +29,21 @@ def test_durable_json_write_creates_target_parent_with_separate_temp_dir(tmp_pat
 
     assert json.loads(target.read_text(encoding="utf-8")) == {"value": 1}
     assert not list(temp_dir.glob("*.tmp"))
+
+
+def test_durable_directory_creation_fsyncs_entry_and_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A fresh directory entry and its private mode must be durable before use."""
+    target = tmp_path / "scope"
+    fsynced: list[Path] = []
+    monkeypatch.setattr(durable_write, "_fsync_directory_durable", fsynced.append)
+
+    create_directory_durable(target, mode=0o700)
+
+    assert target.is_dir()
+    assert fsynced == [target, tmp_path]
 
 
 def test_durable_delete_fsyncs_parent_after_unlink(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

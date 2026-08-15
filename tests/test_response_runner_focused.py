@@ -2689,6 +2689,89 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agno(tmp_path: Path) -> None:
+    """A committed reset with no FINAL must reuse its op ID and directly publish the receipt."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    claimed = ApprovalContinuation(
+        approval_id="approval-reset-recovery",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(
+            ApprovalCall(
+                tool_call_id="reset-call",
+                tool_name="reset_oauth_connection",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        ),
+        state="claimed",
+        generation=3,
+        tool_bindings={
+            "reset-call": {
+                "tool_name": "reset_oauth_connection",
+                "arguments_json": '{"provider_id":"google"}',
+                "invoking_agent": "general",
+                "oauth_reset": {"provider_id": "google"},
+            },
+        },
+    )
+    lifecycle = MagicMock(finalize=AsyncMock())
+    delivery = FinalDeliveryOutcome(
+        terminal_status="completed",
+        event_id="$waiting",
+        is_visible_response=True,
+        final_visible_body="reset receipt",
+        delivery_kind="edited",
+    )
+
+    with (
+        patch.object(runner, "_recover_frozen_approval_final", new=AsyncMock(return_value=(False, None))),
+        patch.object(runner, "_approval_continuation_execution_identity", return_value=identity),
+        patch("mindroom.response_runner.validate_oauth_reset_approval_bindings"),
+        patch(
+            "mindroom.oauth.reset_execution.execute_oauth_connection_reset",
+            new=AsyncMock(return_value="reset receipt"),
+        ) as execute_reset,
+        patch.object(runner.deps.delivery_gateway, "deliver_final", new=AsyncMock(return_value=delivery)),
+        patch.object(runner, "_build_lifecycle", return_value=lifecycle),
+        patch.object(
+            runner.deps.approval_store,
+            "finish_approval_continuation",
+            new=AsyncMock(return_value=True),
+        ),
+        patch.object(runner._approval_responses, "settle_failure", new=AsyncMock()) as settle_failure,
+        patch.object(runner, "_continue_entity_call", new=AsyncMock()) as continue_entity,
+    ):
+        event_id = await runner._recover_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert event_id == "$waiting"
+    assert execute_reset.await_args.kwargs["operation_id"] == "approval-reset-recovery:3:reset-call"
+    continue_entity.assert_not_awaited()
+    settle_failure.assert_not_awaited()
+    lifecycle.finalize.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_path: Path) -> None:
     """Restart recovery must replay semantic final facts, not rendered Matrix HTML."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)

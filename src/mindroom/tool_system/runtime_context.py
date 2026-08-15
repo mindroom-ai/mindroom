@@ -63,6 +63,20 @@ def _tool_runtime_context_scope(tool_context: ToolRuntimeContext | None) -> Iter
 
 
 @dataclass(frozen=True)
+class ApprovalToolOperation:
+    """Stable identity for one approved tool side effect."""
+
+    approval_id: str
+    generation: int
+    tool_call_id: str
+
+    @property
+    def operation_id(self) -> str:
+        """Return the durable lifecycle operation key."""
+        return f"{self.approval_id}:{self.generation}:{self.tool_call_id}"
+
+
+@dataclass(frozen=True)
 class ToolRuntimeContext:
     """Shared runtime metadata available to all tools."""
 
@@ -94,6 +108,7 @@ class ToolRuntimeContext:
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
     config_provider: Callable[[], Config] | None = None
+    approval_operation: ApprovalToolOperation | None = None
 
     @property
     def current_config(self) -> Config:

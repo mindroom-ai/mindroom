@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from mindroom import approval_manager
+from mindroom.approval_bindings import build_approval_tool_bindings
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
@@ -20,7 +21,6 @@ from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
-from mindroom.oauth.reset import build_oauth_reset_approval_bindings
 from mindroom.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     evaluate_tool_approval,
@@ -167,7 +167,7 @@ class ApprovalResponseCoordinator:
         return _ApprovalPausePlan(
             tools=tuple(tool for tool, _tool_call_id, _tool_name, _invoking_agent in identified),
             calls=calls,
-            tool_bindings=build_oauth_reset_approval_bindings(
+            tool_bindings=build_approval_tool_bindings(
                 identified,
                 config=config,
                 runtime_paths=self.runtime_paths,

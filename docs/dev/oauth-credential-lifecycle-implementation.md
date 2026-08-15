@@ -30,6 +30,11 @@ One lifecycle module submits asynchronous callers and synchronous provider adapt
 - Bind every authenticated MCP connection and call to an authoritative token-hash lease.
 - Use structured provider error codes and never log provider-controlled descriptions or token values.
 - Keep reset approval bound to the exact provider, service, scope, worker key, and routing agent.
+- Freeze every approved call's exact ID, name, canonical arguments, and invoking agent.
+- Require reset to be the sole call in its approval generation.
+- Key approved reset commits by `approval_id:generation:tool_call_id` and retain completed tombstones permanently.
+- Finish pending reset deletion before every credential read, refresh, callback publication, or later reset.
+- Recover a claimed reset receipt directly without resuming Agno.
 - Require every provider token credential service to end with `_oauth` so storage policy cannot misclassify plugin tokens.
 - Do not run tests or CI, per user instruction.
 - Run static checks and repository pre-commit hooks on every changed file.
@@ -58,7 +63,7 @@ One lifecycle module submits asynchronous callers and synchronous provider adapt
 - Produces: `refresh_oauth_credentials_blocking(context)` for synchronous callers of the asynchronous provider contract.
 - Produces: `refresh_oauth_credentials_sync(context, refresh)` for synchronous provider adapters.
 - Produces: `exchange_and_store_oauth_credentials(context, code, code_verifier, expected_generation=...)`.
-- Produces: `reset_oauth_credentials(context)`.
+- Produces: `reset_oauth_credentials(context, operation_id=None)`.
 - Produces: credential validation and sanitization helpers currently housed in `oauth.service`.
 - Consumes: `OAuthProvider`, `RuntimePaths`, `CredentialsManager`, `ResolvedWorkerTarget`, `AuthorizationConfig`, `async_exclusive_file_lock`, and scoped credential storage functions.
 
@@ -152,7 +157,9 @@ Apply the same missing, unusable, no-refresh-needed, success, terminal rejection
 `exchange_and_store_oauth_credentials()` must acquire the operation lock, verify the pending callback generation, and retain the lock through exchange, claim validation, refresh-token preservation, and save.
 The API route will wrap the complete lock-wait-through-save coroutine in `run_coroutine_until_complete()` after consuming state.
 
-`reset_oauth_credentials()` must wait cancellably for the operation lock, advance the durable credential generation, and durably delete the credential snapshot without owning MCP transport cleanup.
+`reset_oauth_credentials()` must wait cancellably for the operation lock, durably record a stable pending operation with the advanced generation, delete the exact scoped file, and durably mark the operation completed without owning MCP transport cleanup.
+The completed operation stores the original file-existed result and remains as a permanent tombstone so a stale retry cannot delete credentials from a later callback.
+Every locked credential transaction must finish a pending reset delete before it reads or publishes credentials.
 Cancellation before lock ownership must abort reset, while cancellation after commit must return the deletion result so the caller can publish its receipt.
 MCP reset callers must enter requester-session retirement before invoking the credential transaction and release only the in-memory fence afterward.
 

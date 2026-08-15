@@ -5,23 +5,25 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 from agno.models.response import ToolExecution
 
+from mindroom.approval_bindings import build_approval_tool_bindings
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
-from mindroom.custom_tools import oauth_connections as oauth_connections_module
 from mindroom.custom_tools.oauth_connections import OAuthConnectionTools
 from mindroom.message_target import MessageTarget
 from mindroom.oauth import credential_lifecycle
 from mindroom.oauth import reset as oauth_reset_module
+from mindroom.oauth import reset_execution as oauth_reset_execution_module
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.reset import (
@@ -30,6 +32,7 @@ from mindroom.oauth.reset import (
 )
 from mindroom.oauth.service import lookup_oauth_connect_token, oauth_credentials_worker_target
 from mindroom.tool_system.runtime_context import (
+    ApprovalToolOperation,
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
     tool_runtime_context,
@@ -202,6 +205,62 @@ def test_oauth_reset_approval_binding_rejects_worker_scope_drift(tmp_path: Path)
         )
 
 
+def test_oauth_reset_must_be_only_call_in_approval_generation(tmp_path: Path) -> None:
+    """A reset cannot share one approval generation with another side effect."""
+    _tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    reset_call = ToolExecution(
+        tool_call_id="reset-call",
+        tool_name="reset_oauth_connection",
+        tool_args={"provider_id": "google_drive"},
+        requires_confirmation=True,
+    )
+    other_call = ToolExecution(
+        tool_call_id="other-call",
+        tool_name="other_tool",
+        tool_args={},
+        requires_confirmation=True,
+    )
+
+    with pytest.raises(RuntimeError, match="only tool call"):
+        build_approval_tool_bindings(
+            (
+                (reset_call, "reset-call", "reset_oauth_connection", "research"),
+                (other_call, "other-call", "other_tool", "research"),
+            ),
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            execution_identity=build_execution_identity_from_runtime_context(context),
+        )
+
+
+@pytest.mark.asyncio
+async def test_reset_uses_stable_approval_operation_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live tool must pass its persisted approval identity to the reset owner."""
+    tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    context = replace(
+        context,
+        approval_operation=ApprovalToolOperation(
+            approval_id="approval-1",
+            generation=4,
+            tool_call_id="reset-call",
+        ),
+    )
+    execute_reset = AsyncMock(return_value="receipt")
+    monkeypatch.setattr(
+        "mindroom.custom_tools.oauth_connections.execute_oauth_connection_reset",
+        execute_reset,
+    )
+
+    with tool_runtime_context(context):
+        result = await tool.reset_oauth_connection("google_drive")
+
+    assert result == "receipt"
+    assert execute_reset.await_args.kwargs["operation_id"] == "approval-1:4:reset-call"
+
+
 @pytest.mark.asyncio
 async def test_reset_oauth_connection_uses_team_member_ownership(tmp_path: Path) -> None:
     """A team member toolkit must manage its owning agent scope from a team request context."""
@@ -344,7 +403,7 @@ async def test_reset_oauth_connection_denies_unauthorized_requester_before_side_
         "unauthorized-refresh-token",
     )
     retire = MagicMock()
-    monkeypatch.setattr(oauth_connections_module, "retire_mcp_oauth_request_session", retire)
+    monkeypatch.setattr(oauth_reset_execution_module, "retire_mcp_oauth_request_session", retire)
 
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)
@@ -376,7 +435,7 @@ async def test_reset_oauth_connection_denies_provider_not_backing_agent_tool_bef
         "unavailable-refresh-token",
     )
     retire = MagicMock()
-    monkeypatch.setattr(oauth_connections_module, "retire_mcp_oauth_request_session", retire)
+    monkeypatch.setattr(oauth_reset_execution_module, "retire_mcp_oauth_request_session", retire)
 
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)
@@ -409,7 +468,7 @@ async def test_reset_oauth_connection_denies_unconfigured_provider_before_side_e
     )
     retire = MagicMock()
     monkeypatch.setattr(oauth_reset_module, "load_oauth_providers", lambda *_args: {})
-    monkeypatch.setattr(oauth_connections_module, "retire_mcp_oauth_request_session", retire)
+    monkeypatch.setattr(oauth_reset_execution_module, "retire_mcp_oauth_request_session", retire)
 
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)
@@ -441,13 +500,15 @@ async def test_reset_oauth_connection_builds_link_before_deleting_credentials(
         "link-failure-refresh-token",
     )
     monkeypatch.setattr(
-        oauth_connections_module,
+        oauth_reset_execution_module,
         "oauth_connect_url",
         MagicMock(side_effect=RuntimeError("state persistence unavailable")),
     )
 
-    with tool_runtime_context(context), pytest.raises(RuntimeError, match="state persistence unavailable"):
-        await tool.reset_oauth_connection(provider.id)
+    with tool_runtime_context(context):
+        result = await tool.reset_oauth_connection(provider.id)
+
+    assert result == "Error: OAuth connection reset did not complete; verify connection status, then retry."
 
     assert (
         load_scoped_credentials(
@@ -480,7 +541,7 @@ async def test_reset_oauth_connection_preserves_credentials_when_mcp_teardown_fa
         raise RuntimeError(message)
         yield
 
-    monkeypatch.setattr(oauth_connections_module, "retire_mcp_oauth_request_session", failed_retirement)
+    monkeypatch.setattr(oauth_reset_execution_module, "retire_mcp_oauth_request_session", failed_retirement)
 
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)
@@ -520,7 +581,7 @@ async def test_reset_oauth_connection_cancellation_during_teardown_preserves_cre
         yield
 
     monkeypatch.setattr(
-        oauth_connections_module,
+        oauth_reset_execution_module,
         "retire_mcp_oauth_request_session",
         blocked_teardown,
     )

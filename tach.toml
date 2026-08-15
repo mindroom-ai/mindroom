@@ -4463,6 +4463,7 @@ from = ["mindroom.tool_system.dependencies"]
 
 [[interfaces]]
 expose = [
+    "ApprovalToolOperation",
     "LiveToolDispatchContext",
     "ToolDispatchContext",
     "WorkerProgressEvent",

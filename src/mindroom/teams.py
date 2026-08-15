@@ -1920,6 +1920,7 @@ async def continue_paused_team_run(
     model_name: str,
     decisions: dict[str, bool],
     denial_reasons: dict[str, str | None],
+    tool_bindings: dict[str, dict[str, object]],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     member_model_names: Mapping[str, str] | None = None,
     history_scope: HistoryScope | None = None,
@@ -1981,6 +1982,8 @@ async def continue_paused_team_run(
             persisted.requirements or (),
             decisions=decisions,
             denial_reasons=denial_reasons,
+            bindings=tool_bindings,
+            default_agent_name=configured_team_name,
         )
         continued = await cast(
             "Any",

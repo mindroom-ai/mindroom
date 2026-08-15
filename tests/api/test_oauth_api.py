@@ -33,6 +33,7 @@ from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider
 from mindroom.oauth import registry as oauth_registry
+from mindroom.oauth import reset_execution as oauth_reset_execution
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_docs import google_docs_oauth_provider
@@ -2626,7 +2627,7 @@ def test_disconnect_cleanup_failure_preserves_credentials(tmp_path: Path, monkey
         raise RuntimeError(message)
         yield
 
-    monkeypatch.setattr(oauth_api, "retire_mcp_oauth_request_session", failed_retirement)
+    monkeypatch.setattr(oauth_reset_execution, "retire_mcp_oauth_request_session", failed_retirement)
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:

@@ -151,6 +151,8 @@ class AgentApprovalExecution:
                 [deepcopy(requirement) for requirement in persisted.requirements or ()],
                 decisions=decisions,
                 denial_reasons=denial_reasons,
+                bindings=continuation.tool_bindings,
+                default_agent_name=continuation.entity_name,
             )
 
             async def continue_run() -> RunOutput:

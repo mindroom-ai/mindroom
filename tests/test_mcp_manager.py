@@ -19,6 +19,7 @@ from authlib.integrations.base_client.errors import OAuthError
 from mcp.types import CallToolResult, Implementation, ListToolsResult, Tool, ToolListChangedNotification
 
 from mindroom.agents import create_agent
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
@@ -711,8 +712,11 @@ async def test_mcp_manager_does_not_eagerly_load_oauth_credentials_for_success_l
 
     access_token = await manager._oauth_access_token(
         manager._require_state("demo"),
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
+        credential_context=manager._oauth_credential_context(
+            manager._require_state("demo"),
+            worker_target=worker_target,
+            credentials_manager=credentials_manager,
+        ),
     )
 
     assert access_token == ACCESS_0
@@ -759,11 +763,16 @@ async def test_mcp_manager_serializes_oauth_refresh_read_modify_write_per_scope(
     provider = _FakeMcpOAuthProvider(refresh)
     monkeypatch.setattr("mindroom.mcp.manager.mcp_oauth_provider", lambda *_args: provider)
     state = manager._require_state("demo")
+    credential_context = manager._oauth_credential_context(
+        state,
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
 
     with patch("mindroom.mcp.manager.logger") as mock_logger:
         first_token, second_token = await asyncio.gather(
-            manager._oauth_access_token(state, credentials_manager=credentials_manager, worker_target=worker_target),
-            manager._oauth_access_token(state, credentials_manager=credentials_manager, worker_target=worker_target),
+            manager._oauth_access_token(state, credential_context=credential_context),
+            manager._oauth_access_token(state, credential_context=credential_context),
         )
 
     stored_credentials = load_scoped_credentials(
@@ -815,8 +824,11 @@ async def test_mcp_manager_surfaces_connection_required_for_terminal_oauth_refre
     with pytest.raises(OAuthConnectionRequired) as exc_info:
         await manager._oauth_access_token(
             manager._require_state("demo"),
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
+            credential_context=manager._oauth_credential_context(
+                manager._require_state("demo"),
+                worker_target=worker_target,
+                credentials_manager=credentials_manager,
+            ),
         )
 
     assert exc_info.value.reason == "refresh_rejected"
@@ -919,8 +931,11 @@ async def test_mcp_manager_preserves_non_rotating_oauth_refresh_tokens(
 
     access_token = await manager._oauth_access_token(
         manager._require_state("demo"),
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
+        credential_context=manager._oauth_credential_context(
+            manager._require_state("demo"),
+            worker_target=worker_target,
+            credentials_manager=credentials_manager,
+        ),
     )
 
     stored_credentials = load_scoped_credentials(
@@ -983,12 +998,22 @@ async def test_mcp_manager_oauth_refresh_lock_is_per_scope(
     provider = _FakeMcpOAuthProvider(refresh)
     monkeypatch.setattr("mindroom.mcp.manager.mcp_oauth_provider", lambda *_args: provider)
     state = manager._require_state("demo")
+    alice_context = manager._oauth_credential_context(
+        state,
+        worker_target=alice_target,
+        credentials_manager=credentials_manager,
+    )
+    bob_context = manager._oauth_credential_context(
+        state,
+        worker_target=bob_target,
+        credentials_manager=credentials_manager,
+    )
 
     alice_task = asyncio.create_task(
-        manager._oauth_access_token(state, credentials_manager=credentials_manager, worker_target=alice_target),
+        manager._oauth_access_token(state, credential_context=alice_context),
     )
     bob_task = asyncio.create_task(
-        manager._oauth_access_token(state, credentials_manager=credentials_manager, worker_target=bob_target),
+        manager._oauth_access_token(state, credential_context=bob_context),
     )
     await asyncio.to_thread(release_refreshes.wait)
     alice_token, bob_token = await asyncio.gather(alice_task, bob_task)
@@ -1016,11 +1041,9 @@ async def test_mcp_manager_serializes_requester_oauth_token_resolution(
     async def fake_oauth_access_token(
         _state: MCPServerState,
         *,
-        credentials_manager: object,
-        worker_target: object,
-        authorization: object = None,
+        credential_context: object,
     ) -> str:
-        del credentials_manager, worker_target, authorization
+        del credential_context
         nonlocal active_token_resolutions, max_active_token_resolutions
         active_token_resolutions += 1
         max_active_token_resolutions = max(max_active_token_resolutions, active_token_resolutions)
@@ -1060,6 +1083,37 @@ async def test_mcp_manager_serializes_requester_oauth_token_resolution(
     assert second_result[1].headers == {"Authorization": "Bearer alice-token"}
     assert first_result[1].token_hash == second_result[1].token_hash
     assert max_active_token_resolutions == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_resolves_oauth_alias_context_once(tmp_path: Path) -> None:
+    """A chained alias map must not key a session for one requester while loading another's token."""
+    runtime_paths = _runtime_paths(tmp_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    authorization = AuthorizationConfig(
+        aliases={
+            "@canonical-a:example.test": ["@bridge:example.test"],
+            "@canonical-b:example.test": ["@canonical-a:example.test"],
+        },
+    )
+    bridge_target = _worker_target("@bridge:example.test")
+    canonical_a_target = _worker_target("@canonical-a:example.test")
+    canonical_b_target = _worker_target("@canonical-b:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, canonical_a_target, "canonical-a-token")
+    _save_mcp_oauth_credentials(runtime_paths, canonical_b_target, "canonical-b-token")
+
+    state, lease = await manager._request_state_and_headers(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=bridge_target,
+        authorization=authorization,
+    )
+
+    assert lease.headers == {"Authorization": "Bearer canonical-a-token"}
+    assert next(iter(manager._scoped_states.values())) is state
+    assert next(iter(manager._scoped_states)).worker_key == canonical_a_target.worker_key
 
 
 @pytest.mark.asyncio
