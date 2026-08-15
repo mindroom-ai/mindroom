@@ -222,6 +222,14 @@ class MindRoomMCPToolkit(Toolkit):
         return json.dumps(self._catalog_payload(catalog))
 
     async def _oauth_call_tool(self, *, tool_name: str, arguments: dict[str, object] | None = None) -> ToolResult | str:
+        return await self._call_tool_with_error_payload(tool_name, dict(arguments or {}))
+
+    async def _call_tool_with_error_payload(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+    ) -> ToolResult | str:
+        """Call one manager-owned tool and preserve structured reconnect/catalog errors."""
         if self.manager is None:
             msg = f"MCP server '{self.server_id}' is not connected"
             raise RuntimeError(msg)
@@ -229,7 +237,7 @@ class MindRoomMCPToolkit(Toolkit):
             return await self.manager.call_tool(
                 self.server_id,
                 tool_name,
-                dict(arguments or {}),
+                arguments,
                 timeout_seconds=self.call_timeout_seconds,
                 credentials_manager=self.credentials_manager,
                 worker_target=self.worker_target,
@@ -248,19 +256,8 @@ class MindRoomMCPToolkit(Toolkit):
             )
 
     def _build_function(self, tool: MCPDiscoveredTool) -> Function:
-        async def _call_tool(**kwargs: object) -> ToolResult:
-            assert self.manager is not None
-            return await self.manager.call_tool(
-                self.server_id,
-                tool.remote_name,
-                dict(kwargs),
-                timeout_seconds=self.call_timeout_seconds,
-                credentials_manager=self.credentials_manager,
-                worker_target=self.worker_target,
-                authorization=self.oauth_authorization,
-                include_tools=self.include_tools,
-                exclude_tools=self.exclude_tools,
-            )
+        async def _call_tool(**kwargs: object) -> ToolResult | str:
+            return await self._call_tool_with_error_payload(tool.remote_name, dict(kwargs))
 
         return Function(
             name=tool.function_name,

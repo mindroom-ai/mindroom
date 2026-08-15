@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+class OAuthResetPreparationError(RuntimeError):
+    """Signal a reset failure before any durable reset intent could be published."""
+
+
 async def retire_and_reset_oauth_credentials(
     context: OAuthCredentialContext,
     *,
@@ -31,19 +35,27 @@ async def retire_and_reset_oauth_credentials(
     before_reset: Callable[[], None] | None = None,
 ) -> bool:
     """Fence the exact MCP session and commit its credential reset once."""
-    async with retire_mcp_oauth_request_session(
-        dict(mcp_servers),
-        context.provider.id,
-        credential_context=context,
-        expected_connection_generation=expected_connection_generation,
-    ):
-        if before_reset is not None:
-            before_reset()
-        return await reset_oauth_credentials(
-            context,
-            operation_id=operation_id,
+    reset_started = False
+    try:
+        async with retire_mcp_oauth_request_session(
+            dict(mcp_servers),
+            context.provider.id,
+            credential_context=context,
             expected_connection_generation=expected_connection_generation,
-        )
+        ):
+            if before_reset is not None:
+                before_reset()
+            reset_started = True
+            return await reset_oauth_credentials(
+                context,
+                operation_id=operation_id,
+                expected_connection_generation=expected_connection_generation,
+            )
+    except Exception as exc:
+        if reset_started:
+            raise
+        msg = "OAuth connection reset preparation failed"
+        raise OAuthResetPreparationError(msg) from exc
 
 
 async def complete_oauth_connection_reset(

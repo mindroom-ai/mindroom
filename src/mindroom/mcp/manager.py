@@ -1238,16 +1238,25 @@ class MCPServerManager:
     async def _drain_retired_states(self, states: tuple[MCPServerState, ...]) -> None:
         """Close atomically detached config generations outside the lifecycle mutex."""
         for state in states:
-            drained = False
             try:
                 await self._cancel_refresh_task(state)
+            except (asyncio.CancelledError, Exception) as exc:
+                logger.warning(
+                    "MCP retired-state refresh cleanup failed",
+                    server_id=state.server_id,
+                    error_type=type(exc).__name__,
+                )
+            try:
                 async with state.lock:
                     await self._disconnect_state_when_idle(state)
-                drained = True
-            finally:
-                if drained:
-                    async with self._state_lifecycle_lock:
-                        self._retiring_states.pop(id(state), None)
+            except (asyncio.CancelledError, Exception) as exc:
+                logger.warning(
+                    "MCP retired-state session cleanup failed",
+                    server_id=state.server_id,
+                    error_type=type(exc).__name__,
+                )
+            async with self._state_lifecycle_lock:
+                self._retiring_states.pop(id(state), None)
 
     async def _clear_function_validation_errors(self) -> None:
         """Make collision-owned failures eligible for validation under the new config surface."""

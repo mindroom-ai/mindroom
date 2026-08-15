@@ -958,7 +958,7 @@ async def test_mcp_manager_does_not_eagerly_load_oauth_credentials_for_success_l
 ) -> None:
     """Successful OAuth resolution should not do a second load just for failure diagnostics."""
     runtime_paths = _runtime_paths(tmp_path)
-    worker_target = _shared_worker_target("@alice:example.test")
+    worker_target = _worker_target("@alice:example.test", worker_scope="user")
     _save_mcp_oauth_credentials(runtime_paths, worker_target, ACCESS_0, expires_at=time.time() + 3600)
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
@@ -1502,6 +1502,46 @@ async def test_mcp_manager_allows_same_oauth_typed_tools_for_multiple_requesters
     assert [tool.function_name for tool in bob_catalog.tools] == ["demo_echo"]
     assert manager.failed_server_ids() == set()
     assert len(manager._scoped_states) == 2
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_shared_agent_still_isolates_requester_bearers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shared worker reuse must not turn requester-owned MCP OAuth into an agent-global token."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    alice_request_target = _shared_worker_target("@alice:example.test")
+    bob_request_target = _shared_worker_target("@bob:example.test")
+    alice_credential_target = _worker_target("@alice:example.test", worker_scope="user")
+    bob_credential_target = _worker_target("@bob:example.test", worker_scope="user")
+    _save_mcp_oauth_credentials(runtime_paths, alice_credential_target, "alice-token")
+    _save_mcp_oauth_credentials(runtime_paths, bob_credential_target, "bob-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=alice_request_target,
+    )
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=bob_request_target,
+    )
+
+    assert _FakeClientSession.transport_extra_headers == [
+        {"Authorization": "Bearer alice-token"},
+        {"Authorization": "Bearer bob-token"},
+    ]
+    assert {key.worker_key for key in manager._scoped_states} == {
+        alice_credential_target.worker_key,
+        bob_credential_target.worker_key,
+    }
 
 
 @pytest.mark.asyncio
@@ -2167,6 +2207,31 @@ async def test_mcp_manager_shutdown_drains_every_state_when_one_close_fails(
     assert manager._states == {}
     assert manager._scoped_states == {}
     assert await manager.sync_servers(config) == set()
+
+
+@pytest.mark.asyncio
+async def test_mcp_config_reload_drains_every_retired_state_when_one_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One old-generation close failure cannot strand later detached sessions."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub(
+        {
+            "first": MCPServerConfig(transport="stdio", command="npx"),
+            "second": MCPServerConfig(transport="stdio", command="npx"),
+        },
+    )
+    await manager.sync_servers(config)
+    _FakeClientSession.close_exception = RuntimeError("close failed")
+
+    assert await manager.sync_servers(_ConfigStub({})) == set()
+
+    assert _FakeClientSession.close_attempt_count == 2
+    assert manager._states == {}
+    assert manager._retiring_states == {}
 
 
 @pytest.mark.asyncio

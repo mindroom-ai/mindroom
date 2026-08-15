@@ -8,7 +8,7 @@ from agno.tools import Toolkit
 
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management
 from mindroom.oauth.reset import OAuthResetTargetError
-from mindroom.oauth.reset_execution import execute_oauth_connection_reset
+from mindroom.oauth.reset_execution import OAuthResetPreparationError, execute_oauth_connection_reset
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -62,7 +62,7 @@ class OAuthConnectionTools(Toolkit):
             return "Error: OAuth reset requires an approved operation."
 
         try:
-            return await execute_oauth_connection_reset(
+            result = await execute_oauth_connection_reset(
                 provider_id,
                 agent_name=agent_name,
                 config=config,
@@ -73,4 +73,7 @@ class OAuthConnectionTools(Toolkit):
                 expected_connection_generation=approval_operation.connection_generation,
             )
         except OAuthResetTargetError as exc:
-            return f"Error: {exc}"
+            result = f"Error: {exc}"
+        except OAuthResetPreparationError:
+            result = "Error: OAuth connection reset did not complete; verify connection status, then retry."
+        return result

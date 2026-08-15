@@ -146,6 +146,7 @@ def mcp_oauth_provider(server_id: str, server_config: MCPServerConfig) -> OAuthP
         token_endpoint_auth_method=auth_config.token_endpoint_auth_method,
         pkce_code_challenge_method=auth_config.pkce_code_challenge_method,
         allow_empty_scopes=True,
+        requester_scoped_credentials=True,
         status_capabilities=(f"{_display_name(server_id, auth_config)} MCP access",),
         runtime_bootstrapper=oauth_runtime_bootstrapper(_oauth_discovery_config(server_config)),
     )

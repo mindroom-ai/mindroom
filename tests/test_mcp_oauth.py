@@ -224,6 +224,7 @@ def test_mcp_oauth_provider_defaults_to_mcp_server_provider_id() -> None:
     assert provider.pkce_code_challenge_method == "S256"
     assert provider.extra_auth_params == {"audience": "example"}
     assert provider.extra_token_params == {"resource": "https://mcp.example.test/mcp"}
+    assert provider.requester_scoped_credentials is True
 
 
 def test_custom_mcp_oauth_provider_id_keeps_generated_credential_services_mcp_scoped() -> None:

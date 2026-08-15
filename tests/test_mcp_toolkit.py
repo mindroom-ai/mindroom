@@ -58,6 +58,9 @@ class _DummyManager:
 
 
 class _OAuthRequiredManager:
+    def __init__(self, cached_catalog: MCPServerCatalog | None = None) -> None:
+        self.cached_catalog = cached_catalog
+
     @staticmethod
     def _connection_required() -> OAuthConnectionRequired:
         message = "Example MCP is not connected for this agent."
@@ -74,9 +77,9 @@ class _OAuthRequiredManager:
         worker_target: ResolvedWorkerTarget | None,
         authorization: AuthorizationConfig | None = None,
     ) -> MCPServerCatalog | None:
-        """No requester catalog is cached before the OAuth connection exists."""
+        """Return the requester catalog captured when this fake manager was built."""
         del worker_target, authorization
-        return None
+        return self.cached_catalog
 
     async def get_request_catalog(
         self,
@@ -378,6 +381,72 @@ async def test_oauth_mcp_toolkit_registers_typed_tools_from_cached_requester_cat
     assert result.content == "ok"
     assert manager.cached_catalog_requests == [("demo", worker_target)]
     assert manager.calls == [("demo", "echo", {"text": "hello"}, credentials_manager, worker_target, 30.0)]
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_typed_tool_returns_structured_reconnect_payload(tmp_path: Path) -> None:
+    """A cached typed tool must preserve the bridge's reconnect contract after revocation."""
+    catalog = _catalog(
+        MCPDiscoveredTool(
+            remote_name="echo",
+            function_name="demo_echo",
+            description="Echo",
+            input_schema={"type": "object", "properties": {}},
+            output_schema=None,
+        ),
+    )
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=_OAuthRequiredManager(catalog),
+        catalog=None,
+        server_config=_oauth_server_config(),
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=_worker_target(),
+    )
+
+    payload = json.loads(await toolkit.async_functions["demo_echo"].entrypoint())
+
+    assert payload["oauth_connection_required"] is True
+    assert payload["provider"] == "mcp_demo"
+    assert "connect_token=opaque" in payload["connect_url"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_typed_tool_returns_current_catalog_after_tool_removal(tmp_path: Path) -> None:
+    """A typed tool cached before catalog drift must return the manager's current surface."""
+    echo = MCPDiscoveredTool(
+        remote_name="echo",
+        function_name="demo_echo",
+        description="Echo",
+        input_schema={"type": "object", "properties": {}},
+        output_schema=None,
+    )
+    ping = MCPDiscoveredTool(
+        remote_name="ping",
+        function_name="demo_ping",
+        description="Ping",
+        input_schema={"type": "object", "properties": {}},
+        output_schema=None,
+    )
+    manager = _RequesterAwareManager(_catalog(echo))
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=manager,
+        catalog=None,
+        server_config=_oauth_server_config(),
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=_worker_target(),
+    )
+    manager.catalog = _catalog(ping)
+
+    payload = json.loads(await toolkit.async_functions["demo_echo"].entrypoint())
+
+    assert payload == {
+        "error": "MCP tool 'echo' is not available for server 'demo'",
+        "available_tools": ["ping"],
+    }
 
 
 @pytest.mark.asyncio

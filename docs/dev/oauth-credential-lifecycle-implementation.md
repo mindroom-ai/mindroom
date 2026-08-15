@@ -1,7 +1,6 @@
 # OAuth Credential Lifecycle Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use baspowers:executing-plans to implement this plan task-by-task.
-> Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Historical implementation record:** These checkboxes preserve the original execution plan and do not report current implementation or review status.
 
 **Goal:** Replace distributed OAuth mutation logic with one serialized credential lifecycle owner.
 
