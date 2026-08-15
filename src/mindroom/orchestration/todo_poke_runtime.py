@@ -16,6 +16,7 @@ from mindroom.custom_tools.todo_poke import (
 )
 from mindroom.custom_tools.todo_state import state_root as todo_state_root
 from mindroom.entity_resolution import mindroom_user_id
+from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.scheduling import get_pending_schedule_thread_ids_for_room
 
 if TYPE_CHECKING:
@@ -96,18 +97,21 @@ class TodoPokeRuntimeCoordinator:
             return None
         return agent_bot
 
-    def _joined_agent_bot(
+    async def _joined_agent_bot(
         self,
         room_id: str,
         agent_names: tuple[str, ...],
     ) -> AgentBot | TeamBot | None:
-        """Return the first ready candidate bot joined to the target room."""
+        """Return the first ready candidate with authoritative membership in the target room."""
         for agent_name in agent_names:
             agent_bot = self._agent_bot(agent_name)
             if agent_bot is None:
                 continue
             client = agent_bot.client
-            if client is not None and room_id in client.rooms:
+            if client is None:
+                continue
+            joined_room_ids = await get_joined_rooms(client)
+            if joined_room_ids is not None and room_id in joined_room_ids:
                 return agent_bot
         return None
 
@@ -117,7 +121,7 @@ class TodoPokeRuntimeCoordinator:
         agent_names: tuple[str, ...],
     ) -> frozenset[str | None] | None:
         """Return pending schedule scopes through one assigned agent joined to the room."""
-        agent_bot = self._joined_agent_bot(room_id, agent_names)
+        agent_bot = await self._joined_agent_bot(room_id, agent_names)
         if agent_bot is None or agent_bot.client is None:
             return None
         return await get_pending_schedule_thread_ids_for_room(agent_bot.client, room_id)
@@ -130,9 +134,11 @@ class TodoPokeRuntimeCoordinator:
         thread_id: str | None,
     ) -> str | None:
         """Send one assigned-agent todo poke that enters normal dispatch."""
-        agent_bot = self._agent_bot(agent_name)
         config = self.config_provider()
-        if agent_bot is None or config is None or agent_bot.client is None or room_id not in agent_bot.client.rooms:
+        if config is None:
+            raise TodoPokeDeliveryUnavailableError
+        agent_bot = await self._joined_agent_bot(room_id, (agent_name,))
+        if agent_bot is None or agent_bot.client is None:
             raise TodoPokeDeliveryUnavailableError
 
         original_sender = mindroom_user_id(config, self.runtime_paths)

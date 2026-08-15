@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -52,14 +53,26 @@ def _coordinator(
     )
 
 
+def _client(
+    *joined_room_ids: str,
+    cached_room_ids: tuple[str, ...] | None = None,
+) -> MagicMock:
+    client = MagicMock()
+    cached_ids = joined_room_ids if cached_room_ids is None else cached_room_ids
+    client.rooms = {room_id: MagicMock() for room_id in cached_ids}
+    client.joined_rooms = AsyncMock(
+        return_value=nio.JoinedRoomsResponse(rooms=list(joined_room_ids)),
+    )
+    return client
+
+
 def _bot(**overrides: object) -> MagicMock:
     bot = MagicMock()
     bot.running = overrides.get("running", True)
     if "client" in overrides:
         bot.client = overrides["client"]
     else:
-        bot.client = MagicMock()
-        bot.client.rooms = {"!room:localhost": MagicMock()}
+        bot.client = _client("!room:localhost")
     bot.in_flight_response_count = overrides.get("in_flight_response_count", 0)
     return bot
 
@@ -136,10 +149,8 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_schedule_query_uses_joined_candidate_for_shared_room(tmp_path: Path) -> None:
     """A same-room assignee without membership must not hide a later joined assignee."""
-    unjoined_client = MagicMock()
-    unjoined_client.rooms = {}
-    joined_client = MagicMock()
-    joined_client.rooms = {"!room:localhost": MagicMock()}
+    unjoined_client = _client()
+    joined_client = _client("!room:localhost")
     coordinator = _coordinator(
         test_runtime_paths(tmp_path),
         _config(tmp_path),
@@ -165,10 +176,8 @@ async def test_schedule_query_uses_joined_candidate_for_shared_room(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_send_skips_unjoined_todo_owner_without_using_other_candidate(tmp_path: Path) -> None:
     """Only the todo owner may transport its poke, and it must be joined."""
-    unjoined_client = MagicMock()
-    unjoined_client.rooms = {}
-    joined_client = MagicMock()
-    joined_client.rooms = {"!room:localhost": MagicMock()}
+    unjoined_client = _client()
+    joined_client = _client("!room:localhost")
     unjoined_bot = _bot(client=unjoined_client)
     unjoined_bot._hook_send_message = AsyncMock(return_value="$wrong")
     joined_bot = _bot(client=joined_client)
@@ -195,6 +204,49 @@ async def test_send_skips_unjoined_todo_owner_without_using_other_candidate(tmp_
 
     unjoined_bot._hook_send_message.assert_not_awaited()
     joined_bot._hook_send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_schedule_query_rejects_stale_joined_room_cache(tmp_path: Path) -> None:
+    """Cached room state must not authorize a schedule read after membership ended."""
+    stale_client = _client(cached_room_ids=("!room:localhost",))
+    coordinator = _coordinator(
+        test_runtime_paths(tmp_path),
+        _config(tmp_path),
+        {"code": _bot(client=stale_client)},
+    )
+
+    with patch(
+        "mindroom.orchestration.todo_poke_runtime.get_pending_schedule_thread_ids_for_room",
+        new=AsyncMock(return_value=frozenset({"$scheduled"})),
+    ) as schedule_query:
+        pending = await coordinator._schedule_query("!room:localhost", ("code",))
+
+    assert pending is None
+    schedule_query.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_rejects_stale_joined_room_cache(tmp_path: Path) -> None:
+    """Cached room state must not authorize delivery after membership ended."""
+    stale_client = _client(cached_room_ids=("!room:localhost",))
+    stale_bot = _bot(client=stale_client)
+    stale_bot._hook_send_message = AsyncMock(return_value="$wrong")
+    coordinator = _coordinator(
+        test_runtime_paths(tmp_path),
+        _config(tmp_path),
+        {"code": stale_bot},
+    )
+
+    with pytest.raises(TodoPokeDeliveryUnavailableError):
+        await coordinator._send_poke(
+            "code",
+            "!room:localhost",
+            "@code Todo work is ready.",
+            "$thread",
+        )
+
+    stale_bot._hook_send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
