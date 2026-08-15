@@ -69,6 +69,16 @@ def test_arxiv_download_directory_is_converted_to_path(tmp_path: Path) -> None:
     assert tool.download_dir == tmp_path / "papers"
 
 
+def test_arxiv_blank_download_directory_preserves_upstream_default() -> None:
+    """A blank optional path should retain Agno's default download directory."""
+    tool_class = cast("Any", TOOL_REGISTRY["arxiv"]())
+
+    default_tool = tool_class()
+    blank_tool = tool_class(download_dir="")
+
+    assert blank_tool.download_dir == default_tool.download_dir
+
+
 def test_pubmed_configured_max_results_applies_when_call_omits_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """Configured PubMed result limits should be the default for model calls."""
     tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())

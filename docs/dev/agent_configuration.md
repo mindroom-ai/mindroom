@@ -21,7 +21,7 @@ The configuration file has these common top-level sections; see the exhaustive [
 6. **memory** - Memory system configuration (mem0, file-backed, or disabled)
 7. **knowledge_bases** - File-backed RAG knowledge bases
 8. **router** - Agent routing system configuration
-9. **voice** - Voice message processing (STT + command intelligence)
+9. **voice** - Voice message processing with STT, mention normalization, and light ASR cleanup
 10. **authorization** - Fine-grained user and room permissions
 11. **matrix_room_access** - Managed room access mode and discoverability
 12. **matrix_space** - Optional root Matrix Space for grouping rooms
@@ -301,7 +301,7 @@ voice:
     # api_key: null  # Optional API key for STT service
     # host: null  # Optional host URL for self-hosted STT
   intelligence:
-    model: default  # Model for command recognition
+    model: default  # Model for mention normalization and light ASR cleanup
 ```
 
 ## Authorization Configuration
@@ -499,7 +499,7 @@ Below is a representative selection:
 - **notion** - Notion workspace integration (requires API key)
 
 ### Special Tool Bundles
-- **openclaw_compat** - Convenience bundle that expands to: shell, coding, duckduckgo, website, browser, scheduler, subagents, matrix_message (matrix_message also implies attachments via `IMPLIED_TOOLS`)
+- **openclaw_compat** - Convenience bundle that expands to shell, coding, duckduckgo, website, browser, scheduler, subagents, and matrix_message, which also implies attachments and matrix_room through `IMPLIED_TOOLS`.
 
 ## Example Agent Configurations
 

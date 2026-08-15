@@ -146,7 +146,7 @@ The memory facade is now Tach-enforced as a narrow slice with 16 exposed symbols
 
 Tach visibility and dependency rules enforce helper restrictions for the declared modules.
 
-See [tach.toml](../../tach.toml) for the enforced surface and its source of truth.
+See the repository's [tach.toml](https://github.com/mindroom-ai/mindroom/blob/main/tach.toml) for the enforced surface and its source of truth.
 
 ### User-facing control surfaces
 

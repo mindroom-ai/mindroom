@@ -49,11 +49,11 @@ Use in-app report/block tools first when available.
 Do not put moderation evidence or private identifiers in a public GitHub issue.
 If the in-app controls fail, open a general issue without sensitive evidence so maintainers can publish an appropriate private contact path.
 
-Useful non-sensitive context includes:
+Useful public context includes:
 
-- room ID (or link)
-- message link (if available)
-- a short description of the issue
+- the affected feature and client version
+- a short general description with identifiers removed
+- sanitized error text with tokens, Matrix IDs, room IDs, and message links removed
 
 ## Response Times
 

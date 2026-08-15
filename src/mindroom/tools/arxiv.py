@@ -70,7 +70,10 @@ def arxiv_tools() -> type[ArxivTools]:
             download_dir: Path | str | None = None,
             **kwargs: object,
         ) -> None:
-            resolved_download_dir = Path(download_dir) if isinstance(download_dir, str) else download_dir
+            if isinstance(download_dir, str):
+                resolved_download_dir = Path(download_dir) if download_dir else None
+            else:
+                resolved_download_dir = download_dir
             super().__init__(
                 enable_search_arxiv=enable_search_arxiv,
                 enable_read_arxiv_papers=enable_read_arxiv_papers,

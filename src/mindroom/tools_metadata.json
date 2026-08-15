@@ -6846,7 +6846,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -9200,7 +9200,6 @@
       "function_names": [
         "add_zep_message",
         "get_zep_memory",
-        "initialize",
         "search_zep_memory"
       ],
       "helper_text": null,

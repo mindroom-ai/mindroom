@@ -20,8 +20,9 @@ Run the bridge manager from `local/instances/deploy/`:
 ./bridge.py logs telegram --instance <instance>
 ```
 
-`bridge.py add` creates the bridge data directory, `.env.telegram`, configuration, and generated `docker-compose.yml` service named `telegram`.
-Enter `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `TELEGRAM_BOT_TOKEN` in the generated `.env.telegram` file before starting the bridge.
+`bridge.py add` creates the bridge data directory, bridge configuration, registry entry, and generated `docker-compose.yml` service named `telegram`.
+Provide Telegram credentials with `--api-id`, `--api-hash`, and `--bot-token`, export the matching `TELEGRAM_*` variables, or create `local/instances/deploy/.env.telegram` before running the command.
+When a credential is still missing, the command prompts for it and writes the resulting values into the generated bridge configuration and bridge registry.
 
 Synapse and Tuwunel use different appservice registration mechanisms; `bridge.py register` selects the correct path for the instance homeserver.
 
@@ -36,10 +37,8 @@ bot_accounts:
 
 authorization:
   aliases:
-    telegram:
-      patterns:
-        - "@telegram_*:matrix.example.com"
-      target: "@owner:matrix.example.com"
+    "@owner:matrix.example.com":
+      - "@telegram_12345:matrix.example.com"
   agent_reply_permissions:
     "*":
       - "@owner:matrix.example.com"
@@ -49,7 +48,8 @@ agents:
     thread_mode: room
 ```
 
-Replace IDs and alias patterns with the values generated for your deployment.
+Replace the canonical owner and exact Telegram ghost IDs with values from your deployment.
+Aliases use exact Matrix user IDs rather than glob patterns, so add every bridge ghost that should inherit the canonical user's permissions.
 Validate the complete configuration before starting MindRoom.
 
 ## Authenticate Telegram

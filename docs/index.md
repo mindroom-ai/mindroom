@@ -16,7 +16,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 - **100+ tool integrations** - Connect to external services like GitHub, Slack, Gmail, and more
 - **Hot-reload configuration** - Update `config.yaml` and agents restart automatically
 - **Scheduled tasks** - Schedule agents to run at specific times with cron expressions or natural language
-- **Voice messages** - Speech-to-text transcription with intelligent command recognition
+- **Voice messages** - Speech-to-text transcription with mention normalization and light ASR cleanup
 - **Image analysis** - Pass images to vision-capable AI models for analysis
 - **Matrix desktop bridge** - Observe or locally lease control of a computer without opening inbound ports
 - **Authorization** - Fine-grained access control for users and rooms

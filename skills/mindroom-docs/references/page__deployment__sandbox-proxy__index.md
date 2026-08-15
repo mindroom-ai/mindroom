@@ -80,7 +80,6 @@ services:
 
 volumes:
   sandbox-workspace:
-    name: sandbox-workspace
 ```
 
 Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
