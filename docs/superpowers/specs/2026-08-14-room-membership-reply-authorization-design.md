@@ -69,6 +69,8 @@ Authorization and capability checks use `ToolRuntimeContext.current_config`, whi
 
 Authorization-aware production collaborators require the orchestrator-owned membership service as an explicit dependency and never create a private fallback index.
 
+The public `ToolRuntimeContext` extension boundary may omit that internal service for membership-agnostic plugin work, but membership-aware operations call `require_agent_reply_memberships()` and fail closed when it is absent.
+
 ## Membership State
 
 Add one orchestrator-owned in-memory membership service shared by all bot and API reply evaluators.

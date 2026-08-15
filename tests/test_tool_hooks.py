@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, ClassVar, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -208,23 +208,24 @@ def _tool_runtime_context(
     )
 
 
-def test_tool_runtime_context_requires_reply_membership_index(tmp_path: Path) -> None:
-    """Tool contexts must fail construction when their shared security dependency is omitted."""
+def test_detached_tool_runtime_context_fails_closed_without_reply_membership_index(tmp_path: Path) -> None:
+    """Extension contexts may omit the index but cannot perform membership-aware work."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
 
-    context_constructor = cast("Any", ToolRuntimeContext)
-    with pytest.raises(TypeError, match="agent_reply_memberships"):
-        context_constructor(
-            agent_name="general",
-            target=MessageTarget.resolve(room_id="!room:example.org", thread_id=None, reply_to_event_id=None),
-            requester_id="@alice:example.org",
-            client=AsyncMock(),
-            config=config,
-            runtime_paths=runtime_paths,
-            conversation_reader=make_conversation_reader_mock(),
-            relations=make_relation_lookup(),
-        )
+    context = ToolRuntimeContext(
+        agent_name="general",
+        target=MessageTarget.resolve(room_id="!room:example.org", thread_id=None, reply_to_event_id=None),
+        requester_id="@alice:example.org",
+        client=AsyncMock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_reader=make_conversation_reader_mock(),
+        relations=make_relation_lookup(),
+    )
+
+    with pytest.raises(RuntimeError, match="membership-aware authorization"):
+        context.require_agent_reply_memberships()
 
 
 def _execution_identity() -> ToolExecutionIdentity:

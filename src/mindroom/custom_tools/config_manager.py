@@ -967,7 +967,7 @@ class ConfigManagerTools(Toolkit):
                 runtime_context.requester_id,
                 config,
                 self.runtime_paths,
-                runtime_context.agent_reply_memberships,
+                runtime_context.require_agent_reply_memberships(),
             )
             if (agent_name := registry.current_entity_name_for_user_id(matrix_id.full_id, include_router=False))
             is not None

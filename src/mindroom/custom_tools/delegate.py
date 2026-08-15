@@ -116,7 +116,7 @@ class DelegateTools(Toolkit):
             agent_name,
             active_config,
             self._runtime_paths,
-            runtime_context.agent_reply_memberships,
+            runtime_context.require_agent_reply_memberships(),
         ):
             return f"Cannot delegate to '{agent_name}': that agent is not allowed to reply to you."
 

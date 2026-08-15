@@ -74,7 +74,7 @@ class ToolRuntimeContext:
     runtime_paths: RuntimePaths
     conversation_reader: ConversationReader
     relations: RelationLookup
-    agent_reply_memberships: AgentReplyMembershipIndex
+    agent_reply_memberships: AgentReplyMembershipIndex | None = None
     transport_agent_name: str | None = None
     active_model_name: str | None = None
     room: nio.MatrixRoom | None = None
@@ -99,6 +99,13 @@ class ToolRuntimeContext:
     def current_config(self) -> Config:
         """Return the managed runtime's current config or this detached snapshot."""
         return self.config_provider() if self.config_provider is not None else self.config
+
+    def require_agent_reply_memberships(self) -> AgentReplyMembershipIndex:
+        """Return the injected index or reject membership-aware extension work."""
+        if self.agent_reply_memberships is None:
+            msg = "Tool runtime context requires the managed membership index for membership-aware authorization."
+            raise RuntimeError(msg)
+        return self.agent_reply_memberships
 
     @property
     def room_id(self) -> str:
@@ -448,7 +455,7 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         room=context.room,
         conversation_reader=context.conversation_reader,
         matrix_admin=context.matrix_admin,
-        agent_reply_memberships=context.agent_reply_memberships,
+        agent_reply_memberships=context.require_agent_reply_memberships(),
     )
 
 
