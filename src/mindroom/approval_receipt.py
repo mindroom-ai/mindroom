@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
@@ -22,10 +23,17 @@ if TYPE_CHECKING:
 
 _MARKER_KEY = "mindroom_approval_receipt"
 _HOOK_ATTR = "_mindroom_approval_receipt_hook_installed"
+_SAFE_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _APPROVAL_RECEIPT_HEADER = (
     "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
     "paused tool calls were authorized. Do not infer approval policy from tool success alone."
 )
+
+
+def _receipt_call_label(tool_name: str, call_ordinal: int) -> str:
+    if _SAFE_TOOL_NAME.fullmatch(tool_name) is None:
+        return f"invalid tool name (call #{call_ordinal})"
+    return f"`{tool_name}` (call #{call_ordinal})"
 
 
 def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
@@ -35,7 +43,7 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
         if call.decision is None:
             msg = f"Cannot build trusted receipt for pending approval call #{call_ordinal}"
             raise ValueError(msg)
-        call_label = f"`{call.tool_name}` (call #{call_ordinal})"
+        call_label = _receipt_call_label(call.tool_name, call_ordinal)
         if call.decision is ContinuationDecision.APPROVED:
             if call.human_approval_required is True:
                 outcome = "an approval card was shown and approved before execution."
