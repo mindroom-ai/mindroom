@@ -63,7 +63,7 @@ def test_saving_a_checkpoint_writes_the_pinned_record_bytes(tmp_path: Path) -> N
     store = SyncContinuityStore(tmp_path, "code")
 
     store.update_join_fences(add={"!pending:localhost"})
-    store.replace_checkpoint(_checkpoint("s_saved"))
+    store._replace_checkpoint(_checkpoint("s_saved"))
 
     written = (tmp_path / "sync_continuity" / "code.json").read_text(encoding="utf-8")
     assert written == _PERSISTED_RECORD_BYTES
@@ -85,10 +85,10 @@ def test_classic_acceptance_atomically_advances_checkpoint_and_clears_join_fence
 ) -> None:
     """One durable record must contain both sides of accepted Classic continuity."""
     store = SyncContinuityStore(tmp_path, "code")
-    store.replace_checkpoint(_checkpoint("s_before"))
+    store._replace_checkpoint(_checkpoint("s_before"))
     store.update_join_fences(add={"!joined:localhost", "!pending:localhost"})
 
-    record = store.accept_classic_response(
+    record = store._accept_classic_response(
         _checkpoint("s_after"),
         joined_room_ids={"!joined:localhost"},
     )
@@ -107,7 +107,7 @@ def test_crash_before_atomic_replace_preserves_old_checkpoint_and_fence(
 ) -> None:
     """A failed pre-replace write cannot expose either half of new continuity."""
     store = SyncContinuityStore(tmp_path, "code")
-    store.replace_checkpoint(_checkpoint("s_before"))
+    store._replace_checkpoint(_checkpoint("s_before"))
     store.update_join_fences(add={"!joined:localhost"})
     before = store.load()
 
@@ -118,7 +118,7 @@ def test_crash_before_atomic_replace_preserves_old_checkpoint_and_fence(
         ),
         pytest.raises(OSError, match="crash before replace"),
     ):
-        store.accept_classic_response(
+        store._accept_classic_response(
             _checkpoint("s_after"),
             joined_room_ids={"!joined:localhost"},
         )
@@ -129,7 +129,7 @@ def test_crash_before_atomic_replace_preserves_old_checkpoint_and_fence(
 def test_rename_failure_never_falls_back_to_a_tearing_copy(tmp_path: Path) -> None:
     """A failed atomic rename must leave the complete old continuity record."""
     store = SyncContinuityStore(tmp_path, "code")
-    store.replace_checkpoint(_checkpoint("s_before"))
+    store._replace_checkpoint(_checkpoint("s_before"))
     store.update_join_fences(add={"!joined:localhost"})
     before = store.load()
 
@@ -138,7 +138,7 @@ def test_rename_failure_never_falls_back_to_a_tearing_copy(tmp_path: Path) -> No
         patch("mindroom.durable_write.safe_replace") as safe_replace,
         pytest.raises(OSError, match="rename unavailable"),
     ):
-        store.accept_classic_response(
+        store._accept_classic_response(
             _checkpoint("s_after"),
             joined_room_ids={"!joined:localhost"},
         )
@@ -156,7 +156,7 @@ def test_crash_after_atomic_replace_restores_new_checkpoint_without_fence(
         pass
 
     store = SyncContinuityStore(tmp_path, "code")
-    store.replace_checkpoint(_checkpoint("s_before"))
+    store._replace_checkpoint(_checkpoint("s_before"))
     store.update_join_fences(add={"!joined:localhost"})
 
     def replace_then_crash(*args: object, **kwargs: object) -> None:
@@ -170,7 +170,7 @@ def test_crash_after_atomic_replace_restores_new_checkpoint_without_fence(
         ),
         pytest.raises(SimulatedCrash),
     ):
-        store.accept_classic_response(
+        store._accept_classic_response(
             _checkpoint("s_after"),
             joined_room_ids={"!joined:localhost"},
         )
@@ -187,7 +187,7 @@ def test_concurrent_stores_serialize_fresh_read_updates_without_resurrection(
     """A stale concurrent writer cannot erase a checkpoint or pending join."""
     store_a = SyncContinuityStore(tmp_path, "code")
     store_b = SyncContinuityStore(tmp_path, "code")
-    store_a.replace_checkpoint(_checkpoint("s_before"))
+    store_a._replace_checkpoint(_checkpoint("s_before"))
     first_write_entered = threading.Event()
     release_first_write = threading.Event()
     writer_calls = 0
@@ -210,7 +210,7 @@ def test_concurrent_stores_serialize_fresh_read_updates_without_resurrection(
         ),
         ThreadPoolExecutor(max_workers=2) as executor,
     ):
-        checkpoint_future = executor.submit(store_a.replace_checkpoint, _checkpoint("s_after"))
+        checkpoint_future = executor.submit(store_a._replace_checkpoint, _checkpoint("s_after"))
         assert first_write_entered.wait(timeout=2)
         fence_future = executor.submit(store_b.update_join_fences, add={"!pending:localhost"})
         assert not fence_future.done()
@@ -231,8 +231,8 @@ def test_each_changed_record_gets_monotonic_revision_under_store_lock(
     """Durable update order must remain visible to out-of-order runtime publishers."""
     store = SyncContinuityStore(tmp_path, "code")
 
-    first = store.replace_checkpoint(_checkpoint("s_first"))
-    no_op = store.replace_checkpoint(_checkpoint("s_first"))
+    first = store._replace_checkpoint(_checkpoint("s_first"))
+    no_op = store._replace_checkpoint(_checkpoint("s_first"))
     second = store.update_join_fences(add={"!pending:localhost"})
 
     assert first.revision == 1
@@ -289,7 +289,7 @@ def test_mutation_rejects_invalid_continuity_without_repair(tmp_path: Path) -> N
     path.write_text('{"version":"future"}', encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="continuity"):
-        SyncContinuityStore(tmp_path, "code").replace_checkpoint(_checkpoint("s_after"))
+        SyncContinuityStore(tmp_path, "code")._replace_checkpoint(_checkpoint("s_after"))
 
     assert path.read_text(encoding="utf-8") == '{"version":"future"}'
 
@@ -301,7 +301,7 @@ def test_checkpoint_clear_repairs_invalid_continuity_record(tmp_path: Path) -> N
     path.write_text('{"version":"future"}', encoding="utf-8")
     store = SyncContinuityStore(tmp_path, "code")
 
-    record = store.clear_checkpoint()
+    record = store._clear_checkpoint()
 
     assert record == SyncContinuityRecord(revision=1)
     assert store.load() == SyncContinuityRecord(revision=1)

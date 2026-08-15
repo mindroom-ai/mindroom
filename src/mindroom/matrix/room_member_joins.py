@@ -150,7 +150,7 @@ def _human_join_user_id(
     return user_id
 
 
-def record_room_member_joins_seen_from_events(
+def _record_room_member_joins_seen_from_events(
     events: Iterable[tuple[nio.MatrixRoom, nio.RoomMemberEvent]],
     *,
     config: Config,
@@ -281,7 +281,7 @@ def _room_member_events_from_sync_timeline(
                 yield room, event
 
 
-def room_member_sync_state_plan(
+def _room_member_sync_state_plan(
     response: nio.SyncResponse,
     *,
     rooms: Mapping[str, nio.MatrixRoom],
@@ -341,7 +341,7 @@ def room_member_sync_state_plan(
     )
 
 
-def room_member_sync_timeline_events(
+def _room_member_sync_timeline_events(
     response: nio.SyncResponse,
     *,
     rooms: Mapping[str, nio.MatrixRoom],

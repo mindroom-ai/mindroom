@@ -123,11 +123,12 @@ class MindRoomAsyncClient(nio.AsyncClient):
 
     def _handle_olm_events(
         self,
-        response: nio.SyncResponse | nio.SlidingSyncResponse,
+        response: object,
     ) -> None:
         """Preserve an explicit zero OTK count so nio replenishes a drained pool."""
-        super()._handle_olm_events(response)
-        count = response.device_key_count.signed_curve25519
+        sync_response = cast("nio.SyncResponse", response)
+        super()._handle_olm_events(sync_response)
+        count = sync_response.device_key_count.signed_curve25519
         if self.olm is not None and count is not None:
             self.olm.uploaded_key_count = count
 

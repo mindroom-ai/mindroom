@@ -90,7 +90,7 @@ class MembershipFence:
     _report_deadlines: dict[str, int] = field(default_factory=dict)
     _recovered_owed_reports: bool = False
 
-    async def fence_reported_departures(self, room_ids: Iterable[str]) -> None:
+    async def _fence_reported_departures(self, room_ids: Iterable[str]) -> None:
         """Fence departures a sync reported, absorbing the report local ones are owed.
 
         One entry per departure, not per room. A room that was left, rejoined

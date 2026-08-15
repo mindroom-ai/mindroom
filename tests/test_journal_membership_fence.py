@@ -104,7 +104,7 @@ def membership(store: RecordingStore) -> MembershipFence:
 
 async def sync_response_without_departures(membership: MembershipFence) -> None:
     """Apply one ordinary sync response, which reports no departure at all."""
-    await membership.fence_reported_departures([])
+    await membership._fence_reported_departures([])
 
 
 async def _fence_local_departure(
@@ -138,7 +138,7 @@ async def test_a_sync_reported_departure_fences(
     principal: PrincipalStore,
 ) -> None:
     """A departure the bot did not initiate still fences."""
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM]
     assert await principal.membership_epoch(ROOM) == 1
@@ -150,7 +150,7 @@ async def test_the_echo_of_a_local_departure_does_not_fence_again(
 ) -> None:
     """The sync report of a local leave is the same departure, not a second one."""
     await _fence_local_departure(membership, ROOM)
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM]
 
@@ -166,9 +166,9 @@ async def test_a_second_departure_after_the_echo_fences_again(
     arriving twice.
     """
     await _fence_local_departure(membership, ROOM)
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
     await membership.note_membership_restarted(ROOM)
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM, ROOM]
 
@@ -186,9 +186,9 @@ async def test_a_replayed_report_does_not_fence_a_second_time(
     repeat is the same departure and owes no second invalidation: one
     departure, one epoch, whichever observer saw it.
     """
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
 
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM]
     assert await principal.membership_epoch(ROOM) == 1
@@ -200,7 +200,7 @@ async def test_an_echo_absorbs_only_its_own_room(
 ) -> None:
     """An echo absorbs only its own room."""
     await _fence_local_departure(membership, ROOM)
-    await membership.fence_reported_departures([ROOM, OTHER_ROOM])
+    await membership._fence_reported_departures([ROOM, OTHER_ROOM])
 
     assert store.advanced == [ROOM, OTHER_ROOM]
 
@@ -225,7 +225,7 @@ async def test_a_rejoin_before_the_echo_keeps_its_projection(
     await membership.note_membership_restarted(ROOM)
     await admit_message(principal, "$after-rejoin", body="hello again")
 
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM]
     assert await visible_bodies(principal) == ["hello again"]
@@ -249,7 +249,7 @@ async def test_a_rejoin_before_the_echo_keeps_its_queued_answer(
         payload={"body": "answer"},
     )
 
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM]
     delivery = await principal.load_delivery(turn_id="$after-rejoin", stage=DeliveryStage.FINAL)
@@ -270,7 +270,7 @@ async def test_a_failed_advance_leaves_the_departure_to_its_report(
     with pytest.raises(RuntimeError, match="durable advance failed"):
         await _fence_local_departure(membership, ROOM)
 
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM]
 
@@ -284,7 +284,7 @@ async def test_a_cancelled_advance_leaves_the_departure_to_its_report(
     with pytest.raises(asyncio.CancelledError):
         await _fence_local_departure(membership, ROOM)
 
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM]
 
@@ -297,7 +297,7 @@ async def test_a_restart_between_the_fence_and_its_report_absorbs_the_report(
     await _fence_local_departure(membership, ROOM)
 
     restarted = MembershipFence(store=store)
-    await restarted.fence_reported_departures([ROOM])
+    await restarted._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM]
 
@@ -317,8 +317,8 @@ async def test_two_local_departures_before_either_report_fence_twice(
 
     assert store.advanced == [ROOM, ROOM]
 
-    await membership.fence_reported_departures([ROOM])
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM, ROOM]
 
@@ -351,7 +351,7 @@ async def test_a_report_that_never_arrives_stops_absorbing_departures(
     await sync_response_without_departures(membership)
     await membership.note_membership_restarted(ROOM)
 
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM, ROOM]
 
@@ -369,7 +369,7 @@ async def test_an_owed_report_is_still_absorbed_inside_its_window(
     await _fence_local_departure(membership, ROOM)
 
     await sync_response_without_departures(membership)
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM]
 
@@ -393,7 +393,7 @@ async def test_a_retired_report_is_forgotten_durably(
 
     restarted = MembershipFence(store=store)
     await restarted.note_membership_restarted(ROOM)
-    await restarted.fence_reported_departures([ROOM])
+    await restarted._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM, ROOM]
 
@@ -422,7 +422,7 @@ async def test_a_failed_recovery_of_inherited_debt_is_tried_again(
     assert await principal.rooms_owing_departure_reports() == frozenset()
 
     await restarted.note_membership_restarted(ROOM)
-    await restarted.fence_reported_departures([ROOM])
+    await restarted._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM, ROOM]
 
@@ -449,7 +449,7 @@ async def test_a_failed_retirement_is_tried_again(
     assert await principal.rooms_owing_departure_reports() == frozenset()
 
     await membership.note_membership_restarted(ROOM)
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM, ROOM]
 
@@ -461,7 +461,7 @@ async def test_a_concurrent_local_and_reported_departure_fence_once(
     """Both observers of one departure racing must still produce one invalidation."""
     await asyncio.gather(
         _fence_local_departure(membership, ROOM),
-        membership.fence_reported_departures([ROOM]),
+        membership._fence_reported_departures([ROOM]),
     )
 
     assert store.advanced == [ROOM]
@@ -472,7 +472,7 @@ async def test_a_departure_reported_before_the_local_one_fences_once(
     store: RecordingStore,
 ) -> None:
     """A sync response can report a leave before the leaving code gets to fence it."""
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
     await _fence_local_departure(membership, ROOM)
 
     assert store.advanced == [ROOM]
@@ -483,7 +483,7 @@ async def test_a_departure_after_a_reported_one_and_a_rejoin_fences_again(
     store: RecordingStore,
 ) -> None:
     """Suppressing the local half of one departure must not suppress the next."""
-    await membership.fence_reported_departures([ROOM])
+    await membership._fence_reported_departures([ROOM])
     await _fence_local_departure(membership, ROOM)
     await membership.note_membership_restarted(ROOM)
     await _fence_local_departure(membership, ROOM)

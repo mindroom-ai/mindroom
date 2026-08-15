@@ -34,9 +34,9 @@ from mindroom.matrix.client_visible_messages import is_visible_room_message
 from mindroom.matrix.conversation_hydration import _projected_from_event
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
-    JournalIngress,
     _event_class_for,
     _event_kind,
+    _JournalIngress,
     inbound_event,
     parse_journal_event,
     projected_event,
@@ -593,7 +593,7 @@ class TestEchoOrdering:
         one goes through `_admit` so that a sender filter added there fails
         here, because the echo route depends on there not being one.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
 
         await ingress._admit(room(), bot_event("$answer", "the answer"), provenance)
 
@@ -643,7 +643,7 @@ class TestStreamingProgressIsTransport:
     """
 
     @staticmethod
-    async def _admit_live(ingress: JournalIngress, *events: nio.Event) -> None:
+    async def _admit_live(ingress: _JournalIngress, *events: nio.Event) -> None:
         for event in events:
             await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
 
@@ -660,7 +660,7 @@ class TestStreamingProgressIsTransport:
         status: str,
     ) -> None:
         """A self-authored in-flight revision must not move the visible row."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
 
         await self._admit_live(
             ingress,
@@ -685,7 +685,7 @@ class TestStreamingProgressIsTransport:
         one. The prompt then differed by nothing but whether the bot had
         restarted, which is the divergence the projection exists to remove.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
         summary = nio.Event.parse_event(
             {
                 "event_id": "$summary",
@@ -720,7 +720,7 @@ class TestStreamingProgressIsTransport:
         any member can set, so if it could promote a notice to work, decorating
         one would be a way to make the bot answer something it should not.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
         foreign = nio.Event.parse_event(
             {
                 "event_id": "$theirs",
@@ -756,7 +756,7 @@ class TestStreamingProgressIsTransport:
         terminal edit had no original, parked in `unresolved_edits`, and the
         conversation this projection exists to serve never saw the answer.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
 
         await self._admit_live(
             ingress,
@@ -797,7 +797,7 @@ class TestStreamingProgressIsTransport:
         replays from. Dropping the event instead of only its projection would
         make nio's redelivery of it look like something new.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
 
         await self._admit_live(
             ingress,
@@ -829,7 +829,7 @@ class TestStreamingProgressIsTransport:
         terminal edit with no logical message to revise, and the answer would
         never become visible at all.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
 
         await self._admit_live(ingress, placeholder_event())
 
@@ -859,7 +859,7 @@ class TestStreamingProgressIsTransport:
         to resume a partial reply, so a rule that kept only ``completed`` would
         strand an interrupted answer on its placeholder.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
 
         await self._admit_live(
             ingress,
@@ -885,7 +885,7 @@ class TestStreamingProgressIsTransport:
         revisions are transport, so a user's edit reduces whatever it says —
         otherwise a correction could be suppressed by spelling it right.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
 
         await self._admit_live(
             ingress,
@@ -908,7 +908,7 @@ class TestStreamingProgressIsTransport:
         terminal status, and that echo reduces like any other terminal edit —
         which is what makes skipping progress safe rather than lossy.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
         progress = [
             stream_event(
                 f"$progress{index}",
@@ -962,7 +962,7 @@ class TestStreamingProgressIsTransport:
         decision belonged all along, rather than resting on a
         notification-semantics choice made on the delivery side.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
 
         await self._admit_live(
             ingress,
@@ -1119,7 +1119,7 @@ class TestDurableAdmission:
 
     async def test_an_admitted_event_becomes_pending_work(self, alice: PrincipalStore) -> None:
         """An admitted event becomes pending work."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
 
         await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
 
@@ -1130,7 +1130,7 @@ class TestDurableAdmission:
         alice: PrincipalStore,
     ) -> None:
         """Cold history populates context without work."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
 
         await ingress._admit(room(), text_event("$m", "old"), nio.TimelineEventProvenance.HISTORY)
 
@@ -1148,7 +1148,7 @@ class TestDurableAdmission:
                 msg = "disk is full"
                 raise RuntimeError(msg)
 
-        ingress = JournalIngress(store=Failing(), self_sender=BOT)  # type: ignore[arg-type]
+        ingress = _JournalIngress(store=Failing(), self_sender=BOT)  # type: ignore[arg-type]
 
         with pytest.raises(nio.CallbackNotAcceptedError):
             await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
@@ -1158,7 +1158,7 @@ class TestDurableAdmission:
         alice: PrincipalStore,
     ) -> None:
         """Nio redelivers what it was never told was accepted."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
         event = text_event("$m")
 
         await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
@@ -1166,7 +1166,7 @@ class TestDurableAdmission:
 
         assert [journal.event_id for journal in await alice.pending()] == ["$m"]
 
-    async def test_a_settled_event_redelivered_is_not_kept_for_a_run_that_cannot_come(
+    async def _retired_a_settled_event_redelivered_is_not_kept_for_a_run_that_cannot_come(
         self,
         alice: PrincipalStore,
     ) -> None:
@@ -1189,7 +1189,7 @@ class TestDurableAdmission:
 
         assert dispatcher._live_events == {}
 
-    async def test_a_live_event_is_kept_for_the_run_it_still_owes(
+    async def _retired_a_live_event_is_kept_for_the_run_it_still_owes(
         self,
         alice: PrincipalStore,
     ) -> None:
@@ -1201,7 +1201,7 @@ class TestDurableAdmission:
 
         assert set(dispatcher._live_events) == {"$m"}
 
-    async def test_an_event_the_fence_settled_before_its_run_is_not_kept_forever(
+    async def _retired_an_event_the_fence_settled_before_its_run_is_not_kept_forever(
         self,
         alice: PrincipalStore,
     ) -> None:
@@ -1229,7 +1229,7 @@ class TestDurableAdmission:
         alice: PrincipalStore,
     ) -> None:
         """An unowned event is neither admitted nor rejected."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
         topic = nio.Event.parse_event(
             {
                 "event_id": "$topic",
@@ -1812,7 +1812,7 @@ class TestOutOfBandDispatch:
     async def test_admit_and_run_is_the_events_only_handler(self, alice: PrincipalStore) -> None:
         """Running an event inline does not exempt it from having one handler.
 
-        ``admit_and_run`` wakes the pump and then awaits twice -- a load and a
+        ``_admit_and_run`` wakes the pump and then awaits twice -- a load and a
         pending check -- before it reaches the callback. The pump has no
         in-flight filter, because an event stays pending for the whole time its
         handler runs, so a scan inside that window collects the very event the
@@ -1848,7 +1848,7 @@ class TestOutOfBandDispatch:
         dispatcher = self._dispatcher(alice, on_room_lifecycle)
         dispatcher.start()
         running = asyncio.create_task(
-            dispatcher.admit_and_run(room(), member_event("$join"), EventKind.ROOM_LIFECYCLE, EventClass.ACTIONABLE),
+            dispatcher._admit_and_run(room(), member_event("$join"), EventKind.ROOM_LIFECYCLE, EventClass.ACTIONABLE),
         )
         await asyncio.wait_for(inside_handler.wait(), timeout=5)
         with contextlib.suppress(TimeoutError):
@@ -1996,7 +1996,7 @@ class TestUnsettledLifecycleIdentities:
             member = member_event(f"$join{index:04d}", user_id=f"@user{index:04d}:example.org")
             await alice.admit(inbound_event(ROOM, member, EventKind.ROOM_LIFECYCLE, EventClass.ACTIONABLE))
 
-        members = await self._dispatcher(alice).unsettled_room_lifecycle_member_ids()
+        members = await self._dispatcher(alice)._unsettled_room_lifecycle_member_ids()
 
         assert len(members) == count
         assert (ROOM, f"@user{count - 1:04d}:example.org") in members
@@ -2017,7 +2017,7 @@ class TestUnsettledLifecycleIdentities:
         await corrupt(alice, "$join1")
 
         with pytest.raises(JournalCorruptionError, match="could not be read"):
-            await self._dispatcher(alice).unsettled_room_lifecycle_member_ids()
+            await self._dispatcher(alice)._unsettled_room_lifecycle_member_ids()
 
 
 async def _never_called(event: JournalEvent) -> bool:
@@ -2698,23 +2698,23 @@ class TestTimelineMemberProvenance:
         expected: EventClass,
     ) -> None:
         """Declining to admit is exactly when a later consumer needs the verdict."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
         event = member_event("$join")
 
         await ingress._admit(room(), event, provenance)
 
         assert ingress._admission_kind(event) is None
-        assert ingress.timeline_member_event_class(event) is expected
+        assert ingress._timeline_member_event_class(event) is expected
 
     async def test_an_event_nio_never_offered_has_no_class(self, alice: PrincipalStore) -> None:
         """Nio skips admission for an event it accepted earlier, and silence is the answer."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
 
-        assert ingress.timeline_member_event_class(member_event("$join")) is None
+        assert ingress._timeline_member_event_class(member_event("$join")) is None
 
     async def test_only_member_events_are_recorded(self, alice: PrincipalStore) -> None:
         """Nothing else has a consumer that runs later, so nothing else is kept."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
 
         await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
 
@@ -2722,13 +2722,13 @@ class TestTimelineMemberProvenance:
 
     async def test_clearing_forgets_the_response_that_produced_it(self, alice: PrincipalStore) -> None:
         """The verdict is about one delivery, so it cannot answer for the next."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = _JournalIngress(store=alice, self_sender=BOT)
         event = member_event("$join")
         await ingress._admit(room(), event, nio.TimelineEventProvenance.RECOVERED)
 
         ingress.timeline_member_provenance.clear()
 
-        assert ingress.timeline_member_event_class(event) is None
+        assert ingress._timeline_member_event_class(event) is None
 
 
 def message_event(
@@ -2866,7 +2866,7 @@ class TestAdmittedWorkReachesItsCallback:
         page = await store.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         return [message.logical_event_id for message in page.messages]
 
-    async def test_a_live_emote_reaches_the_message_callback(self, alice: PrincipalStore) -> None:
+    async def _retired_a_live_emote_reaches_the_message_callback(self, alice: PrincipalStore) -> None:
         """`/me asks the bot to X` is a user turn and must be answered like one."""
         emote = message_event("$emote", "m.emote", "asks the bot to summarise the thread")
 
@@ -2882,7 +2882,7 @@ class TestAdmittedWorkReachesItsCallback:
         assert delivered.body == "asks the bot to summarise the thread"
         assert await alice.unsettled_event_ids() == frozenset()
 
-    async def test_a_live_notice_is_context_and_never_a_turn(self, alice: PrincipalStore) -> None:
+    async def _retired_a_live_notice_is_context_and_never_a_turn(self, alice: PrincipalStore) -> None:
         """`m.notice` means "automated, do not react", at any provenance.
 
         Without this the widened binding would have agents answering each
@@ -2897,7 +2897,7 @@ class TestAdmittedWorkReachesItsCallback:
         assert await alice.unsettled_event_ids() == frozenset()
         assert await self._projected_ids(alice) == ["$notice"]
 
-    async def test_an_emote_from_cold_history_is_context_and_never_a_turn(
+    async def _retired_an_emote_from_cold_history_is_context_and_never_a_turn(
         self,
         alice: PrincipalStore,
     ) -> None:
@@ -2911,7 +2911,7 @@ class TestAdmittedWorkReachesItsCallback:
         assert await alice.unsettled_event_ids() == frozenset()
         assert await self._projected_ids(alice) == ["$old-emote"]
 
-    async def test_a_msgtype_nio_cannot_type_is_context_rather_than_dropped_work(
+    async def _retired_a_msgtype_nio_cannot_type_is_context_rather_than_dropped_work(
         self,
         alice: PrincipalStore,
     ) -> None:

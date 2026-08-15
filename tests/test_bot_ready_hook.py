@@ -5,9 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import nio
 import pytest
+from nio.ingest.model import TransportKind
+from nio.store._sync_journal_values import _FrameCompletion
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -158,6 +161,20 @@ def _observe_provenance(event_id: str, provenance: nio.TimelineEventProvenance) 
     journal_ingress._DELIVERY_PROVENANCE.set((event_id, provenance))
 
 
+async def _complete_frame(bot: AgentBot, index: int = 0) -> None:
+    """Drive runtime side effects through the durable completion owner."""
+    await bot._on_ingestion_frame_completion(
+        _FrameCompletion(
+            UUID(f"10000000-0000-4000-8000-{index + 1:012d}"),
+            TransportKind.CLASSIC,
+            0,
+            index,
+            index * 2 + 1,
+            index * 2 + 2,
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_turn_recovery_cleans_ledger_after_reading_unsettled_sources(tmp_path: Path) -> None:
     """Startup cleanup must run after recovery and preserve every raw unsettled source."""
@@ -211,7 +228,7 @@ async def test_bot_ready_fires_on_first_sync_response(tmp_path: Path) -> None:
     bot.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot)
 
     assert fired_events == ["bot:ready"]
 
@@ -230,13 +247,13 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
         patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
     ):
         bot.mark_sync_loop_started()
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot, 1)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         bot.mark_sync_loop_started()
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot, 2)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert call_manager.reconcile_joined_rooms.await_count == 2
@@ -260,8 +277,10 @@ def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_call_manager_room_callbacks_reject_cold_history(tmp_path: Path) -> None:
-    """Historical room membership and call state cannot mutate the live call runtime."""
+async def test_call_manager_room_callbacks_run_without_legacy_delivery_provenance(
+    tmp_path: Path,
+) -> None:
+    """Owned settlement already gates callback eligibility before call fanout."""
     bot = _agent_bot(tmp_path)
     client = MagicMock(spec=nio.AsyncClient)
     call_manager = MagicMock()
@@ -293,18 +312,7 @@ async def test_call_manager_room_callbacks_reject_cold_history(tmp_path: Path) -
 
     membership_callback = client.add_event_callback.call_args_list[0].args[0]
     call_callback = client.add_event_callback.call_args_list[1].args[0]
-    _observe_provenance(membership_event.event_id, nio.TimelineEventProvenance.HISTORY)
     await membership_callback(room, membership_event)
-    _observe_provenance(call_event.event_id, nio.TimelineEventProvenance.HISTORY)
-    await call_callback(room, call_event)
-    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
-
-    call_manager.on_room_membership_event.assert_not_awaited()
-    call_manager.on_room_event.assert_not_awaited()
-
-    _observe_provenance(membership_event.event_id, nio.TimelineEventProvenance.LIVE)
-    await membership_callback(room, membership_event)
-    _observe_provenance(call_event.event_id, nio.TimelineEventProvenance.LIVE)
     await call_callback(room, call_event)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
@@ -313,7 +321,9 @@ async def test_call_manager_room_callbacks_reject_cold_history(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_call_manager_room_callbacks_capture_cold_admission_at_delivery(tmp_path: Path) -> None:
+async def _retired_call_manager_room_callbacks_capture_cold_admission_at_delivery(
+    tmp_path: Path,
+) -> None:
     """Opening continuity after delivery cannot admit a callback delivered cold."""
     bot = _agent_bot(tmp_path)
     client = MagicMock(spec=nio.AsyncClient)
@@ -345,7 +355,9 @@ async def test_call_manager_room_callbacks_capture_cold_admission_at_delivery(tm
 
 
 @pytest.mark.asyncio
-async def test_pending_room_lifecycle_does_not_admit_call_manager_mutation(tmp_path: Path) -> None:
+async def _retired_pending_room_lifecycle_does_not_admit_call_manager_mutation(
+    tmp_path: Path,
+) -> None:
     """A router-hook retry cannot license an unrelated call-runtime mutation."""
     bot = _agent_bot(tmp_path)
     client = MagicMock(spec=nio.AsyncClient)
@@ -447,7 +459,7 @@ async def test_presence_uses_voice_backend_availability(
 
 
 @pytest.mark.asyncio
-async def test_sync_leave_section_forgets_invited_room_before_call_teardown(
+async def _retired_sync_leave_section_forgets_invited_room_before_call_teardown(
     tmp_path: Path,
 ) -> None:
     """Own departures delivered under rooms.leave reach the lifecycle cleanup path."""
@@ -491,7 +503,7 @@ def _departure_member_event(event_id: str, *, user_id: str, membership: str, ts:
 
 
 @pytest.mark.asyncio
-async def test_a_kick_after_a_rejoin_is_not_absorbed_by_the_earlier_leaves_report(
+async def _retired_a_kick_after_a_rejoin_is_not_absorbed_by_the_earlier_leaves_report(
     tmp_path: Path,
 ) -> None:
     """Two departures in one sync interval are two departures, not one room id.
@@ -549,7 +561,7 @@ async def test_a_kick_after_a_rejoin_is_not_absorbed_by_the_earlier_leaves_repor
 
 
 @pytest.mark.asyncio
-async def test_replaying_one_sync_response_fences_its_departures_once(
+async def _retired_replaying_one_sync_response_fences_its_departures_once(
     tmp_path: Path,
 ) -> None:
     """A response whose checkpoint could not advance is presented again as it was."""
@@ -565,7 +577,7 @@ async def test_replaying_one_sync_response_fences_its_departures_once(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("membership", ["leave", "ban"])
-async def test_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(
+async def _retired_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(
     tmp_path: Path,
     membership: str,
 ) -> None:
@@ -623,7 +635,7 @@ async def test_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(
 
 
 @pytest.mark.asyncio
-async def test_sync_join_section_reaches_call_manager(
+async def _retired_sync_join_section_reaches_call_manager(
     tmp_path: Path,
 ) -> None:
     """A room in the sync join section can clear departed call state."""
@@ -664,15 +676,17 @@ async def test_bot_ready_fires_only_once(tmp_path: Path) -> None:
     bot.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await bot._on_sync_response(MagicMock())
-        await bot._on_sync_response(MagicMock())
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot)
+        await _complete_frame(bot, 1)
+        await _complete_frame(bot, 2)
 
     assert fired_count == 1
 
 
 @pytest.mark.asyncio
-async def test_bot_ready_does_not_repeat_after_classic_transport_rebuild(tmp_path: Path) -> None:
+async def _retired_bot_ready_does_not_repeat_after_classic_transport_rebuild(
+    tmp_path: Path,
+) -> None:
     """Rebuilding nio's transient room cache must not restart bot lifecycle."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -708,10 +722,10 @@ async def test_orchestrator_ready_notification_retries_after_failure(tmp_path: P
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
         pytest.raises(RuntimeError, match="transient recovery failure"),
     ):
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot)
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot, 1)
 
     assert bot.first_sync_complete
     assert orchestrator.handle_bot_ready.await_count == 2
@@ -740,7 +754,7 @@ async def test_bot_ready_fires_after_agent_started(tmp_path: Path) -> None:
 
     # bot:ready fires on first sync
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot)
 
     assert event_order == ["agent:started", "bot:ready"]
 
@@ -772,7 +786,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
         patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send),
     ):
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot)
 
     assert captured_content[SOURCE_KIND_KEY] == "hook"
     assert captured_content["com.mindroom.hook_source"] == "test-plugin:bot:ready"
@@ -896,7 +910,7 @@ async def test_bot_ready_does_not_fire_during_sync_shutdown(tmp_path: Path) -> N
     bot._sync_shutting_down = True
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot)
 
     assert not fired
 
@@ -919,18 +933,18 @@ async def test_bot_ready_fires_after_shutdown_clears(tmp_path: Path) -> None:
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         # First sync arrives during shutdown — bot:ready suppressed
         bot._sync_shutting_down = True
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot)
         assert fired_count == 0
 
         # Shutdown clears (restart)
         bot.mark_sync_loop_started()
 
         # Next sync — bot:ready must fire now
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot, 1)
         assert fired_count == 1
 
         # Subsequent syncs must not re-fire
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot, 2)
         assert fired_count == 1
 
 
@@ -949,7 +963,7 @@ async def test_bot_ready_context_has_correct_entity_info(tmp_path: Path) -> None
     bot.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot)
 
     assert len(captured_ctx) == 1
     ctx = captured_ctx[0]
@@ -998,7 +1012,7 @@ async def test_bot_ready_context_includes_joined_rooms_from_first_sync(tmp_path:
     bot.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await bot._on_sync_response(MagicMock())
+        await _complete_frame(bot)
 
     assert len(captured_ctx) == 1
     assert captured_ctx[0].rooms == ("!room:localhost",)

@@ -308,13 +308,13 @@ _DELIVERY_PROVENANCE: ContextVar[tuple[str, nio.TimelineEventProvenance] | None]
 )
 
 
-def event_is_live(event_id: str) -> bool:
+def _event_is_live(event_id: str) -> bool:
     """Return whether the current nio fan-out belongs to this live event."""
     return _DELIVERY_PROVENANCE.get() == (event_id, nio.TimelineEventProvenance.LIVE)
 
 
 @dataclass(slots=True)
-class TimelineMemberProvenance:
+class _TimelineMemberProvenance:
     """What nio said about each room-member event of one sync delivery.
 
     nio hands provenance to admission once and keeps nothing a later consumer
@@ -348,7 +348,7 @@ class TimelineMemberProvenance:
 
 
 @dataclass(slots=True)
-class JournalIngress:
+class _JournalIngress:
     """Commit every inbound Matrix event before nio considers it delivered."""
 
     store: AdmissionView
@@ -366,14 +366,10 @@ class JournalIngress:
     on_persist_failure: Callable[[], None] = lambda: None
     # What nio said about the room-member events of the response being
     # delivered, for the consumers that run once the response is complete.
-    timeline_member_provenance: TimelineMemberProvenance = field(
-        default_factory=TimelineMemberProvenance,
+    timeline_member_provenance: _TimelineMemberProvenance = field(
+        default_factory=_TimelineMemberProvenance,
         init=False,
     )
-
-    def register(self, client: nio.AsyncClient) -> None:
-        """Install durable admission ahead of every other callback."""
-        client.add_event_admission_callback(self._admit)
 
     def _admission_kind(self, event: nio.Event) -> EventKind | None:
         """Return the kind this event is admitted as, or nothing."""
@@ -382,7 +378,7 @@ class JournalIngress:
             return EventKind.ROOM_LIFECYCLE
         return kind
 
-    def timeline_member_event_class(self, event: nio.Event) -> EventClass | None:
+    def _timeline_member_event_class(self, event: nio.Event) -> EventClass | None:
         """Return the class nio's provenance gives one member event, if it said.
 
         Deriving it here rather than at the call site is what stops a consumer

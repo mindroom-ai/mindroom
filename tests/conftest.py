@@ -983,7 +983,6 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.rooms = _AutoRoomCache(user_id)
     client.next_batch = "s_test_token"
     client.loaded_sync_token = ""
-    client.has_uncommitted_classic_sync_state = False
     presence_response = MagicMock()
     presence_response.presence = "offline"
     presence_response.last_active_ago = 3_600_000
@@ -996,18 +995,6 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.room_messages = AsyncMock(return_value=room_messages_response)
     client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
 
-    async def reset_classic_sync_state() -> None:
-        client.next_batch = ""
-        client.loaded_sync_token = ""
-        client.rooms.clear()
-        client.has_uncommitted_classic_sync_state = False
-
-    def acknowledge_classic_sync(_next_batch: str) -> None:
-        client.has_uncommitted_classic_sync_state = False
-
-    client.clear_persisted_sync_recovery = MagicMock()
-    client.acknowledge_classic_sync = MagicMock(side_effect=acknowledge_classic_sync)
-    client.reset_classic_sync_state.side_effect = reset_classic_sync_state
     return client
 
 
@@ -1581,7 +1568,6 @@ def install_runtime_journal_support(bot: RuntimeBot) -> RuntimeBot:
         msg = f"Unsupported test room membership target: {target_membership}"
         raise ValueError(msg)
 
-    bot._sync_checkpoint_trust.store_generation = "test-store-generation"
     bot._room_lifecycle.deps = replace(
         bot._room_lifecycle.deps,
         change_membership=change_membership,

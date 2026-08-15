@@ -577,11 +577,6 @@ class ThreadingBehaviorTestBase:
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
-        # Sync checkpoints are certified by the event journal. Pinned so a test
-        # that saves one and restarts exercises the token logic rather than the
-        # first-open mint, which would rightly reject it.
-        bot._sync_checkpoint_trust.store_generation = "test-store-generation"
-
         # Initialize components that depend on client
 
         # Mock the agent to return a response

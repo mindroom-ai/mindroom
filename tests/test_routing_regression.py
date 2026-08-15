@@ -31,8 +31,6 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.sync_certification import SyncTrustState
-from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import EntityStartResults
@@ -619,10 +617,7 @@ class TestRoutingRegression:
             ),
         )
         await coalescing_gate.drain_all()
-        router_bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
-        router_bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_router_shutdown")
         await router_bot.prepare_for_sync_shutdown()
-        assert router_bot._sync_checkpoint_trust.checkpoint == SyncCheckpoint("s_before_router_shutdown")
 
     @pytest.mark.asyncio
     async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(

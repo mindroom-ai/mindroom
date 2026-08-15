@@ -35,7 +35,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.journal_ingress import (
     TEXTUAL_MESSAGE_EVENT_TYPE,
     JournalCorruptionError,
-    JournalIngress,
     inbound_event,
     parse_journal_event,
     projected_event,
@@ -47,7 +46,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.event_journal import DispatchView, EventClass
-    from mindroom.matrix.journal_ingress import TimelineMemberProvenance
 
 from mindroom.event_journal import JournalEvent
 
@@ -98,13 +96,11 @@ class JournalDispatcher:
     callbacks: JournalCallbacks
     room_for_id: Callable[[str], nio.MatrixRoom]
     on_persist_failure: Callable[[], None] | None = None
-    room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
     # Replaying a turn needs the agent fleet up, so the orchestrator releases
     # turn-backed replay separately from the rest of startup. Until it does,
     # those events stay pending; everything else drains immediately.
     _turn_replay_released: bool = field(default=False, init=False, repr=False)
     _worker: PendingEventWorker = field(init=False, repr=False)
-    _ingress: JournalIngress = field(init=False, repr=False)
     # The event objects nio already parsed, kept until their callback runs.
     # Replaying from the stored payload is what recovery is for; doing it for
     # an event that is still in hand would parse every event twice and discard
@@ -119,14 +115,6 @@ class JournalDispatcher:
             deferral_is_live=self._deferral_is_live,
             retained_event_ids=self._retained_live_event_ids,
             release_retained=self._forget_live_events,
-        )
-        self._ingress = JournalIngress(
-            store=self.store,
-            self_sender=self.self_sender,
-            on_admitted=self._worker.wake,
-            room_lifecycle_enabled=self.room_lifecycle_admission_enabled,
-            on_event_admitted=self._remember_live_event,
-            on_persist_failure=self.on_persist_failure or (lambda: None),
         )
 
     def _remember_live_event(self, room: nio.MatrixRoom, event: nio.Event) -> None:
@@ -149,10 +137,6 @@ class JournalDispatcher:
         for event_id in event_ids:
             self._live_events.pop(event_id, None)
 
-    def register(self, client: nio.AsyncClient) -> None:
-        """Install durable admission ahead of every other callback."""
-        self._ingress.register(client)
-
     def start(self) -> None:
         """Begin draining everything that does not need the agent fleet."""
         self._worker.start()
@@ -165,15 +149,6 @@ class JournalDispatcher:
     def wake(self) -> None:
         """Signal that newly admitted work is waiting."""
         self._worker.wake()
-
-    @property
-    def timeline_member_provenance(self) -> TimelineMemberProvenance:
-        """Return what nio said about this response's room-member events."""
-        return self._ingress.timeline_member_provenance
-
-    def timeline_member_event_class(self, event: nio.Event) -> EventClass | None:
-        """Return the class nio's provenance gives one member event, if it said."""
-        return self._ingress.timeline_member_event_class(event)
 
     async def stop(self) -> None:
         """Stop draining, leaving unfinished work pending for the next start."""
@@ -231,7 +206,7 @@ class JournalDispatcher:
             self._remember_live_event(room, event)
         self._worker.wake()
 
-    async def admit_and_run(
+    async def _admit_and_run(
         self,
         room: nio.MatrixRoom,
         event: nio.Event,
@@ -444,7 +419,7 @@ class JournalDispatcher:
         """Return every event that still owes semantic work."""
         return await self.store.unsettled_event_ids()
 
-    async def unsettled_room_lifecycle_member_ids(self) -> frozenset[tuple[str, str]]:
+    async def _unsettled_room_lifecycle_member_ids(self) -> frozenset[tuple[str, str]]:
         """Return room and member identities still owned by lifecycle events.
 
         Every one of them, walked to the end rather than read as one page. The

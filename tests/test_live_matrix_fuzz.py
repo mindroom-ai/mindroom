@@ -3230,13 +3230,13 @@ def test_restart_regression_waits_for_checkpoint_later_than_fresh_event() -> Non
             )
             fixture_database.commit()
         continuity_store = SyncContinuityStore(stack.storage_path, "general")
-        continuity_store.replace_checkpoint(
+        continuity_store._replace_checkpoint(
             SyncCheckpoint("s_before", store_generation="generation"),
         )
 
         def advance_checkpoint() -> None:
             time.sleep(0.1)
-            continuity_store.replace_checkpoint(
+            continuity_store._replace_checkpoint(
                 SyncCheckpoint("s_after", store_generation="generation"),
             )
 

@@ -19,15 +19,10 @@ import pytest
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.hooks import EVENT_AGENT_STARTED
-from mindroom.matrix.sync_certification import SyncTrustState
-from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
-from tests.sync_continuity_helpers import load_sync_checkpoint
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
-    _load_sync_token_value,
     _make_client_mock,
-    _save_certified_sync_token,
 )
 
 if TYPE_CHECKING:
@@ -118,54 +113,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             await store_before_login.existing_generation()
 
     @pytest.mark.asyncio
-    async def test_restored_first_sync_success_updates_checkpoint(self, bot: AgentBot) -> None:
-        """Successful restored-token catch-up should save the new checkpoint token."""
-        _save_certified_sync_token(bot, "s_before_complete")
-        bot._runtime_view.mark_runtime_started()
-        bot._sync_checkpoint_trust.state = SyncTrustState.PENDING
-        bot.client.next_batch = "s_after_complete"
-
-        await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
-
-        checkpoint = load_sync_checkpoint(bot.storage_path, bot.agent_name)
-        assert checkpoint is not None
-        assert checkpoint.token == "s_after_complete"  # noqa: S105
-
-    @pytest.mark.asyncio
-    async def test_empty_joined_rooms_first_sync_certifies_checkpoint(self, bot: AgentBot) -> None:
-        """A non-limited empty sync response can certify that there were no room deltas."""
-        _save_certified_sync_token(bot, "s_before_empty")
-        bot._runtime_view.mark_runtime_started()
-        bot._sync_checkpoint_trust.state = SyncTrustState.PENDING
-        bot.client.next_batch = "s_after_empty"
-
-        await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
-
-        checkpoint = load_sync_checkpoint(bot.storage_path, bot.agent_name)
-        assert checkpoint is not None
-        assert checkpoint.token == "s_after_empty"  # noqa: S105
-
-    @pytest.mark.asyncio
-    async def test_sync_error_keeps_watchdog_clock_on_latest_activity(self, bot: AgentBot) -> None:
-        """Sync errors should keep the watchdog alive using the latest observed sync activity."""
-        sync_response = MagicMock()
-        sync_response.__class__ = nio.SyncResponse
-        sync_response.rooms = MagicMock(join={})
-        sync_error = MagicMock(spec=nio.SyncError)
-        bot._first_sync_done = True
-
-        monotonic_values = iter([100.0, 200.0])
-
-        def monotonic_side_effect() -> float:
-            return next(monotonic_values, 200.0)
-
-        with patch("mindroom.bot.time.monotonic", side_effect=monotonic_side_effect):
-            await bot._on_sync_response(sync_response)
-            await bot._on_sync_error(sync_error)
-
-        assert bot._last_sync_monotonic == 200.0
-
-    @pytest.mark.asyncio
     async def test_live_redaction_tombstones_the_source_it_names(self, bot: AgentBot) -> None:
         """The redaction callback owes exactly one thing: the durable tombstone."""
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
@@ -179,32 +126,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             await bot._on_redaction(room, redaction_event)
 
         mark_source_redacted.assert_called_once_with("$source:localhost")
-
-    @pytest.mark.asyncio
-    async def test_live_redaction_failure_does_not_rewind_raw_sync_position(
-        self,
-        bot: AgentBot,
-    ) -> None:
-        """Durable exact work, not raw token rewind, owns redaction retry."""
-        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
-        redaction_event = MagicMock(spec=nio.RedactionEvent)
-        redaction_event.redacts = "$source:localhost"
-        _save_certified_sync_token(bot, "s_before_redaction")
-        bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_redaction")
-        bot.client.next_batch = "s_after_redaction"
-
-        with (
-            patch.object(
-                bot._turn_store,
-                "mark_source_redacted",
-                side_effect=RuntimeError("persist failed"),
-            ),
-            pytest.raises(RuntimeError, match="persist failed"),
-        ):
-            await bot._on_redaction(room, redaction_event)
-
-        assert bot.client.next_batch == "s_after_redaction"
-        assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_redaction"
 
     @pytest.mark.asyncio
     async def test_wait_for_background_tasks_owner_scope_isolated(self, bot: AgentBot) -> None:

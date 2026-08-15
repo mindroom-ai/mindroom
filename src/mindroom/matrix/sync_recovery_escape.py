@@ -28,7 +28,7 @@ _CLASSIC_SYNC_RECOVERY_STALL_LIMIT = 3
 
 
 @dataclass(frozen=True)
-class SkippedRecoveryGap:
+class _SkippedRecoveryGap:
     """One room's unrecoverable gap, given up on so sync can move forward."""
 
     room_id: str
@@ -45,7 +45,7 @@ class _RoomStall:
 
 
 @dataclass
-class SyncRecoveryStallTracker:
+class _SyncRecoveryStallTracker:
     """Track per-room recovery failures measured from an unchanging checkpoint.
 
     One tracker belongs to one principal's sync continuity, so a wedged room on
@@ -59,7 +59,7 @@ class SyncRecoveryStallTracker:
         *,
         unrecovered_room_ids: frozenset[str],
         checkpoint_token: str | None,
-    ) -> tuple[SkippedRecoveryGap, ...]:
+    ) -> tuple[_SkippedRecoveryGap, ...]:
         """Return the rooms whose gap must be skipped to restore forward progress.
 
         Call this once per sync response that actually settles recovery, with
@@ -79,7 +79,7 @@ class SyncRecoveryStallTracker:
             if room_id not in unrecovered_room_ids:
                 del self._stalls[room_id]
 
-    def _record_failure(self, room_id: str, checkpoint_token: str | None) -> SkippedRecoveryGap | None:
+    def _record_failure(self, room_id: str, checkpoint_token: str | None) -> _SkippedRecoveryGap | None:
         """Count one failure and retain skip eligibility until progress resolves it."""
         stall = self._stalls.get(room_id)
         if stall is None or stall.checkpoint_token != checkpoint_token:
@@ -93,7 +93,7 @@ class SyncRecoveryStallTracker:
         )
         if stall.failed_attempts < _CLASSIC_SYNC_RECOVERY_STALL_LIMIT:
             return None
-        return SkippedRecoveryGap(
+        return _SkippedRecoveryGap(
             room_id=room_id,
             skipped_from_token=checkpoint_token,
             failed_attempts=stall.failed_attempts,

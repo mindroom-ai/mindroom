@@ -1195,11 +1195,11 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
 
     with patch.object(InboundTurnNormalizer, "resolve_text_event", new=resolve_with_barrier):
         first_dispatch = asyncio.create_task(
-            obligation_runner.admit_and_run(room, first, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            obligation_runner._admit_and_run(room, first, EventKind.MESSAGE, EventClass.ACTIONABLE),
         )
         await normalization_started.wait()
         second_dispatch = asyncio.create_task(
-            obligation_runner.admit_and_run(room, second, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            obligation_runner._admit_and_run(room, second, EventKind.MESSAGE, EventClass.ACTIONABLE),
         )
         await asyncio.sleep(0)
         assert not second_dispatch.done()
@@ -1398,7 +1398,7 @@ async def test_router_silent_ignore_compacts_exact_callback(config: Config, tmp_
         ),
     )
 
-    await obligation_runner.admit_and_run(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
+    await obligation_runner._admit_and_run(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
     await harness.gate.drain_all()
 
     assert harness.policy.plan_turn_calls == 1
@@ -1508,7 +1508,7 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
 async def test_an_emote_is_answered_like_any_other_user_message(config: Config, tmp_path: Path) -> None:
     """`/me asks the bot to X` produces a reply, with its body as the prompt.
 
-    Driven through ``admit_and_run`` rather than the controller directly,
+    Driven through ``_admit_and_run`` rather than the controller directly,
     because the thing that refused an emote was the journal's kind binding, not
     the turn engine: the event was committed as actionable work and then
     discarded by an ``isinstance`` check before any turn existed.
@@ -1528,7 +1528,7 @@ async def test_an_emote_is_answered_like_any_other_user_message(config: Config, 
         room=room,
     )
 
-    await obligation_runner.admit_and_run(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
+    await obligation_runner._admit_and_run(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
     await harness.gate.drain_all()
     await harness.runner.settle_inbox_responses()
 

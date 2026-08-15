@@ -216,7 +216,7 @@ class CallManager:
         self._observed_rooms[room.room_id] = room
         await self._reconcile(room)
 
-    async def on_sync_room_membership(
+    async def _on_sync_room_membership(
         self,
         *,
         joined_room_ids: AbstractSet[str],

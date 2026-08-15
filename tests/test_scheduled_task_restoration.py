@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
+from uuid import UUID
 
 import pytest
+from nio.ingest.model import TransportKind
+from nio.store._sync_journal_values import _FrameCompletion
 
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
@@ -24,6 +27,20 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+async def _complete_frame(bot: AgentBot, index: int = 0) -> None:
+    """Drive runtime side effects through the durable completion owner."""
+    await bot._on_ingestion_frame_completion(
+        _FrameCompletion(
+            UUID(f"20000000-0000-4000-8000-{index + 1:012d}"),
+            TransportKind.CLASSIC,
+            0,
+            index,
+            index * 2 + 1,
+            index * 2 + 2,
+        ),
+    )
 
 
 class TestScheduledTaskRestoration:
@@ -243,7 +260,7 @@ class TestScheduledTaskRestoration:
             ) as mock_drain,
             patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
         ):
-            await router_bot._on_sync_response(MagicMock())
+            await _complete_frame(router_bot)
 
             assert router_bot._deferred_overdue_task_drain_task is not None
             await router_bot._deferred_overdue_task_drain_task
@@ -255,7 +272,7 @@ class TestScheduledTaskRestoration:
                 router_bot._conversation_reader,
             )
 
-            await router_bot._on_sync_response(MagicMock())
+            await _complete_frame(router_bot, 1)
             mock_drain.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -291,11 +308,11 @@ class TestScheduledTaskRestoration:
             patch("mindroom.bot.has_deferred_overdue_tasks", return_value=True),
             patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
         ):
-            await router_bot._on_sync_response(MagicMock())
+            await _complete_frame(router_bot)
             assert router_bot._deferred_overdue_task_drain_task is not None
             await router_bot._deferred_overdue_task_drain_task
 
-            await router_bot._on_sync_response(MagicMock())
+            await _complete_frame(router_bot, 1)
             assert router_bot._deferred_overdue_task_drain_task is not None
             await router_bot._deferred_overdue_task_drain_task
 
@@ -335,13 +352,13 @@ class TestScheduledTaskRestoration:
             patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
         ):
             await router_bot.prepare_for_sync_shutdown()
-            await router_bot._on_sync_response(MagicMock())
+            await _complete_frame(router_bot)
 
             assert router_bot._deferred_overdue_task_drain_task is None
             mock_drain.assert_not_awaited()
 
             router_bot.mark_sync_loop_started()
-            await router_bot._on_sync_response(MagicMock())
+            await _complete_frame(router_bot, 1)
 
             assert router_bot._deferred_overdue_task_drain_task is not None
             await router_bot._deferred_overdue_task_drain_task

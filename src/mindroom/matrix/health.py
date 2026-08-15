@@ -115,7 +115,7 @@ def mark_matrix_sync_success(entity_name: str, sync_time: datetime | None = None
 
 
 @contextmanager
-def track_matrix_sync_cache_write(entity_name: str) -> Iterator[None]:
+def _track_matrix_sync_cache_write(entity_name: str) -> Iterator[None]:
     """Publish one entity's complete sequential durable cache phase."""
     started_monotonic = time.monotonic()
     with _matrix_sync_lock:

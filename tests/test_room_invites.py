@@ -939,7 +939,7 @@ async def test_router_departure_allows_fresh_reinvite(
     install_send_response_mock(bot, send_response)
 
     await bot._on_invite(room, event)
-    bot._room_lifecycle.forget_invited_room(room_id)
+    bot._room_lifecycle._forget_invited_room(room_id)
     await bot._on_invite(room, event)
 
     assert join_room.await_count == 2
@@ -976,7 +976,7 @@ def test_agent_forgets_persisted_invited_room_after_being_kicked(
     )
     room_id = "!agent-call:localhost"
     bot._room_lifecycle._update_invited_room(room_id, remember=True)
-    bot._room_lifecycle.forget_invited_room(room_id)
+    bot._room_lifecycle._forget_invited_room(room_id)
 
     assert bot._room_lifecycle.invited_rooms == set()
     assert _invited_rooms_path(config, "agent1").read_text(encoding="utf-8") == "[]\n"
@@ -1015,7 +1015,7 @@ def test_agent_retries_failed_persisted_invited_room_forget(
     monkeypatch.setattr("mindroom.bot_room_lifecycle.save_invited_rooms", lambda *_args: False)
 
     with pytest.raises(OSError, match="Failed to forget invited room"):
-        bot._room_lifecycle.forget_invited_room(room_id)
+        bot._room_lifecycle._forget_invited_room(room_id)
 
     restarted = AgentBot(
         agent_user=bot.agent_user,
@@ -1026,7 +1026,7 @@ def test_agent_retries_failed_persisted_invited_room_forget(
     assert restarted._room_lifecycle.invited_rooms == {room_id}
 
     monkeypatch.setattr("mindroom.bot_room_lifecycle.save_invited_rooms", save_invited_rooms)
-    bot._room_lifecycle.forget_invited_room(room_id)
+    bot._room_lifecycle._forget_invited_room(room_id)
     restarted = AgentBot(
         agent_user=bot.agent_user,
         storage_path=tmp_path,
@@ -1064,7 +1064,7 @@ def test_nonpersisting_agent_forget_clears_in_memory_room(tmp_path: Path) -> Non
     room_id = "!old-invite:localhost"
     bot._room_lifecycle.invited_rooms = {room_id}
 
-    bot._room_lifecycle.forget_invited_room(room_id)
+    bot._room_lifecycle._forget_invited_room(room_id)
 
     assert bot._room_lifecycle.invited_rooms == set()
     assert not _invited_rooms_path(config, "agent1").exists()

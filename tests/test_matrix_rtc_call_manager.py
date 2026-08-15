@@ -504,7 +504,7 @@ async def test_manager_stops_call_when_agent_is_kicked_from_ephemeral_room(tmp_p
     room = _room()
     await manager.on_room_event(room, _member_unknown_event())
 
-    await manager.on_sync_room_membership(joined_room_ids=set(), left_room_ids={ROOM_ID})
+    await manager._on_sync_room_membership(joined_room_ids=set(), left_room_ids={ROOM_ID})
 
     assert bridge.closed is True
     assert manager._sessions == {}
@@ -606,7 +606,7 @@ async def test_manager_clears_departure_guard_on_own_rejoin(tmp_path: Path) -> N
     manager = _manager(client, FakeBridge(), tmp_path)
     manager._departed_rooms.add(ROOM_ID)
 
-    await manager.on_sync_room_membership(joined_room_ids={ROOM_ID}, left_room_ids=set())
+    await manager._on_sync_room_membership(joined_room_ids={ROOM_ID}, left_room_ids=set())
 
     assert ROOM_ID not in manager._departed_rooms
 

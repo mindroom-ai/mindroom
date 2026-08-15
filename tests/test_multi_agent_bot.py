@@ -297,10 +297,11 @@ class TestAgentBot(AgentBotTestBase):
         assert ingestion_config.source.timeout_ms == 30_000
         assert ingestion_config.source.filter_json == b'{"room":{"timeline":{"limit":50}}}'
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
-        # Every timeline event, including an undecryptable one, is admitted
-        # through one durable callback. Only invites and membership events,
-        # which are not admitted from the timeline, register their own.
-        mock_client.add_event_admission_callback.assert_called_once()
+        # The owned ingestion pump is the sole durable source owner. The
+        # public client keeps only compatibility callbacks; it must not retain
+        # either of the superseded public sync/admission engines.
+        mock_client.add_event_admission_callback.assert_not_called()
+        mock_client.add_response_callback.assert_not_called()
         registered_event_types = [call.args[1] for call in mock_client.add_event_callback.call_args_list]
         assert registered_event_types == [nio.InviteEvent, nio.RoomMemberEvent]
         invite_callback = next(
@@ -406,7 +407,7 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._turn_controller.deps.matrix_id.full_id == actual_user_id
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
         assert mock_client.add_event_callback.call_count == 2
-        mock_client.add_event_admission_callback.assert_called_once()
+        mock_client.add_event_admission_callback.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
@@ -599,7 +600,6 @@ class TestAgentBot(AgentBotTestBase):
         bot.running = True
         bot._mark_sync_progress = MagicMock()
         bot._run_sync_response_side_effects = AsyncMock()
-        bot._apply_sync_response = AsyncMock()
         next_batch = MagicMock(return_value=None)
         bot._ingestion_session = SimpleNamespace(next_batch=next_batch)
         assert next_batch() is None
@@ -624,19 +624,15 @@ class TestAgentBot(AgentBotTestBase):
         await bot._on_ingestion_frame_completion(first)
         next_batch.assert_not_called()
         assert bot._first_sync_done is True
-        assert bot._classic_sync_rebuild_pending is False
         bot._run_sync_response_side_effects.assert_awaited_once_with(
             first_sync_response=True,
         )
-        bot._apply_sync_response.assert_not_awaited()
-
         await bot._on_ingestion_frame_completion(second)
         assert bot._mark_sync_progress.call_count == 2
         assert bot._run_sync_response_side_effects.await_args_list == [
             call(first_sync_response=True),
             call(first_sync_response=False),
         ]
-        bot._apply_sync_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failed_child", ["runner", "pump"])

@@ -50,7 +50,7 @@ async def run_coroutine_until_complete[Result](
         raise
 
 
-async def run_blocking_until_complete[Result](
+async def _run_blocking_until_complete[Result](
     operation: Callable[..., Result],
     *args: object,
 ) -> Result:
