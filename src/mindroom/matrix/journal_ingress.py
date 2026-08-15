@@ -25,7 +25,10 @@ from mindroom.event_journal import (
     thread_root,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, parse_matrix_media_event_source
+from mindroom.matrix.media import (
+    MATRIX_MEDIA_EVENT_TYPES,
+    parse_matrix_media_event_source,
+)
 from mindroom.matrix.transport_progress import is_transport_progress_revision
 
 if TYPE_CHECKING:
@@ -224,20 +227,27 @@ def projected_event(
     return projected
 
 
-def ingestion_event_views(
-    *, room_id: str, source: Mapping[str, object], self_sender: str  # noqa: COM812
-) -> tuple[InboundEvent, ProjectedEvent | None]:
-    """Convert canonical Matrix input through the existing admission rules."""
+def ingestion_timeline_views(
+    *,
+    room_id: str,
+    source: Mapping[str, object],
+    self_sender: str,
+    provenance: nio.TimelineEventProvenance,
+    expected_event_id: str | None = None,
+) -> tuple[InboundEvent, ProjectedEvent | None] | None:
+    """Classify one durable timeline input, or return its compatibility fate."""
     message = "Unsupported ingestion event"
     parsed = parse_matrix_media_event_source(source)
-    if parsed is None:
+    if not isinstance(parsed, MATRIX_MEDIA_EVENT_TYPES):
         parsed = nio.Event.parse_event(dict(source))
     if not isinstance(parsed, nio.Event):
         raise TypeError(message)
-    kind = _event_kind(parsed)
-    if kind is None or kind in (EventKind.ROOM_LIFECYCLE, EventKind.DECRYPTION_FAILURE):
+    if expected_event_id is not None and parsed.event_id != expected_event_id:
         raise ValueError(message)
-    event_class = _event_class_for(nio.TimelineEventProvenance.LIVE, parsed)
+    kind = _event_kind(parsed)
+    if kind is None or kind is EventKind.ROOM_LIFECYCLE:
+        return None
+    event_class = _event_class_for(provenance, parsed)
     return (
         inbound_event(room_id, parsed, kind, event_class),
         projected_event(room_id, parsed, kind, self_sender=self_sender),

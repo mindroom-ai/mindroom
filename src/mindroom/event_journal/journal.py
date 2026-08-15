@@ -131,18 +131,23 @@ def validate_ingestion_batch_admission(  # noqa: PLR0915 - exact XOR grammar
     if effect is IngestionRecordDisposition.ROOM_LIFECYCLE:
         require(type(source) is DepartureSource)
         require(type(room_id) is str and bool(room_id))
-        require(type(previous_membership) is type(membership) is str)
-        require(
-            previous_membership in _MATRIX_MEMBERSHIPS
-            and membership in _MATRIX_MEMBERSHIPS
-            and previous_membership != membership,
-        )
+        require(type(membership) is str and membership in _MATRIX_MEMBERSHIPS)
         require(type(previous_epoch) is type(epoch) is int)
         lifecycle_previous_epoch = cast("int", previous_epoch)
         lifecycle_epoch = cast("int", epoch)
         require(lifecycle_previous_epoch >= 0)
-        departure = previous_membership == "join" and membership != "join"
-        require(lifecycle_epoch == lifecycle_previous_epoch + int(departure))
+        if previous_membership is None:
+            require(
+                source is DepartureSource.REPORTED and lifecycle_previous_epoch == lifecycle_epoch == 0,
+            )
+        else:
+            require(
+                type(previous_membership) is str
+                and previous_membership in _MATRIX_MEMBERSHIPS
+                and previous_membership != membership,
+            )
+            departure = previous_membership == "join" and membership != "join"
+            require(lifecycle_epoch == lifecycle_previous_epoch + int(departure))
         require(e is None and p is None)
         return
 
@@ -271,18 +276,18 @@ def _apply_ingestion_disposition(
         source = cast("DepartureSource", admission.source)
         if admission.previous_membership == "join":
             state = _claim_membership_state(transaction, principal_id, room_id)
-            outcome = _fence_departure_from_state(
+            _fence_departure_from_state(
                 transaction,
                 principal_id,
                 room_id,
                 source=source,
                 state=state,
             )
-            return outcome.observation is DepartureObservation.FENCED
+            return False
         if admission.membership == "join" and source is DepartureSource.LOCAL:
             _claim_membership_state(transaction, principal_id, room_id)
             note_membership_restarted(transaction, principal_id, room_id)
-        return True
+        return False
 
     if disposition is IngestionRecordDisposition.HISTORY_LOSS:
         room_id = cast("str", admission.room_id)

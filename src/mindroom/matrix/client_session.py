@@ -133,7 +133,7 @@ class _MindRoomAsyncClient(nio.AsyncClient):
     def _handle_decrypt_to_device(
         self,
         to_device_event: nio.ToDeviceEvent,
-    ) -> nio.ToDeviceEvent | None:
+    ) -> nio.ToDeviceEvent | nio.BadEvent | nio.UnknownBadEvent | None:
         decrypted = super()._handle_decrypt_to_device(to_device_event)
         if not isinstance(to_device_event, nio.OlmEvent) or not isinstance(
             decrypted,

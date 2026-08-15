@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import threading
 import time
 from contextlib import suppress
@@ -19,14 +20,19 @@ import pytest_asyncio
 from nio.ingest import (
     BatchRef,
     EventRecord,
+    LossBoundary,
+    LossReason,
+    LossRecord,
     RecordKind,
     RecordOrigin,
     SyncBatch,
+    SystemOrigin,
+    SystemOriginKind,
     TimelineEventProvenance,
     TransportKind,
     canonical_batch_payload,
 )
-from nio.ingest.serialization import batch_from_records
+from nio.ingest.serialization import _loss_id, batch_from_records
 
 from mindroom.event_journal import (
     AdmissionFacts,
@@ -45,11 +51,12 @@ from mindroom.event_journal import (
     ProjectedEvent,
     validate_ingestion_batch_admission,
 )
+from mindroom.matrix import durable_ingestion as durable_ingestion_module
 from mindroom.matrix.durable_ingestion import (
     consume_one_ingestion_batch,
     validate_ingestion_batch,
 )
-from mindroom.matrix.journal_ingress import ingestion_event_views
+from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from tests.conftest import (
     CrashError,
     DiesAfterNextWriteCommit,
@@ -150,6 +157,67 @@ def _batch() -> SyncBatch:
         created_revision=1,
         records=(_record(),),
     )
+
+
+def _canonical(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+
+
+def _batch_with(record: EventRecord | LossRecord) -> SyncBatch:
+    return batch_from_records(
+        account_id=ACCOUNT_ID,
+        device_id=DEVICE_ID,
+        consumer_generation=CONSUMER_GENERATION,
+        stream_id=STREAM_ID,
+        sequence=0,
+        created_revision=1,
+        records=(record,),
+    )
+
+
+def _record_with(
+    kind: RecordKind,
+    source: object,
+    *,
+    origin: RecordOrigin | SystemOrigin | None = None,
+    room_id: str | None = None,
+    membership_epoch: int | None = None,
+    room_sequence: int | None = None,
+    event_id: str | None = None,
+    provenance: TimelineEventProvenance | None = None,
+    clear: object | None = None,
+) -> EventRecord:
+    return EventRecord(
+        RECORD_ID,
+        kind,
+        origin or RecordOrigin(TransportKind.CLASSIC, 1, 2, 3),
+        room_id,
+        membership_epoch,
+        room_sequence,
+        event_id,
+        provenance,
+        _canonical(source),
+        None if clear is None else _canonical(clear),
+    )
+
+
+def _loss_with(origin: RecordOrigin | SystemOrigin) -> LossRecord:
+    boundary = LossBoundary("$prior", 99, "start", "target")
+    provisional = LossRecord(
+        "provisional",
+        origin,
+        ROOM_ID,
+        4,
+        LossReason.BASELINE_LOST,
+        boundary,
+        _canonical({"cause": "test"}),
+    )
+    return replace(provisional, loss_id=_loss_id(STREAM_ID, provisional))
 
 
 def _set(batch: SyncBatch, target: str, field: str, value: object) -> None:
@@ -425,6 +493,19 @@ def test_lifecycle_admission_grammar_rejects_invalid_transition_proofs(
         validate_ingestion_batch_admission(admission)
 
 
+def test_lifecycle_admission_accepts_initial_reported_membership_without_fabrication() -> None:
+    admission = _lifecycle_admission(
+        source=DepartureSource.REPORTED,
+        previous_membership="leave",
+        membership="join",
+        previous_membership_epoch=0,
+        membership_epoch=0,
+    )
+    admission = replace(admission, previous_membership=None)
+
+    validate_ingestion_batch_admission(admission)
+
+
 def test_semantic_disposition_accepts_cleanup_and_room_membership_events() -> None:
     admission = _expected_admission()
     assert admission.event is not None
@@ -492,7 +573,6 @@ def test_validation_freezes_task5_golden_and_exact_conversion() -> None:
         ("record", "record_id", 1, IngestionBatchValidationError),
         ("record", "kind", RecordKind.STATE, IngestionBatchValidationError),
         ("record", "origin", object(), IngestionBatchValidationError),
-        ("origin", "transport", TransportKind.SLIDING, IngestionBatchValidationError),
         ("origin", "source_epoch", -1, IngestionBatchValidationError),
         ("origin", "request_id", True, IngestionBatchValidationError),
         ("origin", "frame_index", -1, IngestionBatchValidationError),
@@ -504,12 +584,6 @@ def test_validation_freezes_task5_golden_and_exact_conversion() -> None:
         ("record", "room_sequence", True, IngestionBatchValidationError),
         ("record", "event_id", 1, IngestionBatchValidationError),
         ("record", "event_id", "", IngestionBatchValidationError),
-        (
-            "record",
-            "provenance",
-            TimelineEventProvenance.HISTORY,
-            IngestionBatchValidationError,
-        ),
         ("record", "clear_json", b"{}", IngestionBatchValidationError),
         ("record", "source_json", "{}", IngestionBatchValidationError),
     ),
@@ -705,6 +779,399 @@ def test_validation_accepts_sorted_canonical_utf8_source_json() -> None:
     }
 
 
+def _complete_record_cases() -> tuple[
+    tuple[
+        EventRecord | LossRecord,
+        IngestionRecordDisposition,
+        EventKind | None,
+        EventClass | None,
+        DepartureSource | None,
+    ],
+    ...,
+]:
+    message = json.loads(SOURCE_JSON)
+    outer_encrypted = {
+        "content": {
+            "algorithm": "m.megolm.v1.aes-sha2",
+            "ciphertext": "ciphertext",
+            "device_id": "BOBDEVICE",
+            "sender_key": "sender-key",
+            "session_id": "session",
+        },
+        "event_id": EVENT_ID,
+        "origin_server_ts": 1000,
+        "sender": SENDER,
+        "type": "m.room.encrypted",
+    }
+    reported_lifecycle = {
+        "event_id": "$member",
+        "membership": "leave",
+        "membership_epoch": 1,
+        "membership_provenance": "reported",
+        "previous_membership": "join",
+        "previous_membership_epoch": 0,
+        "source_kind": "state",
+        "source_record_id": "source-record",
+        "timeline_provenance": None,
+    }
+    initial_lifecycle = {
+        "event_id": None,
+        "membership": "join",
+        "membership_epoch": 0,
+        "membership_provenance": "reported",
+        "previous_membership": None,
+        "previous_membership_epoch": 0,
+        "source_kind": "section",
+        "source_record_id": None,
+        "timeline_provenance": None,
+    }
+    timeline_lifecycle = {
+        "event_id": "$timeline-member",
+        "membership": "leave",
+        "membership_epoch": 1,
+        "membership_provenance": "reported",
+        "previous_membership": "join",
+        "previous_membership_epoch": 0,
+        "source_kind": "timeline",
+        "source_record_id": "timeline-source-record",
+        "timeline_provenance": "history",
+    }
+    local_lifecycle = {
+        "event_id": None,
+        "membership": "join",
+        "membership_epoch": 0,
+        "membership_provenance": "local",
+        "previous_membership": "leave",
+        "previous_membership_epoch": 0,
+        "source_kind": "local",
+        "source_record_id": None,
+        "timeline_provenance": None,
+    }
+    local_operation = UUID("66666666-6666-4666-8666-666666666666")
+    local_origin = SystemOrigin(SystemOriginKind.MEMBERSHIP_CHANGE, local_operation)
+    local_record = EventRecord(
+        str(uuid5(local_operation, "nio:room-lifecycle:v1")),
+        RecordKind.ROOM_LIFECYCLE,
+        local_origin,
+        ROOM_ID,
+        0,
+        8,
+        None,
+        None,
+        _canonical(local_lifecycle),
+        None,
+    )
+    compatibility_records = (
+        _record_with(
+            RecordKind.STATE,
+            {
+                "content": {"name": "Room"},
+                "event_id": "$state",
+                "origin_server_ts": 1,
+                "sender": SENDER,
+                "state_key": "",
+                "type": "m.room.name",
+            },
+            room_id=ROOM_ID,
+            membership_epoch=0,
+            room_sequence=9,
+            event_id="$state",
+        ),
+        _record_with(
+            RecordKind.EPHEMERAL,
+            {"content": {"user_ids": [SENDER]}, "type": "m.typing"},
+            room_id=ROOM_ID,
+            membership_epoch=0,
+            room_sequence=10,
+        ),
+        _record_with(
+            RecordKind.ROOM_ACCOUNT_DATA,
+            {"content": {"tags": {}}, "type": "m.tag"},
+            room_id=ROOM_ID,
+            membership_epoch=0,
+            room_sequence=11,
+        ),
+        _record_with(
+            RecordKind.GLOBAL_ACCOUNT_DATA,
+            {"content": {"value": True}, "type": "org.example.global"},
+        ),
+        _record_with(
+            RecordKind.PRESENCE,
+            {
+                "content": {"presence": "online"},
+                "sender": SENDER,
+                "type": "m.presence",
+            },
+        ),
+        _record_with(
+            RecordKind.TO_DEVICE,
+            {
+                "content": {"value": True},
+                "sender": SENDER,
+                "type": "org.example.to_device",
+            },
+        ),
+    )
+    return (
+        *(
+            (
+                _record_with(
+                    RecordKind.TIMELINE,
+                    message,
+                    origin=RecordOrigin(transport, 1, 2, 3),
+                    room_id=ROOM_ID,
+                    membership_epoch=0,
+                    room_sequence=0,
+                    event_id=EVENT_ID,
+                    provenance=provenance,
+                ),
+                IngestionRecordDisposition.SEMANTIC_EVENT,
+                EventKind.MESSAGE,
+                event_class,
+                None,
+            )
+            for transport, provenance, event_class in (
+                (
+                    TransportKind.CLASSIC,
+                    TimelineEventProvenance.LIVE,
+                    EventClass.ACTIONABLE,
+                ),
+                (
+                    TransportKind.SLIDING,
+                    TimelineEventProvenance.RECOVERED,
+                    EventClass.ACTIONABLE,
+                ),
+                (
+                    TransportKind.CLASSIC,
+                    TimelineEventProvenance.HISTORY,
+                    EventClass.CONTEXT_ONLY,
+                ),
+            )
+        ),
+        (
+            _record_with(
+                RecordKind.TIMELINE,
+                outer_encrypted,
+                room_id=ROOM_ID,
+                membership_epoch=0,
+                room_sequence=1,
+                event_id=EVENT_ID,
+                provenance=TimelineEventProvenance.LIVE,
+                clear=message,
+            ),
+            IngestionRecordDisposition.SEMANTIC_EVENT,
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            None,
+        ),
+        (
+            _record_with(
+                RecordKind.TIMELINE,
+                outer_encrypted,
+                room_id=ROOM_ID,
+                membership_epoch=0,
+                room_sequence=2,
+                event_id=EVENT_ID,
+                provenance=TimelineEventProvenance.LIVE,
+            ),
+            IngestionRecordDisposition.SEMANTIC_EVENT,
+            EventKind.DECRYPTION_FAILURE,
+            EventClass.ACTIONABLE,
+            None,
+        ),
+        (
+            _record_with(
+                RecordKind.TIMELINE,
+                {
+                    "content": {"name": "Room"},
+                    "event_id": "$timeline-state",
+                    "origin_server_ts": 2,
+                    "sender": SENDER,
+                    "state_key": "",
+                    "type": "m.room.name",
+                },
+                room_id=ROOM_ID,
+                membership_epoch=0,
+                room_sequence=3,
+                event_id="$timeline-state",
+                provenance=TimelineEventProvenance.LIVE,
+            ),
+            IngestionRecordDisposition.COMPATIBILITY_ONLY,
+            None,
+            None,
+            None,
+        ),
+        (
+            _record_with(
+                RecordKind.ROOM_LIFECYCLE,
+                reported_lifecycle,
+                room_id=ROOM_ID,
+                membership_epoch=1,
+                room_sequence=7,
+            ),
+            IngestionRecordDisposition.ROOM_LIFECYCLE,
+            None,
+            None,
+            DepartureSource.REPORTED,
+        ),
+        (
+            _record_with(
+                RecordKind.ROOM_LIFECYCLE,
+                initial_lifecycle,
+                room_id=ROOM_ID,
+                membership_epoch=0,
+                room_sequence=0,
+            ),
+            IngestionRecordDisposition.ROOM_LIFECYCLE,
+            None,
+            None,
+            DepartureSource.REPORTED,
+        ),
+        (
+            _record_with(
+                RecordKind.ROOM_LIFECYCLE,
+                timeline_lifecycle,
+                room_id=ROOM_ID,
+                membership_epoch=1,
+                room_sequence=1,
+            ),
+            IngestionRecordDisposition.ROOM_LIFECYCLE,
+            None,
+            None,
+            DepartureSource.REPORTED,
+        ),
+        (
+            local_record,
+            IngestionRecordDisposition.ROOM_LIFECYCLE,
+            None,
+            None,
+            DepartureSource.LOCAL,
+        ),
+        *(
+            (
+                record,
+                IngestionRecordDisposition.COMPATIBILITY_ONLY,
+                None,
+                None,
+                None,
+            )
+            for record in compatibility_records
+        ),
+        (
+            _loss_with(RecordOrigin(TransportKind.SLIDING, 3, 4, 5)),
+            IngestionRecordDisposition.HISTORY_LOSS,
+            None,
+            None,
+            None,
+        ),
+        (
+            _loss_with(
+                SystemOrigin(
+                    SystemOriginKind.CONSUMER_RESET,
+                    UUID("77777777-7777-4777-8777-777777777777"),
+                ),
+            ),
+            IngestionRecordDisposition.HISTORY_LOSS,
+            None,
+            None,
+            None,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("record", "disposition", "event_kind", "event_class", "departure_source"),
+    _complete_record_cases(),
+    ids=(
+        "classic-live-timeline",
+        "sliding-recovered-timeline",
+        "classic-history-timeline",
+        "decrypted-timeline",
+        "failed-megolm-timeline",
+        "nonsemantic-timeline",
+        "reported-lifecycle",
+        "initial-reported-lifecycle",
+        "timeline-reported-lifecycle",
+        "local-lifecycle",
+        "state",
+        "ephemeral",
+        "room-account-data",
+        "global-account-data",
+        "presence",
+        "to-device",
+        "transport-loss",
+        "system-loss",
+    ),
+)
+def test_validation_maps_every_durable_record_to_one_admission_disposition(
+    record: EventRecord | LossRecord,
+    disposition: IngestionRecordDisposition,
+    event_kind: EventKind | None,
+    event_class: EventClass | None,
+    departure_source: DepartureSource | None,
+) -> None:
+    batch = _batch_with(record)
+
+    admission = validate_ingestion_batch(
+        batch,
+        account_id=ACCOUNT_ID,
+        device_id=DEVICE_ID,
+    )
+
+    record_id = record.loss_id if type(record) is LossRecord else record.record_id
+    assert (
+        admission.schema_version,
+        admission.consumer_generation,
+        admission.stream_id,
+        admission.sequence,
+        admission.sha256,
+        admission.record_id,
+        admission.disposition,
+    ) == (
+        1,
+        CONSUMER_GENERATION,
+        STREAM_ID,
+        0,
+        batch.ref.sha256,
+        record_id,
+        disposition,
+    )
+    if disposition is IngestionRecordDisposition.SEMANTIC_EVENT:
+        assert admission.event is not None
+        assert (admission.event.kind, admission.event.event_class) == (
+            event_kind,
+            event_class,
+        )
+        assert admission.event.event_id == record.event_id
+        assert admission.event.room_id == ROOM_ID
+        assert admission.source is None
+        assert admission.room_id is None
+        return
+    assert admission.event is None
+    assert admission.projected is None
+    if disposition is IngestionRecordDisposition.ROOM_LIFECYCLE:
+        source = json.loads(record.source_json)
+        assert (
+            admission.source,
+            admission.room_id,
+            admission.previous_membership,
+            admission.membership,
+            admission.previous_membership_epoch,
+            admission.membership_epoch,
+        ) == (
+            departure_source,
+            ROOM_ID,
+            source["previous_membership"],
+            source["membership"],
+            source["previous_membership_epoch"],
+            source["membership_epoch"],
+        )
+    elif disposition is IngestionRecordDisposition.HISTORY_LOSS:
+        assert admission.room_id == ROOM_ID
+    else:
+        assert admission.room_id is None
+
+
 @pytest.mark.parametrize(
     "source",
     (
@@ -726,11 +1193,18 @@ def test_validation_accepts_sorted_canonical_utf8_source_json() -> None:
         },
     ),
 )
-def test_conversion_rejects_membership_and_unsupported_events(
+def test_conversion_classifies_membership_and_unsupported_events_as_compatibility(
     source: dict[str, object],
 ) -> None:
-    with pytest.raises((TypeError, ValueError)):
-        ingestion_event_views(room_id=ROOM_ID, source=source, self_sender=ACCOUNT_ID)
+    assert (
+        ingestion_timeline_views(
+            room_id=ROOM_ID,
+            source=source,
+            self_sender=ACCOUNT_ID,
+            provenance=TimelineEventProvenance.LIVE,
+        )
+        is None
+    )
 
 
 def test_conversion_uses_the_existing_media_parser() -> None:
@@ -746,11 +1220,14 @@ def test_conversion_uses_the_existing_media_parser() -> None:
         },
     }
 
-    event, projected = ingestion_event_views(
+    views = ingestion_timeline_views(
         room_id=ROOM_ID,
         source=source,
         self_sender=ACCOUNT_ID,
+        provenance=TimelineEventProvenance.LIVE,
     )
+    assert views is not None
+    event, projected = views
 
     assert event.kind is EventKind.MEDIA
     assert event.event_class is EventClass.ACTIONABLE
@@ -1234,6 +1711,35 @@ async def test_context_only_semantic_event_persists_without_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_admission_is_receipt_only_without_a_semantic_event(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    store = journal_database()
+    principal = await _bound_principal(store)
+
+    facts = await principal.admit_ingestion_batch(
+        _lifecycle_admission(
+            source=DepartureSource.REPORTED,
+            previous_membership="leave",
+            membership="join",
+            previous_membership_epoch=0,
+            membership_epoch=0,
+        ),
+    )
+
+    assert facts == RECEIPT_ONLY_FACTS
+    assert (
+        await store.backend.read(
+            lambda tx: tx.fetchall(
+                "SELECT event_id FROM journal_events WHERE principal_id = ?",
+                (ACCOUNT_ID,),
+            ),
+        )
+        == ()
+    )
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_disposition_matrix_and_rearmed_work(
     journal_database: Callable[[], EventJournalStore],
 ) -> None:
@@ -1261,20 +1767,48 @@ async def test_lifecycle_disposition_matrix_and_rearmed_work(
         )
 
     steps = (
-        (lifecycle(0, DepartureSource.REPORTED, "leave", "join", 0), FRESH_FACTS, ()),
-        (lifecycle(1, DepartureSource.REPORTED, "invite", "knock", 0), FRESH_FACTS, ()),
-        (lifecycle(2, DepartureSource.LOCAL, "leave", "join", 0), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 0, 0, 0),)),
-        (lifecycle(3, DepartureSource.REPORTED, "join", "leave", 0), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 1, 1, 0),)),
+        (lifecycle(0, DepartureSource.REPORTED, "leave", "join", 0), RECEIPT_ONLY_FACTS, ()),
+        (lifecycle(1, DepartureSource.REPORTED, "invite", "knock", 0), RECEIPT_ONLY_FACTS, ()),
+        (
+            lifecycle(2, DepartureSource.LOCAL, "leave", "join", 0),
+            RECEIPT_ONLY_FACTS,
+            ((ACCOUNT_ID, ROOM_ID, 0, 0, 0),),
+        ),
+        (
+            lifecycle(3, DepartureSource.REPORTED, "join", "leave", 0),
+            RECEIPT_ONLY_FACTS,
+            ((ACCOUNT_ID, ROOM_ID, 1, 1, 0),),
+        ),
         (
             lifecycle(4, DepartureSource.REPORTED, "join", "leave", 0),
             RECEIPT_ONLY_FACTS,
             ((ACCOUNT_ID, ROOM_ID, 1, 1, 0),),
         ),
-        (lifecycle(5, DepartureSource.REPORTED, "leave", "join", 1), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 1, 1, 0),)),
-        (lifecycle(6, DepartureSource.LOCAL, "leave", "join", 1), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 1, 0, 0),)),
-        (lifecycle(7, DepartureSource.LOCAL, "join", "leave", 1), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 2, 1, 1),)),
-        (lifecycle(8, DepartureSource.REPORTED, "leave", "join", 1), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 2, 1, 1),)),
-        (lifecycle(9, DepartureSource.LOCAL, "leave", "join", 1), FRESH_FACTS, ((ACCOUNT_ID, ROOM_ID, 2, 0, 1),)),
+        (
+            lifecycle(5, DepartureSource.REPORTED, "leave", "join", 1),
+            RECEIPT_ONLY_FACTS,
+            ((ACCOUNT_ID, ROOM_ID, 1, 1, 0),),
+        ),
+        (
+            lifecycle(6, DepartureSource.LOCAL, "leave", "join", 1),
+            RECEIPT_ONLY_FACTS,
+            ((ACCOUNT_ID, ROOM_ID, 1, 0, 0),),
+        ),
+        (
+            lifecycle(7, DepartureSource.LOCAL, "join", "leave", 1),
+            RECEIPT_ONLY_FACTS,
+            ((ACCOUNT_ID, ROOM_ID, 2, 1, 1),),
+        ),
+        (
+            lifecycle(8, DepartureSource.REPORTED, "leave", "join", 1),
+            RECEIPT_ONLY_FACTS,
+            ((ACCOUNT_ID, ROOM_ID, 2, 1, 1),),
+        ),
+        (
+            lifecycle(9, DepartureSource.LOCAL, "leave", "join", 1),
+            RECEIPT_ONLY_FACTS,
+            ((ACCOUNT_ID, ROOM_ID, 2, 0, 1),),
+        ),
     )
     for admission, facts, membership in steps:
         assert await principal.admit_ingestion_batch(admission) == facts
@@ -2405,9 +2939,12 @@ async def test_postgres_loser_waits_then_classifies(
 @dataclass
 class _AdapterSession:
     batch: SyncBatch | None
-    ack_error: BaseException | None = None
+    settlement_error: BaseException | None = None
     next_calls: list[dict[str, object]] = field(default_factory=list)
     ack_attempts: list[BatchRef] = field(default_factory=list)
+    settlement_attempts: list[tuple[SyncBatch, bool, bool]] = field(
+        default_factory=list,
+    )
 
     def next_batch(self, **limits: object) -> SyncBatch | None:
         self.next_calls.append(limits)
@@ -2415,8 +2952,21 @@ class _AdapterSession:
 
     def acknowledge_batch(self, ref: BatchRef) -> None:
         self.ack_attempts.append(ref)
-        if self.ack_error is not None:
-            error, self.ack_error = self.ack_error, None
+        message = "adapter acknowledged outside owned settlement"
+        raise AssertionError(message)
+
+    async def _settle_batch(
+        self,
+        batch: SyncBatch,
+        *,
+        receipt_new: bool,
+        semantic_event_new: bool,
+    ) -> None:
+        self.settlement_attempts.append(
+            (batch, receipt_new, semantic_event_new),
+        )
+        if self.settlement_error is not None:
+            error, self.settlement_error = self.settlement_error, None
             raise error
         self.batch = None
 
@@ -2437,6 +2987,46 @@ class _AdapterAdmission:
         return self.result  # type: ignore[return-value]
 
 
+@dataclass
+class _PumpSession:
+    batches: list[SyncBatch]
+    next_calls: list[dict[str, object]] = field(default_factory=list)
+    settlement_attempts: list[tuple[SyncBatch, bool, bool]] = field(
+        default_factory=list,
+    )
+
+    def next_batch(self, **limits: object) -> SyncBatch | None:
+        self.next_calls.append(limits)
+        return self.batches[0] if self.batches else None
+
+    async def _settle_batch(
+        self,
+        batch: SyncBatch,
+        *,
+        receipt_new: bool,
+        semantic_event_new: bool,
+    ) -> None:
+        assert self.batches
+        assert self.batches[0] is batch
+        self.settlement_attempts.append(
+            (batch, receipt_new, semantic_event_new),
+        )
+        self.batches.pop(0)
+
+
+@dataclass
+class _PumpAdmission:
+    results: list[AdmissionFacts]
+    calls: list[IngestionBatchAdmission] = field(default_factory=list)
+
+    async def admit_ingestion_batch(
+        self,
+        admission: IngestionBatchAdmission,
+    ) -> AdmissionFacts:
+        self.calls.append(admission)
+        return self.results.pop(0)
+
+
 @pytest.mark.asyncio
 async def test_adapter_empty_session_is_noop() -> None:
     session = _AdapterSession(None)
@@ -2454,6 +3044,117 @@ async def test_adapter_empty_session_is_noop() -> None:
     assert session.next_calls == [{"max_records": 1}]
     assert admission.calls == []
     assert session.ack_attempts == []
+    assert session.settlement_attempts == []
+
+
+@pytest.mark.asyncio
+async def test_pump_drains_one_record_batches_wakes_only_semantic_work_and_cancels() -> None:
+    batches = [_batch(), _batch(), _batch()]
+    session = _PumpSession(list(batches))
+    admission = _PumpAdmission(
+        [FRESH_FACTS, RECEIPT_ONLY_FACTS, REPLAY_FACTS],
+    )
+    wait_entered = asyncio.Event()
+    never_release = asyncio.Event()
+    semantic_wakes: list[None] = []
+
+    async def wait_for_work() -> None:
+        wait_entered.set()
+        await never_release.wait()
+
+    pumping = asyncio.create_task(
+        durable_ingestion_module.run_ingestion_pump(
+            session,  # type: ignore[arg-type]
+            admission,
+            account_id=ACCOUNT_ID,
+            device_id=DEVICE_ID,
+            wait_for_work=wait_for_work,
+            wake_semantic_dispatch=lambda: semantic_wakes.append(None),
+        ),
+    )
+    try:
+        await asyncio.wait_for(wait_entered.wait(), 2)
+        assert admission.results == []
+        assert len(admission.calls) == 3
+        assert session.next_calls == [{"max_records": 1}] * 4
+        assert session.settlement_attempts == [
+            (batches[0], True, True),
+            (batches[1], True, False),
+            (batches[2], False, False),
+        ]
+        assert semantic_wakes == [None]
+        assert not pumping.done()
+        pumping.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pumping
+    finally:
+        never_release.set()
+        if not pumping.done():
+            pumping.cancel()
+        with suppress(BaseException):
+            await pumping
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ("admission", "settlement"))
+async def test_pump_propagates_failure_without_waiting_or_waking(phase: str) -> None:
+    error = RuntimeError(f"{phase} failed")
+    batch = _batch()
+    session = _AdapterSession(
+        batch,
+        settlement_error=error if phase == "settlement" else None,
+    )
+    admission = _AdapterAdmission(error=error if phase == "admission" else None)
+
+    async def forbid_wait() -> None:
+        message = "failing pump waited for more work"
+        raise AssertionError(message)
+
+    def forbid_wake() -> None:
+        message = "failing pump woke semantic dispatch"
+        raise AssertionError(message)
+
+    with pytest.raises(RuntimeError) as raised:
+        await durable_ingestion_module.run_ingestion_pump(
+            session,
+            admission,
+            account_id=ACCOUNT_ID,
+            device_id=DEVICE_ID,
+            wait_for_work=forbid_wait,
+            wake_semantic_dispatch=forbid_wake,
+        )
+
+    assert raised.value is error
+    assert session.next_calls == [{"max_records": 1}]
+    assert len(admission.calls) == 1
+    assert session.settlement_attempts == ([(batch, True, True)] if phase == "settlement" else [])
+    assert session.batch is batch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", (FRESH_FACTS, RECEIPT_ONLY_FACTS, REPLAY_FACTS))
+async def test_adapter_passes_exact_admission_facts_to_owned_settlement(
+    result: AdmissionFacts,
+) -> None:
+    batch = _batch()
+    session = _AdapterSession(batch)
+    admission = _AdapterAdmission(result=result)
+
+    returned = await consume_one_ingestion_batch(
+        session,  # type: ignore[arg-type]
+        admission,
+        account_id=ACCOUNT_ID,
+        device_id=DEVICE_ID,
+    )
+
+    assert returned is result
+    assert admission.calls == [_expected_admission()]
+    assert session.settlement_attempts == [
+        (batch, result.receipt_new, result.semantic_event_new),
+    ]
+    assert session.settlement_attempts[0][0] is batch
+    assert session.ack_attempts == []
+    assert session.batch is None
 
 
 @pytest.mark.asyncio
@@ -2489,11 +3190,211 @@ async def test_adapter_invalid_matrix_never_admits_or_acks(
 
     assert admission.calls == []
     assert session.ack_attempts == []
+    assert session.settlement_attempts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_kind", "event_id", "source_record_id", "timeline_provenance"),
+    (
+        pytest.param("section", "$member", None, None, id="section-event"),
+        pytest.param("section", None, "source-record", None, id="section-record"),
+        pytest.param("section", None, None, "live", id="section-provenance"),
+        pytest.param("state", "$member", None, None, id="state-without-record"),
+        pytest.param("state", "$member", "source-record", "live", id="state-provenance"),
+        pytest.param("timeline", "$member", None, "live", id="timeline-without-record"),
+        pytest.param("timeline", "$member", "source-record", None, id="timeline-without-provenance"),
+        pytest.param("timeline", "$member", "source-record", "recovered", id="timeline-recovered"),
+    ),
+)
+async def test_adapter_rejects_impossible_lifecycle_source_evidence_before_admission(
+    source_kind: str,
+    event_id: str | None,
+    source_record_id: str | None,
+    timeline_provenance: str | None,
+) -> None:
+    source = {
+        "event_id": event_id,
+        "membership": "leave",
+        "membership_epoch": 1,
+        "membership_provenance": "reported",
+        "previous_membership": "join",
+        "previous_membership_epoch": 0,
+        "source_kind": source_kind,
+        "source_record_id": source_record_id,
+        "timeline_provenance": timeline_provenance,
+    }
+    batch = _batch_with(
+        _record_with(
+            RecordKind.ROOM_LIFECYCLE,
+            source,
+            room_id=ROOM_ID,
+            membership_epoch=1,
+            room_sequence=0,
+        ),
+    )
+    session = _AdapterSession(batch)
+    admission = _AdapterAdmission()
+
+    with pytest.raises(IngestionBatchValidationError):
+        await consume_one_ingestion_batch(
+            session,  # type: ignore[arg-type]
+            admission,
+            account_id=ACCOUNT_ID,
+            device_id=DEVICE_ID,
+        )
+
+    assert admission.calls == []
+    assert session.ack_attempts == []
+    assert session.settlement_attempts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("membership", ("invite", "knock", "ban"))
+async def test_adapter_rejects_impossible_local_lifecycle_membership_before_admission(
+    membership: str,
+) -> None:
+    operation_id = UUID("99999999-9999-4999-8999-999999999999")
+    source = {
+        "event_id": None,
+        "membership": "join",
+        "membership_epoch": 0,
+        "membership_provenance": "local",
+        "previous_membership": "leave",
+        "previous_membership_epoch": 0,
+        "source_kind": "local",
+        "source_record_id": None,
+        "timeline_provenance": None,
+    }
+    record = EventRecord(
+        str(uuid5(operation_id, "nio:room-lifecycle:v1")),
+        RecordKind.ROOM_LIFECYCLE,
+        SystemOrigin(SystemOriginKind.MEMBERSHIP_CHANGE, operation_id),
+        ROOM_ID,
+        0,
+        0,
+        None,
+        None,
+        _canonical(source),
+        None,
+    )
+    batch = _batch_with(record)
+    source["membership"] = membership
+    object.__setattr__(record, "source_json", _canonical(source))
+    _resign(batch)
+    session = _AdapterSession(batch)
+    admission = _AdapterAdmission()
+
+    with pytest.raises(IngestionBatchValidationError):
+        await consume_one_ingestion_batch(
+            session,  # type: ignore[arg-type]
+            admission,
+            account_id=ACCOUNT_ID,
+            device_id=DEVICE_ID,
+        )
+
+    assert admission.calls == []
+    assert session.ack_attempts == []
+    assert session.settlement_attempts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_event_id", "record_event_id"),
+    (
+        pytest.param("$state", None, id="missing-carrier"),
+        pytest.param("$state", "$other", id="conflicting-carrier"),
+        pytest.param(None, "$other", id="invented-carrier"),
+        pytest.param("", "", id="empty-carrier"),
+    ),
+)
+async def test_adapter_rejects_impossible_compatibility_event_identity_before_admission(
+    source_event_id: str | None,
+    record_event_id: str | None,
+) -> None:
+    source = {
+        "content": {"name": "Room"},
+        "event_id": source_event_id,
+        "origin_server_ts": 1,
+        "sender": SENDER,
+        "state_key": "",
+        "type": "m.room.name",
+    }
+    batch = _batch_with(
+        _record_with(
+            RecordKind.STATE,
+            source,
+            room_id=ROOM_ID,
+            membership_epoch=0,
+            room_sequence=0,
+            event_id=record_event_id,
+        ),
+    )
+    session = _AdapterSession(batch)
+    admission = _AdapterAdmission()
+
+    with pytest.raises(IngestionBatchValidationError):
+        await consume_one_ingestion_batch(
+            session,  # type: ignore[arg-type]
+            admission,
+            account_id=ACCOUNT_ID,
+            device_id=DEVICE_ID,
+        )
+
+    assert admission.calls == []
+    assert session.ack_attempts == []
+    assert session.settlement_attempts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("shape", "error"),
+    (
+        pytest.param("loss-id", IngestionBatchIntegrityError, id="loss-id"),
+        pytest.param("detail-json", IngestionBatchValidationError, id="detail-json"),
+        pytest.param("reserved-origin", IngestionBatchValidationError, id="reserved-origin"),
+    ),
+)
+async def test_adapter_rejects_invalid_loss_evidence_before_admission(
+    shape: str,
+    error: type[Exception],
+) -> None:
+    record = _loss_with(RecordOrigin(TransportKind.CLASSIC, 1, 2, 3))
+    batch = _batch_with(record)
+    if shape == "loss-id":
+        object.__setattr__(record, "loss_id", "forged")
+    elif shape == "detail-json":
+        object.__setattr__(record, "detail_json", b'{"cause": "test"}')
+    else:
+        object.__setattr__(
+            record,
+            "origin",
+            SystemOrigin(
+                SystemOriginKind.MEMBERSHIP_CHANGE,
+                UUID("88888888-8888-4888-8888-888888888888"),
+            ),
+        )
+        object.__setattr__(record, "loss_id", _loss_id(STREAM_ID, record))
+    _resign(batch)
+    session = _AdapterSession(batch)
+    admission = _AdapterAdmission()
+
+    with pytest.raises(error):
+        await consume_one_ingestion_batch(
+            session,  # type: ignore[arg-type]
+            admission,
+            account_id=ACCOUNT_ID,
+            device_id=DEVICE_ID,
+        )
+
+    assert admission.calls == []
+    assert session.ack_attempts == []
+    assert session.settlement_attempts == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", (False, True), ids=("normal", "cancelled"))
-async def test_adapter_waits_for_terminal_commit_before_ack_or_cancellation(
+async def test_adapter_waits_for_terminal_commit_before_settlement_or_cancellation(
     journal_database: Callable[[], EventJournalStore],
     cancel: bool,
 ) -> None:
@@ -2530,6 +3431,7 @@ async def test_adapter_waits_for_terminal_commit_before_ack_or_cancellation(
         assert await asyncio.to_thread(inside_transaction.wait, 20), "adapter admission never reached its receipt"
         assert not consuming.done()
         assert session.ack_attempts == []
+        assert session.settlement_attempts == []
         assert await _graph(store) == _old_graph()
         if cancel:
             consuming.cancel()
@@ -2543,11 +3445,13 @@ async def test_adapter_waits_for_terminal_commit_before_ack_or_cancellation(
     assert await _graph(store) == _fresh_graph()
     if not cancel:
         assert consuming.result() == FRESH_FACTS
-        assert session.ack_attempts == [batch.ref]
+        assert session.settlement_attempts == [(batch, True, True)]
+        assert session.ack_attempts == []
         return
 
     assert consuming.cancelled()
     assert session.ack_attempts == []
+    assert session.settlement_attempts == []
     assert (
         await consume_one_ingestion_batch(
             session,  # type: ignore[arg-type]
@@ -2557,7 +3461,8 @@ async def test_adapter_waits_for_terminal_commit_before_ack_or_cancellation(
         )
         == REPLAY_FACTS
     )
-    assert session.ack_attempts == [batch.ref]
+    assert session.settlement_attempts == [(batch, False, False)]
+    assert session.ack_attempts == []
 
 
 @pytest.mark.asyncio
@@ -2582,11 +3487,12 @@ async def test_adapter_rejects_nonterminal_results_without_ack(result: object) -
 
     assert len(admission.calls) == 1
     assert session.ack_attempts == []
+    assert session.settlement_attempts == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("result", (FRESH_FACTS, RECEIPT_ONLY_FACTS, REPLAY_FACTS))
-async def test_adapter_acks_each_exact_terminal_facts_once(
+async def test_adapter_settles_each_exact_terminal_facts_once(
     result: AdmissionFacts,
 ) -> None:
     batch = _batch()
@@ -2602,8 +3508,11 @@ async def test_adapter_acks_each_exact_terminal_facts_once(
 
     assert returned == result
     assert admission.calls == [_expected_admission()]
-    assert session.ack_attempts == [batch.ref]
-    assert session.ack_attempts[0] is batch.ref
+    assert session.settlement_attempts == [
+        (batch, result.receipt_new, result.semantic_event_new),
+    ]
+    assert session.settlement_attempts[0][0] is batch
+    assert session.ack_attempts == []
 
 
 @pytest.mark.asyncio
@@ -2622,17 +3531,18 @@ async def test_adapter_backend_error_never_acks() -> None:
 
     assert raised.value is error
     assert session.ack_attempts == []
+    assert session.settlement_attempts == []
 
 
 @pytest.mark.asyncio
-async def test_adapter_ack_failure_redelivers_exact_duplicate(
+async def test_adapter_settlement_failure_redelivers_exact_duplicate(
     journal_database: Callable[[], EventJournalStore],
 ) -> None:
     store = journal_database()
     principal = await _bound_principal(store)
     batch = _batch()
-    error = RuntimeError("ack failed")
-    session = _AdapterSession(batch, ack_error=error)
+    error = RuntimeError("settlement failed")
+    session = _AdapterSession(batch, settlement_error=error)
 
     with pytest.raises(RuntimeError) as raised:
         await consume_one_ingestion_batch(
@@ -2655,7 +3565,11 @@ async def test_adapter_ack_failure_redelivers_exact_duplicate(
         == REPLAY_FACTS
     )
     assert session.next_calls == [{"max_records": 1}, {"max_records": 1}]
-    assert session.ack_attempts == [batch.ref, batch.ref]
-    assert all(ref is batch.ref for ref in session.ack_attempts)
+    assert session.settlement_attempts == [
+        (batch, True, True),
+        (batch, False, False),
+    ]
+    assert all(attempt[0] is batch for attempt in session.settlement_attempts)
+    assert session.ack_attempts == []
     assert session.batch is None
     assert await _graph(store) == _fresh_graph()
