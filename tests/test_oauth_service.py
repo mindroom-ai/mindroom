@@ -590,6 +590,38 @@ async def test_scoped_oauth_refresh_logs_non_recoverable_provider_failure_withou
 
 
 @pytest.mark.asyncio
+async def test_scoped_oauth_refresh_does_not_log_unrecognized_provider_error_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Provider-controlled error values must collapse to a bounded log sentinel."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target()
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    _save_credentials(runtime_paths, worker_target, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    logger = _CapturingLogger()
+    monkeypatch.setattr(oauth_service_module, "logger", logger, raising=False)
+    provider_error = f"provider echoed {CHAIN_0} " + ("x" * 10_000)
+
+    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
+        assert credentials["refresh_token"] == CHAIN_0
+        message = "provider unavailable"
+        raise OAuthProviderError(message, oauth_error=provider_error)
+
+    with pytest.raises(OAuthProviderError):
+        await refresh_scoped_oauth_credentials_with_result(
+            _FakeOAuthProvider(refresh),
+            runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    assert logger.warning_calls[0][1]["oauth_error"] == "unrecognized"
+    assert provider_error not in repr(logger.warning_calls)
+    _assert_no_token_values_logged(logger)
+
+
+@pytest.mark.asyncio
 async def test_scoped_oauth_refresh_logs_stale_retry_failure_without_tokens(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

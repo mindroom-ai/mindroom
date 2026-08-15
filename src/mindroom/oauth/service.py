@@ -41,6 +41,27 @@ OAUTH_CONNECT_TOKEN_TTL_MINUTES = 10
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = OAUTH_CONNECT_TOKEN_TTL_MINUTES * 60
 _OAUTH_CONNECT_TOKEN_KIND = "conversation_oauth_connect"  # noqa: S105
 _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
+_UNRECOGNIZED_OAUTH_ERROR_CODE = "unrecognized"
+_LOGGABLE_OAUTH_ERROR_CODES = frozenset(
+    {
+        "access_denied",
+        "authorization_pending",
+        "expired_token",
+        "invalid_client",
+        "invalid_grant",
+        "invalid_refresh_token",
+        "invalid_request",
+        "invalid_scope",
+        "invalid_target",
+        "invalid_token",
+        "server_error",
+        "slow_down",
+        "temporarily_unavailable",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "unsupported_token_type",
+    },
+)
 logger = get_logger(__name__)
 _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
     {
@@ -571,7 +592,7 @@ def _log_oauth_refresh_failed(
         reason=reason,
         stale_retry_used=stale_retry_used,
         error_type=type(exc).__name__,
-        oauth_error=_normalized_oauth_error_code(exc.oauth_error),
+        oauth_error=_safe_oauth_error_code_for_logging(exc.oauth_error),
     )
 
 
@@ -618,8 +639,17 @@ def _is_recoverable_stale_refresh_rejection(exc: OAuthProviderError) -> bool:
     return is_terminal_oauth_refresh_error_code(exc.oauth_error)
 
 
-def _normalized_oauth_error_code(value: object) -> str | None:
-    return value.strip().lower() if isinstance(value, str) and value.strip() else None
+def _safe_oauth_error_code_for_logging(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if len(value) > 64:
+        return _UNRECOGNIZED_OAUTH_ERROR_CODE
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if normalized in _LOGGABLE_OAUTH_ERROR_CODES:
+        return normalized
+    return _UNRECOGNIZED_OAUTH_ERROR_CODE
 
 
 def oauth_credential_target_payload(
