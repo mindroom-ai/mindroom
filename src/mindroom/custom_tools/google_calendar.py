@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agno.tools.google.calendar import GoogleCalendarTools as AgnoGoogleCalendarTools
+from googleapiclient.discovery import build
 
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.logging_config import get_logger
@@ -82,3 +83,6 @@ class GoogleCalendarTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
 
     def _should_fallback_to_original_auth(self) -> bool:
         return google_service_account_configured(self.service_account_path, self._runtime_paths)
+
+    def _build_service(self) -> Any:  # noqa: ANN401
+        return build("calendar", "v3", http=self._google_authorized_http(self.creds))

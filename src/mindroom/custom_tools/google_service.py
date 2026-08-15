@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING, Any, cast
 
+from google_auth_httplib2 import AuthorizedHttp
+
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
@@ -16,6 +18,21 @@ class _GoogleServiceThreadState(threading.local):
         self.credential_key: object | None = None
         self.label_cache: dict[str, str] | None = None
         self.user_email: str | None = None
+        self.authorization_rejected = False
+
+
+class _TrackedGoogleAuthorizedHttp(AuthorizedHttp):
+    """Latch only a final HTTP 401 after AuthorizedHttp finishes its retries."""
+
+    def __init__(self, credentials: Any, state: _GoogleServiceThreadState) -> None:  # noqa: ANN401
+        super().__init__(credentials)
+        self._mindroom_state = state
+
+    def request(self, *args: Any, **kwargs: Any) -> tuple[Any, Any]:  # noqa: ANN401
+        response, content = super().request(*args, **kwargs)
+        if response.status == 401:
+            self._mindroom_state.authorization_rejected = True
+        return response, content
 
 
 def google_service_account_configured(service_account_path: str | None, runtime_paths: RuntimePaths) -> bool:
@@ -70,6 +87,22 @@ class ThreadLocalGoogleServiceMixin:
     def _adopt_google_credential_revision(self, value: object) -> None:
         """Advance one same-account revision without invalidating an active service call."""
         self._google_service_state().credential_key = value
+
+    def _google_authorized_http(self, credentials: Any) -> AuthorizedHttp:  # noqa: ANN401
+        """Build an HTTP client that records final managed OAuth rejection."""
+        return _TrackedGoogleAuthorizedHttp(credentials, self._google_service_state())
+
+    def _reset_google_authorization_rejected(self) -> None:
+        self._google_service_state().authorization_rejected = False
+
+    def _mark_google_authorization_rejected(self) -> None:
+        self._google_service_state().authorization_rejected = True
+
+    def _consume_google_authorization_rejected(self) -> bool:
+        state = self._google_service_state()
+        rejected = state.authorization_rejected
+        state.authorization_rejected = False
+        return rejected
 
     @property
     def _label_cache(self) -> dict[str, str] | None:

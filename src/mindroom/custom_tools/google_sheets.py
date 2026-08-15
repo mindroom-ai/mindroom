@@ -9,6 +9,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agno.tools.google.sheets import GoogleSheetsTools as AgnoGoogleSheetsTools
+from agno.tools.google.sheets import authenticate
+from googleapiclient.discovery import build
 
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.logging_config import get_logger
@@ -75,6 +77,63 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
 
     def _should_fallback_to_original_auth(self) -> bool:
         return google_service_account_configured(self.service_account_path, self._runtime_paths)
+
+    def _build_service(self) -> Any:  # noqa: ANN401
+        return build("sheets", "v4", http=self._google_authorized_http(self.creds))
+
+    def _build_drive_service(self) -> Any:  # noqa: ANN401
+        """Build the secondary Drive client through the same OAuth transport boundary."""
+        return build("drive", "v3", http=self._google_authorized_http(self.creds))
+
+    @authenticate
+    def create_duplicate_sheet(
+        self,
+        source_id: str,
+        new_title: str | None = None,
+        copy_permissions: bool = True,
+    ) -> str:
+        """Duplicate one spreadsheet while retaining structured OAuth rejection."""
+        if not self.creds:
+            return "Not authenticated. Call auth() first."
+        if not self.service:
+            return "Service not initialized"
+
+        try:
+            drive_scope = "https://www.googleapis.com/auth/drive"
+            if drive_scope not in self.scopes:
+                self.scopes.append(drive_scope)
+                self._auth()
+
+            drive_service = self._build_drive_service()
+            if not new_title:
+                source_sheet = self.service.spreadsheets().get(spreadsheetId=source_id).execute()
+                new_title = source_sheet["properties"]["title"]
+
+            new_file = drive_service.files().copy(fileId=source_id, body={"name": new_title}).execute()
+            new_spreadsheet_id = new_file.get("id")
+            if copy_permissions:
+                permissions = (
+                    drive_service.permissions()
+                    .list(fileId=source_id, fields="permissions(emailAddress,role,type)")
+                    .execute()
+                    .get("permissions", [])
+                )
+                for permission in permissions:
+                    if permission.get("role") == "owner":
+                        continue
+                    drive_service.permissions().create(
+                        fileId=new_spreadsheet_id,
+                        body={
+                            "role": permission.get("role"),
+                            "type": permission.get("type"),
+                            "emailAddress": permission.get("emailAddress"),
+                        },
+                    ).execute()
+
+        except Exception as exc:
+            return f"Error duplicating spreadsheet via Drive API: {exc}"
+        else:
+            return f"Spreadsheet duplicated successfully: https://docs.google.com/spreadsheets/d/{new_spreadsheet_id}"
 
     def _normalize_dashboard_config_kwargs(self, kwargs: dict[str, Any]) -> None:
         """Map dashboard field names onto Agno's constructor argument names."""

@@ -39,6 +39,7 @@ from mindroom.oauth.credential_lifecycle import (
 from mindroom.oauth.providers import (
     OAuthClientConfig,
     OAuthConnectionRequired,
+    OAuthProviderError,
     OAuthRefreshRejectedError,
     oauth_connection_required_payload,
 )
@@ -833,6 +834,47 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
         "error_type": "OAuthRefreshRejectedError",
         "refresh_rejected": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_keeps_transient_refresh_failure_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A provider outage must not claim the retained requester credential is disconnected."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "retained-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    state = manager._states["demo"]
+    credential_context = manager._oauth_credential_context(
+        state,
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    leaked_detail = "provider unavailable with secret detail"
+
+    async def fail_refresh(_context: OAuthCredentialContext) -> object:
+        raise OAuthProviderError(leaked_detail, oauth_error="temporarily_unavailable")
+
+    monkeypatch.setattr("mindroom.mcp.manager.refresh_oauth_credentials_with_result", fail_refresh)
+
+    with pytest.raises(OAuthProviderError) as exc_info:
+        await manager._oauth_authorization_material(state, credential_context=credential_context)
+
+    assert type(exc_info.value) is OAuthProviderError
+    assert str(exc_info.value) == "OAuth credential refresh failed"
+    assert leaked_detail not in str(exc_info.value)
+    assert (
+        load_scoped_credentials(
+            "mcp_demo_oauth",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        is not None
+    )
 
 
 @pytest.mark.asyncio
@@ -2041,6 +2083,79 @@ async def test_mcp_manager_retirement_releases_fence_when_cleanup_is_cancelled(
         manager._state_lifecycle_lock.release()
 
     assert key.oauth_request_key not in manager._retired_request_keys
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_retirement_finishes_pre_yield_cleanup_before_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A detached requester session must close before retirement cancellation propagates."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    state = next(iter(manager._scoped_states.values()))
+    session = _FakeClientSession.sessions[0]
+    base_state = manager._states["demo"]
+    credential_context = manager._oauth_credential_context(
+        base_state,
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    request_key = manager._request_session_key(base_state, credential_context.worker_target).oauth_request_key
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    cancellation_turn = asyncio.Event()
+    body_entered = False
+    original_disconnect = manager._disconnect_state_when_idle
+
+    async def delayed_disconnect(candidate: MCPServerState) -> None:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        await original_disconnect(candidate)
+
+    async def retire() -> None:
+        nonlocal body_entered
+        async with manager.retire_request_session(credential_context=credential_context):
+            body_entered = True
+
+    monkeypatch.setattr(manager, "_disconnect_state_when_idle", delayed_disconnect)
+    retirement = asyncio.create_task(retire())
+    await cleanup_started.wait()
+    retirement.cancel()
+    asyncio.get_running_loop().call_soon(cancellation_turn.set)
+    await cancellation_turn.wait()
+
+    assert retirement.done() is False
+    assert manager._scoped_states == {}
+    assert manager._retiring_states == {id(state): state}
+    assert request_key in manager._retired_request_keys
+    with pytest.raises(OAuthConnectionRequired):
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+    assert len(_FakeClientSession.sessions) == 1
+
+    allow_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await retirement
+
+    assert body_entered is False
+    assert session.closed is True
+    assert manager._retiring_states == {}
+    assert request_key not in manager._retired_request_keys
 
 
 @pytest.mark.asyncio

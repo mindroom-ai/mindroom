@@ -118,7 +118,12 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
         """Return the per-thread authenticated Google Docs service."""
         self._auth()
         if self.service is None:
-            self.service = build("docs", "v1", credentials=self.creds, cache_discovery=False)
+            self.service = build(
+                "docs",
+                "v1",
+                http=self._google_authorized_http(self.creds),
+                cache_discovery=False,
+            )
         return self.service
 
     def _batch_update(self, document_id: str, requests: list[dict[str, object]]) -> dict[str, object]:

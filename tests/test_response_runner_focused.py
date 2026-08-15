@@ -67,6 +67,7 @@ from mindroom.event_journal import (
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
@@ -2915,6 +2916,73 @@ async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agn
 
 
 @pytest.mark.asyncio
+async def test_recovered_completed_reset_survives_provider_config_removal(tmp_path: Path) -> None:
+    """Frozen completion proof must settle even when live provider resolution no longer works."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    claimed = ApprovalContinuation(
+        approval_id="approval-reset-provider-removed",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(
+            ApprovalCall(
+                tool_call_id="reset-call",
+                tool_name="reset_oauth_connection",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        ),
+        state="claimed",
+        generation=3,
+        tool_bindings={
+            "reset-call": {
+                "tool_name": "reset_oauth_connection",
+                "arguments_json": '{"provider_id":"removed"}',
+                "invoking_agent": "general",
+                "oauth_reset": {"provider_id": "removed"},
+            },
+        },
+    )
+    delivered = FinalDeliveryOutcome(
+        terminal_status="completed",
+        event_id="$waiting",
+        is_visible_response=True,
+        final_visible_body=response_runner._UNAVAILABLE_OAUTH_RESET_RECONNECT_RECEIPT,
+        delivery_kind="edited",
+    )
+
+    with (
+        patch.object(runner, "_completed_frozen_oauth_reset_result", return_value=True),
+        patch.object(
+            runner,
+            "_oauth_reset_recovery",
+            new=AsyncMock(
+                side_effect=response_runner.OAuthResetApprovalBindingError("provider no longer configured"),
+            ),
+        ),
+        patch.object(
+            runner,
+            "_deliver_recovered_oauth_reset_outcome",
+            new=AsyncMock(return_value=delivered),
+        ) as deliver,
+    ):
+        outcome = await runner._recover_completed_oauth_reset_outcome(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert outcome == delivered
+    assert deliver.await_args.kwargs["response_text"] == response_runner._UNAVAILABLE_OAUTH_RESET_RECONNECT_RECEIPT
+
+
+@pytest.mark.asyncio
 async def test_claimed_failure_recovers_completed_reset_before_failure_fence(tmp_path: Path) -> None:
     """Cancellation after reset commit must publish its receipt instead of reporting failure."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -3035,7 +3103,7 @@ async def test_outbox_first_claim_does_not_invent_reset_success_after_revocation
         state="ready",
     )
     assert await store.create_approval_continuation(continuation) == continuation
-    reconnect_link = "https://example.test/oauth/connect?token=requester-bound"
+    reconnect_link = "https://example.test/api/oauth/google/authorize?connect_token=requester-bound"
     secret_body = f"OAuth connection reset. Reconnect: {reconnect_link}"
     await store.enqueue_matrix_delivery(
         delivery_id="$source",
@@ -3048,11 +3116,40 @@ async def test_outbox_first_claim_does_not_invent_reset_success_after_revocation
             "m.new_content": {
                 "body": secret_body,
                 "formatted_body": f'<a href="{reconnect_link}">Reconnect</a>',
-                DURABLE_FINAL_OUTCOME_KEY: {"body": secret_body, "interactive": None},
+                DURABLE_FINAL_OUTCOME_KEY: {
+                    "body": secret_body,
+                    "interactive": {
+                        "option_map": {reconnect_link: reconnect_link},
+                        "option_labels": {reconnect_link: reconnect_link},
+                    },
+                },
                 TOOL_TRACE_CONTENT_KEY: {"events": [{"result_preview": secret_body}]},
+                INTERACTIVE_PROMPT_KEY: {
+                    "options": {reconnect_link: reconnect_link},
+                    "option_labels": {reconnect_link: reconnect_link},
+                },
             },
-            DURABLE_FINAL_OUTCOME_KEY: {"body": secret_body, "interactive": None},
+            DURABLE_FINAL_OUTCOME_KEY: {
+                "body": secret_body,
+                "interactive": {
+                    "option_map": {reconnect_link: reconnect_link},
+                    "option_labels": {reconnect_link: reconnect_link},
+                },
+            },
             TOOL_TRACE_CONTENT_KEY: {"events": [{"result_preview": secret_body}]},
+            INTERACTIVE_PROMPT_KEY: {
+                "options": {reconnect_link: reconnect_link},
+                "option_labels": {reconnect_link: reconnect_link},
+            },
+            "org.example.response_hook": {
+                "nested": [
+                    {"connect_url": reconnect_link},
+                    f'<a href="{reconnect_link.replace("&", "&amp;")}">Reconnect</a>',
+                ],
+                "reference_url": "https://docs.example.test/oauth-help",
+            },
+            reconnect_link: "hook-key-secret",
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$waiting"},
         },
         edits_event_id="$waiting",
     )
@@ -3072,6 +3169,7 @@ async def test_outbox_first_claim_does_not_invent_reset_success_after_revocation
     assert outcome.recovered == 1
     assert len(sent) == 1
     assert reconnect_link not in str(sent[0].payload)
+    assert reconnect_link not in sent[0].payload
     nested = sent[0].payload["m.new_content"]
     assert isinstance(nested, dict)
     assert nested["body"] == response_runner._UNVERIFIED_OAUTH_RESET_RECEIPT
@@ -3079,6 +3177,48 @@ async def test_outbox_first_claim_does_not_invent_reset_success_after_revocation
         "body": response_runner._UNVERIFIED_OAUTH_RESET_RECEIPT,
         "interactive": None,
     }
+    assert INTERACTIVE_PROMPT_KEY not in nested
+    assert INTERACTIVE_PROMPT_KEY not in sent[0].payload
+    hook_payload = sent[0].payload["org.example.response_hook"]
+    assert isinstance(hook_payload, dict)
+    assert hook_payload["reference_url"] == "https://docs.example.test/oauth-help"
+    assert sent[0].payload["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$waiting"}
+
+
+@pytest.mark.asyncio
+async def test_outbox_first_claim_does_not_resume_pending_reset(tmp_path: Path) -> None:
+    """Durable delivery can remint only an operation already completed by its owner."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    recovery = SimpleNamespace(
+        provider_id="google",
+        invoking_agent="general",
+        execution_identity=MagicMock(),
+        operation=SimpleNamespace(
+            operation_id="approval-reset:1:reset-call",
+            connection_generation="connection-generation-1",
+        ),
+        credential_context=MagicMock(),
+    )
+
+    with (
+        patch.object(runner, "_completed_frozen_oauth_reset_result", return_value=None),
+        patch.object(runner, "_oauth_reset_recovery", new=AsyncMock(return_value=recovery)),
+        patch(
+            "mindroom.response_runner.oauth_reset_operation_snapshot",
+            return_value=SimpleNamespace(status="pending", credential_existed=None),
+        ),
+        patch(
+            "mindroom.oauth.reset_execution.execute_oauth_connection_reset",
+            new=AsyncMock(return_value="must not execute"),
+        ) as execute_reset,
+    ):
+        response_text = await runner._completed_oauth_reset_response_text(
+            MagicMock(),
+            require_completed=True,
+        )
+
+    assert response_text is None
+    execute_reset.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3185,6 +3325,87 @@ async def test_outbox_first_claim_remints_authorized_reset_link(tmp_path: Path) 
     assert stale_link not in str(sent[0].payload)
     assert fresh_link in str(sent[0].payload)
     assert execute_reset.await_args.kwargs["operation_id"] == "approval-reset-final-fresh-link:3:reset-call"
+
+
+@pytest.mark.asyncio
+async def test_outbox_first_claim_settles_completed_reset_after_provider_removal(tmp_path: Path) -> None:
+    """Provider config drift cannot strand a proved completed reset FINAL."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-reset-final-provider-removed",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(
+            ApprovalCall(
+                tool_call_id="reset-call",
+                tool_name="reset_oauth_connection",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        ),
+        state="claimed",
+        generation=3,
+        tool_bindings={
+            "reset-call": {
+                "tool_name": "reset_oauth_connection",
+                "arguments_json": '{"provider_id":"removed"}',
+                "invoking_agent": "general",
+                "oauth_reset": {"provider_id": "removed"},
+            },
+        },
+    )
+    stale_link = "https://example.test/api/oauth/removed/authorize?connect_token=expired"
+    delivery = MatrixDelivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        membership_epoch=0,
+        thread_id="$thread",
+        transaction_id="tx-$source-final",
+        payload={
+            "body": stale_link,
+            "m.new_content": {
+                "body": stale_link,
+                DURABLE_FINAL_OUTCOME_KEY: {"body": stale_link, "interactive": None},
+            },
+            "org.example.response_hook": {"connect_url": stale_link},
+        },
+        edits_event_id="$waiting",
+        acknowledged_event_id=None,
+        created_at_ns=1,
+    )
+
+    with (
+        patch.object(
+            runner.deps.approval_store,
+            "approval_continuation_for_source",
+            new=AsyncMock(return_value=continuation),
+        ),
+        patch.object(runner, "_approval_continuation_is_authorized", return_value=True),
+        patch.object(runner, "_completed_frozen_oauth_reset_result", return_value=True),
+        patch.object(
+            runner,
+            "_oauth_reset_recovery",
+            new=AsyncMock(
+                side_effect=response_runner.OAuthResetApprovalBindingError("provider no longer configured"),
+            ),
+        ),
+    ):
+        replacement = await runner._prepare_first_claim_delivery(delivery)
+
+    assert replacement is not None
+    assert stale_link not in str(replacement)
+    nested = replacement["m.new_content"]
+    assert isinstance(nested, dict)
+    assert nested["body"] == response_runner._UNAVAILABLE_OAUTH_RESET_RECONNECT_RECEIPT
 
 
 @pytest.mark.asyncio
@@ -3391,7 +3612,7 @@ async def test_outbox_first_claim_hides_reminted_link_when_continuation_disappea
             assert fresh_link not in str(replacement)
             nested = replacement["m.new_content"]
             assert isinstance(nested, dict)
-            assert nested["body"] == response_runner._UNVERIFIED_OAUTH_RESET_RECEIPT
+            assert nested["body"] == response_runner._MISSING_OAUTH_RESET_OWNER_RECEIPT
 
 
 @pytest.mark.asyncio

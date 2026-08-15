@@ -175,7 +175,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         ):
             credentials = credentials.with_quota_project(self.quota_project_id)
             self.creds = credentials
-        return build("drive", "v3", credentials=credentials)
+        return build("drive", "v3", http=self._google_authorized_http(credentials))
 
     def _register_write_tools(self) -> None:
         sync_tools = (

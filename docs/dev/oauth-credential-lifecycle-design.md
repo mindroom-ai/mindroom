@@ -45,7 +45,7 @@ OAuth operations are rare enough that this concurrency was not worth the correct
 27. Claimed reset recovery re-enters only a durable pending or completed operation by its stable ID, never starts a missing reset, and never resumes the stale paused Agno run.
 28. Credential documents carry a scope-bound self-describing publication record, are durably saved before their counters are published, and repair an interrupted state-file commit under the operation lock.
 29. Pending reset deletion always takes precedence over credential-publication recovery.
-30. Every live or recovery first claim of a reset receipt remints reconnect material under response admission, then holds the membership owner's authorization decision through the atomic durable claim.
+30. Every live or recovery first claim refreshes surviving reconnect material under response admission, preserves policy-removed links, and holds the membership owner's authorization decision through the atomic durable claim.
 31. Revoked claims emit a link-free completion receipt only when the frozen scope-bound locator proves a completed stable operation; missing proof emits a link-free unverified receipt and never starts deletion.
 32. Requester-scoped MCP OAuth rejects missing requester identity before credential or session lookup, and a same-generation HTTP bearer rejection retires the exact session and returns a canonical reconnect response without replaying the remote call.
 
@@ -102,7 +102,7 @@ It does not delete credentials or build links.
 `src/mindroom/custom_tools/oauth_connections.py` owns only live-request authorization and error translation around that executor.
 If teardown is cancelled or fails, deletion does not occur.
 The shared Matrix outbox applies one type-enforced first-claim policy to live and recovery sends, holds response admission across receipt preparation, and holds the membership owner's authorization decision across the final recheck and atomic claim.
-It remints an authorized link from the completed stable operation, atomically replaces revoked reconnect material with a link-free receipt, and preserves already-attempted payloads for transaction-ID reconciliation.
+It remints surviving authorized links from the completed stable operation, preserves links removed by response policy, atomically replaces revoked or unavailable reconnect material with a link-free receipt, and preserves already-attempted payloads for transaction-ID reconciliation.
 
 `src/mindroom/approval_bindings.py` freezes and validates every paused call descriptor.
 OAuth reset bindings add the exact canonical credential target under that generic descriptor and reject a reset mixed with any other call.
@@ -168,7 +168,9 @@ Dashboard disconnect uses the same transaction and fails without deleting creden
 2. The lifecycle transaction advances the durable credential revision and deletes only the credential held under its operation lock.
 3. Other materialized clients observe the new revision before their next managed call and discard cached credentials and services.
 4. Consumers convert the canonical error through `oauth_connection_required(reason="refresh_rejected")`.
-5. Logs contain only allowlisted error codes and bounded metadata.
+5. Nonterminal refresh failures preserve credentials and propagate a sanitized retryable provider error without reconnect material.
+6. Logs contain only allowlisted error codes and bounded metadata.
+7. Google services latch only a final resource HTTP 401 after built-in refresh retries and translate it at the shared managed-client boundary into `oauth_connection_required(reason="access_rejected")` without deleting the refreshed credential.
 
 No consumer infers terminal rejection from free-form error text.
 

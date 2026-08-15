@@ -8,12 +8,15 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from agno.tools.function import Function
 from google.auth.exceptions import RefreshError, TransportError
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
+from google_auth_httplib2 import AuthorizedHttp
+from googleapiclient.errors import HttpError
 
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -473,18 +476,256 @@ def test_google_wrapper_refresh_failure_recovery_is_terminal_only(
         worker_target=worker_target,
     )
 
-    result = tool._ensure_structured_auth()
-
-    assert result is not None
-    payload = json.loads(result)
-    assert payload["oauth_connection_required"] is True
-    assert payload.get("reason") == expected_reason
+    if expected_reason is None:
+        with pytest.raises(RefreshError, match="OAuth credential refresh failed"):
+            tool._ensure_structured_auth()
+        assert tool._consume_oauth_connection_required() == (False, None)
+    else:
+        result = tool._ensure_structured_auth()
+        assert result is not None
+        payload = json.loads(result)
+        assert payload["oauth_connection_required"] is True
+        assert payload.get("reason") == expected_reason
     stored = load_scoped_credentials(
         GoogleDriveTools._oauth_provider.credential_service,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
     assert (stored is not None) is credential_remains
+
+
+@pytest.mark.parametrize(("status", "expected"), [(401, True), (403, False), (200, False)])
+def test_google_http_tracker_records_only_final_401(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    expected: bool,
+) -> None:
+    """The shared transport observes the final response returned after built-in retries."""
+    tool = object.__new__(GoogleDriveTools)
+    tracked_http = tool._google_authorized_http(object())
+
+    def return_response(*_args: object, **_kwargs: object) -> tuple[object, bytes]:
+        return SimpleNamespace(status=status), b"response"
+
+    monkeypatch.setattr("google_auth_httplib2.AuthorizedHttp.request", return_response)
+
+    tracked_http.request("https://www.googleapis.com/example")
+
+    assert tool._consume_google_authorization_rejected() is expected
+
+
+def test_google_sheets_secondary_drive_service_uses_tracked_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The duplicate-sheet Drive client must share the final-401 boundary."""
+    tool = object.__new__(GoogleSheetsTools)
+    credentials = object()
+    tool.creds = credentials
+    built: dict[str, object] = {}
+    service = object()
+
+    def build_service(api: str, version: str, **kwargs: object) -> object:
+        built.update({"api": api, "version": version, **kwargs})
+        return service
+
+    monkeypatch.setattr("mindroom.custom_tools.google_sheets.build", build_service)
+
+    assert tool._build_drive_service() is service
+    assert built["api"] == "drive"
+    assert built["version"] == "v3"
+    assert "credentials" not in built
+    assert isinstance(built["http"], AuthorizedHttp)
+    assert built["http"].credentials is credentials
+
+
+def test_google_sheets_duplicate_initializes_primary_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The override retains upstream authentication and primary-service initialization."""
+    tool = object.__new__(GoogleSheetsTools)
+    tool.creds = _valid_credentials()
+    tool.service = None
+    tool.scopes = ["https://www.googleapis.com/auth/drive"]
+    sheets_service = object()
+
+    class CopyRequest:
+        @staticmethod
+        def execute() -> dict[str, str]:
+            return {"id": "new-sheet"}
+
+    class Files:
+        @staticmethod
+        def copy(**_kwargs: object) -> CopyRequest:
+            return CopyRequest()
+
+    class DriveService:
+        @staticmethod
+        def files() -> Files:
+            return Files()
+
+    monkeypatch.setattr(tool, "_build_service", lambda: sheets_service)
+    monkeypatch.setattr(tool, "_build_drive_service", DriveService)
+
+    result = GoogleSheetsTools.create_duplicate_sheet(
+        tool,
+        "source-sheet",
+        new_title="Copy",
+        copy_permissions=False,
+    )
+
+    assert tool.service is sheets_service
+    assert result.endswith("/new-sheet")
+
+
+def test_gmail_batch_tracks_final_item_401() -> None:
+    """A batch-level HTTP 200 must not hide a final per-item authorization rejection."""
+    tool = object.__new__(GmailTools)
+
+    class Batch:
+        def __init__(self, callback: Callable[..., None]) -> None:
+            self.callback = callback
+
+        def add(self, _request: object, *, request_id: str) -> None:
+            self.request_id = request_id
+
+        def execute(self) -> None:
+            response = SimpleNamespace(status=401, reason="Unauthorized")
+            self.callback(
+                self.request_id,
+                None,
+                HttpError(response, b'{"error":"provider-controlled"}'),
+            )
+
+    class Service:
+        @staticmethod
+        def new_batch_http_request(*, callback: Callable[..., None]) -> Batch:
+            return Batch(callback)
+
+    tool.service = Service()
+    tool.max_batch_size = 10
+
+    results = tool._batch_get(["message-1"], lambda _message_id: object())
+
+    assert results == [{"id": "message-1", "error": "Google request failed"}]
+    assert tool._consume_google_authorization_rejected() is True
+
+
+@pytest.mark.parametrize("operation_name", ["read_operation", "write_operation"])
+def test_google_wrapper_maps_swallowed_final_resource_401_to_access_rejected(
+    runtime_paths: RuntimePaths,
+    operation_name: str,
+) -> None:
+    """Managed Google read and write errors share one structured final-401 boundary."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    service = GoogleDriveTools._oauth_provider.credential_service
+    save_scoped_credentials(
+        service,
+        {
+            "token": "retained-access-token",
+            "refresh_token": "retained-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool.service = object()
+
+    def swallowed_resource_401() -> str:
+        tool._google_service_state().authorization_rejected = True
+        return json.dumps({"error": "provider-controlled 401 detail"})
+
+    tool.functions = {
+        operation_name: Function(name=operation_name, entrypoint=swallowed_resource_401),
+    }
+    tool._wrap_oauth_function_entrypoints()
+
+    entrypoint = tool.functions[operation_name].entrypoint
+    assert entrypoint is not None
+    result = entrypoint()
+    assert isinstance(result, str)
+    payload = json.loads(result)
+
+    assert payload["oauth_connection_required"] is True
+    assert payload["reason"] == "access_rejected"
+    assert "provider-controlled" not in json.dumps(payload)
+    assert tool.creds is None
+    assert tool.service is None
+    stored = load_scoped_credentials(
+        service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    assert stored is not None
+    assert stored["token"] == "retained-access-token"  # noqa: S105
+
+
+def test_nested_google_wrapper_preserves_final_resource_401_for_outer_owner(
+    runtime_paths: RuntimePaths,
+) -> None:
+    """A nested tool call must leave final-401 translation to the outer entrypoint."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    service = GoogleDriveTools._oauth_provider.credential_service
+    save_scoped_credentials(
+        service,
+        {
+            "token": "retained-access-token",
+            "refresh_token": "retained-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+
+    def inner_operation() -> str:
+        tool._google_service_state().authorization_rejected = True
+        return json.dumps({"error": "provider-controlled 401 detail"})
+
+    def outer_operation() -> str:
+        inner_payload = json.loads(tool.inner_operation())
+        return json.dumps({"error": inner_payload["error"]})
+
+    tool.functions = {
+        "inner_operation": Function(name="inner_operation", entrypoint=inner_operation),
+        "outer_operation": Function(name="outer_operation", entrypoint=outer_operation),
+    }
+    tool._wrap_oauth_function_entrypoints()
+
+    result = tool.outer_operation()
+    payload = json.loads(result)
+
+    assert payload["oauth_connection_required"] is True
+    assert payload["reason"] == "access_rejected"
+    assert "provider-controlled" not in result
 
 
 def test_google_lazy_refresh_rejects_expired_access_only_snapshot(runtime_paths: RuntimePaths) -> None:
@@ -807,15 +1048,15 @@ def test_google_lazy_refresh_reuses_rotation_committed_for_a_stale_client(
         credentials.expiry = datetime.fromtimestamp(4_102_444_800.0, tz=UTC)  # type: ignore[attr-defined]
 
     monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", rotate)
-    built_credentials: list[GoogleOAuthCredentials] = []
+    built_http: list[Any] = []
 
     def build_drive_service(
         _service_name: str,
         _version: str,
         *,
-        credentials: GoogleOAuthCredentials,
+        http: Any,  # noqa: ANN401
     ) -> object:
-        built_credentials.append(credentials)
+        built_http.append(http)
         return object()
 
     monkeypatch.setattr("mindroom.custom_tools.google_drive.build", build_drive_service)
@@ -827,9 +1068,10 @@ def test_google_lazy_refresh_reuses_rotation_committed_for_a_stale_client(
     assert provider_calls == 1
     assert tools[0].creds.token == rotated_access
     assert tools[1].creds.token == rotated_access
-    assert built_credentials == [tools[0].creds]
-    assert built_credentials[0].quota_project_id == "billing-project"
-    assert "refresh" in built_credentials[0].__dict__
+    assert len(built_http) == 1
+    assert built_http[0].credentials is tools[0].creds
+    assert built_http[0].credentials.quota_project_id == "billing-project"
+    assert "refresh" in built_http[0].credentials.__dict__
 
 
 def test_google_lazy_refresh_serializes_local_snapshot_publication(  # noqa: PLR0915

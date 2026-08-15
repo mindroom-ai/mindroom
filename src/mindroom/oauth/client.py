@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import threading
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -12,7 +13,7 @@ from enum import Enum, auto
 from functools import wraps
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
-from google.auth.exceptions import RefreshError
+from google.auth.exceptions import GoogleAuthError, RefreshError
 from google.auth.transport import requests as google_requests
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
@@ -36,6 +37,7 @@ from mindroom.oauth.providers import (
     oauth_connection_required_payload,
 )
 from mindroom.oauth.service import (
+    OAUTH_ACCESS_REJECTED_REASON,
     OAUTH_REFRESH_REJECTED_REASON,
     oauth_connection_required,
 )
@@ -44,7 +46,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
     from structlog.stdlib import BoundLogger
 
@@ -100,6 +102,7 @@ class _OAuthClientThreadState(threading.local):
     def __init__(self) -> None:
         self.connection_required = False
         self.connection_reason: str | None = None
+        self.entrypoint_depth = 0
 
 
 class _AuthDescriptor(Protocol):
@@ -131,7 +134,9 @@ class ScopedOAuthClientMixin:
     service: Any | None
     _google_credential_key: object | None
 
-    def _adopt_google_credential_revision(self, value: object) -> None: ...
+    _adopt_google_credential_revision: Callable[[object], None]
+    _reset_google_authorization_rejected: Callable[[], None]
+    _consume_google_authorization_rejected: Callable[[], bool]
 
     def _apply_runtime_original_auth_kwargs(self, kwargs: dict[str, Any]) -> bool:
         """Populate upstream Google auth kwargs from the resolved runtime env."""
@@ -207,23 +212,84 @@ class ScopedOAuthClientMixin:
         kwargs: dict[str, object],
     ) -> object:
         """Run one wrapped call while retaining its thread-local auth outcome."""
-        self._clear_oauth_connection_required()
+        with self._oauth_entrypoint_scope() as outermost:
+            return self._run_scoped_oauth_entrypoint(entrypoint, args, kwargs, outermost=outermost)
+
+    @contextmanager
+    def _oauth_entrypoint_scope(self) -> Iterator[bool]:
+        """Let only the outermost nested tool entrypoint own shared auth outcomes."""
+        state = self._oauth_call_state
+        outermost = state.entrypoint_depth == 0
+        if outermost:
+            self._clear_oauth_connection_required()
+            self._reset_google_authorization_rejected()
+        state.entrypoint_depth += 1
+        try:
+            yield outermost
+        finally:
+            state.entrypoint_depth -= 1
+            if outermost:
+                self._clear_oauth_connection_required()
+                self._reset_google_authorization_rejected()
+
+    def _run_scoped_oauth_entrypoint(
+        self,
+        entrypoint: Callable[..., object],
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+        *,
+        outermost: bool,
+    ) -> object:
+        """Run one entrypoint and translate shared auth state at its outer boundary."""
         try:
             if result := self._ensure_structured_auth():
                 return result
             result = entrypoint(*args, **kwargs)
         except RefreshError:
-            required, reason = self._consume_oauth_connection_required()
-            if required:
-                return self._structured_auth_failure(self._connection_required(reason=reason))
+            if not outermost:
+                raise
+            if translated := self._outer_refresh_error_result():
+                return translated
+            raise
+        except Exception:
+            if not outermost:
+                raise
+            if translated := self._google_access_rejection_result():
+                return translated
             raise
         else:
-            required, reason = self._consume_oauth_connection_required()
-            if required:
-                return self._structured_auth_failure(self._connection_required(reason=reason))
+            if not outermost:
+                return result
+            return self._outer_oauth_entrypoint_result(result)
+
+    def _outer_refresh_error_result(self) -> str | None:
+        """Translate shared auth state after an outer RefreshError."""
+        if rejected := self._google_access_rejection_result():
+            return rejected
+        required, reason = self._consume_oauth_connection_required()
+        if not required:
+            return None
+        return self._structured_auth_failure(self._connection_required(reason=reason))
+
+    def _outer_oauth_entrypoint_result(self, result: object) -> object:
+        """Replace an outer tool result when nested auth state requires it."""
+        if rejected := self._google_access_rejection_result():
+            return rejected
+        required, reason = self._consume_oauth_connection_required()
+        if not required:
             return result
-        finally:
-            self._clear_oauth_connection_required()
+        return self._structured_auth_failure(self._connection_required(reason=reason))
+
+    def _google_access_rejection_result(self) -> str | None:
+        """Translate a final managed resource 401 after provider refresh retries."""
+        rejected = self._consume_google_authorization_rejected()
+        if not rejected or self._provided_creds or self._defer_to_original_auth:
+            return None
+        self.creds = None
+        self.service = None
+        return self._structured_auth_failure(
+            self._connection_required(reason=OAUTH_ACCESS_REJECTED_REASON),
+        )
 
     def _copy_supplied_google_credentials(self, credentials: Any) -> GoogleOAuthCredentials:  # noqa: ANN401
         """Copy supported caller credentials into private blocking credentials."""
@@ -294,6 +360,7 @@ class ScopedOAuthClientMixin:
                 return None
             self._auth_with_stored_oauth()
         except OAuthConnectionRequired as exc:
+            self._mark_oauth_connection_required(reason=exc.reason)
             return self._structured_auth_failure(exc)
         return None
 
@@ -477,8 +544,8 @@ class ScopedOAuthClientMixin:
             return None
         try:
             credentials.refresh(request)
-        except RefreshError as exc:
-            error_code = _google_refresh_error_code(exc)
+        except GoogleAuthError as exc:
+            error_code = _google_refresh_error_code(exc) if isinstance(exc, RefreshError) else None
             if is_terminal_oauth_refresh_error_code(error_code):
                 raise OAuthRefreshRejectedError(
                     _SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE,
@@ -635,8 +702,8 @@ class ScopedOAuthClientMixin:
             self.creds = None
             self.service = None
             raise self._connection_required(reason=OAUTH_REFRESH_REJECTED_REASON) from exc
-        except OAuthProviderError as exc:
-            raise self._connection_required() from exc
+        except OAuthProviderError:
+            raise _SanitizedGoogleRefreshError(_SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE) from None
         except Exception as exc:
             self._oauth_logger.warning(
                 "oauth_authentication_failed",

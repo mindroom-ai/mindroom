@@ -1198,12 +1198,10 @@ def _normalized_refresh_error(exc: OAuthProviderError) -> OAuthProviderError:
             _OAUTH_REFRESH_FAILED_MESSAGE,
             oauth_error=exc.oauth_error,
         )
-    if isinstance(exc, OAuthRefreshRejectedError):
-        return OAuthProviderError(
-            _OAUTH_REFRESH_FAILED_MESSAGE,
-            oauth_error=exc.oauth_error,
-        )
-    return exc
+    return OAuthProviderError(
+        _OAUTH_REFRESH_FAILED_MESSAGE,
+        oauth_error=exc.oauth_error,
+    )
 
 
 def _log_oauth_refresh_skipped(

@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _PENDING_ACCESS_TOKEN = "mindroom-oauth-connection-pending"  # noqa: S105
+_SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
 
 
 class _GithubThreadState(threading.local):
@@ -192,8 +193,13 @@ class GithubTools(AgnoGithubTools):
                 provider_id=self._oauth_provider.id,
                 error_type=type(exc).__name__,
             )
-            reason = OAUTH_REFRESH_REJECTED_REASON if isinstance(exc, OAuthRefreshRejectedError) else None
-            raise self._connection_required(reason=reason) from exc
+            if isinstance(exc, OAuthRefreshRejectedError):
+                self.access_token = None
+                raise self._connection_required(reason=OAUTH_REFRESH_REJECTED_REASON) from exc
+            raise OAuthProviderError(
+                _SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE,
+                oauth_error=exc.oauth_error,
+            ) from None
         if not oauth_credentials_usable(self._oauth_provider, self._runtime_paths, credentials):
             raise self._connection_required()
         token = _normalized_access_token(

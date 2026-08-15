@@ -25,7 +25,7 @@ from mindroom.credentials import (
 )
 from mindroom.custom_tools.github import GithubTools
 from mindroom.oauth import credential_lifecycle
-from mindroom.oauth.providers import OAuthRefreshRejectedError
+from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 
 if TYPE_CHECKING:
@@ -878,11 +878,12 @@ def test_terminal_refresh_failure_returns_safe_connection_payload(tmp_path: Path
         patch("mindroom.custom_tools.github.refresh_oauth_credentials_blocking", side_effect=reject_refresh),
         patch("mindroom.custom_tools.github.logger", logger),
     ):
-        result = tool_class(
+        tool = tool_class(
             runtime_paths=runtime_paths,
             credentials_manager=manager,
             worker_target=target,
-        ).list_repositories()
+        )
+        result = tool.list_repositories()
 
     payload = json.loads(result)
     assert payload["oauth_connection_required"] is True
@@ -891,6 +892,49 @@ def test_terminal_refresh_failure_returns_safe_connection_payload(tmp_path: Path
     assert "session for this agent expired or is no longer valid" in payload["error"]
     assert leaked_secret not in result
     assert leaked_secret not in repr(logger.warning_calls)
+    assert tool.access_token is None
+
+
+def test_transient_refresh_failure_is_retryable_without_reconnect_payload(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool_class = _tool_class()
+    target = _worker_target("@alice:example.test")
+    oauth_target = _oauth_target("@alice:example.test")
+    leaked_detail = "temporary provider failure with secret detail"
+    original = _oauth_credentials("old-access", refresh_token=OLD_REFRESH_TOKEN, expires_at=1.0)
+    save_scoped_credentials(
+        "github_oauth",
+        original,
+        credentials_manager=manager,
+        worker_target=oauth_target,
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.github.refresh_oauth_credentials_blocking",
+            side_effect=OAuthProviderError(leaked_detail, oauth_error="temporarily_unavailable"),
+        ),
+        pytest.raises(OAuthProviderError) as exc_info,
+    ):
+        tool_class(
+            runtime_paths=runtime_paths,
+            credentials_manager=manager,
+            worker_target=target,
+        ).list_repositories()
+
+    assert type(exc_info.value) is OAuthProviderError
+    assert str(exc_info.value) == "OAuth credential refresh failed"
+    assert leaked_detail not in str(exc_info.value)
+    assert "/api/oauth/" not in str(exc_info.value)
+    assert (
+        load_scoped_credentials(
+            "github_oauth",
+            credentials_manager=manager,
+            worker_target=oauth_target,
+        )
+        == original
+    )
 
 
 def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path) -> None:

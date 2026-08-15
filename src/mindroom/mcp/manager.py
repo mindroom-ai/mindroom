@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
+_SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
 
 # The cap matches STARTUP_RETRY_MAX_DELAY_SECONDS so a recovered required server
 # unblocks its dependent agents no slower than the bot-start retry loop did.
@@ -499,12 +500,7 @@ class MCPServerManager:
                         state.retired = True
                         states.append(state)
                         seen_state_ids.add(id(state))
-                for state in states:
-                    await self._cancel_refresh_task(state)
-                    async with state.lock:
-                        await self._disconnect_state_when_idle(state)
-                    async with self._state_lifecycle_lock:
-                        self._retiring_states.pop(id(state), None)
+                await run_coroutine_until_complete(self._drain_retired_request_states(tuple(states)))
                 yield
             finally:
                 self._retired_request_keys.discard(request_key)
@@ -602,8 +598,12 @@ class MCPServerManager:
         except OAuthProviderError as exc:
             failed_credentials = (await load_oauth_credentials_snapshot(context)).credentials
             self._log_oauth_refresh_failure(state, provider.id, failed_credentials or {}, exc)
-            reason = OAUTH_REFRESH_REJECTED_REASON if isinstance(exc, OAuthRefreshRejectedError) else None
-            raise oauth_connection_required(context, reason=reason) from exc
+            if isinstance(exc, OAuthRefreshRejectedError):
+                raise oauth_connection_required(context, reason=OAUTH_REFRESH_REJECTED_REASON) from exc
+            raise OAuthProviderError(
+                _SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE,
+                oauth_error=exc.oauth_error,
+            ) from None
         if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
             raise oauth_connection_required(context)
         assert credentials is not None
@@ -1333,6 +1333,15 @@ class MCPServerManager:
                     server_id=state.server_id,
                     error_type=type(exc).__name__,
                 )
+            async with self._state_lifecycle_lock:
+                self._retiring_states.pop(id(state), None)
+
+    async def _drain_retired_request_states(self, states: tuple[MCPServerState, ...]) -> None:
+        """Close requester states before reset, failing closed on teardown errors."""
+        for state in states:
+            await self._cancel_refresh_task(state)
+            async with state.lock:
+                await self._disconnect_state_when_idle(state)
             async with self._state_lifecycle_lock:
                 self._retiring_states.pop(id(state), None)
 

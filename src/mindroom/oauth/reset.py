@@ -33,7 +33,7 @@ class OAuthResetTargetError(ValueError):
     """One requested provider cannot resolve to a safe agent credential target."""
 
 
-class _OAuthResetApprovalBindingError(RuntimeError):
+class OAuthResetApprovalBindingError(RuntimeError):
     """One approved OAuth reset no longer resolves to its original credential target."""
 
 
@@ -140,12 +140,12 @@ async def build_oauth_reset_approval_bindings(
             continue
         if execution_identity is None:
             msg = "OAuth reset approval requires an execution identity."
-            raise _OAuthResetApprovalBindingError(msg)
+            raise OAuthResetApprovalBindingError(msg)
         tool_args = tool.tool_args
         provider_id = tool_args.get("provider_id") if isinstance(tool_args, dict) else None
         if not isinstance(provider_id, str) or not provider_id:
             msg = "OAuth reset approval requires a provider_id."
-            raise _OAuthResetApprovalBindingError(msg)
+            raise OAuthResetApprovalBindingError(msg)
         try:
             target = resolve_oauth_reset_target(
                 provider_id,
@@ -155,7 +155,7 @@ async def build_oauth_reset_approval_bindings(
                 execution_identity=execution_identity,
             )
         except OAuthResetTargetError as exc:
-            raise _OAuthResetApprovalBindingError(str(exc)) from exc
+            raise OAuthResetApprovalBindingError(str(exc)) from exc
         bindings[tool_call_id] = await _oauth_reset_target_binding(target)
     return bindings
 
@@ -179,7 +179,7 @@ async def validate_oauth_reset_approval_bindings(
         provider_id = binding.get("provider_id") if binding is not None else None
         if not isinstance(provider_id, str) or not provider_id:
             msg = "Approved OAuth credential target is missing; run the reset again."
-            raise _OAuthResetApprovalBindingError(msg)
+            raise OAuthResetApprovalBindingError(msg)
         try:
             target = resolve_oauth_reset_target(
                 provider_id,
@@ -190,7 +190,7 @@ async def validate_oauth_reset_approval_bindings(
             )
         except OAuthResetTargetError as exc:
             msg = "Approved OAuth credential target changed or is unavailable; run the reset again."
-            raise _OAuthResetApprovalBindingError(msg) from exc
+            raise OAuthResetApprovalBindingError(msg) from exc
         assert binding is not None
         if allow_connection_generation_drift:
             ignored_keys = {"credential_generation", "connection_generation"}
@@ -202,7 +202,7 @@ async def validate_oauth_reset_approval_bindings(
         current_binding = {key: value for key, value in current_binding.items() if key not in ignored_keys}
         if binding != current_binding:
             msg = "Approved OAuth credential target changed; run the reset again."
-            raise _OAuthResetApprovalBindingError(msg)
+            raise OAuthResetApprovalBindingError(msg)
 
 
 async def _oauth_reset_target_binding(target: _ResolvedOAuthResetTarget) -> dict[str, object]:
@@ -221,7 +221,7 @@ def _oauth_reset_target_identity_binding(target: _ResolvedOAuthResetTarget) -> d
     credential_requester_id = execution_identity.requester_id if execution_identity is not None else None
     if not credential_requester_id:
         msg = "Agent-initiated OAuth reset requires a canonical requester identity."
-        raise _OAuthResetApprovalBindingError(msg)
+        raise OAuthResetApprovalBindingError(msg)
     return {
         "provider_id": target.provider.id,
         "credential_service": target.provider.credential_service,

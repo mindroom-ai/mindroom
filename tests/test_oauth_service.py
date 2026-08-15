@@ -1058,9 +1058,12 @@ async def test_nonterminal_refresh_failure_preserves_credentials_and_bounds_logs
     original = _credentials(ACCESS_0, CHAIN_0, expires_at=1.0)
     _save(context, original)
 
-    with pytest.raises(OAuthProviderError):
+    with pytest.raises(OAuthProviderError) as exc_info:
         await refresh_oauth_credentials_with_result(context)
 
+    assert type(exc_info.value) is OAuthProviderError
+    assert str(exc_info.value) == "OAuth credential refresh failed"
+    assert provider_error not in str(exc_info.value)
     assert _load(context) == original
     assert logger.warning_calls[0][1]["reason"] == "provider_refresh_failed"
     assert logger.warning_calls[0][1]["oauth_error"] == "unrecognized"

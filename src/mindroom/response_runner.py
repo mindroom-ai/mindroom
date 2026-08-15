@@ -60,7 +60,7 @@ from mindroom.history.interrupted_replay import persist_interrupted_replay_snaps
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
-from mindroom.interactive import InteractiveMetadata
+from mindroom.interactive import INTERACTIVE_PROMPT_KEY, InteractiveMetadata
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.matrix.typing import typing_indicator
@@ -72,6 +72,8 @@ from mindroom.memory import (
 )
 from mindroom.oauth.credential_lifecycle import oauth_reset_operation_snapshot
 from mindroom.oauth.reset import (
+    OAuthResetApprovalBindingError,
+    OAuthResetTargetError,
     completed_oauth_reset_result_from_binding,
     resolve_oauth_reset_target,
     validate_oauth_reset_approval_bindings,
@@ -439,28 +441,38 @@ _UNVERIFIED_OAUTH_RESET_RECEIPT = (
     "OAuth connection reset status could not be verified. Current authorization no longer permits "
     "publishing a reconnect link in this conversation."
 )
+_MISSING_OAUTH_RESET_OWNER_RECEIPT = (
+    "OAuth reset status and current authorization could not be verified. No reconnect link was published."
+)
+_UNAVAILABLE_OAUTH_RESET_RECONNECT_RECEIPT = (
+    "OAuth connection reset completed, but current configuration cannot issue a reconnect link. "
+    "Restore this provider for the agent, then run the reset again for a fresh link."
+)
+_WITHHELD_OAUTH_CONNECT_URL = "[OAuth reconnect link withheld]"
 _OAUTH_CONNECT_URL_PATTERN = re.compile(r"https?://[^\s<>\"'`]+?(?=;\s|[\s<>\"'`]|$)")
 
 
 def _replace_final_delivery_body(payload: Mapping[str, object], body: str) -> dict[str, object]:
     """Replace visible and semantic body fields without disturbing delivery identity."""
-    replacement = dict(payload)
-    nested = payload.get("m.new_content")
+    replacement = _replace_oauth_connect_urls(payload, replacement_url=_WITHHELD_OAUTH_CONNECT_URL)
+    nested = replacement.get("m.new_content")
     visible = dict(cast("dict[str, object]", nested)) if isinstance(nested, dict) else replacement
     visible["body"] = body
     visible["formatted_body"] = body
     semantic = visible.get(DURABLE_FINAL_OUTCOME_KEY)
     if isinstance(semantic, dict):
-        visible[DURABLE_FINAL_OUTCOME_KEY] = {**semantic, "body": body}
+        visible[DURABLE_FINAL_OUTCOME_KEY] = {**semantic, "body": body, "interactive": None}
     visible.pop(TOOL_TRACE_CONTENT_KEY, None)
+    visible.pop(INTERACTIVE_PROMPT_KEY, None)
     if visible is not replacement:
         replacement["m.new_content"] = visible
         replacement["body"] = f"* {body}"
         replacement["formatted_body"] = body
         top_level_semantic = replacement.get(DURABLE_FINAL_OUTCOME_KEY)
         if isinstance(top_level_semantic, dict):
-            replacement[DURABLE_FINAL_OUTCOME_KEY] = {**top_level_semantic, "body": body}
+            replacement[DURABLE_FINAL_OUTCOME_KEY] = {**top_level_semantic, "body": body, "interactive": None}
         replacement.pop(TOOL_TRACE_CONTENT_KEY, None)
+        replacement.pop(INTERACTIVE_PROMPT_KEY, None)
     return replacement
 
 
@@ -491,23 +503,37 @@ def _refresh_oauth_connect_urls_in_delivery(
         msg = "Fresh OAuth reset receipt has no requester-bound connect URL"
         raise ValueError(msg)
 
-    def refresh(value: object) -> object:
+    return _replace_oauth_connect_urls(payload, replacement_url=fresh_url)
+
+
+def _replace_oauth_connect_urls(
+    payload: Mapping[str, object],
+    *,
+    replacement_url: str,
+) -> dict[str, object]:
+    """Replace requester-bound OAuth URLs in every nested payload value."""
+
+    def replace(value: object) -> object:
         if isinstance(value, str):
 
             def replace_url(match: re.Match[str]) -> str:
                 matched = match.group(0)
                 if _oauth_connect_url_from_text(matched) is None:
                     return matched
-                return escape(fresh_url, quote=True) if "&amp;" in matched else fresh_url
+                return escape(replacement_url, quote=True) if "&amp;" in matched else replacement_url
 
             return _OAUTH_CONNECT_URL_PATTERN.sub(replace_url, value)
         if isinstance(value, dict):
-            return {key: refresh(item) for key, item in value.items()}
+            return {
+                key: replace(item)
+                for key, item in value.items()
+                if not isinstance(key, str) or _oauth_connect_url_from_text(key) is None
+            }
         if isinstance(value, list):
-            return [refresh(item) for item in value]
+            return [replace(item) for item in value]
         return value
 
-    return {key: refresh(value) for key, value in payload.items()}
+    return cast("dict[str, object]", replace(dict(payload)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1374,34 +1400,9 @@ class ResponseRunner:
         target: MessageTarget,
     ) -> FinalDeliveryOutcome | None:
         """Deliver a proved reset receipt for the active lifecycle to finalize exactly once."""
-        from mindroom.oauth.reset_execution import execute_oauth_connection_reset  # noqa: PLC0415
-
-        recovery = await self._oauth_reset_recovery(claimed)
-        if recovery is None:
+        response_text = await self._completed_oauth_reset_response_text(claimed)
+        if response_text is None:
             return None
-        try:
-            reset_operation = oauth_reset_operation_snapshot(
-                recovery.credential_context,
-                recovery.operation.operation_id,
-            )
-        except Exception as exc:
-            msg = "OAuth reset receipt recovery remains pending"
-            raise _OAuthResetReceiptRecoveryError(msg) from exc
-        if reset_operation is None:
-            return None
-        try:
-            response_text = await execute_oauth_connection_reset(
-                recovery.provider_id,
-                agent_name=recovery.invoking_agent,
-                config=self.deps.runtime.config,
-                runtime_paths=self.deps.runtime_paths,
-                execution_identity=recovery.execution_identity,
-                operation_id=recovery.operation.operation_id,
-                expected_connection_generation=recovery.operation.connection_generation,
-            )
-        except Exception as exc:
-            msg = "Completed OAuth reset receipt recovery remains pending"
-            raise _OAuthResetReceiptRecoveryError(msg) from exc
         try:
             outcome = await self._deliver_recovered_oauth_reset_outcome(
                 claimed,
@@ -1415,6 +1416,57 @@ class ResponseRunner:
             msg = "Completed OAuth reset receipt recovery remains pending"
             raise _OAuthResetReceiptRecoveryError(msg)
         return outcome
+
+    async def _completed_oauth_reset_response_text(
+        self,
+        claimed: ApprovalContinuation,
+        *,
+        require_completed: bool = False,
+    ) -> str | None:
+        """Return a fresh receipt, or a link-free receipt from frozen completion proof."""
+        from mindroom.oauth.reset_execution import execute_oauth_connection_reset  # noqa: PLC0415
+
+        frozen_completed = self._completed_frozen_oauth_reset_result(claimed) is not None
+        try:
+            recovery = await self._oauth_reset_recovery(claimed)
+        except (OAuthResetApprovalBindingError, OAuthResetTargetError) as exc:
+            if frozen_completed:
+                return _UNAVAILABLE_OAUTH_RESET_RECONNECT_RECEIPT
+            msg = "OAuth reset receipt recovery remains pending"
+            raise _OAuthResetReceiptRecoveryError(msg) from exc
+        except Exception as exc:
+            msg = "OAuth reset receipt recovery remains pending"
+            raise _OAuthResetReceiptRecoveryError(msg) from exc
+        if recovery is None:
+            return _UNAVAILABLE_OAUTH_RESET_RECONNECT_RECEIPT if frozen_completed else None
+        try:
+            reset_operation = oauth_reset_operation_snapshot(
+                recovery.credential_context,
+                recovery.operation.operation_id,
+            )
+        except Exception as exc:
+            msg = "OAuth reset receipt recovery remains pending"
+            raise _OAuthResetReceiptRecoveryError(msg) from exc
+        if reset_operation is None or (require_completed and reset_operation.status != "completed"):
+            return _UNAVAILABLE_OAUTH_RESET_RECONNECT_RECEIPT if frozen_completed else None
+        try:
+            return await execute_oauth_connection_reset(
+                recovery.provider_id,
+                agent_name=recovery.invoking_agent,
+                config=self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
+                execution_identity=recovery.execution_identity,
+                operation_id=recovery.operation.operation_id,
+                expected_connection_generation=recovery.operation.connection_generation,
+            )
+        except OAuthResetTargetError as exc:
+            if frozen_completed:
+                return _UNAVAILABLE_OAUTH_RESET_RECONNECT_RECEIPT
+            msg = "OAuth reset receipt recovery remains pending"
+            raise _OAuthResetReceiptRecoveryError(msg) from exc
+        except Exception as exc:
+            msg = "OAuth reset receipt recovery remains pending"
+            raise _OAuthResetReceiptRecoveryError(msg) from exc
 
     async def _deliver_recovered_oauth_reset_outcome(
         self,
@@ -2610,7 +2662,7 @@ class ResponseRunner:
                 return
             continuation = await self.deps.approval_store.approval_continuation_for_source(delivery.delivery_id)
             if continuation is None:
-                yield _replace_final_delivery_body(delivery.payload, _UNVERIFIED_OAUTH_RESET_RECEIPT)
+                yield _replace_final_delivery_body(delivery.payload, _MISSING_OAUTH_RESET_OWNER_RECEIPT)
                 return
             async with self.deps.runtime.agent_reply_memberships.authorization_decision():
                 if not self._approval_continuation_is_authorized(continuation):
@@ -2646,29 +2698,15 @@ class ResponseRunner:
             response_text = _REVOKED_OAUTH_RESET_RECEIPT if operation_completed else _UNVERIFIED_OAUTH_RESET_RECEIPT
             return _replace_final_delivery_body(delivery.payload, response_text)
 
-        from mindroom.oauth.reset_execution import execute_oauth_connection_reset  # noqa: PLC0415
-
-        recovery = await self._oauth_reset_recovery(continuation)
-        if recovery is None:
+        response_text = await self._completed_oauth_reset_response_text(continuation, require_completed=True)
+        if response_text is None:
             msg = "OAuth reset receipt has no stable completed operation"
             raise _OAuthResetReceiptRecoveryError(msg)
-        operation = oauth_reset_operation_snapshot(
-            recovery.credential_context,
-            recovery.operation.operation_id,
-        )
-        if operation is None or operation.status != "completed":
-            msg = "OAuth reset receipt operation remains incomplete"
-            raise _OAuthResetReceiptRecoveryError(msg)
-        response_text = await execute_oauth_connection_reset(
-            recovery.provider_id,
-            agent_name=recovery.invoking_agent,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-            execution_identity=recovery.execution_identity,
-            operation_id=recovery.operation.operation_id,
-            expected_connection_generation=recovery.operation.connection_generation,
-        )
-        return _refresh_oauth_connect_urls_in_delivery(delivery.payload, response_text)
+        if response_text == _UNAVAILABLE_OAUTH_RESET_RECONNECT_RECEIPT:
+            replacement = _replace_final_delivery_body(delivery.payload, response_text)
+        else:
+            replacement = _refresh_oauth_connect_urls_in_delivery(delivery.payload, response_text)
+        return replacement
 
     async def _settle_unauthorized_approval_continuation(
         self,
