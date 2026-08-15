@@ -179,6 +179,23 @@ def _append_config_only_presets(tools: list[dict[str, Any]]) -> None:
         )
 
 
+def _project_agent_repository_dashboard_tool(
+    tools: list[dict[str, Any]],
+    config: Config,
+) -> None:
+    """Expose the operator-managed repository tool only when global policy exists."""
+    if config.agent_repositories is None:
+        tools[:] = [tool for tool in tools if tool.get("name") != "agent_repository"]
+        return
+    for tool in tools:
+        if tool.get("name") != "agent_repository":
+            continue
+        tool["status"] = "available"
+        tool["setup_type"] = "none"
+        tool["config_fields"] = None
+        return
+
+
 def _annotate_dashboard_configuration_support(
     tools: list[dict[str, Any]],
     *,
@@ -405,6 +422,7 @@ async def get_registered_tools(
         tolerate_plugin_load_errors=True,
     )
     tools = export_tools_metadata(tool_metadata)
+    _project_agent_repository_dashboard_tool(tools, config)
     execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
     context = _resolve_tool_availability_context(
         request,
