@@ -47,9 +47,10 @@ from mindroom.config.agent import (
     CultureConfig,
     TeamConfig,
 )
+from mindroom.config.agent_repository import AgentRepositoriesConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig, ToolConfigEntry
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
@@ -1038,6 +1039,30 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["duckduckgo"] is None
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agent_storage.SqliteDb")
+def test_create_agent_provisions_workspace_for_shared_repository_tool(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Shared repository agents need a canonical workspace independent of memory backend."""
+    mock_get_tool_by_name.return_value = MagicMock()
+    config = _test_config()
+    config.agent_repositories = AgentRepositoriesConfig(
+        organization="example-org",
+        prefix="MindRoom",
+    )
+    config.agents["general"].tools = [ToolConfigEntry(name="agent_repository")]
+    config.agents["general"].include_default_tools = False
+    config.agents["general"].worker_scope = "shared"
+
+    _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+
+    repository_call = next(call for call in mock_get_tool_by_name.call_args_list if call.args[0] == "agent_repository")
+    assert repository_call.kwargs["tool_output_workspace_root"] == agent_workspace_root_path(tmp_path, "general")
 
 
 def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_path: Path) -> None:

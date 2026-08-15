@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mindroom.config.agent_repository import AGENT_REPOSITORY_TOOL_NAME
 from mindroom.constants import RuntimePaths, config_relative_path
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 
@@ -379,7 +380,8 @@ def _resolve_workspace(
         return None
 
     if agent_config.private is None:
-        if config.resolve_entity(agent_name).memory_backend != "file":
+        uses_file_memory = config.resolve_entity(agent_name).memory_backend == "file"
+        if not uses_file_memory and AGENT_REPOSITORY_TOOL_NAME not in agent_config.tool_names:
             return None
         root = resolve_workspace_relative_path(
             state_storage_path,
@@ -391,7 +393,7 @@ def _resolve_workspace(
         return ResolvedAgentWorkspace(
             root=root,
             context_files=(),
-            file_memory_path=root,
+            file_memory_path=root if uses_file_memory else None,
         )
 
     workspace = _effective_workspace(agent_name, config, runtime_paths=runtime_paths)

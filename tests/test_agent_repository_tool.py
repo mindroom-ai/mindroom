@@ -160,22 +160,23 @@ async def test_ensure_runs_no_git_network_or_push_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Provisioning only edits local Git metadata; workers perform scoped pushes later."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
     commands: list[tuple[str, ...]] = []
-    real_run_local_git = agent_repositories_module._run_local_git
+    real_subprocess_run = agent_repositories_module.subprocess.run
 
-    def record_local_git(workspace: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
-        commands.append(arguments)
-        return real_run_local_git(workspace, *arguments)
+    def record_subprocess_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(tuple(arguments))
+        return real_subprocess_run(arguments, **kwargs)
 
-    monkeypatch.setattr(agent_repositories_module, "_run_local_git", record_local_git)
+    monkeypatch.setattr(agent_repositories_module.subprocess, "run", record_subprocess_run)
 
-    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker()).ensure_my_repository())
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
 
     assert payload["status"] == "ok"
     assert commands
-    assert not {"clone", "fetch", "pull", "push", "ls-remote"} & {
-        argument for command in commands for argument in command
-    }
+    assert all(command[:2] == ("git", "config") for command in commands)
 
 
 @pytest.mark.asyncio
@@ -302,6 +303,61 @@ async def test_symlinked_git_metadata_fails_without_mutating_target(tmp_path: Pa
     assert payload["status"] == "error"
     assert "Git metadata" in payload["error"]
     assert (external / ".git" / "config").read_bytes() == config_before
+
+
+@pytest.mark.asyncio
+async def test_symlinked_git_config_fails_without_mutating_target(tmp_path: Path) -> None:
+    """Trusted origin setup must never follow a nested Git config link."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    external_config = tmp_path / "external-config"
+    config_path = workspace / ".git" / "config"
+    external_config.write_bytes(config_path.read_bytes())
+    config_path.unlink()
+    config_path.symlink_to(external_config)
+    config_before = external_config.read_bytes()
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert payload["status"] == "error"
+    assert "Git metadata" in payload["error"]
+    assert external_config.read_bytes() == config_before
+
+
+@pytest.mark.asyncio
+async def test_git_directory_swap_cannot_redirect_origin_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Origin mutation must stay bound to inspected Git metadata during a concurrent swap."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    external = tmp_path / "external"
+    external.mkdir()
+    _git(external, "init", "--initial-branch=main")
+    external_config = external / ".git" / "config"
+    external_before = external_config.read_bytes()
+    original_read_git_config_entries = agent_repositories_module._read_git_config_entries
+    swapped = False
+
+    def swap_after_config_inspection(config_fd: int) -> tuple[tuple[str, str], ...]:
+        nonlocal swapped
+        result = original_read_git_config_entries(config_fd)
+        if not swapped:
+            (workspace / ".git").rename(workspace / ".git-original")
+            (workspace / ".git").symlink_to(external / ".git", target_is_directory=True)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(agent_repositories_module, "_read_git_config_entries", swap_after_config_inspection)
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert swapped
+    assert payload["status"] == "error"
+    assert external_config.read_bytes() == external_before
 
 
 @pytest.mark.asyncio
