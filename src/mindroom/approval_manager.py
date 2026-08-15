@@ -64,11 +64,15 @@ logger = get_logger(__name__)
 
 
 class ToolApprovalTransportError(RuntimeError):
-    """One actionable reason an approval card cannot be delivered."""
+    """One actionable reason an approval card cannot be transported or verified."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class UnverifiableApprovalCardError(ToolApprovalTransportError):
+    """A legacy approval action target cannot be authenticated by Matrix."""
 
 
 def _utcnow() -> datetime:
@@ -361,11 +365,22 @@ class _ApprovalManager:
                 card_event_id=card_event_id,
             )
             if not terminal and cards is not None and self.resolve_action_delivery is not None:
-                stored = await self._bind_action_delivery(
-                    cards,
-                    room_id=room_id,
-                    card_event_id=card_event_id,
-                )
+                try:
+                    stored = await self._bind_action_delivery(
+                        cards,
+                        room_id=room_id,
+                        card_event_id=card_event_id,
+                    )
+                except UnverifiableApprovalCardError as exc:
+                    if before_consume is not None:
+                        await before_consume()
+                    logger.warning(
+                        "unverifiable_legacy_approval_action_ignored",
+                        room_id=room_id,
+                        card_event_id=card_event_id,
+                        transport_reason=exc.reason,
+                    )
+                    return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
                 terminal = stored is None and await cards.is_terminal_approval_card(
                     room_id=room_id,
                     card_event_id=card_event_id,

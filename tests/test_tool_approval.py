@@ -47,6 +47,7 @@ from mindroom.matrix.message_builder import build_message_content
 from mindroom.tool_approval import (
     MatrixApprovalAction,
     ToolApprovalScriptError,
+    ToolApprovalTransportError,
     evaluate_tool_approval,
     handle_matrix_approval_action,
     resolve_tool_approval_approver,
@@ -355,6 +356,217 @@ async def test_action_delivery_resolver_retries_an_unreadable_exact_card(tmp_pat
 
     with pytest.raises(approval_transport.ToolApprovalTransportError, match="could not verify"):
         await transport.resolve_approval_action_delivery("!room:localhost", "$approval")
+
+
+@pytest.mark.asyncio
+async def test_legacy_action_without_router_transport_is_ignored(tmp_path: Path) -> None:
+    """An unverifiable pre-registry card cannot retain an event-journal lane forever."""
+    cards = MagicMock()
+    cards.pending_approval_card = AsyncMock(return_value=None)
+    cards.is_terminal_approval_card = AsyncMock(return_value=False)
+    cards.resolve_continuation_approval_card = AsyncMock()
+    cards.acknowledge_matrix_delivery = AsyncMock()
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: cards,
+    )
+    manager = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        resolve_action_delivery=transport.resolve_approval_action_delivery,
+    )
+    before_consume = AsyncMock()
+
+    try:
+        with patch("mindroom.approval_manager.logger.warning") as warning:
+            result = await manager.handle_card_response(
+                room_id="!room:localhost",
+                sender_id="@approver:localhost",
+                card_event_id="$approval",
+                status="approved",
+                reason=None,
+                before_consume=before_consume,
+            )
+    finally:
+        await manager.shutdown()
+
+    assert result.consumed is True
+    assert result.resolved is False
+    before_consume.assert_awaited_once_with()
+    cards.resolve_continuation_approval_card.assert_not_awaited()
+    cards.acknowledge_matrix_delivery.assert_not_awaited()
+    warning.assert_called_once()
+    assert warning.call_args.args == ("unverifiable_legacy_approval_action_ignored",)
+    assert warning.call_args.kwargs == {
+        "room_id": "!room:localhost",
+        "card_event_id": "$approval",
+        "transport_reason": "Router approval transport cannot read !room:localhost to verify a card action",
+    }
+
+
+@pytest.mark.asyncio
+async def test_legacy_action_retries_while_router_transport_is_starting(tmp_path: Path) -> None:
+    """An existing router without a live client is not a terminal verification result."""
+    cards = MagicMock()
+    cards.pending_approval_card = AsyncMock(return_value=None)
+    cards.is_terminal_approval_card = AsyncMock(return_value=False)
+    cards.resolve_continuation_approval_card = AsyncMock()
+    cards.acknowledge_matrix_delivery = AsyncMock()
+    router = MagicMock(
+        agent_name="router",
+        running=False,
+        client=None,
+        approval_room_ids=frozenset({"!room:localhost"}),
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: router if name == "router" else None,
+        cards_provider=lambda: cards,
+    )
+    manager = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        resolve_action_delivery=transport.resolve_approval_action_delivery,
+    )
+    before_consume = AsyncMock()
+
+    try:
+        with (
+            patch("mindroom.approval_manager.logger.warning") as warning,
+            pytest.raises(ToolApprovalTransportError, match="not ready"),
+        ):
+            await manager.handle_card_response(
+                room_id="!room:localhost",
+                sender_id="@approver:localhost",
+                card_event_id="$approval",
+                status="approved",
+                reason=None,
+                before_consume=before_consume,
+            )
+    finally:
+        await manager.shutdown()
+
+    before_consume.assert_not_awaited()
+    cards.resolve_continuation_approval_card.assert_not_awaited()
+    cards.acknowledge_matrix_delivery.assert_not_awaited()
+    warning.assert_not_called()
+
+
+@pytest.mark.parametrize("error_code", ["M_FORBIDDEN", "M_NOT_FOUND"])
+@pytest.mark.asyncio
+async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path, error_code: str) -> None:
+    """A definitive Matrix refusal cannot make an unregistered action retry forever."""
+    cards = MagicMock()
+    cards.pending_approval_card = AsyncMock(return_value=None)
+    cards.is_terminal_approval_card = AsyncMock(return_value=False)
+    cards.resolve_continuation_approval_card = AsyncMock()
+    cards.acknowledge_matrix_delivery = AsyncMock()
+    client = MagicMock(
+        user_id="@mindroom_router:localhost",
+        room_get_event=AsyncMock(
+            return_value=nio.RoomGetEventError("unavailable", status_code=error_code),
+        ),
+    )
+    router = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: router if name == "router" else None,
+        cards_provider=lambda: cards,
+    )
+    manager = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        resolve_action_delivery=transport.resolve_approval_action_delivery,
+    )
+    before_consume = AsyncMock()
+
+    try:
+        with patch("mindroom.approval_manager.logger.warning") as warning:
+            result = await manager.handle_card_response(
+                room_id="!room:localhost",
+                sender_id="@approver:localhost",
+                card_event_id="$approval",
+                status="denied",
+                reason="No",
+                before_consume=before_consume,
+            )
+    finally:
+        await manager.shutdown()
+
+    assert result.consumed is True
+    assert result.resolved is False
+    before_consume.assert_awaited_once_with()
+    cards.resolve_continuation_approval_card.assert_not_awaited()
+    cards.acknowledge_matrix_delivery.assert_not_awaited()
+    warning.assert_called_once()
+    assert warning.call_args.args == ("unverifiable_legacy_approval_action_ignored",)
+    assert warning.call_args.kwargs["room_id"] == "!room:localhost"
+    assert warning.call_args.kwargs["card_event_id"] == "$approval"
+    assert error_code in warning.call_args.kwargs["transport_reason"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_action_retries_a_transient_transport_failure(tmp_path: Path) -> None:
+    """A temporary Matrix read failure must leave the source available for replay."""
+    cards = MagicMock()
+    cards.pending_approval_card = AsyncMock(return_value=None)
+    cards.is_terminal_approval_card = AsyncMock(return_value=False)
+    cards.resolve_continuation_approval_card = AsyncMock()
+    cards.acknowledge_matrix_delivery = AsyncMock()
+    client = MagicMock(
+        user_id="@mindroom_router:localhost",
+        room_get_event=AsyncMock(
+            return_value=nio.RoomGetEventError(
+                "temporarily unavailable",
+                status_code="M_LIMIT_EXCEEDED",
+                retry_after_ms=1_000,
+            ),
+        ),
+    )
+    router = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+    )
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=lambda name: router if name == "router" else None,
+        cards_provider=lambda: cards,
+    )
+    manager = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        resolve_action_delivery=transport.resolve_approval_action_delivery,
+    )
+    before_consume = AsyncMock()
+
+    try:
+        with (
+            patch("mindroom.approval_manager.logger.warning") as warning,
+            pytest.raises(ToolApprovalTransportError, match="could not verify"),
+        ):
+            await manager.handle_card_response(
+                room_id="!room:localhost",
+                sender_id="@approver:localhost",
+                card_event_id="$approval",
+                status="approved",
+                reason=None,
+                before_consume=before_consume,
+            )
+    finally:
+        await manager.shutdown()
+
+    before_consume.assert_not_awaited()
+    cards.resolve_continuation_approval_card.assert_not_awaited()
+    cards.acknowledge_matrix_delivery.assert_not_awaited()
+    warning.assert_not_called()
 
 
 @pytest.mark.asyncio
