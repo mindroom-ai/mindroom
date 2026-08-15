@@ -16,6 +16,7 @@ from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bo
 from mindroom.oauth.discovery import (
     _DISCOVERY_CACHE,
     _DYNAMIC_CLIENT_REGISTRATION_LOCKS,
+    _cross_loop_lock,
     _discover_metadata,
 )
 from mindroom.oauth.providers import OAuthProviderError
@@ -124,6 +125,54 @@ def _allow_example_test_dns(monkeypatch: pytest.MonkeyPatch) -> None:
         "mindroom.server_fetch_url.socket.getaddrinfo",
         lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 0))],
     )
+
+
+@pytest.mark.asyncio
+async def test_cross_loop_lock_releases_after_repeated_waiter_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated cancellation must not strand a later-acquired thread lock."""
+    lock = threading.Lock()
+    holder_entered = asyncio.Event()
+    release_holder = asyncio.Event()
+    waiter_entered_cancel_cleanup = asyncio.Event()
+    real_shield = asyncio.shield
+
+    async def observed_shield(awaitable: asyncio.Future[bool]) -> bool:
+        try:
+            return await real_shield(awaitable)
+        except asyncio.CancelledError:
+            waiter_entered_cancel_cleanup.set()
+            raise
+
+    monkeypatch.setattr("mindroom.oauth.discovery.asyncio.shield", observed_shield)
+
+    async def hold_lock() -> None:
+        async with _cross_loop_lock(lock):
+            holder_entered.set()
+            await release_holder.wait()
+
+    async def wait_for_lock() -> None:
+        async with _cross_loop_lock(lock):
+            msg = "cancelled waiter entered the critical section"
+            raise AssertionError(msg)
+
+    holder = asyncio.create_task(hold_lock())
+    await holder_entered.wait()
+    waiter = asyncio.create_task(wait_for_lock())
+    await asyncio.sleep(0)
+
+    waiter.cancel()
+    await waiter_entered_cancel_cleanup.wait()
+    waiter.cancel()
+    release_holder.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(waiter, timeout=2)
+    await asyncio.wait_for(holder, timeout=2)
+
+    assert lock.acquire(blocking=False)
+    lock.release()
 
 
 @pytest.mark.asyncio

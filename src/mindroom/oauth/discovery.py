@@ -78,16 +78,39 @@ class _MetadataCandidateError(OAuthProviderError):
 @asynccontextmanager
 async def _cross_loop_lock(lock: threading.Lock) -> AsyncIterator[None]:
     """Acquire one loop-neutral lock without leaking it when the waiter is cancelled."""
-    acquisition = asyncio.create_task(asyncio.to_thread(lock.acquire))
+    state_guard = threading.Lock()
+    abandoned = False
+    owned_by_waiter = False
+
+    def acquire_or_release_if_abandoned() -> bool:
+        nonlocal owned_by_waiter
+        lock.acquire()
+        with state_guard:
+            if abandoned:
+                lock.release()
+                return False
+            owned_by_waiter = True
+            return True
+
+    acquisition = asyncio.create_task(asyncio.to_thread(acquire_or_release_if_abandoned))
     try:
-        await asyncio.shield(acquisition)
+        acquired = await asyncio.shield(acquisition)
     except asyncio.CancelledError:
-        await acquisition
-        lock.release()
+        with state_guard:
+            abandoned = True
+            release_owned_lock = owned_by_waiter
+            owned_by_waiter = False
+        if release_owned_lock:
+            lock.release()
         raise
+    if not acquired:
+        msg = "OAuth dynamic registration lock acquisition was abandoned"
+        raise RuntimeError(msg)
     try:
         yield
     finally:
+        with state_guard:
+            owned_by_waiter = False
         lock.release()
 
 
