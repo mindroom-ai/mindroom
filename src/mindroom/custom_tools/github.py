@@ -27,6 +27,7 @@ from mindroom.oauth.providers import (
     oauth_connection_required_payload,
 )
 from mindroom.oauth.service import (
+    OAUTH_ACCESS_REJECTED_REASON,
     OAUTH_REFRESH_REJECTED_REASON,
     oauth_connection_required,
 )
@@ -223,9 +224,10 @@ class GithubTools(AgnoGithubTools):
                     return json.dumps(oauth_connection_required_payload(exc))
                 result = _entrypoint(*args, **kwargs)
                 if not self._explicit_access_token and _is_github_authentication_error(result):
+                    self.access_token = None
                     return json.dumps(
                         oauth_connection_required_payload(
-                            self._connection_required(reason=OAUTH_REFRESH_REJECTED_REASON),
+                            self._connection_required(reason=OAUTH_ACCESS_REJECTED_REASON),
                         ),
                     )
                 return result

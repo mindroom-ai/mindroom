@@ -912,10 +912,11 @@ def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path
 
     assert payload["oauth_connection_required"] is True
     assert payload["provider"] == "github"
-    assert payload["reason"] == "refresh_rejected"
+    assert payload["reason"] == "access_rejected"
     assert "session for this agent expired or is no longer valid" in payload["error"]
     assert "/api/oauth/github/authorize?connect_token=" in payload["connect_url"]
     assert revoked_token not in result
+    assert tool.access_token is None
 
 
 def test_wrapper_preserves_all_registered_github_function_names(tmp_path: Path) -> None:

@@ -936,6 +936,8 @@ class MCPServerManager:
     ) -> bool:
         self._require_active_state(state)
         should_notify_catalog_change = False
+        authorization_rejection: OAuthConnectionRequired | None = None
+        authorization_rejection_cause: MCPError | None = None
         async with state.lock:
             self._require_active_state(state)
             if expected_refresh_revision is not None and state.refresh_revision != expected_refresh_revision:
@@ -965,12 +967,25 @@ class MCPServerManager:
                     await self._disconnect_state(state)
                     raise
                 except MCPError as exc:
+                    authorization_rejection = await self._classify_discovery_authorization_rejection(
+                        state,
+                        authorization_lease,
+                        exc,
+                    )
                     await self._record_discovery_failure(state, exc)
-                    return False
-
-                state.consecutive_failures = 0
-                changed = previous_hash != catalog.catalog_hash
-                should_notify_catalog_change = notify and changed and self._on_catalog_change is not None
+                    if authorization_rejection is None:
+                        return False
+                    authorization_rejection_cause = exc
+                else:
+                    state.consecutive_failures = 0
+                    changed = previous_hash != catalog.catalog_hash
+                    should_notify_catalog_change = notify and changed and self._on_catalog_change is not None
+        await self._raise_discovery_authorization_rejection(
+            state,
+            authorization_lease,
+            authorization_rejection,
+            authorization_rejection_cause,
+        )
         invalid_server_ids = await self._validate_global_function_names()
         if state.server_id in invalid_server_ids:
             return False
@@ -979,6 +994,38 @@ class MCPServerManager:
         if state.config.auth is None and state.stale and state.refresh_task is None and not self._shutdown:
             self._schedule_refresh_task(state)
         return changed
+
+    async def _classify_discovery_authorization_rejection(
+        self,
+        state: MCPServerState,
+        authorization_lease: _MCPAuthorizationLease | None,
+        error: MCPError,
+    ) -> OAuthConnectionRequired | None:
+        """Classify a failed candidate before its transport rejection latch is cleared."""
+        if authorization_lease is None:
+            return None
+        try:
+            return await self._oauth_transport_rejection(state, authorization_lease, error)
+        except _MCPAuthorizationChangedError:
+            await self._disconnect_state(state)
+            raise
+
+    async def _raise_discovery_authorization_rejection(
+        self,
+        state: MCPServerState,
+        authorization_lease: _MCPAuthorizationLease | None,
+        rejection: OAuthConnectionRequired | None,
+        cause: MCPError | None,
+    ) -> None:
+        """Retire one rejected candidate after its state and call locks are released."""
+        if rejection is None:
+            return
+        assert authorization_lease is not None
+        assert cause is not None
+        await run_coroutine_until_complete(
+            self._disconnect_rejected_oauth_request_state(authorization_lease.session_key, state),
+        )
+        raise rejection from cause
 
     async def _connect_and_publish_catalog(
         self,
