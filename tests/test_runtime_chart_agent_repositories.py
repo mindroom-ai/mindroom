@@ -144,6 +144,18 @@ def test_agent_repositories_validation_rejects_partial_or_unsafe_policy() -> Non
             "agentRepositories.organization must be a valid GitHub organization slug",
         ),
         (
+            (*_enabled_values(), "agentRepositories.brokerTokenSecret.name=foo..bar"),
+            "agentRepositories.brokerTokenSecret.name must be a valid Kubernetes Secret name",
+        ),
+        (
+            (*_enabled_values(), f"agentRepositories.brokerTokenSecret.name={'a' * 254}"),
+            "agentRepositories.brokerTokenSecret.name must be a valid Kubernetes Secret name",
+        ),
+        (
+            (*_enabled_values(), f"agentRepositories.brokerTokenSecret.name={'a' * 64}.valid"),
+            "agentRepositories.brokerTokenSecret.name must be a valid Kubernetes Secret name",
+        ),
+        (
             (*_enabled_values(), "workers.backend=static_runner"),
             "agentRepositories.enabled requires workers.backend=kubernetes",
         ),

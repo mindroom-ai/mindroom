@@ -284,4 +284,4 @@ async def test_broker_waits_for_bounded_agent_vault_ensure_lifecycle(tmp_path: P
     )
 
     async with broker._client() as client:
-        assert client.timeout.read > 5 * 60
+        assert client.timeout.read > 30 + 5 * 60
