@@ -3007,8 +3007,8 @@ async def test_interrupted_reset_recovery_hides_reconnect_link_after_revocation(
 
 
 @pytest.mark.asyncio
-async def test_outbox_recovery_redacts_unattempted_reset_link_after_revocation(tmp_path: Path) -> None:
-    """Generic startup recovery must sanitize a frozen reset receipt before claiming it."""
+async def test_outbox_first_claim_redacts_unattempted_reset_link_after_revocation(tmp_path: Path) -> None:
+    """Every first claim must sanitize a frozen reset receipt before claiming it."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
@@ -3066,7 +3066,7 @@ async def test_outbox_recovery_redacts_unattempted_reset_link_after_revocation(t
         outcome = await MatrixDeliveryWorker(
             store=store,
             send=send,
-            prepare_recovery_delivery=runner.prepare_recovery_delivery,
+            first_claim_policy=runner.first_claim_policy,
         ).recover()
 
     assert outcome.recovered == 1
@@ -3079,6 +3079,112 @@ async def test_outbox_recovery_redacts_unattempted_reset_link_after_revocation(t
         "body": response_runner._REVOKED_OAUTH_RESET_RECEIPT,
         "interactive": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_outbox_first_claim_remints_authorized_reset_link(tmp_path: Path) -> None:
+    """An unattempted durable reset receipt must receive a fresh requester-bound link before claim."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-reset-final-fresh-link",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(
+            ApprovalCall(
+                tool_call_id="reset-call",
+                tool_name="reset_oauth_connection",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        ),
+        state="claimed",
+        generation=3,
+        tool_bindings={
+            "reset-call": {
+                "tool_name": "reset_oauth_connection",
+                "arguments_json": '{"provider_id":"google"}',
+                "invoking_agent": "general",
+                "oauth_reset": {
+                    "provider_id": "google",
+                    "credential_generation": "credential-generation-1",
+                    "connection_generation": "connection-generation-1",
+                },
+            },
+        },
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    stale_link = "https://example.test/oauth/connect?token=expired"
+    fresh_link = "https://example.test/oauth/connect?token=fresh"
+    stale_body = f"OAuth connection reset. Reconnect: {stale_link}"
+    fresh_body = f"OAuth connection reset. Reconnect: {fresh_link}"
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={
+            "body": f"* {stale_body}",
+            "formatted_body": stale_body,
+            "m.new_content": {
+                "body": stale_body,
+                "formatted_body": stale_body,
+                DURABLE_FINAL_OUTCOME_KEY: {"body": stale_body, "interactive": None},
+            },
+            DURABLE_FINAL_OUTCOME_KEY: {"body": stale_body, "interactive": None},
+        },
+        edits_event_id="$waiting",
+    )
+    sent: list[MatrixDelivery] = []
+
+    async def send(delivery: MatrixDelivery) -> str:
+        sent.append(delivery)
+        return "$final"
+
+    with (
+        patch.object(runner, "_approval_continuation_is_authorized", return_value=True),
+        patch.object(runner, "_approval_continuation_execution_identity", return_value=identity),
+        patch("mindroom.response_runner.validate_oauth_reset_approval_bindings", new=AsyncMock()),
+        patch("mindroom.response_runner.resolve_oauth_reset_target") as resolve_reset_target,
+        patch(
+            "mindroom.response_runner.oauth_reset_operation_snapshot",
+            return_value=SimpleNamespace(status="completed", credential_existed=True),
+        ),
+        patch(
+            "mindroom.oauth.reset_execution.execute_oauth_connection_reset",
+            new=AsyncMock(return_value=fresh_body),
+        ) as execute_reset,
+    ):
+        resolve_reset_target.return_value.credential_context = MagicMock()
+        outcome = await MatrixDeliveryWorker(
+            store=store,
+            send=send,
+            first_claim_policy=runner.first_claim_policy,
+        ).recover()
+
+    assert outcome.recovered == 1
+    assert len(sent) == 1
+    assert stale_link not in str(sent[0].payload)
+    assert fresh_link in str(sent[0].payload)
+    assert execute_reset.await_args.kwargs["operation_id"] == "approval-reset-final-fresh-link:3:reset-call"
 
 
 @pytest.mark.asyncio

@@ -106,6 +106,7 @@ class _FakeClientSession:
     enforce_same_task_exit: ClassVar[bool] = False
     close_exception: ClassVar[BaseException | None] = None
     close_attempt_count: ClassVar[int] = 0
+    authorization_rejected: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -208,6 +209,7 @@ def _reset_fake_session_state() -> Generator[None, None, None]:
     _FakeClientSession.enforce_same_task_exit = False
     _FakeClientSession.close_exception = None
     _FakeClientSession.close_attempt_count = 0
+    _FakeClientSession.authorization_rejected = False
     yield
     dynamic_toolkits_module._loaded_tools.clear()
 
@@ -246,6 +248,7 @@ def _patch_manager(monkeypatch: pytest.MonkeyPatch) -> None:
         return _MCPTransportHandle(
             transport=server_config.transport,
             opener=lambda: _fake_transport(),
+            authorization_rejected=lambda: _FakeClientSession.authorization_rejected,
         )
 
     monkeypatch.setattr("mindroom.mcp.manager.ClientSession", _FakeClientSession)
@@ -520,6 +523,42 @@ async def test_mcp_manager_uses_requester_oauth_bearer_token(
 
 
 @pytest.mark.asyncio
+async def test_requester_scoped_mcp_oauth_rejects_missing_identity_before_credential_load(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Identity-less MCP calls cannot fall back to a legacy global bearer or session key."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    credentials_manager.save_credentials("mcp_demo_oauth_client", {"client_id": "public-client"})
+    credentials_manager.save_credentials(
+        "mcp_demo_oauth",
+        {
+            "token": "legacy-global-token",
+            "client_id": "public-client",
+            "scopes": [],
+            "_source": "oauth",
+            "_oauth_provider": "mcp_demo",
+        },
+    )
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    with pytest.raises(OAuthConnectionRequired, match="requester identity") as exc_info:
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=None,
+        )
+
+    assert exc_info.value.connect_url is None
+    assert manager._scoped_states == {}
+    assert _FakeClientSession.transport_extra_headers == []
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_rejects_stale_oauth_session_publication_and_retries_current_token(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -791,6 +830,81 @@ async def test_terminal_oauth_refresh_rejection_disconnects_and_evicts_cached_se
 
     assert cached_session.closed is True
     assert manager._scoped_states == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_http_401_disconnects_without_replaying_ambiguous_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A structured bearer rejection becomes reconnect-required without dispatch replay."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.planned_tool_results = [BrokenPipeError("Connection closed")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "rejected-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    cached_session = _FakeClientSession.sessions[-1]
+    _FakeClientSession.authorization_rejected = True
+
+    with pytest.raises(OAuthConnectionRequired) as exc_info:
+        await manager.call_tool(
+            "demo",
+            "echo",
+            {},
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    assert exc_info.value.reason == "access_rejected"
+    assert _FakeClientSession.call_tool_invocation_count == 1
+    assert cached_session.closed is True
+    assert manager._scoped_states == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_discovery_http_401_returns_reconnect_and_evicts_requester_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A bearer rejection hidden during discovery remains a requester-scoped reconnect failure."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.authorization_rejected = True
+
+    async def fail_list_tools(
+        _self: object,
+        cursor: str | None = None,
+    ) -> ListToolsResult:
+        del cursor
+        connection_closed = "Connection closed"
+        raise BrokenPipeError(connection_closed)
+
+    monkeypatch.setattr(_FakeClientSession, "list_tools", fail_list_tools)
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "rejected-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    with pytest.raises(OAuthConnectionRequired) as exc_info:
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    assert exc_info.value.reason == "access_rejected"
+    assert manager._scoped_states == {}
+    assert _FakeClientSession.sessions[0].closed is True
 
 
 @pytest.mark.asyncio

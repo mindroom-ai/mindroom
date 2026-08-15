@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 OAUTH_CONNECT_TOKEN_TTL_MINUTES = 10
+OAUTH_ACCESS_REJECTED_REASON = "access_rejected"
 OAUTH_REFRESH_REJECTED_REASON = "refresh_rejected"
 OAUTH_MISSING_WRITE_SCOPE_REASON = "missing_write_scope"
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = OAUTH_CONNECT_TOKEN_TTL_MINUTES * 60
@@ -56,6 +57,7 @@ _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
     },
 )
 __all__ = [
+    "OAUTH_ACCESS_REJECTED_REASON",
     "OAUTH_CONNECT_TOKEN_TTL_MINUTES",
     "OAUTH_MISSING_WRITE_SCOPE_REASON",
     "OAUTH_REFRESH_REJECTED_REASON",
@@ -315,7 +317,7 @@ def oauth_connection_required(
         context.runtime_paths,
         worker_target=context.worker_target,
     )
-    if reason == OAUTH_REFRESH_REJECTED_REASON:
+    if reason in {OAUTH_ACCESS_REJECTED_REASON, OAUTH_REFRESH_REJECTED_REASON}:
         instruction = build_oauth_reconnect_instruction(context.provider, connect_url)
     elif reason == OAUTH_MISSING_WRITE_SCOPE_REASON:
         instruction = (

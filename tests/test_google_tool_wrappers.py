@@ -287,7 +287,7 @@ def test_google_wrapper_build_credentials_uses_provider_scopes(
     tool._oauth_tool_name = tool_class._oauth_tool_name
     tool._oauth_provider = tool_class._oauth_provider
     tool._runtime_paths = runtime_paths
-    creds = tool._credentials_from_token_data(
+    creds = tool._raw_credentials_from_token_data(
         {
             "token": "token",
             "refresh_token": "refresh",
@@ -868,13 +868,21 @@ def test_google_lazy_refresh_serializes_local_snapshot_publication(  # noqa: PLR
     def observe_refresh(
         context: OAuthCredentialContext,
         refresh: Callable[[Mapping[str, Any]], dict[str, Any] | None],
+        *,
+        scope_validator: Callable[[dict[str, Any]], bool] | None = None,
+        expected_connection_generation: str | None = None,
     ) -> OAuthCredentialsRefreshResult:
         nonlocal lifecycle_calls
         with lifecycle_calls_lock:
             lifecycle_calls += 1
             if lifecycle_calls == 2:
                 second_lifecycle_entered.set()
-        return real_refresh(context, refresh)
+        return real_refresh(
+            context,
+            refresh,
+            scope_validator=scope_validator,
+            expected_connection_generation=expected_connection_generation,
+        )
 
     monkeypatch.setattr(oauth_client_module, "refresh_oauth_credentials_sync", observe_refresh)
     real_raw_credentials = tool._raw_credentials_from_token_data
@@ -1051,6 +1059,80 @@ async def test_google_wrapper_reloads_callback_replacement_in_materialized_worke
     assert result is None
     assert token == "account-b-access-token"  # noqa: S105
     assert service is None
+
+
+@pytest.mark.asyncio
+async def test_google_lazy_refresh_cannot_adopt_reconnected_account(runtime_paths: RuntimePaths) -> None:
+    """A retained account-A credential object must not turn into account B after reconnect."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "account-a-access-token",
+            "refresh_token": "account-a-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    retained_account_a = tool.creds
+
+    def exchange_account_b(*_args: object) -> OAuthTokenResult:
+        return OAuthTokenResult(
+            token_data={
+                "token": "account-b-access-token",
+                "refresh_token": "account-b-refresh-token",
+                "expires_at": 4_102_444_800.0,
+                "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            },
+            claims={"sub": "account-b"},
+            claims_verified=True,
+        )
+
+    callback_context = replace(
+        tool._oauth_credential_context(),
+        provider=replace(
+            GoogleDriveTools._oauth_provider,
+            token_exchanger=exchange_account_b,
+            claim_validator=None,
+            runtime_bootstrapper=None,
+        ),
+    )
+    issued_connection_generation = oauth_connection_generation(callback_context)
+    await exchange_and_store_oauth_credentials(
+        callback_context,
+        "account-b-code",
+        "pkce-verifier",
+        expected_connection_generation=issued_connection_generation,
+    )
+
+    with pytest.raises(RefreshError):
+        retained_account_a.refresh(object())
+
+    assert retained_account_a.token == "account-a-access-token"  # noqa: S105
+    assert retained_account_a.refresh_token == "account-a-refresh-token"  # noqa: S105
+    assert tool._ensure_structured_auth() is None
+    assert tool.creds.token == "account-b-access-token"  # noqa: S105
 
 
 def test_google_wrapper_full_context_key_clears_persistent_worker_between_requesters(

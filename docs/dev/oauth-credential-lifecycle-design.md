@@ -45,7 +45,8 @@ OAuth operations are rare enough that this concurrency was not worth the correct
 27. Claimed reset recovery re-enters only a durable pending or completed operation by its stable ID, never starts a missing reset, and never resumes the stale paused Agno run.
 28. Credential documents carry a scope-bound self-describing publication record, are durably saved before their counters are published, and repair an interrupted state-file commit under the operation lock.
 29. Pending reset deletion always takes precedence over credential-publication recovery.
-30. Reset receipt recovery rechecks current authorization before publishing reconnect material, while revoked recovery emits only a link-free completion receipt.
+30. Every live or recovery first claim of a reset receipt rechecks current authorization under response admission, remints authorized reconnect material from the completed stable operation, and emits only a link-free completion receipt after revocation.
+31. Requester-scoped MCP OAuth rejects missing requester identity before credential or session lookup, and a same-generation HTTP bearer rejection retires the exact session and returns a canonical reconnect response without replaying the remote call.
 
 ## Architecture
 
@@ -77,6 +78,7 @@ It translates structured OAuth error codes into `OAuthRefreshRejectedError` for 
 Google-specific `RefreshError` parsing remains in the adapter, but persistence, locking, invalidation, and reconnect classification do not.
 Managed Google credentials and googleapiclient services remain in one thread-local state because Agno executes provider calls in worker threads.
 The state key contains the full canonical credential context and durable revision, so equal revision strings from different requesters cannot share credentials.
+Each lazy-refresh object also retains the connection generation of the external account that created it, so it cannot adopt a replacement account's token after reconnect.
 Supplied credentials cross a stricter boundary: MindRoom copies the exact concrete Google credential into private blocking state and holds one reentrant lock from credential installation through the complete nested provider call.
 Google Drive constructs managed credentials with quota configuration already present and passes the exact tracked object to googleapiclient instead of cloning away its lifecycle refresh hook.
 
@@ -85,6 +87,7 @@ An older call may finish on its own thread, but it cannot overwrite another work
 
 `src/mindroom/mcp/manager.py` treats the durable credential revision plus OAuth token hash as an authorization lease.
 It tracks both the desired lease and the lease that built the connected session, validates both immediately before catalog publication and tool use, and reacquires authoritative credentials when either changes.
+Remote HTTP transports retain only a boolean HTTP 401 observation so an SDK-collapsed bearer rejection can retire the same-generation requester session and produce a structured reconnect response without retaining provider-controlled content.
 
 ### Reset authorization
 
@@ -97,7 +100,7 @@ It does not delete credentials or build links.
 `src/mindroom/oauth/reset_execution.py` enters MCP retirement, issues a reconnect link immediately before deletion, asks the lifecycle owner to commit the reset, and renders the receipt.
 `src/mindroom/custom_tools/oauth_connections.py` owns only live-request authorization and error translation around that executor.
 If teardown is cancelled or fails, deletion does not occur.
-The shared Matrix outbox rechecks authorization before claiming an unattempted reset receipt, atomically replaces revoked reconnect material with a link-free receipt, and preserves already-attempted payloads for transaction-ID reconciliation.
+The shared Matrix outbox applies one type-enforced first-claim policy to live and recovery sends, holds response admission from authorization through the atomic claim, remints an authorized link from the completed stable operation, atomically replaces revoked reconnect material with a link-free receipt, and preserves already-attempted payloads for transaction-ID reconciliation.
 
 `src/mindroom/approval_bindings.py` freezes and validates every paused call descriptor.
 OAuth reset bindings add the exact canonical credential target under that generic descriptor and reject a reset mixed with any other call.

@@ -17,6 +17,7 @@ from google.auth.transport import requests as google_requests
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialConflictError,
     OAuthCredentialContext,
     load_oauth_credentials_snapshot_sync,
     oauth_credential_generation,
@@ -85,6 +86,8 @@ class _GoogleRefreshFailure(Enum):
 class _GoogleRefreshState:
     """Serialized local publication state for one Google credential object."""
 
+    context: OAuthCredentialContext
+    connection_generation: str
     snapshot: dict[str, Any]
     lock: threading.Lock = field(default_factory=threading.Lock)
     last_succeeded: bool = False
@@ -332,10 +335,20 @@ class ScopedOAuthClientMixin:
             expiry=self._token_expiry(token_data),
         )
 
-    def _credentials_from_token_data(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401
+    def _credentials_from_token_data(
+        self,
+        token_data: dict[str, Any],
+        *,
+        context: OAuthCredentialContext,
+        connection_generation: str,
+    ) -> Any:  # noqa: ANN401
         """Create Google credentials whose lazy refresh uses the lifecycle owner."""
         credentials = self._raw_credentials_from_token_data(token_data)
-        refresh_state = _GoogleRefreshState(snapshot=dict(token_data))
+        refresh_state = _GoogleRefreshState(
+            context=context,
+            connection_generation=connection_generation,
+            snapshot=dict(token_data),
+        )
 
         def tracked_refresh(request: object) -> None:
             self._refresh_google_credentials(credentials, refresh_state, request)
@@ -376,14 +389,18 @@ class ScopedOAuthClientMixin:
         def refresh_if_unchanged(current: Mapping[str, Any]) -> dict[str, Any] | None:
             return self._refresh_google_token_if_snapshot_current(current, triggering_snapshot, request)
 
-        context = self._oauth_credential_context()
+        context = state.context
         try:
             result = refresh_oauth_credentials_sync(
                 context,
                 refresh_if_unchanged,
                 scope_validator=self._stored_credentials_have_required_scopes,
+                expected_connection_generation=state.connection_generation,
             )
         except _GoogleRefreshGrantMissingError:
+            state.last_failure = _GoogleRefreshFailure.MISSING
+            self._raise_google_refresh_failure(state.last_failure)
+        except OAuthCredentialConflictError:
             state.last_failure = _GoogleRefreshFailure.MISSING
             self._raise_google_refresh_failure(state.last_failure)
         except OAuthRefreshRejectedError:
@@ -404,6 +421,7 @@ class ScopedOAuthClientMixin:
         credentials.refresh_token = refreshed.refresh_token
         state.snapshot.clear()
         state.snapshot.update(result.credentials)
+        state.connection_generation = result.connection_generation
         self._google_credential_key = (context, result.generation)
         if result.refreshed and refreshed.token == (
             triggering_snapshot.get("token") or triggering_snapshot.get("access_token")
@@ -510,7 +528,11 @@ class ScopedOAuthClientMixin:
             )
             return None
         try:
-            creds = self._credentials_from_token_data(token_data)
+            creds = self._credentials_from_token_data(
+                token_data,
+                context=context,
+                connection_generation=snapshot.connection_generation,
+            )
         except Exception:
             self._oauth_logger.exception("oauth_credentials_load_failed", tool_name=self._oauth_tool_name)
             return None
@@ -587,7 +609,11 @@ class ScopedOAuthClientMixin:
                 )
             ):
                 self._raise_connection_required()
-            credentials = self._credentials_from_token_data(token_data)
+            credentials = self._credentials_from_token_data(
+                token_data,
+                context=context,
+                connection_generation=result.connection_generation,
+            )
             if not credentials.valid:
                 self._raise_connection_required()
             self.creds = credentials

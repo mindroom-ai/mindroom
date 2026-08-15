@@ -427,7 +427,7 @@ def test_google_drive_credentials_restore_stored_expiry(tmp_path: Path) -> None:
     )
     expires_at = datetime(2030, 1, 1, tzinfo=UTC).timestamp()
 
-    creds = tool._credentials_from_token_data(
+    creds = tool._raw_credentials_from_token_data(
         {
             "token": "access-token",
             "refresh_token": "refresh-token",

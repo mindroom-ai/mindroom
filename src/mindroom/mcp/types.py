@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from contextlib import AsyncExitStack
 
     from mcp import ClientSession
@@ -113,6 +113,7 @@ class MCPServerState:
     oauth_session_access_token_hash: str | None = None
     oauth_credential_generation: str | None = None
     oauth_session_credential_generation: str | None = None
+    oauth_transport_authorization_rejected: Callable[[], bool] | None = None
     function_validation_error: bool = False
     retired: bool = False
 

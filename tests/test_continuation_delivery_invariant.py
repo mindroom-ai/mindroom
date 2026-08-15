@@ -130,6 +130,7 @@ class _WatchedOutbox:
         delivery_id: str,
         stage: DeliveryStage,
         sending_device_id: str | None = None,
+        replacement_payload: Mapping[str, object] | None = None,
     ) -> MatrixDelivery | None:
         """Freeze one delivery, noting the claim on the timeline first."""
         self.timeline.append(f"claim:{stage.value}")
@@ -137,6 +138,7 @@ class _WatchedOutbox:
             delivery_id=delivery_id,
             stage=stage,
             sending_device_id=sending_device_id,
+            replacement_payload=replacement_payload,
         )
 
     async def record_matrix_delivery_device(

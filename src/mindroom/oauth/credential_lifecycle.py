@@ -830,6 +830,7 @@ def refresh_oauth_credentials_sync(
     refresh: Callable[[Mapping[str, Any]], dict[str, Any] | None],
     *,
     scope_validator: Callable[[dict[str, Any]], bool] | None = None,
+    expected_connection_generation: str | None = None,
 ) -> OAuthCredentialsRefreshResult:
     """Run one synchronous provider adapter on the OAuth transaction owner."""
     return _run_oauth_transaction_sync(
@@ -837,6 +838,7 @@ def refresh_oauth_credentials_sync(
             context,
             refresh,
             scope_validator=scope_validator,
+            expected_connection_generation=expected_connection_generation,
         ),
     )
 
@@ -846,9 +848,13 @@ async def _refresh_oauth_credentials_sync_transaction(
     refresh: Callable[[Mapping[str, Any]], dict[str, Any] | None],
     *,
     scope_validator: Callable[[dict[str, Any]], bool] | None,
+    expected_connection_generation: str | None,
 ) -> OAuthCredentialsRefreshResult:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
         state = _prepare_oauth_credential_state_locked(context)
+        if expected_connection_generation is not None and state.connection_generation != expected_connection_generation:
+            msg = "OAuth connection state is stale because this credential changed"
+            raise OAuthCredentialConflictError(msg)
         credentials = load_oauth_credentials(context)
         if credentials is None:
             _log_oauth_refresh_skipped(context, None, reason="missing_credentials")

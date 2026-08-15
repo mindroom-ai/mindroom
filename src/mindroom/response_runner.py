@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from uuid import uuid4
@@ -134,7 +135,7 @@ from .delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
-from .response_admission import ResponseAdmissionRefusedError
+from .response_admission import ResponseAdmissionRefusedError, admitted_response_decision
 from .response_lifecycle import (
     QueuedHumanNoticeReservation,
     ResponseLifecycle,
@@ -2502,8 +2503,14 @@ class ResponseRunner:
             for call in continuation.calls
         )
 
-    async def prepare_recovery_delivery(self, delivery: MatrixDelivery) -> Mapping[str, object] | None:
-        """Remove reconnect material before an unauthorized reset FINAL is first claimed."""
+    @asynccontextmanager
+    async def first_claim_policy(self, delivery: MatrixDelivery) -> AsyncIterator[Mapping[str, object] | None]:
+        """Keep current authorization through replacement and the durable first claim."""
+        async with admitted_response_decision(self._admission_gate, self.wait_for_admission_or_shutdown):
+            yield await self._prepare_first_claim_delivery(delivery)
+
+    async def _prepare_first_claim_delivery(self, delivery: MatrixDelivery) -> Mapping[str, object] | None:
+        """Authorize and refresh one durable reset receipt immediately before first claim."""
         if (
             delivery.stage is not DeliveryStage.FINAL
             or delivery.attempted
@@ -2511,7 +2518,7 @@ class ResponseRunner:
         ):
             return None
         continuation = await self.deps.approval_store.approval_continuation_for_source(delivery.delivery_id)
-        if continuation is None or self._approval_continuation_is_authorized(continuation):
+        if continuation is None:
             return None
         if not any(
             call.tool_name == "reset_oauth_connection" and call.decision is ContinuationDecision.APPROVED
@@ -2522,7 +2529,32 @@ class ResponseRunner:
         visible = cast("dict[str, object]", nested) if isinstance(nested, dict) else delivery.payload
         if not isinstance(visible.get(DURABLE_FINAL_OUTCOME_KEY), dict):
             return None
-        return _replace_final_delivery_body(delivery.payload, _REVOKED_OAUTH_RESET_RECEIPT)
+        if not self._approval_continuation_is_authorized(continuation):
+            return _replace_final_delivery_body(delivery.payload, _REVOKED_OAUTH_RESET_RECEIPT)
+
+        from mindroom.oauth.reset_execution import execute_oauth_connection_reset  # noqa: PLC0415
+
+        recovery = await self._oauth_reset_recovery(continuation)
+        if recovery is None:
+            msg = "OAuth reset receipt has no stable completed operation"
+            raise _OAuthResetReceiptRecoveryError(msg)
+        operation = oauth_reset_operation_snapshot(
+            recovery.credential_context,
+            recovery.operation.operation_id,
+        )
+        if operation is None or operation.status != "completed":
+            msg = "OAuth reset receipt operation remains incomplete"
+            raise _OAuthResetReceiptRecoveryError(msg)
+        response_text = await execute_oauth_connection_reset(
+            recovery.provider_id,
+            agent_name=recovery.invoking_agent,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            execution_identity=recovery.execution_identity,
+            operation_id=recovery.operation.operation_id,
+            expected_connection_generation=recovery.operation.connection_generation,
+        )
+        return _replace_final_delivery_body(delivery.payload, response_text)
 
     async def _settle_unauthorized_approval_continuation(
         self,

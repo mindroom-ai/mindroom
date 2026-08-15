@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, cast
 from weakref import WeakValueDictionary
 
 import mcp.types as mcp_types
+from httpx import HTTPStatusError
 from mcp import ClientSession
 
 from mindroom.background_tasks import run_coroutine_until_complete
@@ -45,6 +46,7 @@ from mindroom.oauth.credential_lifecycle import (
 )
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.oauth.service import (
+    OAUTH_ACCESS_REJECTED_REASON,
     OAUTH_REFRESH_REJECTED_REASON,
     oauth_connection_required,
 )
@@ -412,6 +414,17 @@ class MCPServerManager:
                 return await self._request_catalog_with_lock(state, authorization_lease)
             except _MCPAuthorizationChangedError:
                 continue
+            except MCPError as exc:
+                try:
+                    rejection = await self._oauth_transport_rejection(state, authorization_lease, exc)
+                except _MCPAuthorizationChangedError:
+                    continue
+                if rejection is None:
+                    raise
+                await run_coroutine_until_complete(
+                    self._disconnect_rejected_oauth_request_state(authorization_lease.session_key, state),
+                )
+                raise rejection from exc
 
     def cached_request_catalog(
         self,
@@ -496,18 +509,6 @@ class MCPServerManager:
             finally:
                 self._retired_request_keys.discard(request_key)
 
-    def _oauth_connection_required(
-        self,
-        state: MCPServerState,
-        worker_target: ResolvedWorkerTarget | None,
-        *,
-        reason: str | None = None,
-    ) -> OAuthConnectionRequired:
-        return oauth_connection_required(
-            self._oauth_credential_context(state, worker_target=worker_target),
-            reason=reason,
-        )
-
     def _oauth_credential_context(
         self,
         state: MCPServerState,
@@ -531,8 +532,16 @@ class MCPServerManager:
     ) -> _MCPSessionKey:
         worker_scope = worker_target.worker_scope if worker_target is not None else None
         worker_key = worker_target.worker_key if worker_target is not None else None
-        if worker_scope in {"user", "user_agent"} and not worker_key:
-            raise self._oauth_connection_required(state, worker_target)
+        identity = worker_target.execution_identity if worker_target is not None else None
+        if (
+            worker_scope not in {"user", "user_agent"}
+            or not worker_key
+            or identity is None
+            or not identity.requester_id
+        ):
+            provider_id = state.oauth_provider_id or mcp_oauth_provider_id(state.server_id, state.config.auth)
+            msg = f"MCP OAuth provider '{provider_id}' requires a requester identity"
+            raise OAuthConnectionRequired(msg, provider_id=provider_id)
         return _MCPSessionKey(
             server_id=state.server_id,
             config_generation=state.config_generation,
@@ -785,6 +794,13 @@ class MCPServerManager:
         exclude_tools: Collection[str] | None = None,
     ) -> ToolResult:
         self._require_active_state(state)
+        if authorization_lease is not None:
+            rejection = await self._oauth_transport_rejection(state, authorization_lease)
+            if rejection is not None:
+                await run_coroutine_until_complete(
+                    self._disconnect_rejected_oauth_request_state(authorization_lease.session_key, state),
+                )
+                raise rejection
         refresh_revision = state.refresh_revision
         ambiguous_dispatch_error: MCPConnectionError | MCPTimeoutError | None = None
         try:
@@ -800,6 +816,20 @@ class MCPServerManager:
         except (MCPToolCallError, MCPProtocolError):
             raise
         except (MCPConnectionError, MCPTimeoutError) as dispatch_error:
+            if authorization_lease is not None:
+                rejection = await self._oauth_transport_rejection(
+                    state,
+                    authorization_lease,
+                    dispatch_error,
+                )
+                if rejection is not None:
+                    await run_coroutine_until_complete(
+                        self._disconnect_rejected_oauth_request_state(
+                            authorization_lease.session_key,
+                            state,
+                        ),
+                    )
+                    raise rejection from dispatch_error
             if state.last_error is not None or not state.config.auto_reconnect:
                 raise
             ambiguous_dispatch_error = dispatch_error
@@ -1033,6 +1063,7 @@ class MCPServerManager:
     ) -> MCPServerCatalog:
         self._require_active_state(state)
         handle = build_transport_handle(state.server_id, state.config, self.runtime_paths, extra_headers=auth_headers)
+        state.oauth_transport_authorization_rejected = handle.authorization_rejected
         ready: asyncio.Future[tuple[ClientSession, MCPServerCatalog]] = asyncio.get_running_loop().create_future()
         close_event = asyncio.Event()
 
@@ -1320,6 +1351,7 @@ class MCPServerManager:
         state.connected = False
         state.oauth_session_access_token_hash = None
         state.oauth_session_credential_generation = None
+        state.oauth_transport_authorization_rejected = None
         if close_error is not None:
             raise close_error
 
@@ -1864,6 +1896,36 @@ class MCPServerManager:
             if nested_text:
                 return f"{exc.message}: {nested_text}"
         return str(exc)
+
+    async def _oauth_transport_rejection(
+        self,
+        state: MCPServerState,
+        authorization_lease: _MCPAuthorizationLease,
+        exc: BaseException | None = None,
+    ) -> OAuthConnectionRequired | None:
+        """Return reconnect-required only for a same-generation structured bearer rejection."""
+        rejected = (
+            state.oauth_transport_authorization_rejected is not None and state.oauth_transport_authorization_rejected()
+        ) or (exc is not None and self._runtime_exception_has_http_status(exc, 401))
+        if not rejected:
+            return None
+        await self._validate_authoritative_oauth_lease(state, authorization_lease)
+        return oauth_connection_required(
+            authorization_lease.credential_context,
+            reason=OAUTH_ACCESS_REJECTED_REASON,
+        )
+
+    @classmethod
+    def _runtime_exception_has_http_status(cls, exc: BaseException, status_code: int) -> bool:
+        """Return whether a nested structured transport failure carries one HTTP status."""
+        if isinstance(exc, HTTPStatusError) and exc.response.status_code == status_code:
+            return True
+        if isinstance(exc, BaseExceptionGroup) and any(
+            cls._runtime_exception_has_http_status(nested, status_code) for nested in exc.exceptions
+        ):
+            return True
+        cause = exc.__cause__
+        return cause is not None and cls._runtime_exception_has_http_status(cause, status_code)
 
     def _wrap_runtime_exception(self, server_id: str, exc: Exception) -> MCPError:
         if isinstance(exc, MCPError):

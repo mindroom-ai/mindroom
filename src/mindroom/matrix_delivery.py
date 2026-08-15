@@ -22,6 +22,7 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
+    from contextlib import AbstractAsyncContextManager
 
     from mindroom.event_journal.models import MatrixDelivery, TerminalTurnWrite
     from mindroom.event_journal.projection import ProjectedEvent
@@ -32,11 +33,14 @@ logger = get_logger(__name__)
 type SendDelivery = Callable[[MatrixDelivery], Awaitable[str]]
 type _ObserveDelivered = Callable[[MatrixDelivery, str], Awaitable[tuple[ProjectedEvent, ...]]]
 
-# Recovery policy is evaluated before the durable claim. Returning a payload
+# First-claim policy is evaluated before both live and recovery claims. Returning a payload
 # asks the claim transaction to replace the still-unattempted wire content;
 # an already-attempted row remains immutable because Matrix may have accepted
 # those exact bytes already.
-type PrepareRecoveryDelivery = Callable[[MatrixDelivery], Awaitable[Mapping[str, object] | None]]
+type FirstClaimPolicy = Callable[
+    [MatrixDelivery],
+    AbstractAsyncContextManager[Mapping[str, object] | None],
+]
 
 # Finding the Matrix event a previous attempt already produced, when the frozen
 # transaction ID can no longer prove there wasn't one. Returns the event ID if
@@ -129,7 +133,7 @@ class MatrixDeliveryWorker:
     # apart leaves a delivered answer whose record cannot be edited.
     terminal_turn_for: _TerminalTurnFor | None = None
     terminal_turn_committed: _TerminalTurnCommitted | None = None
-    prepare_recovery_delivery: PrepareRecoveryDelivery | None = None
+    first_claim_policy: FirstClaimPolicy | None = None
     delivery_locks: WeakValueDictionary[str, asyncio.Lock] = field(
         default_factory=WeakValueDictionary,
         repr=False,
@@ -310,22 +314,54 @@ class MatrixDeliveryWorker:
         *,
         delivery_id: str,
         stage: DeliveryStage,
-        replacement_payload: Mapping[str, object] | None = None,
     ) -> _FlushOutcome:
-        """Send one delivery while holding its visible-delivery lock."""
-        if replacement_payload is None:
-            claimed = await self.store.claim_matrix_delivery(
-                delivery_id=delivery_id,
-                stage=stage,
-                sending_device_id=self.sending_device_id,
-            )
+        """Freeze one policy-approved payload, then send it under the visible-delivery lock."""
+        pending = (
+            await self.store.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
+            if self.first_claim_policy is not None
+            else None
+        )
+        if pending is not None and not pending.attempted and pending.acknowledged_event_id is None:
+            assert self.first_claim_policy is not None
+            async with self.first_claim_policy(pending) as replacement_payload:
+                claimed = await self._claim(
+                    delivery_id=delivery_id,
+                    stage=stage,
+                    replacement_payload=replacement_payload,
+                )
         else:
-            claimed = await self.store.claim_matrix_delivery(
+            claimed = await self._claim(delivery_id=delivery_id, stage=stage)
+        return await self._flush_claimed(delivery_id=delivery_id, stage=stage, claimed=claimed)
+
+    async def _claim(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        replacement_payload: Mapping[str, object] | None = None,
+    ) -> MatrixDelivery | None:
+        """Atomically freeze optional first-claim policy output."""
+        if replacement_payload is None:
+            return await self.store.claim_matrix_delivery(
                 delivery_id=delivery_id,
                 stage=stage,
                 sending_device_id=self.sending_device_id,
-                replacement_payload=replacement_payload,
             )
+        return await self.store.claim_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=stage,
+            sending_device_id=self.sending_device_id,
+            replacement_payload=replacement_payload,
+        )
+
+    async def _flush_claimed(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        claimed: MatrixDelivery | None,
+    ) -> _FlushOutcome:
+        """Send and acknowledge one payload already frozen by its durable claim."""
         if claimed is None:
             stored = (
                 await self.store.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
@@ -585,15 +621,9 @@ class MatrixDeliveryWorker:
                     continue
                 try:
                     async with self._delivery_lock(delivery.delivery_id):
-                        replacement_payload = (
-                            await self.prepare_recovery_delivery(delivery)
-                            if self.prepare_recovery_delivery is not None
-                            else None
-                        )
                         outcome = await self._flush(
                             delivery_id=delivery.delivery_id,
                             stage=delivery.stage,
-                            replacement_payload=replacement_payload,
                         )
                     sent = await self._finish_flush(delivery.delivery_id, outcome)
                 except Exception:
@@ -619,8 +649,8 @@ class MatrixDeliveryWorker:
 
 __all__ = [
     "DeliveryStage",
+    "FirstClaimPolicy",
     "MatrixDeliveryWorker",
-    "PrepareRecoveryDelivery",
     "RecoveryOutcome",
     "ResolveDelivered",
     "SendDelivery",

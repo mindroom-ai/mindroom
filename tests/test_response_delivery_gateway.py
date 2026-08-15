@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -35,6 +36,7 @@ from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix_delivery import MatrixDeliveryWorker, RecoveryOutcome
 from mindroom.message_target import MessageTarget
+from mindroom.response_admission import ResponseAdmissionGate, admitted_response_decision
 from mindroom.streaming import PROGRESS_PLACEHOLDER
 from tests.conftest import (
     FakeOutbox,
@@ -1861,6 +1863,84 @@ class TestARacedAcknowledgementSpeaksForTheRow:
 class TestGenericDeliveryDeviceChangePolicy:
     """Non-idempotent custom events retain debt when history cannot prove absence."""
 
+    async def test_first_claim_policy_rewrites_live_unattempted_payload(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Live and recovery sends must share the policy immediately before first claim."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "stale"},
+        )
+        sent: list[MatrixDelivery] = []
+        claim_started = asyncio.Event()
+        finish_claim = asyncio.Event()
+        send_started = asyncio.Event()
+        finish_send = asyncio.Event()
+        gate = ResponseAdmissionGate()
+        original_claim = alice.claim_matrix_delivery
+
+        async def claim_then_wait(
+            *,
+            delivery_id: str,
+            stage: DeliveryStage,
+            sending_device_id: str | None = None,
+            replacement_payload: Mapping[str, object] | None = None,
+        ) -> MatrixDelivery | None:
+            claim_started.set()
+            await finish_claim.wait()
+            return await original_claim(
+                delivery_id=delivery_id,
+                stage=stage,
+                sending_device_id=sending_device_id,
+                replacement_payload=replacement_payload,
+            )
+
+        async def send(delivery: MatrixDelivery) -> str:
+            sent.append(delivery)
+            send_started.set()
+            await finish_send.wait()
+            return "$answer"
+
+        async def wait_for_admission() -> bool:
+            await gate.wait_until_open()
+            return True
+
+        @asynccontextmanager
+        async def policy(_delivery: MatrixDelivery) -> AsyncIterator[Mapping[str, object]]:
+            async with admitted_response_decision(gate, wait_for_admission):
+                yield {"msgtype": "m.text", "body": "current"}
+
+        worker = MatrixDeliveryWorker(
+            store=cast(
+                "MatrixDeliveryView",
+                SimpleNamespace(
+                    load_matrix_delivery=alice.load_matrix_delivery,
+                    claim_matrix_delivery=claim_then_wait,
+                    membership_epoch=alice.membership_epoch,
+                    record_matrix_delivery_device=alice.record_matrix_delivery_device,
+                    acknowledge_matrix_delivery=alice.acknowledge_matrix_delivery,
+                ),
+            ),
+            send=send,
+            sending_device_id="DEVICE1",
+            first_claim_policy=policy,
+        )
+
+        delivery = asyncio.create_task(worker.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL))
+        await claim_started.wait()
+        assert not gate.close_if_idle(), "policy generation changed before the durable claim"
+        finish_claim.set()
+        await send_started.wait()
+        assert gate.close_if_idle(), "network send retained first-claim admission"
+        gate.reopen()
+        finish_send.set()
+        assert await delivery == "$answer"
+        assert [delivery.payload["body"] for delivery in sent] == ["current"]
+
     async def test_recovery_policy_never_rewrites_an_attempted_payload(
         self,
         alice: PrincipalStore,
@@ -1879,9 +1959,13 @@ class TestGenericDeliveryDeviceChangePolicy:
             sending_device_id="DEVICE1",
         )
         sent: list[MatrixDelivery] = []
+        policy_called = False
 
-        async def prepare(_delivery: MatrixDelivery) -> Mapping[str, object]:
-            return {"msgtype": "m.text", "body": "replacement"}
+        @asynccontextmanager
+        async def policy(_delivery: MatrixDelivery) -> AsyncIterator[Mapping[str, object]]:
+            nonlocal policy_called
+            policy_called = True
+            yield {"msgtype": "m.text", "body": "replacement"}
 
         async def send(delivery: MatrixDelivery) -> str:
             sent.append(delivery)
@@ -1891,10 +1975,11 @@ class TestGenericDeliveryDeviceChangePolicy:
             store=alice,
             send=send,
             sending_device_id="DEVICE1",
-            prepare_recovery_delivery=prepare,
+            first_claim_policy=policy,
         ).recover()
 
         assert outcome == RecoveryOutcome(recovered=1, failed=0)
+        assert not policy_called
         assert [delivery.payload["body"] for delivery in sent] == ["original"]
 
     async def test_first_claim_crash_replays_a_card_from_the_same_device(

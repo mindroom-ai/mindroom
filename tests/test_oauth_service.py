@@ -20,6 +20,7 @@ from mindroom.credentials import (
 )
 from mindroom.oauth import credential_lifecycle
 from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialConflictError,
     OAuthCredentialContext,
     exchange_and_store_oauth_credentials,
     load_oauth_credentials_snapshot,
@@ -1088,6 +1089,41 @@ def test_sync_refresh_uses_same_scope_transaction(tmp_path: Path) -> None:
     assert result.refreshed is True
     assert observed == [CHAIN_0]
     assert _load(context) == result.credentials
+
+
+@pytest.mark.asyncio
+async def test_sync_refresh_rejects_changed_connection_generation_before_adapter(tmp_path: Path) -> None:
+    """A stale materialized client cannot adopt credentials from a replacement account."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    account_a_generation = oauth_connection_generation(context)
+    await exchange_and_store_oauth_credentials(
+        context,
+        "account-b-code",
+        None,
+        expected_connection_generation=account_a_generation,
+    )
+    adapter_called = False
+
+    def stale_adapter(_credentials: Mapping[str, Any]) -> None:
+        nonlocal adapter_called
+        adapter_called = True
+
+    with pytest.raises(OAuthCredentialConflictError):
+        refresh_oauth_credentials_sync(
+            context,
+            stale_adapter,
+            expected_connection_generation=account_a_generation,
+        )
+
+    assert not adapter_called
+    current = _load(context)
+    assert current is not None
+    assert current["token"] == "callback-access"  # noqa: S105
 
 
 @pytest.mark.asyncio
