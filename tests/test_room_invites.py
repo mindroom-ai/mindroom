@@ -624,6 +624,70 @@ async def test_router_invite_preserves_room_created_after_lifecycle_loaded(
 
 
 @pytest.mark.asyncio
+async def test_router_cleanup_preserves_room_created_after_lifecycle_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cleanup must refresh rooms persisted by hooks after lifecycle construction."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    install_runtime_journal_support(bot)
+    bot.client = AsyncMock()
+
+    creator_client = AsyncMock(spec=nio.AsyncClient)
+    creator_client.homeserver = "http://localhost:8008"
+    creator_client.user_id = bot.agent_user.user_id
+    with monkeypatch.context() as patch_context:
+        patch_context.setattr(
+            "mindroom.hooks.matrix_admin.create_room",
+            AsyncMock(return_value="!hook-created:localhost"),
+        )
+        admin = build_hook_matrix_admin(
+            creator_client,
+            runtime_paths_for(config),
+            config=config,
+        )
+        await admin.create_room(name="Hook-created room")
+
+    assert bot._room_lifecycle.invited_rooms == set()
+
+    left_room_ids: list[str] = []
+
+    async def record_rooms_to_leave(
+        _client: AsyncMock,
+        room_ids: list[str],
+        *,
+        on_room_left: Callable[[str], Awaitable[None]],
+    ) -> list[str]:
+        del on_room_left
+        left_room_ids.extend(room_ids)
+        return room_ids
+
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
+        AsyncMock(return_value=["!hook-created:localhost", "!stale:localhost"]),
+    )
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", record_rooms_to_leave)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.matrix_state_for_runtime",
+        lambda *_args, **_kwargs: MatrixState(),
+    )
+
+    await bot.leave_unconfigured_rooms()
+
+    assert bot._room_lifecycle.invited_rooms == {"!hook-created:localhost"}
+    assert left_room_ids == ["!stale:localhost"]
+
+
+@pytest.mark.asyncio
 async def test_router_invite_keeps_memory_after_transient_persistence_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -869,6 +933,44 @@ def test_agent_retries_failed_persisted_invited_room_forget(
         runtime_paths=runtime_paths_for(config),
     )
     assert restarted._room_lifecycle.invited_rooms == set()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_does_not_resurrect_room_pending_durable_forget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed durable forget must still make the departed room eligible for cleanup."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    invited_path = _invited_rooms_path(config, ROUTER_AGENT_NAME)
+    invited_path.parent.mkdir(parents=True, exist_ok=True)
+    invited_path.write_text('[\n  "!departed:localhost"\n]\n', encoding="utf-8")
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.save_invited_rooms", lambda *_args: False)
+
+    with pytest.raises(OSError, match="Failed to forget invited room"):
+        bot._room_lifecycle.forget_invited_room("!departed:localhost")
+
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
+        AsyncMock(return_value=["!departed:localhost"]),
+    )
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.matrix_state_for_runtime",
+        lambda *_args, **_kwargs: MatrixState(),
+    )
+
+    assert await bot._room_lifecycle._rooms_to_leave() == ["!departed:localhost"]
+    assert bot._room_lifecycle.invited_rooms == set()
 
 
 def test_nonpersisting_agent_forget_clears_in_memory_room(tmp_path: Path) -> None:
