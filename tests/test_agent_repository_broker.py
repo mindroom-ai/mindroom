@@ -44,7 +44,7 @@ def _request() -> RepositoryEnsureRequest:
 
 def _response() -> dict[str, object]:
     return {
-        "repository_id": 42,
+        "repository_id": "42",
         "organization": "example-org",
         "repository_name": "MindRoom-redwood",
         "clone_url": "https://github.com/example-org/MindRoom-redwood.git",
@@ -89,7 +89,7 @@ async def test_broker_posts_exact_trusted_request_without_repository_authority(
         _request().worker_key,
         prefix="agent-vault",
     )
-    assert lease.repository_id == 42
+    assert lease.repository_id == "42"
     assert "secret" not in repr(lease)
     assert "token" not in repr(lease).casefold()
 
@@ -170,6 +170,30 @@ async def test_broker_rejects_credential_or_capability_fields_in_response(
     )
 
     with pytest.raises(RepositoryBrokerError, match="schema"):
+        await broker.ensure_repository(_request())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repository_id", [42, "", "0", "01", "-1", "1.0", "\uff11\uff12"])
+async def test_broker_rejects_noncanonical_repository_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repository_id: object,
+) -> None:
+    """Repository IDs must match Agent Vault's canonical positive decimal-string contract."""
+    token_file = tmp_path / "broker-token"
+    token_file.write_text("control-plane-secret", encoding="utf-8")
+    payload = {**_response(), "repository_id": repository_id}
+    broker = AgentVaultRepositoryBroker.from_runtime(_runtime_paths(tmp_path, token_file))
+    monkeypatch.setattr(
+        broker,
+        "_client",
+        lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=payload)),
+        ),
+    )
+
+    with pytest.raises((RepositoryBrokerError, RepositoryBindingError), match=r"repository ID|field types"):
         await broker.ensure_repository(_request())
 
 

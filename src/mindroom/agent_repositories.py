@@ -83,7 +83,7 @@ class RepositoryEnsureRequest:
 class RepositoryLease:
     """Credential-free repository identity returned by the broker."""
 
-    repository_id: int
+    repository_id: str
     organization: str
     repository_name: str
     clone_url: str
@@ -219,13 +219,13 @@ class AgentVaultRepositoryBroker:
         organization = data["organization"]
         repository_name = data["repository_name"]
         clone_url = data["clone_url"]
-        if type(repository_id) is not int or not all(
+        if not _is_canonical_repository_id(repository_id) or not all(
             isinstance(value, str) for value in (organization, repository_name, clone_url)
         ):
             msg = "Agent repository broker response has invalid field types"
             raise RepositoryBrokerError(msg)
         lease = RepositoryLease(
-            repository_id=repository_id,
+            repository_id=cast("str", repository_id),
             organization=cast("str", organization),
             repository_name=cast("str", repository_name),
             clone_url=cast("str", clone_url),
@@ -240,7 +240,7 @@ class RepositoryBinding:
 
     version: int
     worker_key: str
-    repository_id: int
+    repository_id: str
     organization: str
     repository_name: str
     clone_url: str
@@ -307,11 +307,15 @@ def derive_repository_name(*, prefix: str, worker_target: ResolvedWorkerTarget) 
     return _bounded_repository_name(f"{prefix}-{agent_slug}-{username_slug}")
 
 
+def _is_canonical_repository_id(value: object) -> bool:
+    return isinstance(value, str) and value.isascii() and value.isdecimal() and not value.startswith("0")
+
+
 def _validate_lease(request: RepositoryEnsureRequest, lease: RepositoryLease) -> None:
     if not request.worker_key.strip():
         msg = "Repository binding requires a non-empty worker key"
         raise RepositoryBindingError(msg)
-    if type(lease.repository_id) is not int or lease.repository_id <= 0:
+    if not _is_canonical_repository_id(lease.repository_id):
         msg = "Repository broker returned an invalid repository ID"
         raise RepositoryBindingError(msg)
     if lease.organization != request.organization:
@@ -336,7 +340,7 @@ def _binding_from_payload(payload: object) -> RepositoryBinding:
         msg = "Repository binding file has an unsupported version"
         raise RepositoryBindingError(msg)
     repository_id = data["repository_id"]
-    if type(repository_id) is not int or repository_id <= 0:
+    if not _is_canonical_repository_id(repository_id):
         msg = "Repository binding file has an invalid repository ID"
         raise RepositoryBindingError(msg)
     string_fields = ("worker_key", "organization", "repository_name", "clone_url")
@@ -346,7 +350,7 @@ def _binding_from_payload(payload: object) -> RepositoryBinding:
     return RepositoryBinding(
         version=_BINDING_VERSION,
         worker_key=cast("str", data["worker_key"]),
-        repository_id=repository_id,
+        repository_id=cast("str", repository_id),
         organization=cast("str", data["organization"]),
         repository_name=cast("str", data["repository_name"]),
         clone_url=cast("str", data["clone_url"]),
@@ -598,7 +602,7 @@ def _origin_urls_from_config(
         msg = "Agent repository workspace has URL rewriting or included Git configuration"
         raise RepositoryOriginConflictError(msg)
 
-    origin_entries = tuple((key, value) for key, value in normalized_entries if key.startswith("remote.origin."))
+    origin_entries = tuple((key, value) for key, value in entries if key.startswith("remote.origin."))
     fetch_urls = [value for key, value in origin_entries if key == "remote.origin.url"]
     push_urls = [value for key, value in origin_entries if key == "remote.origin.pushurl"]
     return fetch_urls, push_urls, bool(origin_entries)
@@ -711,7 +715,7 @@ def configure_repository_workspace(
                         )
                         if has_origin:
                             actual_urls = [*fetch_urls, *(push_urls or fetch_urls)]
-                            if not actual_urls or any(
+                            if not fetch_urls or any(
                                 _normalized_github_repository(url) != expected for url in actual_urls
                             ):
                                 msg = "Agent repository workspace has an origin for a different repository"

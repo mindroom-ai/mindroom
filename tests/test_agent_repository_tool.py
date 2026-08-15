@@ -12,10 +12,13 @@ from typing import TYPE_CHECKING
 import pytest
 
 import mindroom.agent_repositories as agent_repositories_module
+import mindroom.custom_tools.agent_repository as agent_repository_tool_module
 from mindroom.agent_repositories import (
     RepositoryBindingStore,
     RepositoryEnsureRequest,
     RepositoryLease,
+    RepositoryOriginConflictError,
+    configure_repository_workspace,
 )
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.agent_repository import AgentRepositoryTools
@@ -25,11 +28,14 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_target,
     tool_stays_local,
 )
+from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
 def _target() -> object:
@@ -62,7 +68,7 @@ def _runtime_paths(tmp_path: Path, *, broker_config: bool = False) -> RuntimePat
     )
 
 
-def _lease(repository_id: int = 42) -> RepositoryLease:
+def _lease(repository_id: str = "42") -> RepositoryLease:
     return RepositoryLease(
         repository_id=repository_id,
         organization="example-org",
@@ -76,8 +82,11 @@ class _FakeBroker:
     lease: RepositoryLease = field(default_factory=_lease)
     delay: float = 0.0
     requests: list[RepositoryEnsureRequest] = field(default_factory=list)
+    events: list[str] | None = None
 
     async def ensure_repository(self, request: RepositoryEnsureRequest) -> RepositoryLease:
+        if self.events is not None:
+            self.events.append("broker")
         self.requests.append(request)
         if self.delay:
             await asyncio.sleep(self.delay)
@@ -89,6 +98,7 @@ def _tool(
     *,
     broker: _FakeBroker,
     workspace: Path | None = None,
+    worker_preparer: Callable[[ResolvedWorkerTarget], None] | None = None,
 ) -> AgentRepositoryTools:
     return AgentRepositoryTools(
         organization="example-org",
@@ -97,6 +107,7 @@ def _tool(
         worker_target=_target(),
         tool_output_workspace_root=workspace or tmp_path / "workspace",
         broker=broker,
+        worker_preparer=worker_preparer or (lambda _target: None),
     )
 
 
@@ -131,7 +142,7 @@ async def test_ensure_binds_repository_and_configures_credential_free_origin(tmp
     assert payload == {
         "clone_url": "https://github.com/example-org/MindRoom-redwood.git",
         "organization": "example-org",
-        "repository_id": 42,
+        "repository_id": "42",
         "repository_name": "MindRoom-redwood",
         "status": "ok",
         "tool": "agent_repository",
@@ -151,7 +162,58 @@ async def test_ensure_binds_repository_and_configures_credential_free_origin(tmp
 
     binding = RepositoryBindingStore(_runtime_paths(tmp_path)).read(_target().worker_key)
     assert binding is not None
-    assert binding.repository_id == 42
+    assert binding.repository_id == "42"
+
+
+@pytest.mark.asyncio
+async def test_ensure_prepares_worker_before_calling_broker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh workers must create their Agent Vault vault before repository ensure."""
+    events: list[str] = []
+    broker = _FakeBroker(events=events)
+
+    def prepare_worker(target: ResolvedWorkerTarget) -> None:
+        assert target.worker_key == _target().worker_key
+        events.append("worker")
+
+    monkeypatch.setattr(
+        agent_repository_tool_module,
+        "ensure_worker_target_ready",
+        lambda _runtime_paths, target: prepare_worker(target),
+    )
+    tool = AgentRepositoryTools(
+        organization="example-org",
+        prefix="MindRoom",
+        runtime_paths=_runtime_paths(tmp_path),
+        worker_target=_target(),
+        tool_output_workspace_root=tmp_path / "workspace",
+        broker=broker,
+    )
+
+    payload = json.loads(await tool.ensure_my_repository())
+
+    assert payload["status"] == "ok"
+    assert events == ["worker", "broker"]
+
+
+@pytest.mark.asyncio
+async def test_worker_preparation_failure_stops_before_broker(tmp_path: Path) -> None:
+    """Repository creation must not race ahead when its scoped worker vault is unavailable."""
+    broker = _FakeBroker()
+
+    def fail_worker_preparation(_target: ResolvedWorkerTarget) -> None:
+        msg = "worker unavailable"
+        raise WorkerBackendError(msg)
+
+    payload = json.loads(
+        await _tool(tmp_path, broker=broker, worker_preparer=fail_worker_preparation).ensure_my_repository(),
+    )
+
+    assert payload["status"] == "error"
+    assert payload["error"] == "worker unavailable"
+    assert broker.requests == []
 
 
 @pytest.mark.asyncio
@@ -217,6 +279,39 @@ async def test_normalized_https_origin_is_idempotent(tmp_path: Path, origin: str
 
     assert payload["status"] == "ok"
     assert _git(workspace, "remote", "get-url", "origin") == origin
+    assert (workspace / ".git" / "config").read_bytes() == config_before
+
+
+def test_differently_cased_remote_name_does_not_replace_lowercase_origin(tmp_path: Path) -> None:
+    """A distinct `Origin` remote must not satisfy the required lowercase `origin`."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    _git(workspace, "remote", "add", "Origin", _lease().clone_url)
+    configure_repository_workspace(
+        workspace=workspace,
+        clone_url=_lease().clone_url,
+        lock_path=tmp_path / "workspace.lock",
+    )
+
+    assert _git(workspace, "remote", "get-url", "Origin") == _lease().clone_url
+    assert _git(workspace, "remote", "get-url", "origin") == _lease().clone_url
+
+
+def test_push_url_without_fetch_url_is_an_origin_conflict(tmp_path: Path) -> None:
+    """A push-only remote is not a usable bound origin."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    _git(workspace, "config", "--local", "remote.origin.pushurl", _lease().clone_url)
+    config_before = (workspace / ".git" / "config").read_bytes()
+
+    with pytest.raises(RepositoryOriginConflictError):
+        configure_repository_workspace(
+            workspace=workspace,
+            clone_url=_lease().clone_url,
+            lock_path=tmp_path / "workspace.lock",
+        )
     assert (workspace / ".git" / "config").read_bytes() == config_before
 
 
@@ -476,8 +571,8 @@ async def test_immutable_binding_collision_is_not_disclosed_or_rebound(tmp_path:
         organization="example-org",
         repository_name="MindRoom-redwood",
     )
-    RepositoryBindingStore(_runtime_paths(tmp_path)).bind(request, _lease(repository_id=7))
-    tool = _tool(tmp_path, broker=_FakeBroker(lease=_lease(repository_id=99)))
+    RepositoryBindingStore(_runtime_paths(tmp_path)).bind(request, _lease(repository_id="7"))
+    tool = _tool(tmp_path, broker=_FakeBroker(lease=_lease(repository_id="99")))
 
     result = await tool.ensure_my_repository()
     payload = json.loads(result)
@@ -485,7 +580,7 @@ async def test_immutable_binding_collision_is_not_disclosed_or_rebound(tmp_path:
     assert payload["status"] == "error"
     assert "immutable repository binding" in payload["error"]
     assert "token" not in result.casefold()
-    assert RepositoryBindingStore(_runtime_paths(tmp_path)).read(target.worker_key).repository_id == 7
+    assert RepositoryBindingStore(_runtime_paths(tmp_path)).read(target.worker_key).repository_id == "7"
 
 
 def test_tool_builds_from_registry_with_trusted_runtime_inputs(tmp_path: Path) -> None:

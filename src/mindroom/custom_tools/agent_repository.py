@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from asyncio import Lock
+from asyncio import Lock, to_thread
+from functools import partial
 from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constructor annotations.
 from typing import TYPE_CHECKING
 
@@ -22,8 +23,12 @@ from mindroom.agent_repositories import (
     derive_repository_name,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.tool_system.sandbox_proxy import ensure_worker_target_ready
+from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -40,6 +45,7 @@ class AgentRepositoryTools(Toolkit):
         worker_target: ResolvedWorkerTarget | None,
         tool_output_workspace_root: Path | None,
         broker: RepositoryBroker | None = None,
+        worker_preparer: Callable[[ResolvedWorkerTarget], None] | None = None,
     ) -> None:
         self._organization = organization
         self._prefix = prefix
@@ -47,6 +53,7 @@ class AgentRepositoryTools(Toolkit):
         self._workspace = tool_output_workspace_root
         self._broker = broker or AgentVaultRepositoryBroker.from_runtime(runtime_paths)
         self._binding_store = RepositoryBindingStore(runtime_paths)
+        self._worker_preparer = worker_preparer or partial(ensure_worker_target_ready, runtime_paths)
         self._ensure_lock = Lock()
         super().__init__(name="agent_repository", tools=[self.ensure_my_repository])
 
@@ -65,6 +72,7 @@ class AgentRepositoryTools(Toolkit):
         async with self._ensure_lock:
             try:
                 target, worker_key, workspace_root = self._context()
+                await to_thread(self._worker_preparer, target)
                 repository_name = derive_repository_name(
                     prefix=self._prefix,
                     worker_target=target,
@@ -83,7 +91,7 @@ class AgentRepositoryTools(Toolkit):
                 )
             except RepositoryOriginConflictError as exc:
                 return custom_tool_payload("agent_repository", "origin_conflict", error=str(exc))
-            except (RepositoryBindingError, RepositoryBrokerError, OSError) as exc:
+            except (RepositoryBindingError, RepositoryBrokerError, WorkerBackendError, OSError) as exc:
                 return custom_tool_payload("agent_repository", "error", error=str(exc))
 
             return custom_tool_payload(

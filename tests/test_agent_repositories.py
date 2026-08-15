@@ -58,7 +58,7 @@ def _request(target: ResolvedWorkerTarget, name: str) -> RepositoryEnsureRequest
     )
 
 
-def _lease(name: str = "MindRoom-redwood", repository_id: int = 42) -> RepositoryLease:
+def _lease(name: str = "MindRoom-redwood", repository_id: str = "42") -> RepositoryLease:
     return RepositoryLease(
         repository_id=repository_id,
         organization="example-org",
@@ -151,12 +151,12 @@ def test_repository_binding_is_idempotent_and_write_once(tmp_path: Path) -> None
     request = _request(target, "MindRoom-redwood")
     store = RepositoryBindingStore(runtime_paths)
 
-    first = store.bind(request, _lease(repository_id=42))
-    replay = store.bind(request, _lease(repository_id=42))
+    first = store.bind(request, _lease(repository_id="42"))
+    replay = store.bind(request, _lease(repository_id="42"))
 
     assert replay == first
     with pytest.raises(RepositoryBindingError, match="immutable repository binding"):
-        store.bind(request, _lease(repository_id=99))
+        store.bind(request, _lease(repository_id="99"))
 
 
 def test_repository_binding_serializes_concurrent_writers(tmp_path: Path) -> None:

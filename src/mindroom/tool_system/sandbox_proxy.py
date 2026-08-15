@@ -41,6 +41,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     tool_stays_local,
 )
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import (
     get_primary_worker_manager,
@@ -452,6 +453,31 @@ def _get_worker_manager(
         kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
         worker_grantable_credentials=manager_context.worker_grantable_credentials,
     )
+
+
+def ensure_worker_target_ready(runtime_paths: RuntimePaths, worker_target: ResolvedWorkerTarget) -> None:
+    """Ensure the exact trusted worker target is ready without dispatching a tool into it."""
+    proxy_config = sandbox_proxy_config(runtime_paths)
+    manager_context = _primary_worker_manager_context(runtime_paths)
+    with lease_primary_worker_manager(
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
+        storage_root=manager_context.storage_root,
+        kubernetes_tool_validation_snapshot=manager_context.kubernetes_tool_validation_snapshot,
+        kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
+        worker_grantable_credentials=manager_context.worker_grantable_credentials,
+    ) as worker_manager:
+        _payload, worker_handle = _build_worker_routing_payload(
+            runtime_paths=runtime_paths,
+            tool_name="agent_repository",
+            function_name="ensure_my_repository",
+            worker_target=worker_target,
+            worker_manager=worker_manager,
+        )
+    if worker_handle is None:
+        msg = "Agent repository requires a dedicated worker runtime"
+        raise WorkerBackendError(msg)
 
 
 def _execution_env_payload(
