@@ -961,8 +961,9 @@ async def test_mcp_manager_serializes_requester_oauth_token_resolution(
         *,
         credentials_manager: object,
         worker_target: object,
+        authorization: object = None,
     ) -> str:
-        del credentials_manager, worker_target
+        del credentials_manager, worker_target, authorization
         nonlocal active_token_resolutions, max_active_token_resolutions
         active_token_resolutions += 1
         max_active_token_resolutions = max(max_active_token_resolutions, active_token_resolutions)
