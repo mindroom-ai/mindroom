@@ -42,6 +42,7 @@ from mindroom.ai_runtime import (
     install_queued_message_notice_hook,
     queued_message_signal_context,
 )
+from mindroom.approval_receipt import approval_receipt_context
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -342,6 +343,7 @@ async def test_paused_team_scope_open_failure_closes_materialized_member_databas
 
     with (
         patch("mindroom.teams.materialize_exact_team_members", return_value=members),
+        patch("mindroom.teams.install_approval_receipt_hooks") as install_receipt,
         patch("mindroom.teams.open_bound_scope_session_context", return_value=ThrowingScope()),
         patch("mindroom.teams.close_team_runtime_state_dbs") as close_dbs,
         pytest.raises(RuntimeError, match="scope open failed"),
@@ -367,6 +369,7 @@ async def test_paused_team_scope_open_failure_closes_materialized_member_databas
         team_db=None,
         shared_scope_storage=None,
     )
+    install_receipt.assert_called_once_with(agent.model, agent.fallback_config)
 
 
 @pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
@@ -455,6 +458,7 @@ async def test_team_continuation_executes_real_agno_confirmation(
         patch.object(team, "acontinue_run", new=continue_run),
         patch("mindroom.teams.close_team_runtime_state_dbs"),
         patch("mindroom.teams.ai_runtime.register_queued_notice_storage") as register_notice,
+        approval_receipt_context("trusted approval receipt"),
     ):
         result = await continue_paused_team_run(
             member_names=(),

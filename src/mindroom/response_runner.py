@@ -17,6 +17,7 @@ from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.approval_execution import AgentApprovalExecution
+from mindroom.approval_receipt import approval_receipt_context, build_approval_receipt
 from mindroom.approval_response import (
     ApprovalResponseCoordinator,
     continuation_target,
@@ -1377,46 +1378,50 @@ class ResponseRunner:
             raise RuntimeError(msg)
         decisions = {call.tool_call_id: call.decision is ContinuationDecision.APPROVED for call in continuation.calls}
         denial_reasons = {call.tool_call_id: call.reason for call in continuation.calls}
-        if continuation.entity_kind == "team":
+        with approval_receipt_context(build_approval_receipt(continuation.calls)):
+            if continuation.entity_kind == "team":
 
-            async def continue_team() -> CompletedApprovalRun | PausedAttempt:
-                return await continue_paused_team_run(
-                    member_names=continuation.team_member_names,
-                    mode=TeamMode(continuation.team_mode or "coordinate"),
-                    config=self.deps.runtime.config,
-                    runtime_paths=self.deps.runtime_paths,
-                    execution_identity=execution_identity,
-                    session_id=continuation.session_id,
-                    run_id=continuation.run_id,
-                    user_id=continuation.requester_id,
-                    configured_team_name=continuation.entity_name,
-                    model_name=select_model_for_team(
-                        continuation.entity_name,
-                        continuation.room_id,
-                        self.deps.runtime.config,
-                        self.deps.runtime_paths,
-                        thread_id=continuation.thread_id,
+                async def continue_team() -> CompletedApprovalRun | PausedAttempt:
+                    return await continue_paused_team_run(
+                        member_names=continuation.team_member_names,
+                        mode=TeamMode(continuation.team_mode or "coordinate"),
+                        config=self.deps.runtime.config,
+                        runtime_paths=self.deps.runtime_paths,
+                        execution_identity=execution_identity,
+                        session_id=continuation.session_id,
+                        run_id=continuation.run_id,
+                        user_id=continuation.requester_id,
+                        configured_team_name=continuation.entity_name,
+                        model_name=select_model_for_team(
+                            continuation.entity_name,
+                            continuation.room_id,
+                            self.deps.runtime.config,
+                            self.deps.runtime_paths,
+                            thread_id=continuation.thread_id,
+                        )
+                        if continuation.runtime_model_name is None
+                        else continuation.runtime_model_name,
+                        decisions=decisions,
+                        denial_reasons=denial_reasons,
+                        refresh_scheduler=self._knowledge_refresh_scheduler(),
+                        history_scope=continuation.history_scope,
+                        tool_trace_collector=tool_trace_collector,
                     )
-                    if continuation.runtime_model_name is None
-                    else continuation.runtime_model_name,
+
+                async with typing_indicator(self._client(), continuation.room_id):
+                    response_text = await self._run_in_tool_context(
+                        tool_dispatch=tool_dispatch,
+                        operation=continue_team,
+                    )
+            else:
+                response_text = await self._approval_execution.continue_run(
+                    continuation,
+                    execution_identity=execution_identity,
+                    tool_dispatch=tool_dispatch,
                     decisions=decisions,
                     denial_reasons=denial_reasons,
-                    refresh_scheduler=self._knowledge_refresh_scheduler(),
-                    history_scope=continuation.history_scope,
                     tool_trace_collector=tool_trace_collector,
                 )
-
-            async with typing_indicator(self._client(), continuation.room_id):
-                response_text = await self._run_in_tool_context(tool_dispatch=tool_dispatch, operation=continue_team)
-        else:
-            response_text = await self._approval_execution.continue_run(
-                continuation,
-                execution_identity=execution_identity,
-                tool_dispatch=tool_dispatch,
-                decisions=decisions,
-                denial_reasons=denial_reasons,
-                tool_trace_collector=tool_trace_collector,
-            )
         return response_text
 
     def _build_turn_recorder(
