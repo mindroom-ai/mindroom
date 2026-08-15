@@ -272,3 +272,16 @@ def test_broker_rejects_non_origin_or_invalid_port_base_url(tmp_path: Path, brok
             broker_token_file=(tmp_path / "token").resolve(),
             vault_name_prefix="agent-vault",
         )
+
+
+@pytest.mark.asyncio
+async def test_broker_waits_for_bounded_agent_vault_ensure_lifecycle(tmp_path: Path) -> None:
+    """MindRoom must not disconnect before Agent Vault's bounded ensure operation finishes."""
+    broker = AgentVaultRepositoryBroker(
+        broker_url="http://agent-vault:14321",
+        broker_token_file=(tmp_path / "token").resolve(),
+        vault_name_prefix="agent-vault",
+    )
+
+    async with broker._client() as client:
+        assert client.timeout.read > 5 * 60

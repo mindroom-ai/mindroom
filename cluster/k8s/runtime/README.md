@@ -343,6 +343,10 @@ The chart rejects the unsafe default combination of chart-managed approved egres
 
 Agent repositories let an explicitly enabled agent call the argument-free `ensure_my_repository()` tool for one private GitHub repository bound to its worker identity.
 The feature requires Kubernetes workers with Agent Vault enabled because later Git HTTP(S) traffic uses the existing per-worker Agent Vault proxy capability.
+Repository provisioning requires a compatible Agent Vault service that implements the trusted repository endpoint and holds its GitHub App and broker-token settings.
+That may be an external service or the chart-managed Agent Vault server with those settings injected by a trusted deployment-layer patch.
+The runtime chart does not own those seven server-side settings or their Secrets.
+Configure the normal worker Agent Vault integration with an immutable compatible custom Agent Vault CLI image and owner identity before enabling repositories.
 Configure the trusted broker only on the MindRoom control plane:
 
 ```yaml
@@ -360,8 +364,6 @@ workers:
   kubernetes:
     agentVault:
       enabled: true
-      cliImage: infisical/agent-vault:<pinned>
-      ownerEmail: owner@example.test
 ```
 
 The broker token Secret is mounted only in the control-plane container, and its value is never copied into worker environment or model-visible state.
@@ -389,6 +391,7 @@ The tool initializes a missing local Git repository and adds the broker's canoni
 An existing harmlessly normalized HTTPS origin for the exact bound repository succeeds without mutation.
 Any SSH origin or different fetch or push origin returns `origin_conflict` and leaves Git config unchanged.
 The ensure call performs no clone, fetch, commit, or push, and it exposes no repository management operations such as delete, rename, transfer, visibility changes, or collaborator invites.
+MindRoom allows the bounded broker request to run for slightly longer than Agent Vault's five-minute ensure lifecycle, avoiding a client disconnect while provisioning continues server-side.
 Subsequent Git pushes use Agent Vault's repository-scoped Contents-write capability through the existing HTTPS proxy path.
 
 ### Agent Vault Access Grants
