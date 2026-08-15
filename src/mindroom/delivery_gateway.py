@@ -63,6 +63,7 @@ from mindroom.matrix.room_history_reads import (
 from mindroom.matrix_delivery import (
     DeliveryStage,
     MatrixDeliveryWorker,
+    PrepareRecoveryDelivery,
     RecoveryOutcome,
     SendDelivery,
     TurnHandoff,
@@ -404,6 +405,9 @@ class DeliveryGatewayDeps:
     # that leaves the row open to a mutation that derived before the commit and
     # lands after it, which erases the event the answer is stored under.
     terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None
+    # Recovery policy may replace only an unattempted payload. The outbox
+    # claim applies that replacement and freezes it in one transaction.
+    prepare_recovery_delivery: PrepareRecoveryDelivery | None = None
 
 
 _MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
@@ -772,6 +776,7 @@ class DeliveryGateway:
             handoff=handoff,
             terminal_turn_for=self._terminal_turn_write,
             terminal_turn_committed=self.deps.terminal_turn_committed,
+            prepare_recovery_delivery=self.deps.prepare_recovery_delivery,
             delivery_locks=self._delivery_turn_locks,
         )
 

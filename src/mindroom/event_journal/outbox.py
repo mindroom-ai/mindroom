@@ -225,6 +225,7 @@ def claim(
     delivery_id: str,
     stage: DeliveryStage,
     sending_device_id: str | None,
+    replacement_payload: Mapping[str, object] | None,
 ) -> MatrixDelivery | None:
     """Freeze one delivery and atomically record its first device intent.
 
@@ -251,6 +252,19 @@ def claim(
     )
     if current is None or bool(current["retired"]):
         return None
+    if replacement_payload is not None and not bool(current["attempted"]):
+        transaction.execute(
+            """
+            UPDATE matrix_delivery_outbox SET payload_json = ?
+            WHERE principal_id = ? AND delivery_id = ? AND stage = ? AND attempted = 0
+            """,
+            (
+                delivery_payload_json(principal_id, delivery_id, stage, replacement_payload),
+                principal_id,
+                delivery_id,
+                stage.value,
+            ),
+        )
     if stage is DeliveryStage.INITIAL and not bool(current["attempted"]):
         final = transaction.fetchone(
             """

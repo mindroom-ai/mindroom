@@ -672,6 +672,12 @@ class AgentBot:
                     turn_id,
                     event_id,
                 ),
+                # Response policy is initialized immediately below. Resolve it
+                # late so every outbox recovery pass, including startup, uses
+                # the same approval-authorization gate.
+                prepare_recovery_delivery=lambda delivery: self._response_runner.prepare_recovery_delivery(
+                    delivery,
+                ),
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(

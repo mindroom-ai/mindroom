@@ -1861,6 +1861,42 @@ class TestARacedAcknowledgementSpeaksForTheRow:
 class TestGenericDeliveryDeviceChangePolicy:
     """Non-idempotent custom events retain debt when history cannot prove absence."""
 
+    async def test_recovery_policy_never_rewrites_an_attempted_payload(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Unknown Matrix outcome keeps the exact bytes first offered to the homeserver."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "original"},
+        )
+        await alice.claim_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            sending_device_id="DEVICE1",
+        )
+        sent: list[MatrixDelivery] = []
+
+        async def prepare(_delivery: MatrixDelivery) -> Mapping[str, object]:
+            return {"msgtype": "m.text", "body": "replacement"}
+
+        async def send(delivery: MatrixDelivery) -> str:
+            sent.append(delivery)
+            return "$answer"
+
+        outcome = await MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            sending_device_id="DEVICE1",
+            prepare_recovery_delivery=prepare,
+        ).recover()
+
+        assert outcome == RecoveryOutcome(recovered=1, failed=0)
+        assert [delivery.payload["body"] for delivery in sent] == ["original"]
+
     async def test_first_claim_crash_replays_a_card_from_the_same_device(
         self,
         alice: PrincipalStore,

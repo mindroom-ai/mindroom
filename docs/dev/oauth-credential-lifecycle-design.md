@@ -97,6 +97,7 @@ It does not delete credentials or build links.
 `src/mindroom/oauth/reset_execution.py` enters MCP retirement, issues a reconnect link immediately before deletion, asks the lifecycle owner to commit the reset, and renders the receipt.
 `src/mindroom/custom_tools/oauth_connections.py` owns only live-request authorization and error translation around that executor.
 If teardown is cancelled or fails, deletion does not occur.
+The shared Matrix outbox rechecks authorization before claiming an unattempted reset receipt, atomically replaces revoked reconnect material with a link-free receipt, and preserves already-attempted payloads for transaction-ID reconciliation.
 
 `src/mindroom/approval_bindings.py` freezes and validates every paused call descriptor.
 OAuth reset bindings add the exact canonical credential target under that generic descriptor and reject a reset mixed with any other call.

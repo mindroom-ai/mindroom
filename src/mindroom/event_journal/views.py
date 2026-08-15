@@ -322,8 +322,9 @@ class MatrixDeliveryView(Protocol):
         delivery_id: str,
         stage: DeliveryStage,
         sending_device_id: str | None = None,
+        replacement_payload: Mapping[str, object] | None = None,
     ) -> MatrixDelivery | None:
-        """Freeze one delivery before network I/O and return the row as it stood."""
+        """Atomically replace eligible recovery content, freeze it, and return it."""
         ...
 
     async def record_matrix_delivery_device(

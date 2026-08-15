@@ -40,6 +40,7 @@ from mindroom.constants import (
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    TOOL_TRACE_CONTENT_KEY,
 )
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.event_journal import (
@@ -420,6 +421,34 @@ class PostLockRequestPreparationError(RuntimeError):
 
 class _OAuthResetReceiptRecoveryError(RuntimeError):
     """Receipt recovery failed after a durable reset operation was confirmed."""
+
+
+_REVOKED_OAUTH_RESET_RECEIPT = (
+    "OAuth connection reset completed. Current authorization no longer permits "
+    "publishing a reconnect link in this conversation."
+)
+
+
+def _replace_final_delivery_body(payload: Mapping[str, object], body: str) -> dict[str, object]:
+    """Replace visible and semantic body fields without disturbing delivery identity."""
+    replacement = dict(payload)
+    nested = payload.get("m.new_content")
+    visible = dict(cast("dict[str, object]", nested)) if isinstance(nested, dict) else replacement
+    visible["body"] = body
+    visible["formatted_body"] = body
+    semantic = visible.get(DURABLE_FINAL_OUTCOME_KEY)
+    if isinstance(semantic, dict):
+        visible[DURABLE_FINAL_OUTCOME_KEY] = {**semantic, "body": body}
+    visible.pop(TOOL_TRACE_CONTENT_KEY, None)
+    if visible is not replacement:
+        replacement["m.new_content"] = visible
+        replacement["body"] = f"* {body}"
+        replacement["formatted_body"] = body
+        top_level_semantic = replacement.get(DURABLE_FINAL_OUTCOME_KEY)
+        if isinstance(top_level_semantic, dict):
+            replacement[DURABLE_FINAL_OUTCOME_KEY] = {**top_level_semantic, "body": body}
+        replacement.pop(TOOL_TRACE_CONTENT_KEY, None)
+    return replacement
 
 
 @dataclass(frozen=True, slots=True)
@@ -2443,10 +2472,7 @@ class ResponseRunner:
         return await self._deliver_recovered_oauth_reset_outcome(
             claimed,
             target=target,
-            response_text=(
-                "OAuth connection reset completed. Current authorization no longer permits "
-                "publishing a reconnect link in this conversation."
-            ),
+            response_text=_REVOKED_OAUTH_RESET_RECEIPT,
         )
 
     def _approval_continuation_is_authorized(self, continuation: ApprovalContinuation) -> bool:
@@ -2475,6 +2501,28 @@ class ResponseRunner:
             )
             for call in continuation.calls
         )
+
+    async def prepare_recovery_delivery(self, delivery: MatrixDelivery) -> Mapping[str, object] | None:
+        """Remove reconnect material before an unauthorized reset FINAL is first claimed."""
+        if (
+            delivery.stage is not DeliveryStage.FINAL
+            or delivery.attempted
+            or delivery.acknowledged_event_id is not None
+        ):
+            return None
+        continuation = await self.deps.approval_store.approval_continuation_for_source(delivery.delivery_id)
+        if continuation is None or self._approval_continuation_is_authorized(continuation):
+            return None
+        if not any(
+            call.tool_name == "reset_oauth_connection" and call.decision is ContinuationDecision.APPROVED
+            for call in continuation.calls
+        ):
+            return None
+        nested = delivery.payload.get("m.new_content")
+        visible = cast("dict[str, object]", nested) if isinstance(nested, dict) else delivery.payload
+        if not isinstance(visible.get(DURABLE_FINAL_OUTCOME_KEY), dict):
+            return None
+        return _replace_final_delivery_body(delivery.payload, _REVOKED_OAUTH_RESET_RECEIPT)
 
     async def _settle_unauthorized_approval_continuation(
         self,

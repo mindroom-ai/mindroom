@@ -32,6 +32,12 @@ logger = get_logger(__name__)
 type SendDelivery = Callable[[MatrixDelivery], Awaitable[str]]
 type _ObserveDelivered = Callable[[MatrixDelivery, str], Awaitable[tuple[ProjectedEvent, ...]]]
 
+# Recovery policy is evaluated before the durable claim. Returning a payload
+# asks the claim transaction to replace the still-unattempted wire content;
+# an already-attempted row remains immutable because Matrix may have accepted
+# those exact bytes already.
+type PrepareRecoveryDelivery = Callable[[MatrixDelivery], Awaitable[Mapping[str, object] | None]]
+
 # Finding the Matrix event a previous attempt already produced, when the frozen
 # transaction ID can no longer prove there wasn't one. Returns the event ID if
 # the answer is already in the room, or ``None`` if it never arrived.
@@ -123,6 +129,7 @@ class MatrixDeliveryWorker:
     # apart leaves a delivered answer whose record cannot be edited.
     terminal_turn_for: _TerminalTurnFor | None = None
     terminal_turn_committed: _TerminalTurnCommitted | None = None
+    prepare_recovery_delivery: PrepareRecoveryDelivery | None = None
     delivery_locks: WeakValueDictionary[str, asyncio.Lock] = field(
         default_factory=WeakValueDictionary,
         repr=False,
@@ -298,13 +305,27 @@ class MatrixDeliveryWorker:
             outcome = await self._flush(delivery_id=delivery_id, stage=stage)
         return await self._finish_flush(delivery_id, outcome)
 
-    async def _flush(self, *, delivery_id: str, stage: DeliveryStage) -> _FlushOutcome:
+    async def _flush(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        replacement_payload: Mapping[str, object] | None = None,
+    ) -> _FlushOutcome:
         """Send one delivery while holding its visible-delivery lock."""
-        claimed = await self.store.claim_matrix_delivery(
-            delivery_id=delivery_id,
-            stage=stage,
-            sending_device_id=self.sending_device_id,
-        )
+        if replacement_payload is None:
+            claimed = await self.store.claim_matrix_delivery(
+                delivery_id=delivery_id,
+                stage=stage,
+                sending_device_id=self.sending_device_id,
+            )
+        else:
+            claimed = await self.store.claim_matrix_delivery(
+                delivery_id=delivery_id,
+                stage=stage,
+                sending_device_id=self.sending_device_id,
+                replacement_payload=replacement_payload,
+            )
         if claimed is None:
             stored = (
                 await self.store.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
@@ -564,7 +585,16 @@ class MatrixDeliveryWorker:
                     continue
                 try:
                     async with self._delivery_lock(delivery.delivery_id):
-                        outcome = await self._flush(delivery_id=delivery.delivery_id, stage=delivery.stage)
+                        replacement_payload = (
+                            await self.prepare_recovery_delivery(delivery)
+                            if self.prepare_recovery_delivery is not None
+                            else None
+                        )
+                        outcome = await self._flush(
+                            delivery_id=delivery.delivery_id,
+                            stage=delivery.stage,
+                            replacement_payload=replacement_payload,
+                        )
                     sent = await self._finish_flush(delivery.delivery_id, outcome)
                 except Exception:
                     logger.exception(
@@ -590,6 +620,7 @@ class MatrixDeliveryWorker:
 __all__ = [
     "DeliveryStage",
     "MatrixDeliveryWorker",
+    "PrepareRecoveryDelivery",
     "RecoveryOutcome",
     "ResolveDelivered",
     "SendDelivery",

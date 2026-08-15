@@ -40,6 +40,7 @@ from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    TOOL_TRACE_CONTENT_KEY,
 )
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import (
@@ -59,6 +60,7 @@ from mindroom.event_journal import (
     EventClass,
     EventKind,
     InboundEvent,
+    MatrixDelivery,
     PrincipalStore,
     ProjectedEvent,
 )
@@ -69,6 +71,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
+from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
@@ -3001,6 +3004,81 @@ async def test_interrupted_reset_recovery_hides_reconnect_link_after_revocation(
     assert result == expected
     recover_with_link.assert_not_awaited()
     recover_without_link.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_outbox_recovery_redacts_unattempted_reset_link_after_revocation(tmp_path: Path) -> None:
+    """Generic startup recovery must sanitize a frozen reset receipt before claiming it."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-reset-final-revoked",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(
+            ApprovalCall(
+                tool_call_id="reset-call",
+                tool_name="reset_oauth_connection",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        ),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    reconnect_link = "https://example.test/oauth/connect?token=requester-bound"
+    secret_body = f"OAuth connection reset. Reconnect: {reconnect_link}"
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={
+            "body": f"* {secret_body}",
+            "formatted_body": f'<a href="{reconnect_link}">Reconnect</a>',
+            "m.new_content": {
+                "body": secret_body,
+                "formatted_body": f'<a href="{reconnect_link}">Reconnect</a>',
+                DURABLE_FINAL_OUTCOME_KEY: {"body": secret_body, "interactive": None},
+                TOOL_TRACE_CONTENT_KEY: {"events": [{"result_preview": secret_body}]},
+            },
+            DURABLE_FINAL_OUTCOME_KEY: {"body": secret_body, "interactive": None},
+            TOOL_TRACE_CONTENT_KEY: {"events": [{"result_preview": secret_body}]},
+        },
+        edits_event_id="$waiting",
+    )
+    sent: list[MatrixDelivery] = []
+
+    async def send(delivery: MatrixDelivery) -> str:
+        sent.append(delivery)
+        return "$final"
+
+    with patch.object(runner, "_approval_continuation_is_authorized", return_value=False):
+        outcome = await MatrixDeliveryWorker(
+            store=store,
+            send=send,
+            prepare_recovery_delivery=runner.prepare_recovery_delivery,
+        ).recover()
+
+    assert outcome.recovered == 1
+    assert len(sent) == 1
+    assert reconnect_link not in str(sent[0].payload)
+    nested = sent[0].payload["m.new_content"]
+    assert isinstance(nested, dict)
+    assert nested["body"] == response_runner._REVOKED_OAUTH_RESET_RECEIPT
+    assert nested[DURABLE_FINAL_OUTCOME_KEY] == {
+        "body": response_runner._REVOKED_OAUTH_RESET_RECEIPT,
+        "interactive": None,
+    }
 
 
 @pytest.mark.asyncio
