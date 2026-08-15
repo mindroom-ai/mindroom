@@ -485,7 +485,7 @@ async def test_reset_oauth_connection_preserves_credentials_when_mcp_teardown_fa
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)
 
-    assert result == "Error: OAuth session cleanup failed; credentials remain unchanged. Retry the reset."
+    assert result == "Error: OAuth connection reset did not complete; verify connection status, then retry."
     assert (
         load_scoped_credentials(
             provider.credential_service,

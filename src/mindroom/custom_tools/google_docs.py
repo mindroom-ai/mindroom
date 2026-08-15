@@ -17,6 +17,7 @@ from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_docs import google_docs_oauth_provider
 
 if TYPE_CHECKING:
+    from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -49,6 +50,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
+        authorization: AuthorizationConfig | None = None,
         create_document: bool = True,
         read_document: bool = True,
         edit_document: bool = True,
@@ -71,6 +73,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
 
         creds = self._initialize_oauth_client(
             worker_target=worker_target,
+            authorization=authorization,
             provided_creds=provided_creds,
             logger=logger,
             defer_to_original_auth=defer_to_original_auth,

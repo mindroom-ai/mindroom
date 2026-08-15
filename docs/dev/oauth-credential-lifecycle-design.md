@@ -21,14 +21,18 @@ OAuth operations are rare enough that this concurrency is not worth the correctn
 3. Every credential mutation uses one cross-process operation lock derived from that context.
 4. Refresh, authorization-code exchange, reset, disconnect, and provider-driven lazy refresh serialize on that same lock.
 5. A provider operation that can consume or rotate remote state completes its matching local commit before cancellation propagates.
-6. A destructive reset performs all fallible asynchronous cleanup before deleting local credentials.
-7. After deletion, reset performs only infallible in-memory retirement release before returning.
-8. Request actor identity remains raw for room and membership checks.
-9. Credential identity is canonicalized only when resolving `OAuthCredentialContext`.
-10. Provider adapters classify structured terminal refresh errors as `OAuthRefreshRejectedError` without exposing provider-controlled text.
-11. All consumers build connection and reconnection responses through one factory.
-12. Approval continuations persist and revalidate the exact credential target descriptor before execution.
-13. Every browser callback carries the credential generation observed at authorization and cannot publish after that generation is reset.
+6. Credential save and delete commits fsync their payload and parent-directory updates before reporting success.
+7. A destructive reset performs all fallible asynchronous cleanup before deleting local credentials.
+8. After deletion, reset performs only infallible in-memory retirement release before returning.
+9. Request actor identity remains raw for room and membership checks.
+10. Credential identity is canonicalized only when resolving `OAuthCredentialContext`.
+11. Provider adapters classify structured terminal refresh errors as `OAuthRefreshRejectedError` without exposing provider-controlled text.
+12. All consumers build connection and reconnection responses through one factory.
+13. Approval continuations persist and revalidate the exact credential target descriptor before execution.
+14. Every browser callback carries the credential generation observed at authorization and cannot publish after that generation is reset.
+15. Agent approval continuations install their persisted requester context before reconstructing OAuth-backed toolkits.
+16. Every provider token service ends with `_oauth`, making primary-runtime placement and worker-grant rejection structural.
+17. OAuth-backed toolkit construction receives authorization explicitly, and every managed call revalidates its canonical credential scope and durable generation before reusing cached credentials.
 
 ## Architecture
 
@@ -108,7 +112,7 @@ The callback cannot preserve a refresh token that another operation rotated conc
 4. Close the retired session and keep its key fenced against new sessions.
 5. If retirement fails or is cancelled, retain credentials and restore the tracked generation when possible.
 6. Submit credential deletion to the transaction loop and wait cancellably for the operation lock.
-7. Advance the durable credential generation and delete under the operation lock without another suspension point.
+7. Advance the durable credential generation and durably delete the credential under the operation lock without another suspension point.
 8. Release the in-memory MCP retirement fence and return the receipt even if cancellation arrived after commit.
 
 Dashboard disconnect uses the same transaction and fails without deleting credentials if MCP teardown cannot complete.
@@ -116,9 +120,10 @@ Dashboard disconnect uses the same transaction and fails without deleting creden
 ### Provider call failure
 
 1. Provider adapters convert terminal structured codes into `OAuthRefreshRejectedError`.
-2. The lifecycle transaction deletes only the credential held under its operation lock.
-3. Consumers convert the canonical error through `oauth_connection_required(reason="refresh_rejected")`.
-4. Logs contain only allowlisted error codes and bounded metadata.
+2. The lifecycle transaction advances the durable credential generation and deletes only the credential held under its operation lock.
+3. Other materialized clients observe the new generation before their next managed call and discard cached credentials and services.
+4. Consumers convert the canonical error through `oauth_connection_required(reason="refresh_rejected")`.
+5. Logs contain only allowlisted error codes and bounded metadata.
 
 No consumer infers terminal rejection from free-form error text.
 
@@ -137,6 +142,7 @@ Cancellation after that commit is consumed so the approved destructive tool can 
 Focused tests cover observable lifecycle behavior rather than private lock choreography.
 
 - Concurrent same-scope refresh calls perform one necessary rotation and both observe the committed result.
+- Rotated credentials cannot roll back to their pre-refresh snapshot after a successful commit and host crash.
 - Callback waits behind refresh and preserves the latest rotated refresh token when the callback omits one.
 - Callback cancellation after state consumption still commits exchanged credentials before cancellation propagates.
 - Reset waits behind refresh, closes MCP state, deletes once, and cannot resurrect credentials.
@@ -146,11 +152,17 @@ Focused tests cover observable lifecycle behavior rather than private lock chore
 - Retired MCP generations cannot reconnect with captured stale authorization headers or create a replacement session before deletion commits.
 - Callback state issued before a reset cannot republish credentials after the durable generation advances.
 - Reset cancellation before operation-lock ownership preserves credentials, while cancellation after deletion still returns the committed receipt.
+- Reset success is reported only after the credential unlink and parent-directory update are flushed.
+- Refresh cancellation before operation-lock ownership never calls the provider, while cancellation after ownership waits for local publication.
 - Google lazy refresh, GitHub refresh, MCP refresh, API status refresh, and dashboard callback all use the same operation-lock path.
 - Bridge aliases canonicalize only for OAuth credential targets, reset links authorize for the alias, and callbacks store in the canonical scope.
 - Terminal refresh rejection returns the same structured reconnect reason and instruction from every consumer.
 - Logs never include refresh tokens, access tokens, or unrecognized provider-controlled error text.
 - Approval continuation fails closed when provider, service, scope, key, or routing agent changes.
+- Agent approval continuation reconstructs OAuth-backed toolkits inside the same runtime and execution-identity context used for resumed calls.
+- Agent and voice toolkit construction receive authorization explicitly, so alias canonicalization does not depend on an ambient call context.
+- Long-lived Google clients discard valid cached access tokens after reset, disconnect, terminal invalidation, or canonical scope change.
+- Plugin providers without the `_oauth` token-service suffix fail registration before any credential can be stored.
 
 Existing tests that require reconnect writes to bypass an in-flight refresh or assert stale-retry branches are removed because those behaviors violate the serialized transaction model.
 

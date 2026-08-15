@@ -57,7 +57,7 @@ _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
 )
 
 
-def _is_oauth_token_service(service: str) -> bool:
+def is_oauth_token_service(service: str) -> bool:
     """Return whether a service name follows the OAuth token naming contract."""
     return service.endswith(_OAUTH_TOKEN_SERVICE_SUFFIX)
 
@@ -77,13 +77,13 @@ class _CredentialServicePolicy:
 
 def credential_service_policy(service: str, worker_scope: _WorkerScope | None) -> _CredentialServicePolicy:
     """Return credential placement policy for one service in one worker scope."""
-    is_oauth_token_service = _is_oauth_token_service(service)
-    is_local_only = service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES or is_oauth_token_service
+    oauth_token_service = is_oauth_token_service(service)
+    is_local_only = service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES or oauth_token_service
     is_primary_runtime_global = is_oauth_client_config_service(service)
     # OAuth tokens carry one external account identity, so a shared-scope agent's
     # connection must stay bound to that agent instead of the deployment-wide store
     # every other agent reads.
-    uses_agent_scoped = worker_scope == "shared" and is_oauth_token_service
+    uses_agent_scoped = worker_scope == "shared" and oauth_token_service
     return _CredentialServicePolicy(
         service=service,
         worker_scope=worker_scope,
@@ -94,7 +94,7 @@ def credential_service_policy(service: str, worker_scope: _WorkerScope | None) -
         ),
         uses_primary_runtime_agent_scoped_credentials=uses_agent_scoped,
         worker_grantable_supported=not is_primary_runtime_global
-        and not is_oauth_token_service
+        and not oauth_token_service
         and service not in _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     )
 

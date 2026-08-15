@@ -1165,6 +1165,7 @@ class MCPServerManager:
         tool_configs: list[EffectiveToolConfig],
         *,
         get_tool_by_name: Callable[..., object],
+        authorization: AuthorizationConfig,
     ) -> set[str]:
         """Return provider-visible function names exposed by one set of local tools."""
         function_names: set[str] = set()
@@ -1174,6 +1175,7 @@ class MCPServerManager:
                     tool_config.name,
                     self.runtime_paths,
                     worker_target=None,
+                    authorization=authorization,
                     tool_config_overrides=dict(tool_config.tool_config_overrides),
                 )
             except Exception as exc:
@@ -1219,6 +1221,7 @@ class MCPServerManager:
                     )
                 ],
                 get_tool_by_name=get_tool_by_name,
+                authorization=config.authorization,
             ),
         )
         return function_names, mcp_tool_configs

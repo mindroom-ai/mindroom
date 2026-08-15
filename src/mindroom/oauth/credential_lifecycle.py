@@ -10,7 +10,6 @@ import secrets
 import threading
 import time
 from concurrent.futures import Future as ConcurrentFuture
-from contextlib import suppress
 from contextvars import copy_context
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, NoReturn, cast
@@ -219,6 +218,36 @@ async def _run_oauth_transaction[Result](coroutine: Coroutine[Any, Any, Result])
     return await run_coroutine_until_complete(wait_for_transaction())
 
 
+async def _run_cancellable_oauth_transaction[Result](
+    coroutine_factory: Callable[[], Coroutine[Any, Any, Result]],
+) -> Result:
+    """Submit work whose transaction defines its own cancellation-safe commit boundary."""
+    transaction_loop = await asyncio.to_thread(_get_oauth_transaction_loop)
+    submission = transaction_loop.submit_cancellable(coroutine_factory())
+    wrapped_future = asyncio.wrap_future(submission.future)
+    try:
+        return await asyncio.shield(wrapped_future)
+    except asyncio.CancelledError as cancellation:
+        submission.cancel()
+        source_error: BaseException | None = None
+        while not wrapped_future.done():
+            try:
+                await asyncio.shield(wrapped_future)
+            except asyncio.CancelledError:
+                continue
+            except BaseException as exc:
+                source_error = exc
+                break
+        if source_error is None:
+            try:
+                wrapped_future.result()
+            except BaseException as exc:
+                source_error = exc
+        if source_error is not None and not isinstance(source_error, asyncio.CancelledError):
+            raise cancellation from source_error
+        raise
+
+
 def _run_oauth_transaction_sync[Result](coroutine: Coroutine[Any, Any, Result]) -> Result:
     """Block a synchronous tool on work owned entirely by the transaction loop."""
     return _get_oauth_transaction_loop().submit(coroutine).result()
@@ -241,6 +270,15 @@ class OAuthCredentialsRefreshResult:
 
     credentials: dict[str, Any] | None
     refreshed: bool
+    generation: str
+
+
+@dataclass(frozen=True, slots=True)
+class _OAuthCredentialsSnapshot:
+    """Credential data and reset generation read under one operation lock."""
+
+    credentials: dict[str, Any] | None
+    generation: str
 
 
 @dataclass(slots=True)
@@ -249,7 +287,6 @@ class _OAuthCredentialResetOutcome:
 
     committed: bool = False
     deleted: bool = False
-    error: BaseException | None = None
 
 
 def oauth_credentials_worker_target(
@@ -333,6 +370,21 @@ def oauth_credential_generation(context: OAuthCredentialContext) -> str:
     return generation
 
 
+def load_oauth_credentials_snapshot_sync(context: OAuthCredentialContext) -> _OAuthCredentialsSnapshot:
+    """Load credentials and their reset generation under one operation lock."""
+    return _run_oauth_transaction_sync(_load_oauth_credentials_snapshot_transaction(context))
+
+
+async def _load_oauth_credentials_snapshot_transaction(
+    context: OAuthCredentialContext,
+) -> _OAuthCredentialsSnapshot:
+    async with async_exclusive_file_lock(_operation_lock_path(context)):
+        return _OAuthCredentialsSnapshot(
+            credentials=load_oauth_credentials(context),
+            generation=oauth_credential_generation(context),
+        )
+
+
 async def refresh_oauth_credentials(context: OAuthCredentialContext) -> dict[str, Any] | None:
     """Refresh one credential scope and return its committed snapshot."""
     return (await refresh_oauth_credentials_with_result(context)).credentials
@@ -342,31 +394,32 @@ async def refresh_oauth_credentials_with_result(
     context: OAuthCredentialContext,
 ) -> OAuthCredentialsRefreshResult:
     """Serialize provider refresh and publication for one credential scope."""
-    return await _run_oauth_transaction(_refresh_oauth_credentials_transaction(context))
+    return await _run_cancellable_oauth_transaction(lambda: _refresh_oauth_credentials_transaction(context))
 
 
 async def _refresh_oauth_credentials_transaction(
     context: OAuthCredentialContext,
 ) -> OAuthCredentialsRefreshResult:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
-        return await _refresh_oauth_credentials_locked(context)
+        return await run_coroutine_until_complete(_refresh_oauth_credentials_locked(context))
 
 
 async def _refresh_oauth_credentials_locked(
     context: OAuthCredentialContext,
 ) -> OAuthCredentialsRefreshResult:
+    generation = oauth_credential_generation(context)
     credentials = load_oauth_credentials(context)
     if credentials is None:
         _log_oauth_refresh_skipped(context, None, reason="missing_credentials")
-        return OAuthCredentialsRefreshResult(credentials=None, refreshed=False)
+        return OAuthCredentialsRefreshResult(credentials=None, refreshed=False, generation=generation)
     if not oauth_credentials_usable(context.provider, context.runtime_paths, credentials):
         _log_oauth_refresh_skipped(context, credentials, reason="unusable_credentials")
-        return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False)
+        return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False, generation=generation)
     try:
         refreshed_credentials = await context.provider.refresh_token_data(credentials, context.runtime_paths)
     except OAuthProviderError as exc:
         _raise_normalized_refresh_error(context, credentials, exc)
-    return _publish_refresh_result(context, credentials, refreshed_credentials)
+    return _publish_refresh_result(context, credentials, refreshed_credentials, generation=generation)
 
 
 def refresh_oauth_credentials_sync(
@@ -382,18 +435,19 @@ async def _refresh_oauth_credentials_sync_transaction(
     refresh: Callable[[Mapping[str, Any]], dict[str, Any] | None],
 ) -> OAuthCredentialsRefreshResult:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
+        generation = oauth_credential_generation(context)
         credentials = load_oauth_credentials(context)
         if credentials is None:
             _log_oauth_refresh_skipped(context, None, reason="missing_credentials")
-            return OAuthCredentialsRefreshResult(credentials=None, refreshed=False)
+            return OAuthCredentialsRefreshResult(credentials=None, refreshed=False, generation=generation)
         if not oauth_credentials_usable(context.provider, context.runtime_paths, credentials):
             _log_oauth_refresh_skipped(context, credentials, reason="unusable_credentials")
-            return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False)
+            return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False, generation=generation)
         try:
             refreshed_credentials = await asyncio.to_thread(refresh, credentials)
         except OAuthProviderError as exc:
             _raise_normalized_refresh_error(context, credentials, exc)
-        return _publish_refresh_result(context, credentials, refreshed_credentials)
+        return _publish_refresh_result(context, credentials, refreshed_credentials, generation=generation)
 
 
 def refresh_oauth_credentials_blocking(context: OAuthCredentialContext) -> dict[str, Any] | None:
@@ -462,27 +516,14 @@ async def reset_oauth_credentials(
     context: OAuthCredentialContext,
 ) -> bool:
     """Delete one credential, cancelling before its lock or returning after its commit."""
-    transaction_loop = await asyncio.to_thread(_get_oauth_transaction_loop)
     outcome = _OAuthCredentialResetOutcome()
-    submission = transaction_loop.submit_cancellable(_reset_oauth_credentials_transaction(context, outcome))
-    wrapped_future = asyncio.wrap_future(submission.future)
     try:
-        return await asyncio.shield(wrapped_future)
-    except asyncio.CancelledError as cancellation:
-        submission.cancel()
-        while not wrapped_future.done():
-            try:
-                await asyncio.shield(wrapped_future)
-            except asyncio.CancelledError:
-                continue
-            except BaseException:
-                break
-        with suppress(BaseException):
-            wrapped_future.result()
+        return await _run_cancellable_oauth_transaction(
+            lambda: _reset_oauth_credentials_transaction(context, outcome),
+        )
+    except asyncio.CancelledError:
         if outcome.committed:
             return outcome.deleted
-        if outcome.error is not None and not isinstance(outcome.error, asyncio.CancelledError):
-            raise cancellation from outcome.error
         raise
 
 
@@ -490,22 +531,18 @@ async def _reset_oauth_credentials_transaction(
     context: OAuthCredentialContext,
     outcome: _OAuthCredentialResetOutcome,
 ) -> bool:
-    try:
-        async with async_exclusive_file_lock(_operation_lock_path(context)):
-            credentials = load_oauth_credentials(context)
-            _advance_oauth_credential_generation(context)
-            if credentials is not None:
-                delete_scoped_credentials(
-                    context.provider.credential_service,
-                    credentials_manager=context.credentials_manager,
-                    worker_target=context.worker_target,
-                )
-            outcome.deleted = credentials is not None
-            outcome.committed = True
-            return outcome.deleted
-    except BaseException as exc:
-        outcome.error = exc
-        raise
+    async with async_exclusive_file_lock(_operation_lock_path(context)):
+        credentials = load_oauth_credentials(context)
+        _advance_oauth_credential_generation(context)
+        if credentials is not None:
+            delete_scoped_credentials(
+                context.provider.credential_service,
+                credentials_manager=context.credentials_manager,
+                worker_target=context.worker_target,
+            )
+        outcome.deleted = credentials is not None
+        outcome.committed = True
+        return outcome.deleted
 
 
 def _operation_lock_path(context: OAuthCredentialContext) -> Path:
@@ -538,10 +575,12 @@ def _publish_refresh_result(
     context: OAuthCredentialContext,
     credentials: dict[str, Any],
     refreshed_credentials: dict[str, Any] | None,
+    *,
+    generation: str,
 ) -> OAuthCredentialsRefreshResult:
     if refreshed_credentials is None:
         _log_oauth_refresh_skipped(context, credentials, reason="not_needed")
-        return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False)
+        return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False, generation=generation)
     save_scoped_credentials(
         context.provider.credential_service,
         refreshed_credentials,
@@ -553,7 +592,7 @@ def _publish_refresh_result(
         **_oauth_refresh_log_context(context, refreshed_credentials),
         reason="refreshed",
     )
-    return OAuthCredentialsRefreshResult(credentials=refreshed_credentials, refreshed=True)
+    return OAuthCredentialsRefreshResult(credentials=refreshed_credentials, refreshed=True, generation=generation)
 
 
 def _invalidate_rejected_credentials(
@@ -562,6 +601,7 @@ def _invalidate_rejected_credentials(
     exc: OAuthRefreshRejectedError,
 ) -> None:
     _attach_oauth_refresh_failure_context(exc, credentials)
+    _advance_oauth_credential_generation(context)
     delete_scoped_credentials(
         context.provider.credential_service,
         credentials_manager=context.credentials_manager,
@@ -588,8 +628,6 @@ def _raise_normalized_refresh_error(
 def _normalized_refresh_error(exc: OAuthProviderError) -> OAuthProviderError:
     """Classify refresh failure only from its structured OAuth error code."""
     if is_terminal_oauth_refresh_error_code(exc.oauth_error):
-        if isinstance(exc, OAuthRefreshRejectedError):
-            return exc
         return OAuthRefreshRejectedError(
             _OAUTH_REFRESH_FAILED_MESSAGE,
             oauth_error=exc.oauth_error,

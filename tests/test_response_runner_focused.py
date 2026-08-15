@@ -98,8 +98,12 @@ from mindroom.synthetic_model import SyntheticModel
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
-from mindroom.tool_system.runtime_context import ToolDispatchContext
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.runtime_context import (
+    ToolDispatchContext,
+    get_tool_runtime_context,
+    runtime_context_from_dispatch_context,
+)
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_record import canonicalize_turn_record
 from tests.conftest import (
@@ -1748,15 +1752,21 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     assert requirement.tool_execution is not None
     tool_call_id = requirement.tool_execution.tool_call_id
     assert tool_call_id is not None
-    identity = ToolExecutionIdentity(
-        channel="matrix",
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    tool_dispatch = runner.deps.tool_runtime.build_dispatch_context(
+        MessageTarget(
+            room_id="!room:localhost",
+            source_thread_id="$thread",
+            resolved_thread_id="$thread",
+            reply_to_event_id="$event",
+            session_id="session-1",
+        ),
+        user_id="@user:localhost",
         agent_name="general",
-        requester_id="@user:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
     )
+    identity = tool_dispatch.execution_identity
+    expected_tool_context = runtime_context_from_dispatch_context(tool_dispatch)
+    assert expected_tool_context is not None
     continuation = ApprovalContinuation(
         approval_id="approval-real-agent",
         run_id=paused.run_id,
@@ -1772,11 +1782,15 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         source_event_ids=("$source",),
         state="claimed",
     )
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     continue_run = MagicMock(wraps=agent.acontinue_run)
     knowledge = MagicMock()
     refresh_scheduler = MagicMock()
     runner.deps.runtime.orchestrator = SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler)
+
+    def create_agent_in_context(*_args: object, **_kwargs: object) -> AgnoAgent:
+        assert get_tool_runtime_context() is expected_tool_context
+        assert get_tool_execution_identity() == identity
+        return agent
 
     with (
         patch.object(
@@ -1784,7 +1798,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
             "for_agent",
             return_value=knowledge,
         ) as resolve_knowledge,
-        patch("mindroom.approval_execution.create_agent", return_value=agent) as create_agent,
+        patch("mindroom.approval_execution.create_agent", side_effect=create_agent_in_context) as create_agent,
         patch.object(agent, "acontinue_run", new=continue_run),
         patch("mindroom.approval_execution.typing_indicator", _noop_typing),
         patch("mindroom.approval_execution.close_agent_runtime_state_dbs"),
@@ -1796,7 +1810,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         result = await runner._approval_execution.continue_run(
             continuation,
             execution_identity=identity,
-            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            tool_dispatch=tool_dispatch,
             decisions={tool_call_id: approved},
             denial_reasons={tool_call_id: reason},
             tool_trace_collector=[],

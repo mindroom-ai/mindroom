@@ -36,7 +36,7 @@ def _provider(provider_id: str) -> OAuthProvider:
         authorization_url="https://auth.example.test/authorize",
         token_url="https://auth.example.test/token",  # noqa: S106
         scopes=("read",),
-        credential_service=provider_id,
+        credential_service=f"{provider_id}_oauth",
         client_config_services=(f"{provider_id}_oauth_client",),
     )
 

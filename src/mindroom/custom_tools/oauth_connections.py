@@ -91,12 +91,12 @@ class OAuthConnectionTools(Toolkit):
                 deleted = await reset_oauth_credentials(reset_target.credential_context)
         except Exception as exc:
             logger.warning(
-                "oauth_mcp_session_disconnect_failed",
+                "oauth_connection_reset_failed",
                 provider_id=provider.id,
                 agent_name=agent_name,
                 error_type=type(exc).__name__,
             )
-            return "Error: OAuth session cleanup failed; credentials remain unchanged. Retry the reset."
+            return "Error: OAuth connection reset did not complete; verify connection status, then retry."
         scope_receipt = (
             "for this requester across agents"
             if worker_target.worker_scope == "user"

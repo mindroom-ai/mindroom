@@ -65,6 +65,7 @@ class ToolManagedInitArg(str, Enum):
     RUNTIME_PATHS = "runtime_paths"
     CREDENTIALS_MANAGER = "credentials_manager"
     WORKER_TARGET = "worker_target"
+    AUTHORIZATION = "authorization"
     TOOL_OUTPUT_WORKSPACE_ROOT = "tool_output_workspace_root"
     WORKER_TOOLS_OVERRIDE = "worker_tools_override"
     CURRENT_ROOM_ID = "current_room_id"

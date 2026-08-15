@@ -305,6 +305,41 @@ async def test_callback_waits_for_refresh_and_preserves_rotated_refresh_token(tm
 
 
 @pytest.mark.asyncio
+async def test_refresh_cancellation_while_waiting_for_lock_does_not_call_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancellation before lock ownership must abandon an unaccepted refresh."""
+    lock_waiting = threading.Event()
+    release_lock = threading.Event()
+    provider_called = threading.Event()
+
+    async def refresh(_credentials: Mapping[str, Any]) -> None:
+        provider_called.set()
+
+    @asynccontextmanager
+    async def blocked_lock(_path: Path) -> AsyncIterator[None]:
+        lock_waiting.set()
+        await asyncio.to_thread(release_lock.wait)
+        yield None
+
+    context = _context(tmp_path, _FakeOAuthProvider(refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    monkeypatch.setattr(credential_lifecycle, "async_exclusive_file_lock", blocked_lock)
+
+    refresh_task = asyncio.create_task(refresh_oauth_credentials_with_result(context))
+    await asyncio.to_thread(lock_waiting.wait)
+    refresh_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await refresh_task
+    release_lock.set()
+
+    assert not provider_called.is_set()
+    assert _load(context) == _credentials(ACCESS_0, CHAIN_0, expires_at=1.0)
+
+
+@pytest.mark.asyncio
 async def test_refresh_publishes_rotation_before_propagating_cancellation(tmp_path: Path) -> None:
     """A remotely rotated refresh grant is committed before cancellation escapes."""
     provider_rotated = threading.Event()
@@ -446,9 +481,12 @@ async def test_terminal_refresh_rejection_deletes_locked_credentials_without_log
     context = _context(tmp_path, _FakeOAuthProvider(refresh))
     _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
 
-    with pytest.raises(OAuthRefreshRejectedError):
+    with pytest.raises(OAuthRefreshRejectedError) as exc_info:
         await refresh_oauth_credentials_with_result(context)
 
+    assert str(exc_info.value) == "OAuth credential refresh failed"
+    assert exc_info.value.oauth_error == INVALID_ROTATION
+    assert exc_info.value.oauth_error_description is None
     assert _load(context) is None
     assert logger.warning_calls == [
         (

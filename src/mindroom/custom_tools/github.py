@@ -35,6 +35,7 @@ from mindroom.tool_system.worker_routing import active_tool_execution_identity
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -85,11 +86,13 @@ class GithubTools(AgnoGithubTools):
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager,
         worker_target: ResolvedWorkerTarget | None,
+        authorization: AuthorizationConfig | None = None,
         **kwargs: object,
     ) -> None:
         self._runtime_paths = runtime_paths
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target
+        self._authorization = authorization
         self._oauth_provider = github_oauth_provider()
         explicit_access_token = _normalized_access_token(access_token) or _normalized_access_token(
             runtime_paths.env_value("GITHUB_ACCESS_TOKEN"),
@@ -115,13 +118,14 @@ class GithubTools(AgnoGithubTools):
         if execution_identity is None and self._worker_target is not None:
             execution_identity = self._worker_target.execution_identity
         runtime_context = get_tool_runtime_context()
+        authorization = runtime_context.config.authorization if runtime_context is not None else self._authorization
         return resolve_oauth_credential_context(
             self._oauth_provider,
             self._runtime_paths,
             self._credentials_manager,
             self._worker_target,
             execution_identity=execution_identity,
-            authorization=runtime_context.config.authorization if runtime_context is not None else None,
+            authorization=authorization,
         )
 
     def _connection_required(self, *, reason: str | None = None) -> OAuthConnectionRequired:

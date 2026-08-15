@@ -23,8 +23,10 @@ One lifecycle module submits asynchronous callers and synchronous provider adapt
 - Perform fallible MCP teardown before destructive credential deletion.
 - Fence retired MCP requester-session generations until credential deletion commits.
 - Bind browser callbacks to a durable credential generation advanced by reset.
+- Pass authorization explicitly into OAuth-backed toolkit construction and revalidate cached credential revisions before every managed call.
 - Use structured provider error codes and never log provider-controlled descriptions or token values.
 - Keep reset approval bound to the exact provider, service, scope, worker key, and routing agent.
+- Require every provider token credential service to end with `_oauth` so storage policy cannot misclassify plugin tokens.
 - Do not run tests or CI, per user instruction.
 - Run static checks and repository pre-commit hooks on every changed file.
 - Do not amend commits, force-push, merge the PR, or create a `codex/` branch.
@@ -42,7 +44,8 @@ One lifecycle module submits asynchronous callers and synchronous provider adapt
 **Interfaces:**
 
 - Produces: `OAuthCredentialContext(provider, runtime_paths, credentials_manager, worker_target, allowed_shared_services=None)`.
-- Produces: `OAuthCredentialsRefreshResult(credentials, refreshed)`.
+- Produces: `OAuthCredentialsRefreshResult(credentials, refreshed, generation)`.
+- Produces: `load_oauth_credentials_snapshot_sync(context)` for lock-consistent eager toolkit construction.
 - Produces: `oauth_credentials_worker_target(provider, worker_target, execution_identity=None, authorization=None)`.
 - Produces: `resolve_oauth_credential_context(...)` as the OAuth-only alias-canonicalization boundary.
 - Produces: `load_oauth_credentials(context)`.
@@ -119,7 +122,8 @@ Do not export a mutation-capable lock context.
 
 Submit the complete transaction to the process-lifetime OAuth transaction loop.
 Acquire the operation lock there before loading credentials and retain it through provider refresh, terminal invalidation, or publication.
-Use `run_coroutine_until_complete()` around the submitted transaction so an accepted remote mutation reaches local commit before caller cancellation propagates.
+Keep transaction submission and operation-lock admission cancellable.
+After lock acquisition, use `run_coroutine_until_complete()` around provider refresh and publication so an accepted remote mutation reaches local commit before caller cancellation propagates.
 On `OAuthRefreshRejectedError`, attach safe pre-invalidation metadata, delete the locked snapshot, emit one bounded warning, and re-raise.
 On a returned rotation, save it before releasing the lock.
 Remove stale retry, snapshot reconciliation, and the second singleflight lock.
@@ -144,7 +148,7 @@ Apply the same missing, unusable, no-refresh-needed, success, terminal rejection
 `exchange_and_store_oauth_credentials()` must acquire the operation lock, verify the pending callback generation, and retain the lock through exchange, claim validation, refresh-token preservation, and save.
 The API route will wrap the complete lock-wait-through-save coroutine in `run_coroutine_until_complete()` after consuming state.
 
-`reset_oauth_credentials()` must wait cancellably for the operation lock, advance the durable credential generation, and delete the credential snapshot without owning MCP transport cleanup.
+`reset_oauth_credentials()` must wait cancellably for the operation lock, advance the durable credential generation, and durably delete the credential snapshot without owning MCP transport cleanup.
 Cancellation before lock ownership must abort reset, while cancellation after commit must return the deletion result so the caller can publish its receipt.
 MCP reset callers must enter requester-session retirement before invoking the credential transaction and release only the in-memory fence afterward.
 
@@ -216,6 +220,9 @@ Preserve safe logs and MCP refreshed-result observability.
 
 Remove direct advisory-lock acquisition, direct credential deletion, the second lock, and lock-held state tracking from `ScopedOAuthClientMixin`.
 Use `refresh_oauth_credentials_sync()` for eager and provider-driven lazy refresh.
+Pass `AuthorizationConfig` through managed tool construction instead of depending on an ambient runtime context for alias resolution.
+Read eager credentials and their generation under the operation lock, then compare canonical context plus generation before every managed call that could reuse cached credentials.
+Advance generation before terminal credential invalidation so all materialized clients discard the rejected grant.
 Keep Google-specific structured `RefreshError` classification in the adapter.
 Translate terminal Google rejection to `OAuthRefreshRejectedError`, let lifecycle deletion occur under the operation lock, and return the shared reconnect payload.
 Continue raising a fixed sanitized `RefreshError` to upstream Google code when transport integration requires that type.
@@ -267,12 +274,13 @@ Resolve provider-specific requester credential identity once.
 Construct the context with the primary runtime credential manager.
 Persist provider ID, credential service, worker scope, worker key, routing agent, and invoking agent in approval bindings.
 Re-resolve and compare every field before approved execution.
+Pass authorization into agent reconstruction and install persisted tool runtime and execution-identity contexts before reconstruction and resumed execution.
 
 - [ ] **Step 6: Make agent reset cancellation-safe by ordering**
 
 Issue the requester-bound reconnect link first.
 Enter MCP requester-session retirement around the lifecycle reset transaction.
-If teardown raises an ordinary exception, log bounded metadata and return an error stating that credentials remain unchanged.
+If teardown or lifecycle reset raises an ordinary exception, log one bounded lifecycle-wide failure event and tell the caller to verify status before retrying.
 If teardown is cancelled, propagate cancellation while credentials remain intact.
 After deletion, release only the in-memory retirement fence before building the receipt.
 

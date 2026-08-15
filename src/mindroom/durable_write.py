@@ -17,6 +17,22 @@ type OverrideRecord = dict[str, str]
 _override_load_cache: dict[Path, tuple[int, dict[str, OverrideRecord]]] = {}
 
 
+def delete_file_durable(path: Path) -> bool:
+    """Unlink one file and durably publish its directory update."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    _fsync_directory_durable(path.parent)
+    return True
+
+
+def replace_file_durable(source: Path, target: Path) -> None:
+    """Atomically replace one file and durably publish its directory update."""
+    source.replace(target)
+    _fsync_directory_durable(target.parent)
+
+
 def write_json_file_durable(
     path: Path,
     payload: object,
@@ -49,10 +65,10 @@ def write_json_file_durable(
             temp_file.flush()
             os.fsync(temp_file.fileno())
         if strict_atomic_replace:
-            temp_path.replace(path)
+            replace_file_durable(temp_path, path)
         else:
             safe_replace(temp_path, path)
-        _fsync_directory(path.parent)
+            _fsync_directory(path.parent)
     finally:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
@@ -120,5 +136,14 @@ def _fsync_directory(directory: Path) -> None:
             os.fsync(directory_fd)
         except OSError:
             return
+    finally:
+        os.close(directory_fd)
+
+
+def _fsync_directory_durable(directory: Path) -> None:
+    """Flush one directory update and propagate durability failures."""
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
     finally:
         os.close(directory_fd)

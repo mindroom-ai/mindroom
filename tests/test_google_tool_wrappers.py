@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from agno.tools.function import Function
 from google.auth.exceptions import RefreshError, TransportError
 
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
     CredentialsManager,
@@ -28,7 +31,9 @@ from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, 
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 from mindroom.oauth import client as oauth_client_module
 from mindroom.oauth.client import ScopedOAuthClientMixin
+from mindroom.oauth.credential_lifecycle import reset_oauth_credentials
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.oauth.service import oauth_credentials_worker_target
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
@@ -466,6 +471,162 @@ def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
         )
         is None
     )
+
+
+def test_google_lazy_refresh_reuses_rotation_committed_for_a_stale_client(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """A stale lazy client must observe a serialized rotation instead of rotating again."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "expired-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 1.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tools = [
+        GoogleDriveTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        for _ in range(2)
+    ]
+    provider_calls = 0
+    rotated_access = "rotated-access-token"
+
+    def rotate(credentials: object, _request: object) -> None:
+        nonlocal provider_calls
+        provider_calls += 1
+        credentials.token = rotated_access  # type: ignore[attr-defined]
+        credentials.expiry = datetime.fromtimestamp(4_102_444_800.0, tz=UTC)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", rotate)
+
+    tools[0].creds.refresh(object())
+    tools[1].creds.refresh(object())
+
+    assert provider_calls == 1
+    assert tools[0].creds.token == rotated_access
+    assert tools[1].creds.token == rotated_access
+
+
+def test_google_wrapper_constructor_canonicalizes_alias_without_runtime_context(
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Toolkit construction must own alias resolution without an ambient call context."""
+    alias = "@telegram_alice:example.org"
+    canonical = "@alice:example.org"
+    canonical_access_token = "canonical-access-token"  # noqa: S105
+    authorization = AuthorizationConfig(aliases={canonical: [alias]})
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=alias,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    raw_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    canonical_target = oauth_credentials_worker_target(
+        GoogleDriveTools._oauth_provider,
+        raw_target,
+        authorization=authorization,
+    )
+    assert canonical_target is not None
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": canonical_access_token,
+            "refresh_token": "canonical-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=canonical_target,
+    )
+
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=raw_target,
+        authorization=authorization,
+    )
+
+    assert tool.creds.token == canonical_access_token
+    assert tool._oauth_credential_context().worker_target == canonical_target
+
+
+@pytest.mark.asyncio
+async def test_google_wrapper_drops_valid_cached_credentials_after_reset(
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Every managed entrypoint must observe reset before reusing a cached access token."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "valid-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool.service = object()
+
+    assert await reset_oauth_credentials(tool._oauth_credential_context()) is True
+    payload = json.loads(await asyncio.to_thread(tool._ensure_structured_auth))
+
+    assert payload["oauth_connection_required"] is True
+    assert tool.creds is None
+    assert tool.service is None
 
 
 @pytest.mark.asyncio

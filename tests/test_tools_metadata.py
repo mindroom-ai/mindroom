@@ -515,6 +515,7 @@ def test_github_metadata_declares_oauth_and_manual_token_fallback() -> None:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.AUTHORIZATION,
     )
     assert {field.name for field in metadata.config_fields or []} == {"access_token", "base_url"}
 

@@ -18,7 +18,11 @@ from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
 from httpx import HTTPError, HTTPStatusError
 
-from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY, is_oauth_client_config_service
+from mindroom.credential_policy import (
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+    is_oauth_client_config_service,
+    is_oauth_token_service,
+)
 from mindroom.credentials import get_runtime_credentials_manager, validate_service_name
 
 warnings.filterwarnings(
@@ -360,9 +364,8 @@ def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError) -> OAuthProviderErro
     if detail is not None:
         if is_terminal_oauth_refresh_error_code(error_code):
             return OAuthRefreshRejectedError(
-                f"{msg}: {detail}",
+                msg,
                 oauth_error=error_code,
-                oauth_error_description=error_description,
             )
         return OAuthProviderError(
             f"{msg}: {detail}",
@@ -371,9 +374,8 @@ def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError) -> OAuthProviderErro
         )
     if is_terminal_oauth_refresh_error_code(error_code):
         return OAuthRefreshRejectedError(
-            f"{msg}: {error_code}",
+            msg,
             oauth_error=error_code,
-            oauth_error_description=error_description,
         )
     return OAuthProviderError(msg)
 
@@ -430,6 +432,9 @@ class OAuthProvider:
                 f"OAuth provider '{self.id}' credential_service '{self.credential_service}' "
                 "must not end with '_oauth_client'"
             )
+            raise ValueError(msg)
+        if not is_oauth_token_service(self.credential_service):
+            msg = f"OAuth provider '{self.id}' credential_service '{self.credential_service}' must end with '_oauth'"
             raise ValueError(msg)
         if self.tool_config_service is not None:
             validate_service_name(self.tool_config_service)

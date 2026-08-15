@@ -178,7 +178,7 @@ def _use_runtime_auth_settings(api_app: FastAPI) -> None:
 def _fake_provider(
     provider_id: str = "test_drive",
     *,
-    credential_service: str = "test_drive",
+    credential_service: str = "test_drive_oauth",
     tool_config_service: str | None = None,
     email: str = "alice@example.com",
     hosted_domain: str = "example.com",
@@ -372,7 +372,7 @@ def test_plugin_config_registers_oauth_provider(tmp_path: Path) -> None:
                     "path": str(plugin_dir),
                     "settings": {
                         "provider_id": "plugin_drive",
-                        "credential_service": "plugin_drive",
+                        "credential_service": "plugin_drive_oauth",
                     },
                 },
             ],
@@ -382,7 +382,7 @@ def test_plugin_config_registers_oauth_provider(tmp_path: Path) -> None:
     providers = load_oauth_providers(config, runtime_paths)
 
     assert providers["plugin_drive"].display_name == "Plugin OAuth"
-    assert providers["plugin_drive"].credential_service == "plugin_drive"
+    assert providers["plugin_drive"].credential_service == "plugin_drive_oauth"
 
 
 def test_plugin_oauth_provider_rejects_duplicate_service_names(tmp_path: Path) -> None:
@@ -447,7 +447,7 @@ def test_oauth_provider_requires_client_config_service() -> None:
         )
 
 
-def test_plugin_oauth_provider_rejects_tool_config_overlap(tmp_path: Path) -> None:
+def test_plugin_oauth_provider_rejects_token_service_without_suffix(tmp_path: Path) -> None:
     plugin_dir = tmp_path / "plugin"
     plugin_dir.mkdir()
     (plugin_dir / "mindroom.plugin.json").write_text(
@@ -482,11 +482,11 @@ def test_plugin_oauth_provider_rejects_tool_config_overlap(tmp_path: Path) -> No
         },
     )
 
-    with pytest.raises(plugin_imports.PluginValidationError, match="Duplicate OAuth provider service name"):
+    with pytest.raises(ValueError, match="must end with '_oauth'"):
         load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
 
 
-def test_plugin_oauth_provider_rejects_ordinary_tool_credential_service_overlap(tmp_path: Path) -> None:
+def test_plugin_oauth_provider_rejects_ordinary_service_as_token_store(tmp_path: Path) -> None:
     plugin_dir = tmp_path / "plugin"
     plugin_dir.mkdir()
     (plugin_dir / "mindroom.plugin.json").write_text(
@@ -521,7 +521,7 @@ def test_plugin_oauth_provider_rejects_ordinary_tool_credential_service_overlap(
         },
     )
 
-    with pytest.raises(plugin_imports.PluginValidationError, match="overlap existing tool service"):
+    with pytest.raises(ValueError, match="must end with '_oauth'"):
         load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
 
 
@@ -677,6 +677,11 @@ def test_plugin_oauth_provider_rejects_client_config_tool_service_overlap(monkey
 def test_oauth_provider_rejects_client_config_suffix_for_token_service() -> None:
     with pytest.raises(ValueError, match=r"credential_service.*must not end with '_oauth_client'"):
         _fake_provider(credential_service="bad_oauth_client")
+
+
+def test_oauth_provider_requires_token_service_suffix() -> None:
+    with pytest.raises(ValueError, match=r"credential_service.*must end with '_oauth'"):
+        _fake_provider(credential_service="unsafe_token_service")
 
 
 def test_oauth_provider_rejects_client_config_suffix_for_tool_config_service() -> None:
@@ -961,7 +966,7 @@ def test_provider_refresh_token_data_skips_unexpired_access_token(
 
 
 @pytest.mark.parametrize("oauth_error", ["invalid_grant", "invalid_refresh_token"])
-def test_provider_refresh_token_data_surfaces_oauth_error_body_without_tokens(
+def test_provider_refresh_token_data_sanitizes_terminal_error_body(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     oauth_error: str,
@@ -1015,9 +1020,9 @@ def test_provider_refresh_token_data_surfaces_oauth_error_body_without_tokens(
         )
 
     message = str(exc_info.value)
-    assert message == f"OAuth token refresh failed: {oauth_error}: refresh grant rejected"
+    assert message == "OAuth token refresh failed"
     assert exc_info.value.oauth_error == oauth_error
-    assert exc_info.value.oauth_error_description == "refresh grant rejected"
+    assert exc_info.value.oauth_error_description is None
     assert "stored-access-token-secret" not in message
     assert "stored-refresh-token-secret" not in message
     assert "provider-leaked-access-token" not in message
@@ -1328,7 +1333,7 @@ def test_pkce_provider_exchange_sends_code_verifier(
         authorization_url="https://auth.example.test/test_drive/authorize",
         token_url="https://auth.example.test/test_drive/token",
         scopes=("scope.read",),
-        credential_service="test_drive",
+        credential_service="test_drive_oauth",
         client_config_services=("test_drive_oauth_client",),
         pkce_code_challenge_method="S256",
     )
@@ -3560,8 +3565,8 @@ def test_callback_rejects_wrong_provider_state(tmp_path: Path) -> None:
         {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
-    first_provider = _fake_provider("first_drive", credential_service="first_drive")
-    second_provider = _fake_provider("second_drive", credential_service="second_drive")
+    first_provider = _fake_provider("first_drive", credential_service="first_drive_oauth")
+    second_provider = _fake_provider("second_drive", credential_service="second_drive_oauth")
     providers = {
         first_provider.id: first_provider,
         second_provider.id: second_provider,

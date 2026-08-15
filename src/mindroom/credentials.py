@@ -24,6 +24,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from mindroom import runtime_env_policy as _runtime_env_policy
 from mindroom.credential_policy import credential_service_policy
+from mindroom.durable_write import delete_file_durable, replace_file_durable
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.worker_routing import worker_root_path
 
@@ -207,7 +208,7 @@ def _atomic_write_private_file(path: Path, payload: bytes) -> None:
             f.write(payload)
             f.flush()
             os.fsync(f.fileno())
-        tmp_path.replace(path)
+        replace_file_durable(tmp_path, path)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
@@ -421,8 +422,7 @@ class CredentialsManager:
 
         """
         credentials_path = self.get_credentials_path(service)
-        if credentials_path.exists():
-            credentials_path.unlink()
+        delete_file_durable(credentials_path)
 
     def list_services(self) -> list[str]:
         """List all services with stored credentials.
