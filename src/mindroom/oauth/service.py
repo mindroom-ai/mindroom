@@ -403,11 +403,7 @@ async def _refresh_scoped_oauth_credentials_snapshot(
                 stale_retry_used=False,
             )
             raise
-        if (
-            latest_credentials is None
-            or latest_refresh_token is None
-            or not oauth_credentials_usable(provider, runtime_paths, latest_credentials)
-        ):
+        if latest_credentials is None or not oauth_credentials_usable(provider, runtime_paths, latest_credentials):
             _log_oauth_refresh_failed(
                 provider,
                 credentials,
@@ -416,6 +412,14 @@ async def _refresh_scoped_oauth_credentials_snapshot(
                 stale_retry_used=False,
             )
             raise
+        if latest_refresh_token is None:
+            _log_oauth_refresh_skipped(
+                provider,
+                latest_credentials,
+                reason="superseded",
+                stale_retry_used=False,
+            )
+            return OAuthCredentialsRefreshResult(credentials=latest_credentials, refreshed=False)
         try:
             refreshed_credentials = await provider.refresh_token_data(latest_credentials, runtime_paths)
         except OAuthProviderError as retry_exc:

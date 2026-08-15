@@ -541,6 +541,51 @@ async def test_scoped_oauth_refresh_preserves_reconnect_with_same_refresh_token(
 
 
 @pytest.mark.asyncio
+async def test_scoped_oauth_refresh_accepts_access_token_only_reconnect_after_stale_rejection(tmp_path: Path) -> None:
+    """A usable reconnect must supersede stale rejection even without another refresh token."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target()
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    _save_credentials(runtime_paths, worker_target, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    reconnected_credentials = _credentials(RECONNECTED_ACCESS, CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
+    del reconnected_credentials["refresh_token"]
+    refresh_calls = 0
+
+    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any] | None:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        assert credentials["refresh_token"] == CHAIN_0
+        save_scoped_credentials(
+            "demo_oauth",
+            reconnected_credentials,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        raise OAuthRefreshRejectedError(INVALID_ROTATION, oauth_error=INVALID_ROTATION)
+
+    result = await refresh_scoped_oauth_credentials_with_result(
+        _FakeOAuthProvider(refresh),
+        runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    assert result == oauth_service_module.OAuthCredentialsRefreshResult(
+        credentials=reconnected_credentials,
+        refreshed=False,
+    )
+    assert refresh_calls == 1
+    assert (
+        load_scoped_credentials(
+            "demo_oauth",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        == reconnected_credentials
+    )
+
+
+@pytest.mark.asyncio
 async def test_scoped_oauth_refresh_logs_terminal_failure_without_tokens(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
