@@ -51,7 +51,8 @@
 {{- if not .Values.agentRepositories.brokerTokenSecret.key -}}
 {{- fail "agentRepositories.brokerTokenSecret.key is required when agentRepositories.enabled=true" -}}
 {{- end -}}
-{{- if not (regexMatch "^[A-Za-z0-9][-._A-Za-z0-9]*$" .Values.agentRepositories.brokerTokenSecret.key) -}}
+{{- $brokerSecretKey := .Values.agentRepositories.brokerTokenSecret.key -}}
+{{- if or (gt (len $brokerSecretKey) 253) (not (regexMatch "^[A-Za-z0-9][-._A-Za-z0-9]*$" $brokerSecretKey)) -}}
 {{- fail "agentRepositories.brokerTokenSecret.key must be a valid Kubernetes Secret key" -}}
 {{- end -}}
 {{- if ne .Values.workers.backend "kubernetes" -}}
