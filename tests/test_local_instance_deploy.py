@@ -477,3 +477,15 @@ def test_get_actual_status_requires_matrix_runtime_container(monkeypatch: pytest
     monkeypatch.setattr(deploy.subprocess, "run", _run)
 
     assert deploy.get_actual_status("alpha") == (False, False)
+
+
+def test_telegram_bridge_manager_pins_legacy_python_image() -> None:
+    """The generated legacy config must use the compatible legacy bridge release."""
+    expected_image = "dock.mau.dev/mautrix/telegram:v0.15.3"
+    manager_source = Path("local/instances/deploy/bridge.py").read_text()
+    template_source = Path("local/instances/deploy/templates/bridges/docker-compose.telegram.j2").read_text()
+
+    assert expected_image in manager_source
+    assert f"image: {expected_image}" in template_source
+    assert "dock.mau.dev/mautrix/telegram:latest" not in manager_source
+    assert "dock.mau.dev/mautrix/telegram:latest" not in template_source

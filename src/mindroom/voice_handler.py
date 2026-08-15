@@ -592,7 +592,7 @@ async def _process_transcription(
         # Get the AI model to process the transcription
         model = model_loading.get_model_instance(config, runtime_paths, config.voice.intelligence.model)
 
-        # Create an agent for voice command processing
+        # Create an agent for voice transcript normalization
         agent = Agent(
             name="VoiceTranscriptionNormalizer",
             role="Normalize voice transcriptions while preserving natural language and mention intent",

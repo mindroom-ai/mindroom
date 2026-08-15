@@ -1,4 +1,4 @@
-"""OAuth provider helpers for requester-scoped remote MCP servers."""
+"""OAuth provider helpers for worker-scoped remote MCP servers."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ async def disconnect_mcp_oauth_request_session(
     *,
     worker_target: ResolvedWorkerTarget | None,
 ) -> None:
-    """Close the active requester-scoped MCP OAuth session for one generated provider."""
+    """Close the active worker-scoped MCP OAuth session for one generated provider."""
     server_id = _mcp_oauth_server_id_for_provider_id(mcp_servers, provider_id)
     if server_id is None:
         return

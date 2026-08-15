@@ -29,7 +29,8 @@ That matters especially for `aws_ses`, because the current registry marks it as 
 `e2b` accepts `api_key` inline from stored credentials or falls back to `E2B_API_KEY`.
 `daytona` accepts stored credentials or environment fallback through `DAYTONA_API_KEY`, and `api_url` can also fall back to `DAYTONA_API_URL`.
 `composio` can fall back to cached Composio user data or `COMPOSIO_API_KEY` when `api_key` is not stored directly.
-Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `sandbox_env_vars`, `sandbox_labels`, `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `headers`.
+Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `headers`.
+Daytona's `sandbox_env_vars` and `sandbox_labels` instead accept JSON objects that MindRoom validates and converts to upstream mappings.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## [`aws_lambda`]
@@ -265,7 +266,7 @@ create_file("main.py", "print('ok')")
 
 ### Notes
 
-- `sandbox_env_vars` and `sandbox_labels` are advanced constructor inputs rather than convenient hand-authored YAML fields.
+- `sandbox_env_vars` and `sandbox_labels` accept validated JSON objects rather than raw upstream constructor objects.
 - `verify_ssl: false` is not a cosmetic flag here, because the current implementation actively patches the Daytona client to skip certificate verification.
 - Use `sandbox_id` when you want to pin the tool to a known sandbox instead of letting session-state reuse choose one.
 

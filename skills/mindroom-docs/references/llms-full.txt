@@ -7101,6 +7101,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 ## Tools On This Page
 
 - [`matrix_message`] - Send, reply, react, read, list room threads, edit, or inspect Matrix conversation context.
+- [`matrix_room`] - Inspect Matrix room metadata, members, thread roots, and room state.
 - [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
 - [`thread_resolution`] - Explicitly resolve or reopen the active Matrix thread.
@@ -7114,7 +7115,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 These tools depend on the active `ToolRuntimeContext`, so they only work when an agent is running in a Matrix-connected conversation.
 `matrix_message` implies `attachments` and `matrix_room` through `Config.IMPLIED_TOOLS`, so enabling it makes both companion toolkits available even when you do not list them separately.
 Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run.
-Current source in this worktree exposes `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
+Current source in this worktree exposes `matrix_message`, `matrix_room`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
 
 ## [`matrix_message`]
 
@@ -7172,6 +7173,49 @@ matrix_message(action="react", target="$event123", message="✅")
 - Use `action="context"` before a follow-up write when you want to inspect the resolved `room_id`, `thread_id`, and `reply_to_event_id`.
 - Successful attachment sends also return `attachment_thread_id`, which identifies the thread root used for the uploaded files.
 - If you need to send existing conversation files, pass `attachment_ids` from the current context or use the `attachments` tool to inspect them first.
+
+## [`matrix_room`]
+
+`matrix_room` provides read-only room introspection through `matrix_room(action, room_id=None, limit=None, event_type=None, state_key=None, page_token=None)`.
+
+### What It Does
+
+The supported actions are `room-info`, `members`, `threads`, and `state`.
+`room-info` returns cached room metadata including name, topic, encryption status, membership count, join rule, aliases, version, guest access, creator, and a power-level summary.
+`members` returns joined users with display names, avatar URLs, and power levels.
+`threads` returns paginated thread-root previews with sender, timestamp, and reply count; it defaults `limit` to 20, clamps it from 1 through 50, and returns `next_token` plus `has_more` for pagination.
+`state` returns one exact state event when `event_type` is supplied, using an empty `state_key` by default.
+Without `event_type`, `state` returns a room-state summary with at most 100 non-member event previews and elides `m.room.member` events.
+`room_id` defaults to the active Matrix room.
+An alternate room is allowed only when the requester is authorized there under the configured room-access policy.
+The tool requires an active Matrix `ToolRuntimeContext` and rate-limits each `(agent_name, requester_id, room_id)` combination to 20 actions per 30 seconds.
+
+### Configuration
+
+This tool has no tool-specific inline configuration fields.
+It can be listed explicitly, and `matrix_message` also enables it automatically through `Config.IMPLIED_TOOLS`.
+
+### Example
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - matrix_room
+```
+
+```python
+matrix_room(action="room-info")
+matrix_room(action="members")
+matrix_room(action="threads", limit=10)
+matrix_room(action="threads", page_token="next-page-token")
+matrix_room(action="state", event_type="m.room.topic")
+```
+
+### Notes
+
+- `page_token` applies to `threads`, while `event_type` and `state_key` apply to `state`.
+- This tool reads room data only; use `matrix_message` or `matrix_api` for supported writes.
 
 ## [`matrix_voice_message`]
 
@@ -10233,7 +10277,8 @@ That matters especially for `aws_ses`, because the current registry marks it as 
 `e2b` accepts `api_key` inline from stored credentials or falls back to `E2B_API_KEY`.
 `daytona` accepts stored credentials or environment fallback through `DAYTONA_API_KEY`, and `api_url` can also fall back to `DAYTONA_API_URL`.
 `composio` can fall back to cached Composio user data or `COMPOSIO_API_KEY` when `api_key` is not stored directly.
-Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `sandbox_env_vars`, `sandbox_labels`, `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `headers`.
+Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `headers`.
+Daytona's `sandbox_env_vars` and `sandbox_labels` instead accept JSON objects that MindRoom validates and converts to upstream mappings.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## [`aws_lambda`]
@@ -10469,7 +10514,7 @@ create_file("main.py", "print('ok')")
 
 ### Notes
 
-- `sandbox_env_vars` and `sandbox_labels` are advanced constructor inputs rather than convenient hand-authored YAML fields.
+- `sandbox_env_vars` and `sandbox_labels` accept validated JSON objects rather than raw upstream constructor objects.
 - `verify_ssl: false` is not a cosmetic flag here, because the current implementation actively patches the Daytona client to skip certificate verification.
 - Use `sandbox_id` when you want to pin the tool to a known sandbox instead of letting session-state reuse choose one.
 
@@ -10946,7 +10991,7 @@ Use the OAuth `auth` block plus `worker_scope: user` or `worker_scope: user_agen
 | `env` | map[string,string] | `{}` | Optional `stdio` environment variables; supports `${ENV_VAR}` placeholders |
 | `url` | string | `null` | Required for `sse` and `streamable-http` |
 | `headers` | map[string,string] | `{}` | Optional remote transport headers; supports `${ENV_VAR}` placeholders |
-| `auth` | object | `null` | Optional OAuth configuration for requester-scoped remote MCP access |
+| `auth` | object | `null` | Optional OAuth configuration for worker-scoped remote MCP access |
 | `tool_prefix` | string | server ID | Prefix for model-visible function names |
 | `include_tools` | list[string] | `[]` | Optional allowlist of remote tool names to expose |
 | `exclude_tools` | list[string] | `[]` | Optional denylist of remote tool names to hide |
@@ -11006,7 +11051,7 @@ Shared scope reuses one agent-scoped token and session; `user` and `user_agent` 
 
 ## OAuth-Backed Remote MCP
 
-Use `auth.type: oauth` for a remote MCP server that requires a requester-owned OAuth bearer token.
+Use `auth.type: oauth` for a remote MCP server that requires an OAuth bearer token resolved for the configured worker scope.
 OAuth-backed MCP requires `sse` or `streamable-http`; `stdio` servers cannot use this mode.
 
 ```yaml
@@ -11030,7 +11075,7 @@ mcp_servers:
 agents:
   assistant:
     display_name: Assistant
-    role: Use requester-scoped MCP tools
+    role: Use worker-scoped MCP tools
     model: sonnet
     worker_scope: user_agent
     tools:
@@ -11048,12 +11093,12 @@ OAuth-backed MCP servers always expose a stable bridge surface:
 - `<prefix>_list_tools`
 - `<prefix>_call_tool`
 
-The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a requester-specific tool catalog.
+The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a worker-scoped tool catalog.
 When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
-Until the requester connects, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
+Until the current worker scope connects, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
 Set the per-server `description` option to tell the model what connecting would unlock; it is appended to all three bridge tool descriptions.
 After the user connects, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for that worker scope to the MCP server.
-After MindRoom has a cached requester-specific catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that requester in addition to the bridge functions.
+After MindRoom has a cached worker-scoped catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that worker scope in addition to the bridge functions.
 
 `discovery: auto` performs protected-resource metadata discovery from the configured `resource` or server `url`, then resolves authorization-server metadata.
 MindRoom tries `/.well-known/oauth-protected-resource` at the resource origin and at the resource path.
@@ -11277,7 +11322,7 @@ It waits up to 600 seconds for active Matrix responses to drain, then force-appl
 - MCP resources and prompts are not exposed in MindRoom yet.
 - Non-OAuth MCP integrations always use the shared server session, even on isolating worker scopes; per-requester isolation requires an OAuth-backed server.
 - OAuth-backed remote MCP credentials and sessions follow the configured worker scope; use `user` or `user_agent` for requester isolation.
-- OAuth-backed remote MCP typed functions appear only after MindRoom has cached a requester-specific remote catalog.
+- OAuth-backed remote MCP typed functions appear only after MindRoom has cached a catalog for the current worker scope.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.
 
@@ -11638,8 +11683,8 @@ my-plugin/
         └── SKILL.md
 ```
 
-Capability fields are optional.
-An empty manifest still loads but contributes no tools, hooks, OAuth providers, or skills.
+Capability fields are optional, but the `name` field is required.
+A name-only manifest loads but contributes no tools, hooks, OAuth providers, or skills.
 A tools-only plugin exposes callable functions to agents.
 A plugin with `oauth_module` registers OAuth providers whose state, callbacks, and scoped credential storage are handled by MindRoom core.
 A hooks-only plugin observes or transforms events without adding agent-facing tools.
@@ -12066,7 +12111,7 @@ context = get_tool_runtime_context()
 worker_target = context.resolve_worker_target()
 ```
 
-This returns the exact worker target that agent toolkit construction uses, so requester-scoped state such as OAuth MCP sessions and scoped credentials resolves identically.
+This returns the exact worker target that agent toolkit construction uses, so worker-scoped state such as OAuth MCP sessions and scoped credentials resolves identically.
 `resolve_worker_target()` raises `ValueError` for team and router dispatches, because those contexts have no single agent execution scope to mirror; catch it if your tool can run inside a team.
 
 ## MCP via plugins (advanced)
@@ -12124,7 +12169,8 @@ MCP toolkits are async; Agno's async agent runs (`arun`, `aprint_response`) hand
 List skill directories in the manifest `skills` array.
 Each listed directory is added to MindRoom's skill search roots.
 Skill subdirectories must contain a `SKILL.md` file.
-YAML frontmatter is optional: discovery falls back to the directory name and an empty description, and requirements are declared only when needed.
+YAML frontmatter is optional: discovery falls back to the directory name, and a missing description falls back to the resolved skill name.
+Requirements are declared only when needed.
 
 ## Hooks
 
@@ -13990,14 +14036,14 @@ When a voice message is received:
 
 1. The audio event is handled through the shared media pipeline.
 2. If voice STT and `voice.visible_router_echo` are enabled and the router is present and allowed to reply, the router immediately posts `Router agent is transcribing…`.
-3. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment while the placeholder is visible.
+3. When audio download succeeds, it is decrypted, if needed, and registered as a context-scoped attachment while the placeholder is visible.
 4. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and ASR cleanup without creating chat commands.
 5. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
 6. The router replaces its placeholder with the normalized transcript or fallback text, or posts the fallback directly when STT is disabled.
-7. The normalized transcript or fallback prompt plus attachment metadata is dispatched using the normal routing and thread logic.
+7. The normalized transcript or fallback prompt is dispatched using the normal routing and thread logic, with attachment metadata when registration succeeded.
 8. If routing is ambiguous in a multi-responder room, the router posts a visible handoff message.
 9. Otherwise, no extra router message is posted and the chosen agent or team replies directly.
-10. The responding entity receives the original audio attachment alongside the normalized transcript or fallback prompt.
+10. When download and registration succeeded, the responding entity receives the original audio attachment alongside the normalized transcript or fallback prompt; otherwise it receives the text fallback without an attachment.
 
 ## Configuration
 
@@ -16473,7 +16519,8 @@ See [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) for the 
 ### Streaming Responses
 
 Agents stream responses by progressively editing messages.
-Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), avoiding progressive Matrix edits for offline users.
+When requester identity is available, `should_use_streaming()` enables streaming only while that requester is online, avoiding progressive Matrix edits for offline users.
+When requester identity is unavailable, the presence check cannot run and `should_use_streaming()` defaults to streaming.
 See [Streaming Responses](https://docs.mindroom.chat/streaming/) for the full feature documentation.
 
 Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
@@ -17208,7 +17255,9 @@ Accounts with two-factor authentication receive an additional password prompt.
 3. Follow the bridge bot's current `help` output to create or link the portal.
 
 Exact portal commands depend on the running `mautrix-telegram` version.
-The manager currently deploys the unpinned `latest` image, so use the running bridge's `help` output rather than commands copied from another version.
+The manager pins `v0.15.3`, the legacy Python bridge release compatible with its generated configuration and relay-bot workflow.
+Moving to the newer Go bridge requires a coordinated image, configuration, and portal-command migration.
+Use the running bridge's `help` output rather than commands copied from another version.
 
 ## Operations
 

@@ -28,8 +28,8 @@ my-plugin/
         └── SKILL.md
 ```
 
-Capability fields are optional.
-An empty manifest still loads but contributes no tools, hooks, OAuth providers, or skills.
+Capability fields are optional, but the `name` field is required.
+A name-only manifest loads but contributes no tools, hooks, OAuth providers, or skills.
 A tools-only plugin exposes callable functions to agents.
 A plugin with `oauth_module` registers OAuth providers whose state, callbacks, and scoped credential storage are handled by MindRoom core.
 A hooks-only plugin observes or transforms events without adding agent-facing tools.
@@ -456,7 +456,7 @@ context = get_tool_runtime_context()
 worker_target = context.resolve_worker_target()
 ```
 
-This returns the exact worker target that agent toolkit construction uses, so requester-scoped state such as OAuth MCP sessions and scoped credentials resolves identically.
+This returns the exact worker target that agent toolkit construction uses, so worker-scoped state such as OAuth MCP sessions and scoped credentials resolves identically.
 `resolve_worker_target()` raises `ValueError` for team and router dispatches, because those contexts have no single agent execution scope to mirror; catch it if your tool can run inside a team.
 
 ## MCP via plugins (advanced)
@@ -514,7 +514,8 @@ MCP toolkits are async; Agno's async agent runs (`arun`, `aprint_response`) hand
 List skill directories in the manifest `skills` array.
 Each listed directory is added to MindRoom's skill search roots.
 Skill subdirectories must contain a `SKILL.md` file.
-YAML frontmatter is optional: discovery falls back to the directory name and an empty description, and requirements are declared only when needed.
+YAML frontmatter is optional: discovery falls back to the directory name, and a missing description falls back to the resolved skill name.
+Requirements are declared only when needed.
 
 ## Hooks
 

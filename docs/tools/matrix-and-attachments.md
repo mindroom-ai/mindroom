@@ -14,6 +14,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 ## Tools On This Page
 
 - [`matrix_message`] - Send, reply, react, read, list room threads, edit, or inspect Matrix conversation context.
+- [`matrix_room`] - Inspect Matrix room metadata, members, thread roots, and room state.
 - [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
 - [`thread_resolution`] - Explicitly resolve or reopen the active Matrix thread.
@@ -27,7 +28,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 These tools depend on the active `ToolRuntimeContext`, so they only work when an agent is running in a Matrix-connected conversation.
 `matrix_message` implies `attachments` and `matrix_room` through `Config.IMPLIED_TOOLS`, so enabling it makes both companion toolkits available even when you do not list them separately.
 Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run.
-Current source in this worktree exposes `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
+Current source in this worktree exposes `matrix_message`, `matrix_room`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
 
 ## [`matrix_message`]
 
@@ -85,6 +86,49 @@ matrix_message(action="react", target="$event123", message="✅")
 - Use `action="context"` before a follow-up write when you want to inspect the resolved `room_id`, `thread_id`, and `reply_to_event_id`.
 - Successful attachment sends also return `attachment_thread_id`, which identifies the thread root used for the uploaded files.
 - If you need to send existing conversation files, pass `attachment_ids` from the current context or use the `attachments` tool to inspect them first.
+
+## [`matrix_room`]
+
+`matrix_room` provides read-only room introspection through `matrix_room(action, room_id=None, limit=None, event_type=None, state_key=None, page_token=None)`.
+
+### What It Does
+
+The supported actions are `room-info`, `members`, `threads`, and `state`.
+`room-info` returns cached room metadata including name, topic, encryption status, membership count, join rule, aliases, version, guest access, creator, and a power-level summary.
+`members` returns joined users with display names, avatar URLs, and power levels.
+`threads` returns paginated thread-root previews with sender, timestamp, and reply count; it defaults `limit` to 20, clamps it from 1 through 50, and returns `next_token` plus `has_more` for pagination.
+`state` returns one exact state event when `event_type` is supplied, using an empty `state_key` by default.
+Without `event_type`, `state` returns a room-state summary with at most 100 non-member event previews and elides `m.room.member` events.
+`room_id` defaults to the active Matrix room.
+An alternate room is allowed only when the requester is authorized there under the configured room-access policy.
+The tool requires an active Matrix `ToolRuntimeContext` and rate-limits each `(agent_name, requester_id, room_id)` combination to 20 actions per 30 seconds.
+
+### Configuration
+
+This tool has no tool-specific inline configuration fields.
+It can be listed explicitly, and `matrix_message` also enables it automatically through `Config.IMPLIED_TOOLS`.
+
+### Example
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - matrix_room
+```
+
+```python
+matrix_room(action="room-info")
+matrix_room(action="members")
+matrix_room(action="threads", limit=10)
+matrix_room(action="threads", page_token="next-page-token")
+matrix_room(action="state", event_type="m.room.topic")
+```
+
+### Notes
+
+- `page_token` applies to `threads`, while `event_type` and `state_key` apply to `state`.
+- This tool reads room data only; use `matrix_message` or `matrix_api` for supported writes.
 
 ## [`matrix_voice_message`]
 

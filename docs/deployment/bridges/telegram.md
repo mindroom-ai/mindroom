@@ -79,7 +79,9 @@ Accounts with two-factor authentication receive an additional password prompt.
 3. Follow the bridge bot's current `help` output to create or link the portal.
 
 Exact portal commands depend on the running `mautrix-telegram` version.
-The manager currently deploys the unpinned `latest` image, so use the running bridge's `help` output rather than commands copied from another version.
+The manager pins `v0.15.3`, the legacy Python bridge release compatible with its generated configuration and relay-bot workflow.
+Moving to the newer Go bridge requires a coordinated image, configuration, and portal-command migration.
+Use the running bridge's `help` output rather than commands copied from another version.
 
 ## Operations
 

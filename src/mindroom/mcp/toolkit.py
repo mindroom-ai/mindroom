@@ -133,21 +133,21 @@ class MindRoomMCPToolkit(Toolkit):
         suffix = f" {self.server_config.description}" if self.server_config.description else ""
         self.async_functions[f"{tool_prefix}_connection_status"] = Function(
             name=f"{tool_prefix}_connection_status",
-            description=f"Check whether MCP server '{self.server_id}' is connected for the current requester.{suffix}",
+            description=f"Check whether MCP server '{self.server_id}' is connected for the current worker scope.{suffix}",
             parameters={"type": "object", "properties": {}},
             entrypoint=self._oauth_connection_status,
             skip_entrypoint_processing=True,
         )
         self.async_functions[f"{tool_prefix}_list_tools"] = Function(
             name=f"{tool_prefix}_list_tools",
-            description=f"List remote tools exposed by MCP server '{self.server_id}' for the current requester.{suffix}",
+            description=f"List remote tools exposed by MCP server '{self.server_id}' for the current worker scope.{suffix}",
             parameters={"type": "object", "properties": {}},
             entrypoint=self._oauth_list_tools,
             skip_entrypoint_processing=True,
         )
         self.async_functions[f"{tool_prefix}_call_tool"] = Function(
             name=f"{tool_prefix}_call_tool",
-            description=f"Call one remote tool on MCP server '{self.server_id}' for the current requester.{suffix}",
+            description=f"Call one remote tool on MCP server '{self.server_id}' for the current worker scope.{suffix}",
             parameters={
                 "type": "object",
                 "properties": {

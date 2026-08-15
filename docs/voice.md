@@ -15,14 +15,14 @@ When a voice message is received:
 
 1. The audio event is handled through the shared media pipeline.
 2. If voice STT and `voice.visible_router_echo` are enabled and the router is present and allowed to reply, the router immediately posts `Router agent is transcribing…`.
-3. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment while the placeholder is visible.
+3. When audio download succeeds, it is decrypted, if needed, and registered as a context-scoped attachment while the placeholder is visible.
 4. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and ASR cleanup without creating chat commands.
 5. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
 6. The router replaces its placeholder with the normalized transcript or fallback text, or posts the fallback directly when STT is disabled.
-7. The normalized transcript or fallback prompt plus attachment metadata is dispatched using the normal routing and thread logic.
+7. The normalized transcript or fallback prompt is dispatched using the normal routing and thread logic, with attachment metadata when registration succeeded.
 8. If routing is ambiguous in a multi-responder room, the router posts a visible handoff message.
 9. Otherwise, no extra router message is posted and the chosen agent or team replies directly.
-10. The responding entity receives the original audio attachment alongside the normalized transcript or fallback prompt.
+10. When download and registration succeeded, the responding entity receives the original audio attachment alongside the normalized transcript or fallback prompt; otherwise it receives the text fallback without an attachment.
 
 ## Configuration
 

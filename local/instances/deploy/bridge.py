@@ -103,7 +103,7 @@ class BridgeRegistry(BaseModel):
 # Bridge template configurations
 BRIDGE_TEMPLATES = {
     BridgeType.TELEGRAM: {
-        "image": "dock.mau.dev/mautrix/telegram:latest",
+        "image": "dock.mau.dev/mautrix/telegram:v0.15.3",
         "config_template": "telegram-config-template.yaml",
         "env_vars": ["TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_BOT_TOKEN"],
         "required_credentials": ["api_id", "api_hash", "bot_token"],
