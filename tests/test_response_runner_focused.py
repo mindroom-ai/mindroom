@@ -1485,6 +1485,62 @@ async def test_ready_approval_replay_rechecks_current_authorization(
 
 
 @pytest.mark.asyncio
+async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Path) -> None:
+    """A ready team continuation must not resume after one member loses access."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    await _admit_approval_source(runner.deps.approval_store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-team-member-revoked",
+        run_id="run-paused",
+        session_id="session-1",
+        entity_kind="team",
+        entity_name="general",
+        room_id=request.room_id,
+        thread_id=request.thread_id,
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+        team_member_names=("general", "worker"),
+        team_mode="coordinate",
+    )
+    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    runner.deps.runtime.config.authorization = AuthorizationConfig(
+        default_room_access=True,
+        agent_reply_permissions={
+            "general": AgentReplyPermission(users=[continuation.requester_id]),
+            "worker": AgentReplyPermission(users=[]),
+        },
+    )
+    failing = replace(
+        continuation,
+        state="failing",
+        failure_reason="Current authorization no longer permits this tool approval continuation.",
+    )
+
+    with (
+        patch.object(runner._approval_responses, "request_failure", new=AsyncMock(return_value=failing)),
+        patch.object(runner._approval_responses, "settle_failure", new=AsyncMock(return_value=True)),
+        patch.object(
+            runner,
+            "_run_claimed_approval_lifecycle",
+            new=AsyncMock(side_effect=AssertionError("revoked team continuation executed")),
+        ) as execute,
+    ):
+        event_id = await runner._run_owned_or_locked_response(
+            request,
+            target=request.response_envelope.target,
+            early_placeholder=response_runner._EarlyPlaceholderState(),
+            locked_operation=AsyncMock(return_value="$duplicate"),
+        )
+
+    assert event_id == "$waiting"
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Path) -> None:
     """A visible error is not terminal while its continuation still owns the source."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)

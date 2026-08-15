@@ -100,6 +100,12 @@ class ToolRuntimeContext:
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
     agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=_new_agent_reply_memberships)
+    config_provider: Callable[[], Config] | None = None
+
+    @property
+    def current_config(self) -> Config:
+        """Return the managed runtime's current config or this detached snapshot."""
+        return self.config_provider() if self.config_provider is not None else self.config
 
     @property
     def room_id(self) -> str:
@@ -266,6 +272,7 @@ class ToolRuntimeSupport:
             membership=self.membership,
             membership_turn_id=source_envelope.source_event_id if source_envelope is not None else None,
             agent_reply_memberships=self.runtime.agent_reply_memberships,
+            config_provider=lambda: self.runtime.config,
         )
 
     def build_dispatch_context(

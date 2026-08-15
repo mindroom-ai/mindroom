@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import nio
+from nio.client.sliding_membership import sliding_live_timeline
 
 from mindroom.membership_models import ReportedDeparture
 
@@ -176,15 +177,15 @@ def own_membership_from_sliding_sync(
 def room_member_events_from_sync(
     response: nio.SyncResponse | nio.SlidingSyncResponse,
 ) -> tuple[tuple[str, nio.RoomMemberEvent], ...]:
-    """Return deduplicated member events in their per-room sync order."""
+    """Return deduplicated live member events in their per-room sync order."""
     room_events: Iterable[tuple[str, Iterable[object]]]
     if isinstance(response, nio.SyncResponse):
         room_events = (
-            (room_id, (*room.state, *room.timeline.events))
+            (room_id, room.timeline.events)
             for room_id, room in (*response.rooms.join.items(), *response.rooms.leave.items())
         )
     else:
-        room_events = ((room_id, (*room.required_state, *room.timeline)) for room_id, room in response.rooms.items())
+        room_events = ((room_id, sliding_live_timeline(room)) for room_id, room in response.rooms.items())
 
     seen: set[tuple[str, str]] = set()
     transitions: list[tuple[str, nio.RoomMemberEvent]] = []

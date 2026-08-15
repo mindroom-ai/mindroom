@@ -862,6 +862,82 @@ async def test_grant_user_join_superseded_in_same_sync_never_temporarily_grants(
     orchestrator.reconcile_reply_authorized_calls.assert_awaited_once_with()
 
 
+@pytest.mark.asyncio
+async def test_sliding_membership_pre_admission_uses_only_the_live_timeline_suffix(
+    tmp_path: Path,
+) -> None:
+    """Expanded Sliding history must not masquerade as live authorization changes."""
+    room_id = "!grant:localhost"
+    sender_id = "@alice:localhost"
+    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot.config.authorization.agent_reply_permissions = {
+        "router": AgentReplyPermission(joined_rooms=["grant"]),
+    }
+    state = MatrixState.load(runtime_paths=bot.runtime_paths)
+    state.add_room("grant", room_id, "#grant:localhost", "Grant")
+    state.save(runtime_paths=bot.runtime_paths)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[
+            nio.RoomMember(bot.agent_user.user_id, None, None),
+            nio.RoomMember(sender_id, None, None),
+        ],
+        room_id=room_id,
+    )
+    index = bot._runtime_view.agent_reply_memberships
+    await index.refresh(bot.config, bot.runtime_paths, client)
+    response = nio.SlidingSyncResponse.from_dict(
+        {
+            "pos": "s-history-only",
+            "rooms": {
+                room_id: {
+                    "membership": "join",
+                    "initial": False,
+                    "unstable_expanded_timeline": True,
+                    "num_live": 0,
+                    "timeline": [
+                        _departure_member_event("$historical-leave", user_id=sender_id, membership="leave", ts=1),
+                        _departure_member_event("$historical-rejoin", user_id=sender_id, membership="join", ts=2),
+                    ],
+                },
+            },
+        },
+    )
+    assert isinstance(response, nio.SlidingSyncResponse)
+
+    bot._before_sync_response_admission(response)
+    bot._router_reply_membership_sync.finish_response(response)
+    await bot._refresh_agent_reply_memberships_if_needed()
+
+    assert index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+    assert not index.needs_refresh(bot.config.authorization)
+    orchestrator.refresh_agent_reply_memberships.assert_not_awaited()
+
+    live_leave_response = nio.SlidingSyncResponse.from_dict(
+        {
+            "pos": "s-expanded-with-live-leave",
+            "rooms": {
+                room_id: {
+                    "membership": "join",
+                    "unstable_expanded_timeline": True,
+                    "num_live": 1,
+                    "timeline": [
+                        _departure_member_event("$older-rejoin", user_id=sender_id, membership="join", ts=3),
+                        _departure_member_event("$live-leave", user_id=sender_id, membership="leave", ts=4),
+                    ],
+                },
+            },
+        },
+    )
+    assert isinstance(live_leave_response, nio.SlidingSyncResponse)
+
+    bot._before_sync_response_admission(live_leave_response)
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+
+
 def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Path) -> None:
     """Call admission is rechecked for call-state and underlying room-member changes."""
     bot = _agent_bot(tmp_path)

@@ -107,7 +107,7 @@ class DelegateTools(Toolkit):
             return "Cannot delegate an empty task. Please provide a task description."
 
         runtime_context = get_tool_runtime_context()
-        active_config = runtime_context.config if runtime_context is not None else self._config
+        active_config = runtime_context.current_config if runtime_context is not None else self._config
         policy = active_config.authorization.agent_reply_policy(agent_name)
         if runtime_context is None and policy is not None and "*" not in policy.users:
             return f"Cannot delegate to '{agent_name}': requester authorization is unavailable."

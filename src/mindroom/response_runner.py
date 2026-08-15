@@ -22,7 +22,7 @@ from mindroom.approval_response import (
     continuation_target,
     identify_approval_tools,
 )
-from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
+from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -1904,9 +1904,9 @@ class ResponseRunner:
         recovered, event_id = await self._recover_nonready_approval(owned, target=target)
         if recovered:
             return event_id
-        if not is_sender_allowed_for_agent_reply_in_room(
+        if not is_sender_allowed_for_entity_replies_in_room(
             owned.requester_id,
-            owned.entity_name,
+            (owned.entity_name, *owned.team_member_names),
             self.deps.runtime.config,
             owned.room_id,
             self.deps.runtime_paths,
@@ -2399,12 +2399,18 @@ class ResponseRunner:
         stop_receipt_order = max(stop_receipt_orders)
         await on_user_stop_handled(response_event_id, stop_receipt_order)
 
-    async def _request_remains_authorized(self, request: ResponseRequest) -> bool:
+    async def _request_remains_authorized(
+        self,
+        request: ResponseRequest,
+        *,
+        reply_entity_names: tuple[str, ...] = (),
+    ) -> bool:
         """Recheck one requester after serialized lifecycle admission."""
         requester_id = request.response_envelope.requester_id
-        if is_sender_allowed_for_agent_reply_in_room(
+        entity_names = tuple(dict.fromkeys((self.deps.agent_name, *reply_entity_names)))
+        if is_sender_allowed_for_entity_replies_in_room(
             requester_id,
-            self.deps.agent_name,
+            entity_names,
             self.deps.runtime.config,
             request.room_id,
             self.deps.runtime_paths,
@@ -2416,7 +2422,7 @@ class ResponseRunner:
             source_event_id=request.response_envelope.source_event_id,
             requester_id=requester_id,
             room_id=request.room_id,
-            entity_name=self.deps.agent_name,
+            entity_names=entity_names,
         )
         if request.on_source_turn_suppressed is not None:
             await request.on_source_turn_suppressed()
@@ -2428,6 +2434,7 @@ class ResponseRunner:
         *,
         history_scope: HistoryScope,
         execution_identity: ToolExecutionIdentity,
+        reply_entity_names: tuple[str, ...] = (),
     ) -> bool:
         """Require current replay identity and requester authority under the lock."""
         if not self._sync_restart_retry_is_current(
@@ -2436,7 +2443,10 @@ class ResponseRunner:
             execution_identity=execution_identity,
         ):
             return False
-        return await self._request_remains_authorized(request)
+        return await self._request_remains_authorized(
+            request,
+            reply_entity_names=reply_entity_names,
+        )
 
     async def _begin_locked_turn(
         self,
@@ -2447,6 +2457,7 @@ class ResponseRunner:
         execution_identity: ToolExecutionIdentity,
         placeholder_message: str | None = None,
         early_placeholder_state: _EarlyPlaceholderState | None = None,
+        reply_entity_names: tuple[str, ...] = (),
     ) -> ResponseRequest | None:
         """Expose a locked turn before running its potentially slow preparation."""
         placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
@@ -2454,6 +2465,7 @@ class ResponseRunner:
             request,
             history_scope=history_scope,
             execution_identity=execution_identity,
+            reply_entity_names=reply_entity_names,
         ):
             return None
         if request.on_lifecycle_lock_acquired is not None:
@@ -2817,6 +2829,7 @@ class ResponseRunner:
         response_kind: str,
         history_scope: HistoryScope | None = None,
         execution_identity: ToolExecutionIdentity | None = None,
+        reply_entity_names: tuple[str, ...] = (),
     ) -> str | None:
         """Finalize one empty prompt through the canonical response lifecycle."""
         resolved_history_scope = history_scope or self.deps.state_writer.history_scope()
@@ -2829,6 +2842,7 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=resolved_history_scope,
             execution_identity=resolved_execution_identity,
+            reply_entity_names=reply_entity_names,
         )
         if prepared_request is None:
             return None
@@ -2908,6 +2922,10 @@ class ResponseRunner:
             list(team_request.team_agents),
             requester_user_id=retry_execution_identity.requester_id,
         )
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        agent_names = [
+            registry.current_entity_name_for_user_id(mid.full_id) or mid.username for mid in team_request.team_agents
+        ]
         if not request.prompt.strip():
             return await self._finalize_empty_prompt_locked(
                 request,
@@ -2915,6 +2933,7 @@ class ResponseRunner:
                 response_kind="team",
                 history_scope=session_scope,
                 execution_identity=retry_execution_identity,
+                reply_entity_names=tuple(agent_names),
             )
         prepared_request = await self._begin_locked_turn(
             request,
@@ -2923,6 +2942,7 @@ class ResponseRunner:
             execution_identity=retry_execution_identity,
             placeholder_message="🤝 Team Response: Thinking...",
             early_placeholder_state=placeholder_state,
+            reply_entity_names=tuple(agent_names),
         )
         if prepared_request is None:
             return None
@@ -2986,10 +3006,6 @@ class ResponseRunner:
         self._note_pipeline_metadata(request, response_kind="team", used_streaming=use_streaming)
         show_tool_calls = self._show_tool_calls()
         mode = TeamMode.COORDINATE if team_request.team_mode == "coordinate" else TeamMode.COLLABORATE
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        agent_names = [
-            registry.current_entity_name_for_user_id(mid.full_id) or mid.username for mid in team_request.team_agents
-        ]
         matrix_target_item = _matrix_message_target_item(
             resolved_target,
             matrix_message_available=any(

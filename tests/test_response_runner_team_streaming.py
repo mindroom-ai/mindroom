@@ -18,7 +18,7 @@ from agno.session.team import TeamSession
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
@@ -120,6 +120,47 @@ async def test_generate_team_response_helper_preserves_raw_prompt_when_model_pro
     message = mock_team_response.await_args.kwargs["message"]
     assert "Describe this image" in message
     assert "Available attachment IDs: att_1" in message
+
+
+@pytest.mark.asyncio
+async def test_team_response_rechecks_every_member_before_execution(tmp_path: Path) -> None:
+    """A revoked member must fence an already-planned ad-hoc team at the locked boundary."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _config()
+    config.agents["worker"] = AgentConfig(display_name="Worker")
+    config.authorization = AuthorizationConfig(
+        default_room_access=True,
+        agent_reply_permissions={
+            "general": AgentReplyPermission(users=["@alice:localhost"]),
+            "worker": AgentReplyPermission(users=[]),
+        },
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="general")
+
+    with patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="unexpected")) as response:
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+            enable_streaming=False,
+        )
+
+        event_id = await coordinator.generate_team_response_helper(
+            _response_request(user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[
+                fixture_entity_matrix_id("general", "localhost", runtime_paths),
+                fixture_entity_matrix_id("worker", "localhost", runtime_paths),
+            ],
+            team_mode="coordinate",
+        )
+
+    assert event_id is None
+    response.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -153,12 +153,36 @@ def is_sender_allowed_for_agent_reply_in_room(
     membership_index: AgentReplyMembershipIndex,
 ) -> bool:
     """Require both current-room access and entity reply access."""
-    return is_authorized_sender(sender_id, config, room_id, runtime_paths) and is_sender_allowed_for_agent_reply(
+    return is_sender_allowed_for_entity_replies_in_room(
         sender_id,
-        agent_name,
+        (agent_name,),
         config,
+        room_id,
         runtime_paths,
         membership_index,
+    )
+
+
+def is_sender_allowed_for_entity_replies_in_room(
+    sender_id: str,
+    entity_names: Iterable[str],
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+) -> bool:
+    """Require current-room access and reply access for every execution entity."""
+    if not is_authorized_sender(sender_id, config, room_id, runtime_paths):
+        return False
+    return all(
+        is_sender_allowed_for_agent_reply(
+            sender_id,
+            entity_name,
+            config,
+            runtime_paths,
+            membership_index,
+        )
+        for entity_name in entity_names
     )
 
 
