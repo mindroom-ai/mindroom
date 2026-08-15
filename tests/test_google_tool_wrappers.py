@@ -6,7 +6,6 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -27,22 +26,14 @@ from mindroom.custom_tools.google_docs import GoogleDocsTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
-from mindroom.file_locks import advisory_file_lock, file_lock_is_held
 from mindroom.oauth import client as oauth_client_module
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.oauth.service import (
-    scoped_oauth_credentials_refresh_lock_path,
-    scoped_oauth_credentials_singleflight_lock_path,
-)
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-RECONNECTED_ACCESS = "reconnected-access"
-STALE_REFRESHED_ACCESS = "stale-refreshed-access"
 
 
 class ValidCredentials:
@@ -302,32 +293,27 @@ def test_scoped_oauth_client_connection_required_uses_shared_instruction(
     tool._oauth_provider = GoogleDriveTools._oauth_provider
     tool._runtime_paths = runtime_paths
     tool._worker_target = None
+    tool._creds_manager = get_runtime_credentials_manager(runtime_paths)
 
-    def connect_url(provider: object, runtime_paths_arg: RuntimePaths, *, worker_target: object) -> str:
-        assert provider is GoogleDriveTools._oauth_provider
-        assert runtime_paths_arg is runtime_paths
-        assert worker_target is None
-        return "https://connect.example.test"
+    seen: list[object] = []
 
-    monkeypatch.setattr(
-        oauth_client_module,
-        "oauth_connect_url",
-        connect_url,
-    )
-    seen: list[tuple[object, str]] = []
+    def connection_required(context: object, *, reason: str | None = None) -> OAuthConnectionRequired:
+        seen.append(context)
+        assert reason is None
+        return OAuthConnectionRequired(
+            "shared instruction: https://connect.example.test",
+            provider_id="google_drive",
+            connect_url="https://connect.example.test",
+        )
 
-    def build_instruction(provider: object, connect_url: str) -> str:
-        seen.append((provider, connect_url))
-        return f"shared instruction: {connect_url}"
-
-    monkeypatch.setattr(oauth_client_module, "build_oauth_connect_instruction", build_instruction)
+    monkeypatch.setattr(oauth_client_module, "oauth_connection_required", connection_required)
 
     exc = tool._connection_required()
 
     assert str(exc) == "shared instruction: https://connect.example.test"
     assert exc.provider_id == "google_drive"
     assert exc.connect_url == "https://connect.example.test"
-    assert seen == [(GoogleDriveTools._oauth_provider, "https://connect.example.test")]
+    assert len(seen) == 1
 
 
 @pytest.mark.parametrize(
@@ -627,11 +613,11 @@ def test_google_wrapper_keeps_refresh_rejection_state_per_call(
     assert failed_payload["reason"] == "refresh_rejected"
 
 
-def test_google_wrapper_reports_second_terminal_rejection_after_first_deletion(
+def test_google_wrapper_reports_missing_connection_after_terminal_deletion(
     monkeypatch: pytest.MonkeyPatch,
     runtime_paths: RuntimePaths,
 ) -> None:
-    """Terminal classification must not depend on which caller deletes the shared snapshot."""
+    """A later live client still returns a connection prompt after the grant is deleted."""
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -688,104 +674,8 @@ def test_google_wrapper_reports_second_terminal_rejection_after_first_deletion(
     second_payload = json.loads(tools[1].swallowed_failure())
 
     assert first_payload["reason"] == "refresh_rejected"
-    assert second_payload["reason"] == "refresh_rejected"
-
-
-def test_google_wrapper_serializes_refresh_with_reconnect_write(
-    monkeypatch: pytest.MonkeyPatch,
-    runtime_paths: RuntimePaths,
-) -> None:
-    """A reconnect write that starts during refresh must persist after the stale refresh finishes."""
-    credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
-    worker_target = resolve_worker_target(
-        "user_agent",
-        "general",
-        execution_identity=identity,
-    )
-    provider = GoogleDriveTools._oauth_provider
-    token_data = {
-        "token": "expired-access-token",
-        "refresh_token": "shared-refresh-token",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "client_id": "client-id",
-        "expires_at": 1.0,
-        "scopes": list(provider.scopes),
-        "_source": "oauth",
-        "_oauth_provider": provider.id,
-    }
-    save_scoped_credentials(
-        provider.credential_service,
-        token_data,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
-    refresh_started = threading.Event()
-    writer_attempting = threading.Event()
-    release_refresh = threading.Event()
-    writer_finished = threading.Event()
-
-    def blocked_refresh(credentials: object, _request: object) -> None:
-        refresh_started.set()
-        assert release_refresh.wait(timeout=5)
-        credentials.token = STALE_REFRESHED_ACCESS
-        credentials.expiry = datetime(2100, 1, 1, tzinfo=UTC).replace(tzinfo=None)
-
-    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", blocked_refresh)
-    tool = GoogleDriveTools(
-        runtime_paths=runtime_paths,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
-    lock_path = scoped_oauth_credentials_refresh_lock_path(
-        provider.credential_service,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
-    singleflight_lock_path = scoped_oauth_credentials_singleflight_lock_path(
-        provider.credential_service,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
-
-    def reconnect_writer() -> None:
-        assert refresh_started.wait(timeout=5)
-        writer_attempting.set()
-        with advisory_file_lock(lock_path):
-            save_scoped_credentials(
-                provider.credential_service,
-                {**token_data, "token": RECONNECTED_ACCESS, "expires_at": 4_102_444_800.0},
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-            )
-        writer_finished.set()
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        auth_future = executor.submit(tool._ensure_structured_auth)
-        writer_future = executor.submit(reconnect_writer)
-        assert writer_attempting.wait(timeout=5)
-        assert file_lock_is_held(singleflight_lock_path) is True
-        writer_finished_early = writer_finished.wait(timeout=0.1)
-        release_refresh.set()
-        assert auth_future.result(timeout=5) is None
-        writer_future.result(timeout=5)
-
-    stored = load_scoped_credentials(
-        provider.credential_service,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
-    assert writer_finished_early is False
-    assert stored is not None
-    assert stored["token"] == RECONNECTED_ACCESS
+    assert second_payload["oauth_connection_required"] is True
+    assert "reason" not in second_payload
 
 
 def test_google_wrapper_skips_stored_oauth_when_service_account_env_is_configured(

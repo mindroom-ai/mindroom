@@ -12,8 +12,8 @@ from urllib.parse import parse_qs, urlparse
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, refresh_oauth_credentials
 from mindroom.oauth.github import github_oauth_provider
-from mindroom.oauth.service import refresh_scoped_oauth_credentials
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -144,11 +144,13 @@ def test_github_refresh_persists_rotated_access_and_refresh_tokens(tmp_path: Pat
         new=AsyncMock(return_value=refresh_response),
     ):
         refreshed = asyncio.run(
-            refresh_scoped_oauth_credentials(
-                _provider(),
-                runtime_paths,
-                credentials_manager=credentials_manager,
-                worker_target=None,
+            refresh_oauth_credentials(
+                OAuthCredentialContext(
+                    provider=_provider(),
+                    runtime_paths=runtime_paths,
+                    credentials_manager=credentials_manager,
+                    worker_target=None,
+                ),
             ),
         )
 

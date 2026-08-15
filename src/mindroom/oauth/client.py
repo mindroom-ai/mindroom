@@ -13,29 +13,30 @@ from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 from google.auth.exceptions import RefreshError
 from google.auth.transport import requests as google_requests
 
-from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
-from mindroom.file_locks import advisory_file_lock
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialContext,
+    load_oauth_credentials,
+    oauth_credentials_have_required_scopes,
+    oauth_credentials_match_client_id,
+    oauth_credentials_satisfy_identity_policy,
+    refresh_oauth_credentials_sync,
+)
 from mindroom.oauth.providers import (
     OAuthConnectionRequired,
     OAuthProvider,
+    OAuthProviderError,
+    OAuthRefreshRejectedError,
     is_terminal_oauth_refresh_error_code,
     oauth_connection_required_payload,
 )
 from mindroom.oauth.service import (
-    build_oauth_connect_instruction,
-    build_oauth_reconnect_instruction,
-    invalidate_scoped_oauth_credentials_if_current,
-    oauth_connect_url,
-    oauth_credentials_have_required_scopes,
-    oauth_credentials_match_client_id,
-    oauth_credentials_satisfy_identity_policy,
-    scoped_oauth_credentials_refresh_lock_path,
-    scoped_oauth_credentials_singleflight_lock_path,
+    OAUTH_REFRESH_REJECTED_REASON,
+    oauth_connection_required,
 )
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from structlog.stdlib import BoundLogger
 
@@ -133,59 +134,41 @@ class ScopedOAuthClientMixin:
                 _entrypoint: Callable[..., object] = entrypoint,
                 **kwargs: object,
             ) -> object:
-                self._clear_oauth_refresh_rejection()
+                self._clear_oauth_connection_required()
                 try:
                     if result := self._ensure_structured_auth():
                         return result
                     result = _entrypoint(*args, **kwargs)
                 except RefreshError:
-                    if self._consume_oauth_refresh_rejection():
-                        return self._structured_auth_failure(self._connection_required(reason="refresh_rejected"))
+                    required, reason = self._consume_oauth_connection_required()
+                    if required:
+                        return self._structured_auth_failure(self._connection_required(reason=reason))
                     raise
                 else:
-                    if self._consume_oauth_refresh_rejection():
-                        return self._structured_auth_failure(self._connection_required(reason="refresh_rejected"))
+                    required, reason = self._consume_oauth_connection_required()
+                    if required:
+                        return self._structured_auth_failure(self._connection_required(reason=reason))
                     return result
                 finally:
-                    self._clear_oauth_refresh_rejection()
+                    self._clear_oauth_connection_required()
 
             function.entrypoint = oauth_entrypoint
             setattr(self, function.name, oauth_entrypoint)
 
     def _load_token_data(self) -> dict[str, Any] | None:
         """Load OAuth credentials for the current execution scope."""
-        return load_scoped_credentials(
-            self._oauth_provider.credential_service,
-            credentials_manager=self._creds_manager,
-            worker_target=self._worker_target,
-        )
+        return load_oauth_credentials(self._oauth_credential_context())
 
-    def _save_token_data(self, token_data: dict[str, Any]) -> None:
-        """Persist refreshed OAuth credentials to the current execution scope."""
-        save_scoped_credentials(
-            self._oauth_provider.credential_service,
-            token_data,
+    def _oauth_credential_context(self) -> OAuthCredentialContext:
+        return OAuthCredentialContext(
+            provider=self._oauth_provider,
+            runtime_paths=self._runtime_paths,
             credentials_manager=self._creds_manager,
             worker_target=self._worker_target,
         )
 
     def _connection_required(self, *, reason: str | None = None) -> OAuthConnectionRequired:
-        connect_url = oauth_connect_url(
-            self._oauth_provider,
-            self._runtime_paths,
-            worker_target=self._worker_target,
-        )
-        instruction = (
-            build_oauth_reconnect_instruction(self._oauth_provider, connect_url)
-            if reason == "refresh_rejected"
-            else build_oauth_connect_instruction(self._oauth_provider, connect_url)
-        )
-        return OAuthConnectionRequired(
-            instruction,
-            provider_id=self._oauth_provider.id,
-            connect_url=connect_url,
-            reason=reason,
-        )
+        return oauth_connection_required(self._oauth_credential_context(), reason=reason)
 
     def _raise_connection_required(self) -> NoReturn:
         raise self._connection_required()
@@ -222,8 +205,8 @@ class ScopedOAuthClientMixin:
             expiry = expiry.replace(tzinfo=UTC)
         return expiry.timestamp()
 
-    def _credentials_from_token_data(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401
-        """Create a Google Credentials object from stored token data."""
+    def _raw_credentials_from_token_data(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401
+        """Create an unwrapped Google credential adapter from stored token data."""
         ensure_tool_deps(_GOOGLE_OAUTH_DEPS, self._oauth_tool_name, self._runtime_paths)
         from google.oauth2.credentials import Credentials as GoogleOAuthCredentials  # noqa: PLC0415
 
@@ -237,7 +220,7 @@ class ScopedOAuthClientMixin:
         scopes = token_data.get("scopes")
         if not isinstance(scopes, list):
             scopes = list(self._oauth_provider.scopes)
-        credentials = GoogleOAuthCredentials(
+        return GoogleOAuthCredentials(
             token=token_data.get("token"),
             refresh_token=token_data.get("refresh_token"),
             token_uri=token_data.get("token_uri") or self._oauth_provider.token_url,
@@ -246,43 +229,85 @@ class ScopedOAuthClientMixin:
             scopes=scopes,
             expiry=self._token_expiry(token_data),
         )
-        original_refresh = credentials.refresh
+
+    def _credentials_from_token_data(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401
+        """Create Google credentials whose lazy refresh uses the lifecycle owner."""
+        credentials = self._raw_credentials_from_token_data(token_data)
 
         def tracked_refresh(request: object) -> None:
             try:
-                original_refresh(request)
-            except RefreshError as exc:
-                if _google_refresh_was_terminally_rejected(exc):
-                    self._mark_oauth_refresh_rejected()
-                    if not self._oauth_refresh_lock_is_held():
-                        invalidate_scoped_oauth_credentials_if_current(
-                            self._oauth_provider.credential_service,
-                            credentials_manager=self._creds_manager,
-                            worker_target=self._worker_target,
-                            expected_credentials=token_data,
-                        )
-                    self.service = None
+                result = refresh_oauth_credentials_sync(
+                    self._oauth_credential_context(),
+                    lambda current: self._refresh_google_token_data(current, request, force=True),
+                )
+            except OAuthRefreshRejectedError:
+                self._mark_oauth_connection_required(reason=OAUTH_REFRESH_REJECTED_REASON)
+                self.service = None
                 raise _SanitizedGoogleRefreshError(_SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE) from None
+            except OAuthProviderError:
+                raise _SanitizedGoogleRefreshError(_SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE) from None
+            if result.credentials is None:
+                self._mark_oauth_connection_required()
+                raise _SanitizedGoogleRefreshError(_SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE)
+            refreshed = self._raw_credentials_from_token_data(result.credentials)
+            credentials.token = refreshed.token
+            credentials.expiry = refreshed.expiry
 
         credentials.refresh = tracked_refresh
         return credentials
 
-    def _consume_oauth_refresh_rejection(self) -> bool:
-        rejected = bool(getattr(self._oauth_call_state, "refresh_rejected", False))
-        self._clear_oauth_refresh_rejection()
-        if rejected:
+    def _refresh_google_token_data(
+        self,
+        token_data: dict[str, Any] | Mapping[str, Any],
+        request: object,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any] | None:
+        """Adapt one Google refresh call to the lifecycle provider contract."""
+        current = dict(token_data)
+        credentials = self._raw_credentials_from_token_data(current)
+        if not force and not credentials.expired:
+            return None
+        if not credentials.refresh_token:
+            return None
+        try:
+            credentials.refresh(request)
+        except RefreshError as exc:
+            error_code = _google_refresh_error_code(exc)
+            if is_terminal_oauth_refresh_error_code(error_code):
+                raise OAuthRefreshRejectedError(
+                    _SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE,
+                    oauth_error=error_code,
+                ) from exc
+            raise OAuthProviderError(
+                _SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE,
+                oauth_error=error_code,
+            ) from exc
+        refreshed = dict(current)
+        refreshed["token"] = credentials.token
+        refreshed_expires_at = self._expires_at_from_credentials(credentials)
+        if refreshed_expires_at is not None:
+            refreshed["expires_at"] = refreshed_expires_at
+        if credentials.refresh_token:
+            refreshed["refresh_token"] = credentials.refresh_token
+        return refreshed
+
+    def _consume_oauth_connection_required(self) -> tuple[bool, str | None]:
+        required = bool(getattr(self._oauth_call_state, "connection_required", False))
+        reason = getattr(self._oauth_call_state, "connection_reason", None)
+        self._clear_oauth_connection_required()
+        if required:
             self.creds = None
             self.service = None
-        return rejected
+        return required, reason if isinstance(reason, str) else None
 
-    def _mark_oauth_refresh_rejected(self) -> None:
-        self._oauth_call_state.refresh_rejected = True
+    def _mark_oauth_connection_required(self, *, reason: str | None = None) -> None:
+        self._oauth_call_state.connection_required = True
+        self._oauth_call_state.connection_reason = reason
 
-    def _clear_oauth_refresh_rejection(self) -> None:
-        self._oauth_call_state.refresh_rejected = False
-
-    def _oauth_refresh_lock_is_held(self) -> bool:
-        return bool(getattr(self._oauth_call_state, "refresh_lock_held", False))
+    def _clear_oauth_connection_required(self) -> None:
+        self._oauth_call_state.connection_required = False
+        self._oauth_call_state.connection_reason = None
 
     def _load_stored_credentials(self) -> Any | None:  # noqa: ANN401
         """Load stored credentials for the current execution scope."""
@@ -345,64 +370,34 @@ class ScopedOAuthClientMixin:
         """Authenticate using MindRoom-scoped stored OAuth credentials."""
         if not self._load_token_data():
             raise self._connection_required()
-        lock_path = scoped_oauth_credentials_refresh_lock_path(
-            self._oauth_provider.credential_service,
-            credentials_manager=self._creds_manager,
-            worker_target=self._worker_target,
-        )
-        singleflight_lock_path = scoped_oauth_credentials_singleflight_lock_path(
-            self._oauth_provider.credential_service,
-            credentials_manager=self._creds_manager,
-            worker_target=self._worker_target,
-        )
-        with advisory_file_lock(singleflight_lock_path), advisory_file_lock(lock_path):
-            refresh_lock_was_held = self._oauth_refresh_lock_is_held()
-            self._oauth_call_state.refresh_lock_held = True
-            try:
-                self._auth_with_stored_oauth_locked()
-            finally:
-                self._oauth_call_state.refresh_lock_held = refresh_lock_was_held
-
-    def _auth_with_stored_oauth_locked(self) -> None:
-        """Authenticate while holding the scoped refresh/reconnect lock."""
-        token_data = self._load_token_data()
-        if (
-            not token_data
-            or not self._stored_credentials_have_required_scopes(token_data)
-            or not oauth_credentials_satisfy_identity_policy(self._oauth_provider, self._runtime_paths, token_data)
-        ):
-            raise self._connection_required()
-
         try:
             ensure_tool_deps(_GOOGLE_OAUTH_DEPS, self._oauth_tool_name, self._runtime_paths)
-
+            result = refresh_oauth_credentials_sync(
+                self._oauth_credential_context(),
+                lambda current: self._refresh_google_token_data(current, google_requests.Request()),
+            )
+            token_data = result.credentials
+            if (
+                not token_data
+                or not self._stored_credentials_have_required_scopes(token_data)
+                or not oauth_credentials_satisfy_identity_policy(
+                    self._oauth_provider,
+                    self._runtime_paths,
+                    token_data,
+                )
+            ):
+                self._raise_connection_required()
             self.creds = self._credentials_from_token_data(token_data)
-            if self.creds.expired and self.creds.refresh_token:
-                self.creds.refresh(google_requests.Request())
-                refreshed = dict(token_data)
-                # Google auth refresh updates access-token state and preserves the
-                # stored refresh token, unlike rotating MCP provider refreshes.
-                refreshed["token"] = self.creds.token
-                refreshed_expires_at = self._expires_at_from_credentials(self.creds)
-                if refreshed_expires_at is not None:
-                    refreshed["expires_at"] = refreshed_expires_at
-                self._save_token_data(refreshed)
-                token_data.clear()
-                token_data.update(refreshed)
             if not self.creds.valid:
                 self._raise_connection_required()
             self._oauth_logger.info("oauth_authentication_succeeded", tool_name=self._oauth_tool_name)
         except OAuthConnectionRequired:
             raise
-        except RefreshError as exc:
-            if self._consume_oauth_refresh_rejection():
-                if self._load_token_data() == token_data:
-                    delete_scoped_credentials(
-                        self._oauth_provider.credential_service,
-                        credentials_manager=self._creds_manager,
-                        worker_target=self._worker_target,
-                    )
-                raise self._connection_required(reason="refresh_rejected") from exc
+        except OAuthRefreshRejectedError as exc:
+            self.creds = None
+            self.service = None
+            raise self._connection_required(reason=OAUTH_REFRESH_REJECTED_REASON) from exc
+        except OAuthProviderError as exc:
             raise self._connection_required() from exc
         except Exception as exc:
             self._oauth_logger.warning(
@@ -423,11 +418,11 @@ class ScopedOAuthClientMixin:
         self._auth_with_stored_oauth()
 
 
-def _google_refresh_was_terminally_rejected(exc: RefreshError) -> bool:
-    """Return whether Google supplied a structured terminal refresh-grant error."""
+def _google_refresh_error_code(exc: RefreshError) -> str | None:
+    """Return Google's structured OAuth error code without inspecting free text."""
     for value in exc.args:
         if isinstance(value, dict):
             error = value.get("error")
-            if is_terminal_oauth_refresh_error_code(error):
-                return True
-    return False
+            if isinstance(error, str) and error:
+                return error
+    return None

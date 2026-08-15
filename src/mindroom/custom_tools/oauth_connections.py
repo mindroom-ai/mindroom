@@ -7,14 +7,13 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management
-from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.mcp.oauth import disconnect_mcp_oauth_request_session
+from mindroom.oauth.credential_lifecycle import reset_oauth_credentials
 from mindroom.oauth.reset import OAuthResetTargetError, resolve_oauth_reset_target
 from mindroom.oauth.service import (
     OAUTH_CONNECT_TOKEN_TTL_MINUTES,
     oauth_connect_url,
-    reset_scoped_oauth_credentials,
 )
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 
@@ -82,17 +81,18 @@ class OAuthConnectionTools(Toolkit):
         worker_target = reset_target.worker_target
 
         connect_url = oauth_connect_url(provider, self.runtime_paths, worker_target=worker_target)
-        credentials_manager = get_runtime_credentials_manager(self.runtime_paths)
-        deleted = await reset_scoped_oauth_credentials(
-            provider.credential_service,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-        try:
+
+        async def disconnect_mcp() -> None:
             await disconnect_mcp_oauth_request_session(
                 config.mcp_servers,
                 provider.id,
                 worker_target=worker_target,
+            )
+
+        try:
+            deleted = await reset_oauth_credentials(
+                reset_target.credential_context,
+                before_delete=disconnect_mcp,
             )
         except Exception as exc:
             logger.warning(
@@ -101,6 +101,7 @@ class OAuthConnectionTools(Toolkit):
                 agent_name=agent_name,
                 error_type=type(exc).__name__,
             )
+            return "Error: OAuth session cleanup failed; credentials remain unchanged. Retry the reset."
         scope_receipt = (
             "for this requester across agents"
             if worker_target.worker_scope == "user"

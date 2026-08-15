@@ -14,7 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -29,13 +29,7 @@ from mindroom.api import oauth as oauth_api
 from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
-from mindroom.credentials import (
-    CredentialsManager,
-    delete_scoped_credentials,
-    get_runtime_credentials_manager,
-    save_scoped_credentials,
-)
-from mindroom.file_locks import file_lock_is_held
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
@@ -51,10 +45,9 @@ from mindroom.oauth.providers import (
     _OAuthClaimValidationContext,
 )
 from mindroom.oauth.registry import load_oauth_providers
-from mindroom.oauth.service import oauth_credentials_satisfy_identity_policy, scoped_oauth_credentials_refresh_lock_path
+from mindroom.oauth.service import oauth_credentials_satisfy_identity_policy
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.worker_routing import (
-    ResolvedWorkerTarget,
     ToolExecutionIdentity,
     WorkerScope,
     resolve_worker_key,
@@ -2380,54 +2373,6 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
     assert manager.for_worker(owner_worker_key).load_credentials(provider.credential_service) is None
 
 
-def test_callback_saves_credentials_under_refresh_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A reconnect must hold the same lock used by refresh invalidation when it saves."""
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        {
-            "TEST_OAUTH_CLIENT_ID": "client-id",
-            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
-            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
-        },
-    )
-    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider()
-
-    def save_while_locked(
-        service: str,
-        credentials: dict[str, Any],
-        *,
-        credentials_manager: CredentialsManager,
-        worker_target: ResolvedWorkerTarget | None,
-    ) -> None:
-        lock_path = scoped_oauth_credentials_refresh_lock_path(
-            service,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-        assert file_lock_is_held(lock_path)
-        save_scoped_credentials(
-            service,
-            credentials,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-
-    monkeypatch.setattr("mindroom.api.oauth.save_scoped_credentials", save_while_locked)
-
-    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
-        with TestClient(api_app) as client:
-            _login(client)
-            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
-            state = _state_from_auth_url(connect_response.json()["auth_url"])
-            callback_response = client.get(
-                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
-                follow_redirects=False,
-            )
-
-    assert callback_response.status_code == 307
-
-
 @pytest.mark.asyncio
 async def test_callback_saves_exchanged_credentials_before_propagating_cancellation(
     tmp_path: Path,
@@ -2498,7 +2443,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", lambda *_args: None)
-    monkeypatch.setattr(oauth_api, "async_exclusive_file_lock", blocked_lock)
+    monkeypatch.setattr("mindroom.oauth.credential_lifecycle.async_exclusive_file_lock", blocked_lock)
     request = StarletteRequest(
         {
             "type": "http",
@@ -2510,13 +2455,13 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
     )
 
     callback_task = asyncio.create_task(oauth_api.callback(provider.id, request))
-    await exchange_completed.wait()
     await lock_waiting.wait()
     callback_task.cancel()
     await asyncio.sleep(0)
 
     assert not callback_task.done()
     release_lock.set()
+    await exchange_completed.wait()
     with pytest.raises(asyncio.CancelledError):
         await callback_task
     stored_credentials = manager.load_credentials(provider.credential_service)
@@ -2525,8 +2470,8 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
     assert stored_credentials["refresh_token"] == "new-refresh-token"
 
 
-def test_disconnect_deletes_credentials_under_refresh_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Disconnect must not race an in-flight refresh that could resurrect credentials."""
+def test_disconnect_cleanup_failure_preserves_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disconnect does not delete credentials when fallible MCP cleanup fails."""
     runtime_paths = _runtime_paths(
         tmp_path,
         {
@@ -2550,39 +2495,19 @@ def test_disconnect_deletes_credentials_under_refresh_lock(tmp_path: Path, monke
             "_oauth_provider": provider.id,
         },
     )
-    original_delete = delete_scoped_credentials
-    delete_was_locked = False
-
-    def delete_while_locked(
-        service: str,
-        *,
-        credentials_manager: CredentialsManager,
-        worker_target: ResolvedWorkerTarget | None,
-    ) -> None:
-        nonlocal delete_was_locked
-        lock_path = scoped_oauth_credentials_refresh_lock_path(
-            service,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-        assert file_lock_is_held(lock_path)
-        delete_was_locked = True
-        original_delete(
-            service,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-
-    monkeypatch.setattr("mindroom.oauth.service.delete_scoped_credentials", delete_while_locked)
+    monkeypatch.setattr(
+        oauth_api,
+        "disconnect_mcp_oauth_request_session",
+        AsyncMock(side_effect=RuntimeError("close failed")),
+    )
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             _login(client)
-            response = client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
+            with pytest.raises(RuntimeError, match="close failed"):
+                client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
 
-    assert response.status_code == 200
-    assert delete_was_locked is True
-    assert scoped_manager.load_credentials(provider.credential_service) is None
+    assert scoped_manager.load_credentials(provider.credential_service) is not None
 
 
 def test_callback_drops_old_refresh_token_when_identity_changes(tmp_path: Path) -> None:

@@ -756,7 +756,7 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
         return refreshed
 
     with (
-        patch("mindroom.custom_tools.github.refresh_scoped_oauth_credentials", side_effect=refresh_credentials),
+        patch("mindroom.custom_tools.github.refresh_oauth_credentials", side_effect=refresh_credentials),
         patch("mindroom.custom_tools.github.Github", return_value=_FakeGithub()),
     ):
         tool = tool_class(
@@ -817,7 +817,7 @@ def test_terminal_refresh_failure_returns_safe_connection_payload(tmp_path: Path
         raise OAuthRefreshRejectedError(msg, oauth_error="invalid_grant")
 
     with (
-        patch("mindroom.custom_tools.github.refresh_scoped_oauth_credentials", side_effect=reject_refresh),
+        patch("mindroom.custom_tools.github.refresh_oauth_credentials", side_effect=reject_refresh),
         patch("mindroom.custom_tools.github.logger", logger),
     ):
         result = tool_class(

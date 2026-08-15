@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
+from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, oauth_credentials_worker_target
 from mindroom.oauth.registry import load_oauth_providers
-from mindroom.oauth.service import oauth_credentials_worker_target
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 
@@ -35,9 +36,20 @@ class _OAuthResetApprovalBindingError(RuntimeError):
 class _ResolvedOAuthResetTarget:
     """Exact provider and requester-isolated credential target for one reset."""
 
-    provider: OAuthProvider
     agent_name: str
-    worker_target: ResolvedWorkerTarget
+    credential_context: OAuthCredentialContext
+
+    @property
+    def provider(self) -> OAuthProvider:
+        """Return the provider bound to this reset."""
+        return self.credential_context.provider
+
+    @property
+    def worker_target(self) -> ResolvedWorkerTarget:
+        """Return the requester-isolated target bound to this reset."""
+        worker_target = self.credential_context.worker_target
+        assert worker_target is not None
+        return worker_target
 
 
 def resolve_oauth_reset_target(
@@ -100,9 +112,13 @@ def resolve_oauth_reset_target(
         msg = "Agent-initiated OAuth reset requires a requester-isolated user or user_agent scope."
         raise OAuthResetTargetError(msg)
     return _ResolvedOAuthResetTarget(
-        provider=provider,
         agent_name=agent_name,
-        worker_target=credential_target,
+        credential_context=OAuthCredentialContext(
+            provider=provider,
+            runtime_paths=runtime_paths,
+            credentials_manager=get_runtime_credentials_manager(runtime_paths),
+            worker_target=credential_target,
+        ),
     )
 
 

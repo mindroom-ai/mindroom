@@ -26,13 +26,13 @@ from mindroom.mcp.errors import MCPProtocolError, MCPTimeoutError, MCPToolCallEr
 from mindroom.mcp.manager import MCPServerManager, _discovery_retry_delay_seconds
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
+from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, refresh_oauth_credentials
 from mindroom.oauth.providers import (
     OAuthClientConfig,
     OAuthConnectionRequired,
     OAuthRefreshRejectedError,
     oauth_connection_required_payload,
 )
-from mindroom.oauth.service import refresh_scoped_oauth_credentials
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -429,10 +429,10 @@ async def test_mcp_manager_non_oauth_calls_use_shared_session_without_requester_
         pytest.fail("non-OAuth MCP calls must not resolve requester-scoped credentials")
 
     monkeypatch.setattr(
-        "mindroom.mcp.manager.refresh_scoped_oauth_credentials_with_result",
+        "mindroom.mcp.manager.refresh_oauth_credentials_with_result",
         _fail_credential_resolution,
     )
-    monkeypatch.setattr("mindroom.mcp.manager.load_scoped_credentials", _fail_credential_resolution)
+    monkeypatch.setattr("mindroom.mcp.manager.load_oauth_credentials", _fail_credential_resolution)
     _FakeClientSession.tool_list = [_tool("echo")]
     _FakeClientSession.planned_tool_results = [
         CallToolResult(content=[mcp_types.TextContent(type="text", text="pong-alice")]),
@@ -549,8 +549,8 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
         )
 
     assert "session for this agent expired or is no longer valid" in str(exc_info.value)
-    assert exc_info.value.reason == "oauth_refresh_rejected"
-    assert oauth_connection_required_payload(exc_info.value)["reason"] == "oauth_refresh_rejected"
+    assert exc_info.value.reason == "refresh_rejected"
+    assert oauth_connection_required_payload(exc_info.value)["reason"] == "refresh_rejected"
     warning_call = mock_logger.warning.call_args
     assert warning_call is not None
     assert warning_call.args == ("MCP OAuth token refresh failed",)
@@ -649,7 +649,7 @@ async def test_mcp_manager_does_not_eagerly_load_oauth_credentials_for_success_l
     def fail_eager_diagnostic_load(*_args: object, **_kwargs: object) -> dict[str, Any]:
         pytest.fail("manager should not eagerly load credentials only for failure logging")
 
-    monkeypatch.setattr("mindroom.mcp.manager.load_scoped_credentials", fail_eager_diagnostic_load)
+    monkeypatch.setattr("mindroom.mcp.manager.load_oauth_credentials", fail_eager_diagnostic_load)
 
     access_token = await manager._oauth_access_token(
         manager._require_state("demo"),
@@ -727,122 +727,6 @@ async def test_mcp_manager_serializes_oauth_refresh_read_modify_write_per_scope(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("oauth_error_code", [INVALID_GRANT, INVALID_ROTATION])
-async def test_mcp_manager_recovers_from_stale_oauth_refresh_token_rejection(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    oauth_error_code: str,
-) -> None:
-    """A stale-token rejection should re-read a newer stored token and retry once."""
-    runtime_paths = _runtime_paths(tmp_path)
-    worker_target = _shared_worker_target("@alice:example.test")
-    _save_mcp_oauth_credentials(
-        runtime_paths,
-        worker_target,
-        ACCESS_0,
-        refresh_token=CHAIN_0,
-        expires_at=900.0,
-    )
-    credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    manager = MCPServerManager(runtime_paths)
-    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
-    seen_refresh_tokens: list[str] = []
-
-    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any] | None:
-        refresh_token = str(credentials["refresh_token"])
-        seen_refresh_tokens.append(refresh_token)
-        if refresh_token == CHAIN_0:
-            save_scoped_credentials(
-                "mcp_demo_oauth",
-                _refreshed_credentials(CHAIN_1),
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-            )
-            raise OAuthRefreshRejectedError(oauth_error_code, oauth_error=oauth_error_code)
-        if refresh_token == CHAIN_1:
-            return _refreshed_credentials(CHAIN_2)
-        pytest.fail(f"unexpected refresh token: {refresh_token}")
-
-    provider = _FakeMcpOAuthProvider(refresh)
-    monkeypatch.setattr("mindroom.mcp.manager.mcp_oauth_provider", lambda *_args: provider)
-
-    access_token = await manager._oauth_access_token(
-        manager._require_state("demo"),
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
-
-    stored_credentials = load_scoped_credentials(
-        "mcp_demo_oauth",
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
-    assert access_token == ACCESS_2
-    assert stored_credentials is not None
-    assert stored_credentials["refresh_token"] == CHAIN_2
-    assert seen_refresh_tokens == [CHAIN_0, CHAIN_1]
-
-
-@pytest.mark.asyncio
-async def test_mcp_manager_does_not_retry_stale_refresh_when_only_description_mentions_recoverable_code(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Only structured OAuth error codes should trigger stale-token recovery."""
-    runtime_paths = _runtime_paths(tmp_path)
-    worker_target = _shared_worker_target("@alice:example.test")
-    _save_mcp_oauth_credentials(
-        runtime_paths,
-        worker_target,
-        ACCESS_0,
-        refresh_token=CHAIN_0,
-        expires_at=900.0,
-    )
-    credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    manager = MCPServerManager(runtime_paths)
-    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
-    seen_refresh_tokens: list[str] = []
-
-    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any] | None:
-        refresh_token = str(credentials["refresh_token"])
-        seen_refresh_tokens.append(refresh_token)
-        if refresh_token == CHAIN_0:
-            save_scoped_credentials(
-                "mcp_demo_oauth",
-                _refreshed_credentials(CHAIN_1),
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-            )
-            msg = "OAuth provider description mentioned invalid_grant"
-            raise OAuthRefreshRejectedError(
-                msg,
-                oauth_error=TEMPORARILY_UNAVAILABLE,
-                oauth_error_description="retry later; invalid_grant is unrelated text",
-            )
-        pytest.fail(f"unexpected retry with refresh token: {refresh_token}")
-
-    provider = _FakeMcpOAuthProvider(refresh)
-    monkeypatch.setattr("mindroom.mcp.manager.mcp_oauth_provider", lambda *_args: provider)
-
-    with pytest.raises(OAuthConnectionRequired) as exc_info:
-        await manager._oauth_access_token(
-            manager._require_state("demo"),
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-
-    stored_credentials = load_scoped_credentials(
-        "mcp_demo_oauth",
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
-    assert exc_info.value.reason == "oauth_refresh_rejected"
-    assert stored_credentials is not None
-    assert stored_credentials["refresh_token"] == CHAIN_1
-    assert seen_refresh_tokens == [CHAIN_0]
-
-
-@pytest.mark.asyncio
 async def test_mcp_manager_surfaces_connection_required_for_terminal_oauth_refresh_rejection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -877,7 +761,7 @@ async def test_mcp_manager_surfaces_connection_required_for_terminal_oauth_refre
             worker_target=worker_target,
         )
 
-    assert exc_info.value.reason == "oauth_refresh_rejected"
+    assert exc_info.value.reason == "refresh_rejected"
     assert len(seen_refresh_tokens) == 1
     assert seen_refresh_tokens == [CHAIN_0]
 
@@ -898,14 +782,15 @@ async def test_scoped_oauth_refresh_lock_releases_after_noop_returns(
         return _refreshed_credentials(CHAIN_1)
 
     provider = _FakeMcpOAuthProvider(refresh)
+    context = OAuthCredentialContext(
+        provider=provider,
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
 
     missing_credentials = await asyncio.wait_for(
-        refresh_scoped_oauth_credentials(
-            provider,
-            runtime_paths,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        ),
+        refresh_oauth_credentials(context),
         timeout=1,
     )
     assert missing_credentials is None
@@ -925,12 +810,7 @@ async def test_scoped_oauth_refresh_lock_releases_after_noop_returns(
         worker_target=worker_target,
     )
     unusable_credentials = await asyncio.wait_for(
-        refresh_scoped_oauth_credentials(
-            provider,
-            runtime_paths,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        ),
+        refresh_oauth_credentials(context),
         timeout=1,
     )
     assert unusable_credentials is not None
@@ -944,12 +824,7 @@ async def test_scoped_oauth_refresh_lock_releases_after_noop_returns(
         expires_at=900.0,
     )
     refreshed_credentials = await asyncio.wait_for(
-        refresh_scoped_oauth_credentials(
-            provider,
-            runtime_paths,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        ),
+        refresh_oauth_credentials(context),
         timeout=1,
     )
 

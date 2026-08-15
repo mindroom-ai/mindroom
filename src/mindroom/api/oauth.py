@@ -21,8 +21,6 @@ from mindroom.api.credentials_target import (
 )
 from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
-from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.mcp.oauth import disconnect_mcp_oauth_request_session
 from mindroom.oauth import (
@@ -31,6 +29,13 @@ from mindroom.oauth import (
     OAuthProvider,
     OAuthProviderError,
     is_oauth_loopback_hostname,
+)
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialContext,
+    exchange_and_store_oauth_credentials,
+    load_oauth_credentials,
+    refresh_oauth_credentials,
+    reset_oauth_credentials,
 )
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import (
@@ -41,10 +46,6 @@ from mindroom.oauth.service import (
     oauth_credentials_usable,
     oauth_provider_service_account_configured,
     oauth_success_redirect_url,
-    refresh_scoped_oauth_credentials,
-    reset_scoped_oauth_credentials,
-    sanitized_oauth_token_result,
-    scoped_oauth_credentials_refresh_lock_path,
 )
 
 if TYPE_CHECKING:
@@ -300,40 +301,18 @@ def _claim_str(credentials: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _same_external_identity(existing_credentials: dict[str, Any] | None, token_data: dict[str, Any]) -> bool:
-    existing_sub = _claim_str(existing_credentials or {}, "sub")
-    new_sub = _claim_str(token_data, "sub")
-    if existing_sub is not None or new_sub is not None:
-        return existing_sub == new_sub
-
-    existing_email = _claim_str(existing_credentials or {}, "email")
-    new_email = _claim_str(token_data, "email")
-    return existing_email is not None and existing_email == new_email
-
-
-def _same_oauth_client(existing_credentials: dict[str, Any] | None, token_data: dict[str, Any]) -> bool:
-    existing_client_id = (existing_credentials or {}).get("client_id")
-    if not isinstance(existing_client_id, str) or not existing_client_id.strip():
-        return False
-    token_client_id = token_data.get("client_id")
-    return isinstance(token_client_id, str) and token_client_id.strip() == existing_client_id.strip()
-
-
-def _token_data_preserving_refresh_token(
-    existing_credentials: dict[str, Any] | None,
-    safe_token_data: dict[str, Any],
-) -> dict[str, Any]:
-    token_data = dict(safe_token_data)
-    existing_refresh_token = (existing_credentials or {}).get("refresh_token")
-    if (
-        "refresh_token" not in token_data
-        and isinstance(existing_refresh_token, str)
-        and existing_refresh_token
-        and _same_external_identity(existing_credentials, token_data)
-        and _same_oauth_client(existing_credentials, token_data)
-    ):
-        token_data["refresh_token"] = existing_refresh_token
-    return token_data
+def _credential_context(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    target: RequestCredentialsTarget,
+) -> OAuthCredentialContext:
+    return OAuthCredentialContext(
+        provider=provider,
+        runtime_paths=runtime_paths,
+        credentials_manager=target.base_manager,
+        worker_target=worker_target_for_credentials_target(target),
+        allowed_shared_services=target.allowed_shared_services,
+    )
 
 
 def _script_json(value: object) -> str:
@@ -407,45 +386,6 @@ async def success(provider_id: str, request: Request) -> HTMLResponse:
     return HTMLResponse(html)
 
 
-async def _exchange_and_store_callback_credentials(
-    provider: OAuthProvider,
-    runtime_paths: RuntimePaths,
-    target: RequestCredentialsTarget,
-    *,
-    code: str,
-    code_verifier: str | None,
-) -> None:
-    """Exchange one consumed callback code and durably publish its credentials."""
-    token_result = await provider.exchange_code(
-        code,
-        runtime_paths,
-        code_verifier=code_verifier,
-    )
-    provider.validate_claims(token_result, runtime_paths)
-    safe_result = sanitized_oauth_token_result(provider, token_result)
-    worker_target = worker_target_for_credentials_target(target)
-    credentials_manager = target.base_manager
-    lock_path = scoped_oauth_credentials_refresh_lock_path(
-        provider.credential_service,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
-    async with async_exclusive_file_lock(lock_path):
-        existing_credentials = load_scoped_credentials(
-            provider.credential_service,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-            allowed_shared_services=target.allowed_shared_services,
-        )
-        token_data = _token_data_preserving_refresh_token(existing_credentials, safe_result.token_data)
-        save_scoped_credentials(
-            provider.credential_service,
-            token_data,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-
-
 @router.get("/{provider_id}/callback")
 async def callback(provider_id: str, request: Request) -> RedirectResponse:
     """Handle a provider OAuth callback and store scoped credentials."""
@@ -475,12 +415,10 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
 
     try:
         await run_coroutine_until_complete(
-            _exchange_and_store_callback_credentials(
-                provider,
-                runtime_paths,
-                target,
-                code=code,
-                code_verifier=pending.code_verifier,
+            exchange_and_store_oauth_credentials(
+                _credential_context(provider, runtime_paths, target),
+                code,
+                pending.code_verifier,
             ),
         )
     except OAuthClaimValidationError as exc:
@@ -508,16 +446,8 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         provider,
         agent_name=agent_name,
     )
-    worker_target = worker_target_for_credentials_target(target)
-    credentials = (
-        load_scoped_credentials(
-            provider.credential_service,
-            credentials_manager=target.base_manager,
-            worker_target=worker_target,
-            allowed_shared_services=target.allowed_shared_services,
-        )
-        or {}
-    )
+    context = _credential_context(provider, runtime_paths, target)
+    credentials = load_oauth_credentials(context) or {}
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
     client_config_resolution = (
         provider.client_config_resolution(runtime_paths)
@@ -533,28 +463,14 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
     credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
     if credentials_usable and has_client_config and not has_service_account_config:
         try:
-            refreshed_credentials = await refresh_scoped_oauth_credentials(
-                provider,
-                runtime_paths,
-                credentials_manager=target.base_manager,
-                worker_target=worker_target,
-                allowed_shared_services=target.allowed_shared_services,
-            )
+            refreshed_credentials = await refresh_oauth_credentials(context)
         except OAuthProviderError as exc:
             logger.warning(
                 "oauth_token_refresh_failed",
                 provider_id=provider.id,
                 error_type=type(exc).__name__,
             )
-            credentials = (
-                load_scoped_credentials(
-                    provider.credential_service,
-                    credentials_manager=target.base_manager,
-                    worker_target=worker_target,
-                    allowed_shared_services=target.allowed_shared_services,
-                )
-                or {}
-            )
+            credentials = load_oauth_credentials(context) or {}
             credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
         else:
             credentials = refreshed_credentials or {}
@@ -590,24 +506,26 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
 async def disconnect(provider_id: str, request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Remove scoped OAuth credentials for one provider while preserving tool settings."""
     await _require_oauth_api_user(request)
-    provider, _runtime_paths = _load_provider(request, provider_id)
+    provider, runtime_paths = _load_provider(request, provider_id)
     target = _resolve_oauth_credentials_target(
         request,
         provider,
         agent_name=agent_name,
     )
-    worker_target = worker_target_for_credentials_target(target)
-    await reset_scoped_oauth_credentials(
-        provider.credential_service,
-        credentials_manager=target.base_manager,
-        worker_target=worker_target,
-    )
+    context = _credential_context(provider, runtime_paths, target)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
-    if config is not None:
+
+    async def disconnect_mcp() -> None:
+        assert config is not None
         await disconnect_mcp_oauth_request_session(
             config.mcp_servers,
             provider.id,
-            worker_target=worker_target,
+            worker_target=context.worker_target,
         )
+
+    await reset_oauth_credentials(
+        context,
+        before_delete=disconnect_mcp if config is not None else None,
+    )
     return {"status": "disconnected", "provider": provider.id}

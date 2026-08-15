@@ -13,8 +13,14 @@ from typing import TYPE_CHECKING, Protocol, cast
 from agno.tools.github import GithubTools as AgnoGithubTools
 from github import Auth, Github, GithubException
 
-from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.logging_config import get_logger
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialContext,
+    load_oauth_credentials,
+    oauth_credentials_usable,
+    oauth_credentials_worker_target,
+    refresh_oauth_credentials,
+)
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import (
     OAuthConnectionRequired,
@@ -23,12 +29,8 @@ from mindroom.oauth.providers import (
     oauth_connection_required_payload,
 )
 from mindroom.oauth.service import (
-    build_oauth_connect_instruction,
-    build_oauth_reconnect_instruction,
-    oauth_connect_url,
-    oauth_credentials_usable,
-    oauth_credentials_worker_target,
-    refresh_scoped_oauth_credentials,
+    OAUTH_REFRESH_REJECTED_REASON,
+    oauth_connection_required,
 )
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
@@ -36,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.constants import RuntimePaths
+    from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -100,14 +103,10 @@ class GithubTools(AgnoGithubTools):
         self._wrap_oauth_function_entrypoints()
 
     def _stored_access_token(self) -> str | None:
-        worker_target = self._oauth_credentials_worker_target()
-        if self._oauth_provider.requester_scoped_credentials and worker_target is None:
+        context = self._oauth_credential_context()
+        if self._oauth_provider.requester_scoped_credentials and context.worker_target is None:
             return None
-        credentials = load_scoped_credentials(
-            self._oauth_provider.credential_service,
-            credentials_manager=self._credentials_manager,
-            worker_target=worker_target,
-        )
+        credentials = load_oauth_credentials(context)
         if credentials is None:
             return None
         token = credentials.get("token") or credentials.get("access_token")
@@ -123,34 +122,22 @@ class GithubTools(AgnoGithubTools):
             execution_identity=execution_identity,
         )
 
-    def _connection_required(self, *, reason: str | None = None) -> OAuthConnectionRequired:
-        connect_url = oauth_connect_url(
-            self._oauth_provider,
-            self._runtime_paths,
+    def _oauth_credential_context(self) -> OAuthCredentialContext:
+        return OAuthCredentialContext(
+            provider=self._oauth_provider,
+            runtime_paths=self._runtime_paths,
+            credentials_manager=self._credentials_manager,
             worker_target=self._oauth_credentials_worker_target(),
         )
-        instruction = (
-            build_oauth_reconnect_instruction(self._oauth_provider, connect_url)
-            if reason == "refresh_rejected"
-            else build_oauth_connect_instruction(self._oauth_provider, connect_url)
-        )
-        return OAuthConnectionRequired(
-            instruction,
-            provider_id=self._oauth_provider.id,
-            connect_url=connect_url,
-            reason=reason,
-        )
+
+    def _connection_required(self, *, reason: str | None = None) -> OAuthConnectionRequired:
+        return oauth_connection_required(self._oauth_credential_context(), reason=reason)
 
     def _refresh_oauth_credentials(self) -> dict[str, object] | None:
-        worker_target = self._oauth_credentials_worker_target()
-        if self._oauth_provider.requester_scoped_credentials and worker_target is None:
+        context = self._oauth_credential_context()
+        if self._oauth_provider.requester_scoped_credentials and context.worker_target is None:
             return None
-        refresh = refresh_scoped_oauth_credentials(
-            self._oauth_provider,
-            self._runtime_paths,
-            credentials_manager=self._credentials_manager,
-            worker_target=worker_target,
-        )
+        refresh = refresh_oauth_credentials(context)
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -185,7 +172,7 @@ class GithubTools(AgnoGithubTools):
                 provider_id=self._oauth_provider.id,
                 error_type=type(exc).__name__,
             )
-            reason = "refresh_rejected" if isinstance(exc, OAuthRefreshRejectedError) else None
+            reason = OAUTH_REFRESH_REJECTED_REASON if isinstance(exc, OAuthRefreshRejectedError) else None
             raise self._connection_required(reason=reason) from exc
         if not oauth_credentials_usable(self._oauth_provider, self._runtime_paths, credentials):
             raise self._connection_required()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import parse_qs, urlparse
@@ -449,11 +450,11 @@ async def test_reset_oauth_connection_builds_link_before_deleting_credentials(
 
 
 @pytest.mark.asyncio
-async def test_reset_oauth_connection_returns_link_when_mcp_teardown_fails(
+async def test_reset_oauth_connection_preserves_credentials_when_mcp_teardown_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Post-pop MCP close failure must not hide a successful reset recovery link."""
+    """Fallible MCP cleanup must complete before destructive credential deletion."""
     tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
     provider = google_drive_oauth_provider()
     credentials_manager, worker_target, _credentials = _save_test_credentials(
@@ -471,12 +472,56 @@ async def test_reset_oauth_connection_returns_link_when_mcp_teardown_fails(
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)
 
-    assert "`connect_url`:" in result
+    assert result == "Error: OAuth session cleanup failed; credentials remain unchanged. Retry the reset."
     assert (
         load_scoped_credentials(
             provider.credential_service,
             credentials_manager=credentials_manager,
             worker_target=worker_target,
         )
-        is None
+        is not None
+    )
+
+
+@pytest.mark.asyncio
+async def test_reset_oauth_connection_cancellation_during_teardown_preserves_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation remains safe because teardown precedes the reset commit point."""
+    tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    provider = google_drive_oauth_provider()
+    credentials_manager, worker_target, credentials = _save_test_credentials(
+        context,
+        worker_target,
+        provider,
+        "mcp-cancel-refresh-token",
+    )
+    teardown_started = asyncio.Event()
+    hold_teardown = asyncio.Event()
+
+    async def blocked_teardown(*_args: object, **_kwargs: object) -> None:
+        teardown_started.set()
+        await hold_teardown.wait()
+
+    monkeypatch.setattr(
+        oauth_connections_module,
+        "disconnect_mcp_oauth_request_session",
+        blocked_teardown,
+    )
+
+    with tool_runtime_context(context):
+        reset_task = asyncio.create_task(tool.reset_oauth_connection(provider.id))
+        await teardown_started.wait()
+        reset_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reset_task
+
+    assert (
+        load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        == credentials
     )
