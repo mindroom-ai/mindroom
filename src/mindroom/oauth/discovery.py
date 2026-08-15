@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 _DISCOVERY_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_CACHE_TTL_SECONDS = 3600.0
+_CROSS_LOOP_LOCK_RETRY_SECONDS = 0.01
 _JSON_CONTENT_TYPE = "application/json"
 _DYNAMIC_CLIENT_SOURCE = "oauth_dynamic_client_registration"
 _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD = "none"  # noqa: S105
@@ -77,40 +78,14 @@ class _MetadataCandidateError(OAuthProviderError):
 
 @asynccontextmanager
 async def _cross_loop_lock(lock: threading.Lock) -> AsyncIterator[None]:
-    """Acquire one loop-neutral lock without leaking it when the waiter is cancelled."""
-    state_guard = threading.Lock()
-    abandoned = False
-    owned_by_waiter = False
-
-    def acquire_or_release_if_abandoned() -> bool:
-        nonlocal owned_by_waiter
-        lock.acquire()
-        with state_guard:
-            if abandoned:
-                lock.release()
-                return False
-            owned_by_waiter = True
-            return True
-
-    acquisition = asyncio.create_task(asyncio.to_thread(acquire_or_release_if_abandoned))
-    try:
-        acquired = await asyncio.shield(acquisition)
-    except asyncio.CancelledError:
-        with state_guard:
-            abandoned = True
-            release_owned_lock = owned_by_waiter
-            owned_by_waiter = False
-        if release_owned_lock:
-            lock.release()
-        raise
-    if not acquired:
-        msg = "OAuth dynamic registration lock acquisition was abandoned"
-        raise RuntimeError(msg)
+    """Acquire one loop-neutral lock without occupying an executor worker while waiting."""
+    # A threading.Lock has no cross-loop notification primitive, so bounded polling
+    # is the only wait that neither binds to one loop nor consumes an executor worker.
+    while not lock.acquire(blocking=False):  # noqa: ASYNC110
+        await asyncio.sleep(_CROSS_LOOP_LOCK_RETRY_SECONDS)
     try:
         yield
     finally:
-        with state_guard:
-            owned_by_waiter = False
         lock.release()
 
 

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import TYPE_CHECKING, Any, ClassVar
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -128,24 +129,11 @@ def _allow_example_test_dns(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cross_loop_lock_releases_after_repeated_waiter_cancellation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_cross_loop_lock_releases_after_repeated_waiter_cancellation() -> None:
     """Repeated cancellation must not strand a later-acquired thread lock."""
     lock = threading.Lock()
     holder_entered = asyncio.Event()
     release_holder = asyncio.Event()
-    waiter_entered_cancel_cleanup = asyncio.Event()
-    real_shield = asyncio.shield
-
-    async def observed_shield(awaitable: asyncio.Future[bool]) -> bool:
-        try:
-            return await real_shield(awaitable)
-        except asyncio.CancelledError:
-            waiter_entered_cancel_cleanup.set()
-            raise
-
-    monkeypatch.setattr("mindroom.oauth.discovery.asyncio.shield", observed_shield)
 
     async def hold_lock() -> None:
         async with _cross_loop_lock(lock):
@@ -163,7 +151,6 @@ async def test_cross_loop_lock_releases_after_repeated_waiter_cancellation(
     await asyncio.sleep(0)
 
     waiter.cancel()
-    await waiter_entered_cancel_cleanup.wait()
     waiter.cancel()
     release_holder.set()
 
@@ -173,6 +160,48 @@ async def test_cross_loop_lock_releases_after_repeated_waiter_cancellation(
 
     assert lock.acquire(blocking=False)
     lock.release()
+
+
+@pytest.mark.asyncio
+async def test_cross_loop_lock_waiter_does_not_saturate_default_executor() -> None:
+    """A blocked waiter must leave executor capacity for work needed by the holder."""
+    real_lock = threading.Lock()
+    real_lock.acquire()
+    loop = asyncio.get_running_loop()
+    acquire_attempted = asyncio.Event()
+
+    class ObservedLock:
+        def acquire(self, blocking: bool = True) -> bool:
+            loop.call_soon_threadsafe(acquire_attempted.set)
+            return real_lock.acquire(blocking=blocking)
+
+        def release(self) -> None:
+            real_lock.release()
+
+    lock = cast("threading.Lock", ObservedLock())
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+    waiter_entered = asyncio.Event()
+
+    async def wait_for_lock() -> None:
+        async with _cross_loop_lock(lock):
+            waiter_entered.set()
+
+    waiter = asyncio.create_task(wait_for_lock())
+    await acquire_attempted.wait()
+
+    executor_probe = asyncio.create_task(asyncio.to_thread(lambda: True))
+    probe_completed_while_waiting = False
+    try:
+        probe_completed_while_waiting = await asyncio.wait_for(asyncio.shield(executor_probe), timeout=0.2)
+    except TimeoutError:
+        pass
+    finally:
+        real_lock.release()
+        await asyncio.wait_for(waiter, timeout=2)
+        await asyncio.wait_for(executor_probe, timeout=2)
+
+    assert probe_completed_while_waiting
+    assert waiter_entered.is_set()
 
 
 @pytest.mark.asyncio
