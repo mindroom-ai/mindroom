@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, resolve_oauth_credential_context
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialContext,
+    oauth_credential_generation,
+    resolve_oauth_credential_context,
+)
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
@@ -162,6 +166,7 @@ def validate_oauth_reset_approval_bindings(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
+    allow_credential_generation_drift: bool = False,
 ) -> None:
     """Fail closed when an approved reset resolves differently after configuration drift."""
     for tool_call_id, tool_name, invoking_agent, approved in calls:
@@ -185,7 +190,12 @@ def validate_oauth_reset_approval_bindings(
         except OAuthResetTargetError as exc:
             msg = "Approved OAuth credential target changed or is unavailable; run the reset again."
             raise _OAuthResetApprovalBindingError(msg) from exc
-        if binding != _oauth_reset_target_binding(target):
+        current_binding = _oauth_reset_target_binding(target)
+        if allow_credential_generation_drift:
+            assert binding is not None
+            binding = {key: value for key, value in binding.items() if key != "credential_generation"}
+            current_binding = {key: value for key, value in current_binding.items() if key != "credential_generation"}
+        if binding != current_binding:
             msg = "Approved OAuth credential target changed; run the reset again."
             raise _OAuthResetApprovalBindingError(msg)
 
@@ -199,4 +209,5 @@ def _oauth_reset_target_binding(target: _ResolvedOAuthResetTarget) -> dict[str, 
         "worker_scope": cast("str", worker_target.worker_scope),
         "worker_key": cast("str", worker_target.worker_key),
         "routing_agent_name": cast("str", worker_target.routing_agent_name),
+        "credential_generation": oauth_credential_generation(target.credential_context),
     }

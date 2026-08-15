@@ -71,6 +71,11 @@ class OAuthConnectionTools(Toolkit):
                     if runtime_context.approval_operation is not None
                     else None
                 ),
+                expected_generation=(
+                    runtime_context.approval_operation.credential_generation
+                    if runtime_context.approval_operation is not None
+                    else None
+                ),
             )
         except OAuthResetTargetError as exc:
             return f"Error: {exc}"

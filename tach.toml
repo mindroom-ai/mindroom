@@ -360,6 +360,7 @@ visibility = ["mindroom.ai"]
 [[modules]]
 path = "mindroom.response_turn"
 depends_on = [
+    "mindroom.approval_bindings",
     "mindroom.ai_runtime",
     "mindroom.ai_turn_state",
     "mindroom.cancellation",
@@ -662,6 +663,7 @@ visibility = [
 [[modules]]
 path = "mindroom.approval_response"
 depends_on = [
+    "mindroom.approval_bindings",
     "mindroom.approval_manager",
     "mindroom.constants",
     "mindroom.delivery_gateway",
@@ -670,6 +672,15 @@ depends_on = [
     "mindroom.tool_approval",
 ]
 visibility = ["mindroom.response_runner"]
+
+[[modules]]
+path = "mindroom.approval_bindings"
+depends_on = ["mindroom.oauth.reset"]
+visibility = [
+    "mindroom.approval_response",
+    "mindroom.response_runner",
+    "mindroom.response_turn",
+]
 
 [[modules]]
 path = "mindroom.approval_inbound"
@@ -708,6 +719,59 @@ visibility = [
 [[modules]]
 path = "mindroom.credential_policy"
 depends_on = []
+
+[[modules]]
+path = "mindroom.oauth.credential_lifecycle"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.credentials",
+    "mindroom.durable_write",
+    "mindroom.file_locks",
+    "mindroom.logging_config",
+    "mindroom.oauth.providers",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = [
+    "mindroom.api.oauth",
+    "mindroom.custom_tools.github",
+    "mindroom.mcp.manager",
+    "mindroom.oauth.client",
+    "mindroom.oauth.reset",
+    "mindroom.oauth.reset_execution",
+    "mindroom.oauth.service",
+    "mindroom.response_runner",
+]
+
+[[modules]]
+path = "mindroom.oauth.reset"
+depends_on = [
+    "mindroom.credentials",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.oauth.registry",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = [
+    "mindroom.approval_bindings",
+    "mindroom.custom_tools.oauth_connections",
+    "mindroom.oauth.reset_execution",
+    "mindroom.response_runner",
+]
+
+[[modules]]
+path = "mindroom.oauth.reset_execution"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.mcp.oauth",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.oauth.reset",
+    "mindroom.oauth.service",
+]
+visibility = [
+    "mindroom.api.oauth",
+    "mindroom.custom_tools.oauth_connections",
+    "mindroom.response_runner",
+]
 
 [[modules]]
 path = "mindroom.runtime_resolution"
@@ -935,6 +999,8 @@ depends_on = [
     "mindroom.api.dashboard_credential_scope",
     "mindroom.credentials",
     "mindroom.oauth",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.oauth.reset_execution",
     "mindroom.oauth.service",
     "mindroom.tool_system.worker_routing",
 ]
@@ -1633,6 +1699,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.approval_execution",
+    "mindroom.approval_bindings",
     "mindroom.approval_receipt",
     "mindroom.approval_response",
     "mindroom.constants",
@@ -1649,6 +1716,9 @@ depends_on = [
     "mindroom.message_target",
     "mindroom.memory",
     "mindroom.orchestration.runtime",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.oauth.reset",
+    "mindroom.oauth.reset_execution",
     "mindroom.post_response_effects",
     "mindroom.response_admission",
     "mindroom.response_attempt",
@@ -2033,7 +2103,9 @@ depends_on = [
 [[modules]]
 path = "mindroom.mcp.manager"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.mcp.registry",
+    "mindroom.oauth.credential_lifecycle",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.dynamic_toolkits",
 ]

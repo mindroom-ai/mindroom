@@ -9,6 +9,7 @@ from agno.tools import Toolkit
 from agno.tools.function import Function
 
 from mindroom.mcp.config import resolved_mcp_tool_prefix
+from mindroom.mcp.errors import MCPToolUnavailableError
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 
 if TYPE_CHECKING:
@@ -221,19 +222,6 @@ class MindRoomMCPToolkit(Toolkit):
         return json.dumps(self._catalog_payload(catalog))
 
     async def _oauth_call_tool(self, *, tool_name: str, arguments: dict[str, object] | None = None) -> ToolResult | str:
-        try:
-            catalog = await self._oauth_request_catalog()
-        except OAuthConnectionRequired as exc:
-            return self._oauth_payload(exc)
-
-        tools_by_name = {tool.remote_name: tool for tool in self._filtered_catalog_tools(catalog)}
-        if tool_name not in tools_by_name:
-            return json.dumps(
-                {
-                    "error": f"MCP tool '{tool_name}' is not available for server '{self.server_id}'",
-                    "available_tools": sorted(tools_by_name),
-                },
-            )
         if self.manager is None:
             msg = f"MCP server '{self.server_id}' is not connected"
             raise RuntimeError(msg)
@@ -246,9 +234,18 @@ class MindRoomMCPToolkit(Toolkit):
                 credentials_manager=self.credentials_manager,
                 worker_target=self.worker_target,
                 authorization=self.oauth_authorization,
+                include_tools=self.include_tools,
+                exclude_tools=self.exclude_tools,
             )
         except OAuthConnectionRequired as exc:
             return self._oauth_payload(exc)
+        except MCPToolUnavailableError as exc:
+            return json.dumps(
+                {
+                    "error": str(exc),
+                    "available_tools": list(exc.available_tools),
+                },
+            )
 
     def _build_function(self, tool: MCPDiscoveredTool) -> Function:
         async def _call_tool(**kwargs: object) -> ToolResult:
@@ -261,6 +258,8 @@ class MindRoomMCPToolkit(Toolkit):
                 credentials_manager=self.credentials_manager,
                 worker_target=self.worker_target,
                 authorization=self.oauth_authorization,
+                include_tools=self.include_tools,
+                exclude_tools=self.exclude_tools,
             )
 
         return Function(

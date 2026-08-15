@@ -224,6 +224,7 @@ async def test_same_scope_refresh_serializes_provider_rotation(tmp_path: Path) -
 
     context = _context(tmp_path, _FakeOAuthProvider(refresh))
     _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    original_generation = credential_lifecycle.oauth_credential_generation(context)
     first = asyncio.create_task(refresh_oauth_credentials_with_result(context))
     await asyncio.to_thread(first_started.wait)
     second = asyncio.create_task(refresh_oauth_credentials_with_result(context))
@@ -234,6 +235,8 @@ async def test_same_scope_refresh_serializes_provider_rotation(tmp_path: Path) -
     first_result, second_result = await asyncio.gather(first, second)
 
     assert first_result.refreshed is True
+    assert first_result.generation != original_generation
+    assert second_result.generation == first_result.generation
     assert second_result.credentials == first_result.credentials
     assert seen == [CHAIN_0, CHAIN_1]
     assert _load(context) == first_result.credentials
@@ -360,7 +363,54 @@ async def test_completed_reset_operation_cannot_delete_later_callback_credential
 
 
 @pytest.mark.asyncio
-async def test_pending_reset_operation_fails_closed_and_finishes_on_retry(
+async def test_completed_reset_replay_does_not_finish_unrelated_pending_delete(tmp_path: Path) -> None:
+    """A completed intent replay must not delete newer credentials through another pending intent."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+    completed_operation_id = "approval-1:0:reset-call"
+    assert await credential_lifecycle.reset_oauth_credentials(
+        context,
+        operation_id=completed_operation_id,
+    )
+    replacement = await exchange_and_store_oauth_credentials(
+        context,
+        "replacement-code",
+        None,
+        expected_generation=credential_lifecycle.oauth_credential_generation(context),
+    )
+    state = credential_lifecycle._load_oauth_credential_state(context)
+    credential_lifecycle._write_oauth_credential_state(
+        context,
+        credential_lifecycle._OAuthCredentialState(
+            generation="pending-generation",
+            reset_operations={
+                **state.reset_operations,
+                "approval-2:0:reset-call": credential_lifecycle._OAuthResetOperation(
+                    status="pending",
+                    credential_existed=True,
+                    replayable=True,
+                ),
+            },
+        ),
+    )
+
+    assert await credential_lifecycle.reset_oauth_credentials(
+        context,
+        operation_id=completed_operation_id,
+    )
+    assert _load(context) == replacement
+    assert (
+        credential_lifecycle._load_oauth_credential_state(context).reset_operations["approval-2:0:reset-call"].status
+        == "pending"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_reset_operation_hides_old_credentials_and_reconnect_finishes_it(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -385,18 +435,66 @@ async def test_pending_reset_operation_fails_closed_and_finishes_on_retry(
         )
 
     assert credential_lifecycle.load_oauth_credentials(context) is None
-    with pytest.raises(OAuthProviderError, match="reset is incomplete"):
-        credential_lifecycle.oauth_credential_generation(context)
+    pending_generation = credential_lifecycle.oauth_credential_generation(context)
 
     monkeypatch.setattr(credential_lifecycle, "delete_scoped_credentials", real_delete)
+    replacement = await exchange_and_store_oauth_credentials(
+        context,
+        "replacement-code",
+        None,
+        expected_generation=pending_generation,
+    )
+    assert _load(context) == replacement
     assert (
-        await credential_lifecycle.reset_oauth_credentials(
+        credential_lifecycle.oauth_reset_operation_result(
             context,
-            operation_id="approval-1:0:reset-call",
+            "approval-1:0:reset-call",
         )
         is True
     )
-    assert _load(context) is None
+
+
+@pytest.mark.asyncio
+async def test_stale_approved_reset_cannot_delete_reconnected_credentials(tmp_path: Path) -> None:
+    """A reset approval is valid only for the credential generation shown to its approver."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+    approved_generation = credential_lifecycle.oauth_credential_generation(context)
+    replacement = await exchange_and_store_oauth_credentials(
+        context,
+        "replacement-code",
+        None,
+        expected_generation=approved_generation,
+    )
+
+    with pytest.raises(OAuthProviderError, match="credential changed"):
+        await credential_lifecycle.reset_oauth_credentials(
+            context,
+            operation_id="approval-1:0:reset-call",
+            expected_generation=approved_generation,
+        )
+
+    assert _load(context) == replacement
+    assert credential_lifecycle.oauth_reset_operation_result(context, "approval-1:0:reset-call") is None
+
+
+@pytest.mark.asyncio
+async def test_direct_resets_do_not_retain_replay_tombstones(tmp_path: Path) -> None:
+    """Unkeyed API resets recover pending deletion without growing permanent operation state."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+
+    assert await credential_lifecycle.reset_oauth_credentials(context) is True
+    assert await credential_lifecycle.reset_oauth_credentials(context) is False
+    assert credential_lifecycle._load_oauth_credential_state(context).reset_operations == {}
 
 
 @pytest.mark.asyncio

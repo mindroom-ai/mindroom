@@ -52,6 +52,8 @@ class _AsyncReadWriteLock:
                 self._writer_active = True
             finally:
                 self._waiting_writers -= 1
+                if not self._writer_active and self._waiting_writers == 0:
+                    self._condition.notify_all()
         try:
             yield
         finally:
@@ -106,6 +108,9 @@ class MCPServerState:
     refresh_revision: int = 0
     oauth_access_token_hash: str | None = None
     oauth_session_access_token_hash: str | None = None
+    oauth_credential_generation: str | None = None
+    oauth_session_credential_generation: str | None = None
+    function_validation_error: bool = False
     retired: bool = False
 
     def __post_init__(self) -> None:

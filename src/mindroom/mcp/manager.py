@@ -14,6 +14,7 @@ from weakref import WeakValueDictionary
 import mcp.types as mcp_types
 from mcp import ClientSession
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.mcp.config import (
@@ -22,7 +23,14 @@ from mindroom.mcp.config import (
     resolved_mcp_tool_prefix,
     validate_mcp_function_name,
 )
-from mindroom.mcp.errors import MCPConnectionError, MCPError, MCPProtocolError, MCPTimeoutError, MCPToolCallError
+from mindroom.mcp.errors import (
+    MCPConnectionError,
+    MCPError,
+    MCPProtocolError,
+    MCPTimeoutError,
+    MCPToolCallError,
+    MCPToolUnavailableError,
+)
 from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
 from mindroom.mcp.results import tool_result_from_call_result
@@ -31,6 +39,7 @@ from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog, MCPServerSta
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     load_oauth_credentials,
+    load_oauth_credentials_snapshot,
     oauth_credentials_usable,
     refresh_oauth_credentials_with_result,
     resolve_oauth_credential_context,
@@ -44,7 +53,7 @@ from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loa
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
 
     from agno.tools.function import ToolResult
     from mcp.client.session import MessageHandlerFnT
@@ -89,10 +98,16 @@ class _MCPAuthorizationLease:
 
     headers: Mapping[str, str]
     token_hash: str
+    credential_context: OAuthCredentialContext
+    credential_generation: str
 
 
 class _MCPAuthorizationChangedError(RuntimeError):
     """Signal that a requester must reacquire authoritative authorization."""
+
+
+class _MCPFunctionValidationError(MCPProtocolError):
+    """Signal that one candidate catalog conflicts with the provider-visible surface."""
 
 
 class MCPServerManager:
@@ -110,6 +125,7 @@ class MCPServerManager:
         self._request_retirement_locks: WeakValueDictionary[_MCPSessionKey, asyncio.Lock] = WeakValueDictionary()
         self._retired_request_keys: set[_MCPSessionKey] = set()
         self._catalog_validation_lock = asyncio.Lock()
+        self._state_lifecycle_lock = asyncio.Lock()
         self._on_catalog_change = on_catalog_change
         self._config: Config | None = None
         self._shutdown = False
@@ -133,30 +149,38 @@ class MCPServerManager:
     def get_catalog(self, server_id: str) -> MCPServerCatalog:
         """Return the cached catalog for one server."""
         state = self._require_state(server_id)
-        if state.catalog is not None:
-            return state.catalog
         if state.last_error is not None:
             raise state.last_error
+        if state.catalog is not None:
+            return state.catalog
         msg = f"MCP server '{server_id}' is not connected"
         raise MCPConnectionError(server_id, msg)
 
     async def sync_servers(self, config: Config) -> set[str]:
         """Reconcile live server sessions against the active config."""
-        self._config = config
+        async with self._state_lifecycle_lock:
+            if self._shutdown:
+                return set()
+            self._config = config
         changed_server_ids: set[str] = set()
         desired_servers = {
             server_id: server_config for server_id, server_config in config.mcp_servers.items() if server_config.enabled
         }
+        await self._clear_function_validation_errors()
 
         for server_id in sorted(set(self._states) - set(desired_servers)):
             await self._remove_server(server_id)
 
         for server_id, server_config in desired_servers.items():
-            state = self._states.get(server_id)
-            if state is None:
-                state = MCPServerState(server_id=server_id, config=server_config)
-                self._states[server_id] = state
-            elif state.config != server_config:
+            async with self._state_lifecycle_lock:
+                if self._shutdown:
+                    return set()
+                state = self._states.get(server_id)
+                if state is None:
+                    state = MCPServerState(server_id=server_id, config=server_config)
+                    self._states[server_id] = state
+                config_changed = state.config != server_config
+            if config_changed:
                 await self._cancel_refresh_task(state)
                 async with state.lock:
                     await self._disconnect_state_when_idle(state)
@@ -180,6 +204,9 @@ class MCPServerManager:
             ):
                 changed_server_ids.add(server_id)
 
+        async with self._state_lifecycle_lock:
+            if self._shutdown:
+                return set()
         invalid_server_ids = await self._validate_global_function_names()
         changed_server_ids.difference_update(invalid_server_ids)
         changed_server_ids.difference_update(self.failed_server_ids())
@@ -187,20 +214,25 @@ class MCPServerManager:
 
     async def shutdown(self) -> None:
         """Close all tracked sessions and background refresh tasks."""
-        self._shutdown = True
-        self._config = None
-        for state in list(self._states.values()):
-            state.retired = True
+        async with self._state_lifecycle_lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
+            self._config = None
+            shared_states = list(self._states.values())
+            scoped_states = list(self._scoped_states.values())
+            for state in (*shared_states, *scoped_states):
+                state.retired = True
+            self._states.clear()
+            self._scoped_states.clear()
+            self._request_retirement_locks.clear()
+            self._retired_request_keys.clear()
+        for state in shared_states:
             await self._cancel_refresh_task(state)
             await self._disconnect_state_when_idle(state)
-        for state in list(self._scoped_states.values()):
-            state.retired = True
+        for state in scoped_states:
             await self._cancel_refresh_task(state)
             await self._disconnect_state_when_idle(state)
-        self._states.clear()
-        self._scoped_states.clear()
-        self._request_retirement_locks.clear()
-        self._retired_request_keys.clear()
 
     async def call_tool(
         self,
@@ -212,6 +244,8 @@ class MCPServerManager:
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
         authorization: AuthorizationConfig | None = None,
+        include_tools: Collection[str] | None = None,
+        exclude_tools: Collection[str] | None = None,
     ) -> ToolResult:
         """Call one remote MCP tool through the cached session."""
         state = self._require_state(server_id)
@@ -235,28 +269,30 @@ class MCPServerManager:
                             request_state,
                             notify=False,
                             auth_headers=authorization_lease.headers,
-                            expected_oauth_token_hash=authorization_lease.token_hash,
+                            authorization_lease=authorization_lease,
                         )
-                    self._require_catalog_tool(request_state, remote_tool_name)
                     return await self._call_tool_once_or_reconnect(
                         request_state,
                         remote_tool_name,
                         arguments,
                         timeout_seconds=timeout_seconds or request_state.config.call_timeout_seconds,
                         auth_headers=authorization_lease.headers,
-                        expected_oauth_token_hash=authorization_lease.token_hash,
+                        authorization_lease=authorization_lease,
+                        include_tools=include_tools,
+                        exclude_tools=exclude_tools,
                     )
                 except _MCPAuthorizationChangedError:
                     continue
 
         if state.catalog is None or state.session is None or not state.connected:
             await self._refresh_server_catalog(state, notify=False)
-        self._require_catalog_tool(state, remote_tool_name)
         return await self._call_tool_once_or_reconnect(
             state,
             remote_tool_name,
             arguments,
             timeout_seconds=timeout_seconds or state.config.call_timeout_seconds,
+            include_tools=include_tools,
+            exclude_tools=exclude_tools,
         )
 
     async def get_request_catalog(
@@ -281,9 +317,9 @@ class MCPServerManager:
                         state,
                         notify=False,
                         auth_headers=authorization_lease.headers,
-                        expected_oauth_token_hash=authorization_lease.token_hash,
+                        authorization_lease=authorization_lease,
                     )
-                return await self._request_catalog_with_lock(state, authorization_lease.token_hash)
+                return await self._request_catalog_with_lock(state, authorization_lease)
             except _MCPAuthorizationChangedError:
                 continue
 
@@ -318,6 +354,7 @@ class MCPServerManager:
         server_id: str,
         *,
         worker_target: ResolvedWorkerTarget | None,
+        expected_credential_generation: str | None = None,
     ) -> AsyncIterator[None]:
         """Fence one requester generation while its OAuth credential is reset."""
         base_state = self._states.get(server_id)
@@ -329,26 +366,43 @@ class MCPServerManager:
         except OAuthConnectionRequired:
             yield
             return
-        retirement_lock = self._request_retirement_locks.setdefault(key, asyncio.Lock())
+        async with self._state_lifecycle_lock:
+            retirement_lock = self._request_retirement_locks.setdefault(key, asyncio.Lock())
         async with retirement_lock:
-            self._retired_request_keys.add(key)
-            state = self._scoped_states.get(key)
-            if state is not None:
-                state.retired = True
+            async with self._state_lifecycle_lock:
+                state = self._scoped_states.get(key)
+                if (
+                    state is not None
+                    and expected_credential_generation is not None
+                    and state.oauth_credential_generation != expected_credential_generation
+                ):
+                    state = None
+                    skip_retirement = True
+                else:
+                    self._retired_request_keys.add(key)
+                    skip_retirement = False
+                if state is not None:
+                    state.retired = True
+            if skip_retirement:
+                yield
+                return
             try:
                 if state is not None:
                     await self._cancel_refresh_task(state)
                     async with state.lock:
                         await self._disconnect_state_when_idle(state)
-                    if self._scoped_states.get(key) is state:
-                        self._scoped_states.pop(key)
+                    async with self._state_lifecycle_lock:
+                        if self._scoped_states.get(key) is state:
+                            self._scoped_states.pop(key)
                 yield
             except BaseException:
-                if state is not None and self._scoped_states.get(key) is state:
-                    state.retired = False
+                async with self._state_lifecycle_lock:
+                    if state is not None and self._scoped_states.get(key) is state:
+                        state.retired = False
                 raise
             finally:
-                self._retired_request_keys.discard(key)
+                async with self._state_lifecycle_lock:
+                    self._retired_request_keys.discard(key)
 
     def _oauth_connection_required(
         self,
@@ -430,12 +484,13 @@ class MCPServerManager:
             return None
         return float(expires_at)
 
-    async def _oauth_access_token(
+    async def _oauth_authorization_material(
         self,
         state: MCPServerState,
         *,
         credential_context: OAuthCredentialContext,
-    ) -> str:
+    ) -> tuple[str, str]:
+        """Return the usable access token and exact committed credential generation."""
         context = credential_context
         provider = context.provider
         try:
@@ -459,7 +514,7 @@ class MCPServerManager:
         token = credentials.get("token") or credentials.get("access_token")
         if not isinstance(token, str) or not token:
             raise oauth_connection_required(context)
-        return token
+        return token, refresh_result.generation
 
     async def _request_state_and_headers(
         self,
@@ -483,34 +538,85 @@ class MCPServerManager:
         )
         worker_target = credential_context.worker_target
         key = self._request_session_key(base_state, worker_target)
-        if key in self._retired_request_keys:
-            raise oauth_connection_required(credential_context)
-        state = self._scoped_states.get(key)
-        if state is None:
-            state = MCPServerState(server_id=server_id, config=base_state.config)
-            self._scoped_states[key] = state
+        async with self._state_lifecycle_lock:
+            if (
+                self._shutdown
+                or self._states.get(server_id) is not base_state
+                or base_state.retired
+                or key in self._retired_request_keys
+            ):
+                raise oauth_connection_required(credential_context)
+            state = self._scoped_states.get(key)
+            if state is None:
+                state = MCPServerState(server_id=server_id, config=base_state.config)
+                self._scoped_states[key] = state
 
-        async with state.lock:
-            if state.retired or key in self._retired_request_keys:
-                raise oauth_connection_required(credential_context)
-            access_token = await self._oauth_access_token(
-                base_state,
-                credential_context=credential_context,
-            )
-            if state.retired or key in self._retired_request_keys:
-                raise oauth_connection_required(credential_context)
-            token_hash = hashlib.sha256(access_token.encode("utf-8")).hexdigest()
-            if state.oauth_access_token_hash != token_hash:
-                async with state.call_lock.write():
-                    await self._disconnect_state(state)
-                    state.catalog = None
-                    state.last_error = None
-                    state.stale = True
-                    state.oauth_access_token_hash = token_hash
+        try:
+            async with state.lock:
+                if state.retired or key in self._retired_request_keys:
+                    raise oauth_connection_required(credential_context)
+                access_token, credential_generation = await self._oauth_authorization_material(
+                    base_state,
+                    credential_context=credential_context,
+                )
+                if state.retired or key in self._retired_request_keys:
+                    raise oauth_connection_required(credential_context)
+                token_hash = hashlib.sha256(access_token.encode("utf-8")).hexdigest()
+                if (
+                    state.oauth_access_token_hash != token_hash
+                    or state.oauth_credential_generation != credential_generation
+                ):
+                    async with state.call_lock.write():
+                        await self._disconnect_state(state)
+                        state.catalog = None
+                        state.last_error = None
+                        state.stale = True
+                        state.oauth_access_token_hash = token_hash
+                        state.oauth_credential_generation = credential_generation
+        except OAuthConnectionRequired:
+            await run_coroutine_until_complete(self._disconnect_rejected_oauth_request_state(key, state))
+            raise
         return state, _MCPAuthorizationLease(
             headers={"Authorization": f"Bearer {access_token}"},
             token_hash=token_hash,
+            credential_context=credential_context,
+            credential_generation=credential_generation,
         )
+
+    async def _disconnect_rejected_oauth_request_state(
+        self,
+        key: _MCPSessionKey,
+        state: MCPServerState,
+    ) -> None:
+        """Retire cached bearer state after credentials become unusable or rejected."""
+        state.retired = True
+        async with self._state_lifecycle_lock:
+            if self._scoped_states.get(key) is state:
+                self._scoped_states.pop(key)
+        async with state.call_lock.write():
+            try:
+                await self._disconnect_state(state)
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+                logger.warning(
+                    "MCP OAuth rejected-session disconnect failed",
+                    server_id=state.server_id,
+                    error_type="CancelledError",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "MCP OAuth rejected-session disconnect failed",
+                    server_id=state.server_id,
+                    error_type=type(exc).__name__,
+                )
+            finally:
+                state.catalog = None
+                state.last_error = None
+                state.stale = True
+                state.oauth_access_token_hash = None
+                state.oauth_credential_generation = None
 
     async def _call_tool_once_or_reconnect(
         self,
@@ -520,7 +626,9 @@ class MCPServerManager:
         *,
         timeout_seconds: float,
         auth_headers: Mapping[str, str] | None = None,
-        expected_oauth_token_hash: str | None = None,
+        authorization_lease: _MCPAuthorizationLease | None = None,
+        include_tools: Collection[str] | None = None,
+        exclude_tools: Collection[str] | None = None,
     ) -> ToolResult:
         self._require_active_state(state)
         refresh_revision = state.refresh_revision
@@ -530,12 +638,14 @@ class MCPServerManager:
                 remote_tool_name,
                 arguments,
                 timeout_seconds=timeout_seconds,
-                expected_oauth_token_hash=expected_oauth_token_hash,
+                authorization_lease=authorization_lease,
+                include_tools=include_tools,
+                exclude_tools=exclude_tools,
             )
         except (MCPToolCallError, MCPProtocolError):
             raise
         except (MCPConnectionError, MCPTimeoutError):
-            if not state.config.auto_reconnect:
+            if state.last_error is not None or not state.config.auto_reconnect:
                 raise
         except MCPError:
             raise
@@ -545,15 +655,16 @@ class MCPServerManager:
             notify=True,
             expected_refresh_revision=refresh_revision,
             auth_headers=auth_headers,
-            expected_oauth_token_hash=expected_oauth_token_hash,
+            authorization_lease=authorization_lease,
         )
-        self._require_catalog_tool(state, remote_tool_name)
         return await self._call_tool_with_lock(
             state,
             remote_tool_name,
             arguments,
             timeout_seconds=timeout_seconds,
-            expected_oauth_token_hash=expected_oauth_token_hash,
+            authorization_lease=authorization_lease,
+            include_tools=include_tools,
+            exclude_tools=exclude_tools,
         )
 
     async def _call_tool_with_lock(
@@ -563,16 +674,26 @@ class MCPServerManager:
         arguments: dict[str, object],
         *,
         timeout_seconds: float,
-        expected_oauth_token_hash: str | None = None,
+        authorization_lease: _MCPAuthorizationLease | None = None,
+        include_tools: Collection[str] | None = None,
+        exclude_tools: Collection[str] | None = None,
     ) -> ToolResult:
         async with state.semaphore, state.call_lock.read():
             self._require_active_state(state)
-            self._require_oauth_lease(state, expected_oauth_token_hash)
+            self._require_desired_oauth_lease(state, authorization_lease)
+            if state.last_error is not None:
+                raise state.last_error
+            await self._validate_authoritative_oauth_lease(authorization_lease)
+            self._require_session_oauth_lease(state, authorization_lease)
             if state.session is None or state.catalog is None or not state.connected:
-                if state.last_error is not None:
-                    raise state.last_error
                 msg = f"MCP server '{state.server_id}' is not connected"
                 raise MCPConnectionError(state.server_id, msg)
+            self._require_catalog_tool(
+                state,
+                remote_tool_name,
+                include_tools=include_tools,
+                exclude_tools=exclude_tools,
+            )
             return await self._call_tool_once(
                 state,
                 remote_tool_name,
@@ -583,16 +704,18 @@ class MCPServerManager:
     async def _request_catalog_with_lock(
         self,
         state: MCPServerState,
-        expected_oauth_token_hash: str,
+        authorization_lease: _MCPAuthorizationLease,
     ) -> MCPServerCatalog:
         """Return catalog only while its connected authorization lease is current."""
         async with state.call_lock.read():
             self._require_active_state(state)
-            self._require_oauth_lease(state, expected_oauth_token_hash)
-            if state.catalog is not None and state.connected:
-                return state.catalog
+            self._require_desired_oauth_lease(state, authorization_lease)
             if state.last_error is not None:
                 raise state.last_error
+            await self._validate_authoritative_oauth_lease(authorization_lease)
+            self._require_session_oauth_lease(state, authorization_lease)
+            if state.catalog is not None and state.connected:
+                return state.catalog
             msg = f"MCP server '{state.server_id}' is not connected"
             raise MCPConnectionError(state.server_id, msg)
 
@@ -625,7 +748,7 @@ class MCPServerManager:
         notify: bool,
         expected_refresh_revision: int | None = None,
         auth_headers: Mapping[str, str] | None = None,
-        expected_oauth_token_hash: str | None = None,
+        authorization_lease: _MCPAuthorizationLease | None = None,
     ) -> bool:
         self._require_active_state(state)
         should_notify_catalog_change = False
@@ -633,48 +756,34 @@ class MCPServerManager:
             self._require_active_state(state)
             if expected_refresh_revision is not None and state.refresh_revision != expected_refresh_revision:
                 return False
-            self._require_desired_oauth_lease(state, expected_oauth_token_hash)
+            self._require_desired_oauth_lease(state, authorization_lease)
             state.refresh_revision += 1
             state.stale = False
             async with state.call_lock.write():
                 previous_hash = state.catalog.catalog_hash if state.catalog is not None else None
-                await self._disconnect_state(state)
-                self._require_desired_oauth_lease(state, expected_oauth_token_hash)
                 try:
-                    catalog = await self._connect_and_discover(state, auth_headers=auth_headers)
-                except MCPError as exc:
-                    repeated_error = state.last_error is not None and str(state.last_error) == str(exc)
-                    state.last_error = exc
-                    state.connected = False
-                    state.catalog = None
-                    state.consecutive_failures += 1
-                    log = logger.debug if repeated_error else logger.warning
-                    log(
-                        "MCP server discovery failed",
-                        server_id=state.server_id,
-                        transport=state.config.transport,
-                        error=str(exc),
-                        required=state.config.required,
-                        affected_entities=sorted(self._entities_referencing_server(state.server_id)),
-                        consecutive_failures=state.consecutive_failures,
+                    await self._disconnect_state(state)
+                except Exception:
+                    message = f"MCP server '{state.server_id}' reconnect teardown failed"
+                    await self._record_discovery_failure(
+                        state,
+                        MCPConnectionError(state.server_id, message),
                     )
-                    if state.config.auth is None:
-                        self._schedule_refresh_task(
-                            state,
-                            delay_seconds=_discovery_retry_delay_seconds(state.consecutive_failures),
-                        )
+                    return False
+                self._require_desired_oauth_lease(state, authorization_lease)
+                try:
+                    catalog = await self._connect_and_publish_catalog(
+                        state,
+                        auth_headers=auth_headers,
+                        authorization_lease=authorization_lease,
+                    )
+                except _MCPAuthorizationChangedError:
+                    await self._disconnect_state(state)
+                    raise
+                except MCPError as exc:
+                    await self._record_discovery_failure(state, exc)
                     return False
 
-                if expected_oauth_token_hash is not None and state.oauth_access_token_hash != expected_oauth_token_hash:
-                    await self._disconnect_state(state)
-                    raise _MCPAuthorizationChangedError
-                if state.retired:
-                    await self._disconnect_state(state)
-                    self._require_active_state(state)
-                state.oauth_session_access_token_hash = expected_oauth_token_hash
-                state.catalog = catalog
-                state.connected = True
-                state.last_error = None
                 state.consecutive_failures = 0
                 changed = previous_hash != catalog.catalog_hash
                 should_notify_catalog_change = notify and changed and self._on_catalog_change is not None
@@ -686,6 +795,70 @@ class MCPServerManager:
         if state.config.auth is None and state.stale and state.refresh_task is None and not self._shutdown:
             self._schedule_refresh_task(state)
         return changed
+
+    async def _connect_and_publish_catalog(
+        self,
+        state: MCPServerState,
+        *,
+        auth_headers: Mapping[str, str] | None,
+        authorization_lease: _MCPAuthorizationLease | None,
+    ) -> MCPServerCatalog:
+        """Discover, revalidate, and atomically publish one candidate catalog."""
+        await self._validate_authoritative_oauth_lease(authorization_lease)
+        catalog = await self._connect_and_discover(state, auth_headers=auth_headers)
+        await self._validate_authoritative_oauth_lease(authorization_lease)
+        self._require_desired_oauth_lease(state, authorization_lease)
+        if state.retired:
+            await self._disconnect_state(state)
+            self._require_active_state(state)
+        async with self._catalog_validation_lock:
+            self._require_active_state(state)
+            collision_error = self._candidate_function_validation_error(state, catalog)
+            if collision_error is not None:
+                raise collision_error
+            state.oauth_session_access_token_hash = (
+                authorization_lease.token_hash if authorization_lease is not None else None
+            )
+            state.oauth_session_credential_generation = (
+                authorization_lease.credential_generation if authorization_lease is not None else None
+            )
+            state.catalog = catalog
+            state.connected = True
+            state.last_error = None
+            state.function_validation_error = False
+        return catalog
+
+    async def _record_discovery_failure(self, state: MCPServerState, error: MCPError) -> None:
+        """Hide and drain one failed candidate while preserving its owning error."""
+        try:
+            await self._disconnect_state(state)
+        except Exception as close_error:
+            logger.warning(
+                "MCP failed-session disconnect failed",
+                server_id=state.server_id,
+                error_type=type(close_error).__name__,
+            )
+        repeated_error = state.last_error is not None and str(state.last_error) == str(error)
+        state.connected = False
+        state.catalog = None
+        state.function_validation_error = isinstance(error, _MCPFunctionValidationError)
+        state.consecutive_failures += 1
+        state.last_error = error
+        log = logger.debug if repeated_error else logger.warning
+        log(
+            "MCP server discovery failed",
+            server_id=state.server_id,
+            transport=state.config.transport,
+            error=str(error),
+            required=state.config.required,
+            affected_entities=sorted(self._entities_referencing_server(state.server_id)),
+            consecutive_failures=state.consecutive_failures,
+        )
+        if state.config.auth is None:
+            self._schedule_refresh_task(
+                state,
+                delay_seconds=_discovery_retry_delay_seconds(state.consecutive_failures),
+            )
 
     async def _connect_and_discover(
         self,
@@ -905,6 +1078,16 @@ class MCPServerManager:
         await self._remove_scoped_server_states(server_id)
         await self._disconnect_state_when_idle(state)
 
+    async def _clear_function_validation_errors(self) -> None:
+        """Make collision-owned failures eligible for validation under the new config surface."""
+        for state in (*tuple(self._states.values()), *tuple(self._scoped_states.values())):
+            if not state.function_validation_error:
+                continue
+            async with state.lock:
+                state.last_error = None
+                state.function_validation_error = False
+                state.stale = True
+
     async def _remove_scoped_server_states(self, server_id: str) -> None:
         scoped_keys = [key for key in self._scoped_states if key.server_id == server_id]
         for key in scoped_keys:
@@ -934,17 +1117,20 @@ class MCPServerManager:
         state.session_owner_task = None
         state.session_close_event = None
         if owner_task is not None:
-            try:
-                if close_event is None:
-                    await self._cancel_session_owner_task(owner_task)
-                    close_error = RuntimeError(
-                        f"MCP server '{state.server_id}' session owner is missing close event",
-                    )
-                else:
-                    close_event.set()
-                    await owner_task
-            except BaseException as exc:
-                close_error = exc
+            if owner_task.done() and owner_task.cancelled():
+                pass
+            else:
+                try:
+                    if close_event is None:
+                        await self._cancel_session_owner_task(owner_task)
+                        close_error = RuntimeError(
+                            f"MCP server '{state.server_id}' session owner is missing close event",
+                        )
+                    else:
+                        close_event.set()
+                        await owner_task
+                except BaseException as exc:
+                    close_error = exc
         elif state.exit_stack is not None:
             try:
                 await state.exit_stack.aclose()
@@ -961,6 +1147,7 @@ class MCPServerManager:
         state.session = None
         state.connected = False
         state.oauth_session_access_token_hash = None
+        state.oauth_session_credential_generation = None
         if close_error is not None:
             raise close_error
 
@@ -976,24 +1163,73 @@ class MCPServerManager:
             raise KeyError(msg)
         return state
 
-    def _require_catalog_tool(self, state: MCPServerState, remote_tool_name: str) -> None:
+    def _require_catalog_tool(
+        self,
+        state: MCPServerState,
+        remote_tool_name: str,
+        *,
+        include_tools: Collection[str] | None,
+        exclude_tools: Collection[str] | None,
+    ) -> None:
         self._require_active_state(state)
-        catalog = state.catalog if state.catalog is not None else self.get_catalog(state.server_id)
-        if remote_tool_name not in {tool.remote_name for tool in catalog.tools}:
-            msg = f"MCP tool '{remote_tool_name}' is not in the cached catalog for server '{state.server_id}'"
-            raise MCPProtocolError(state.server_id, msg)
+        catalog = state.catalog
+        if catalog is None:
+            msg = f"MCP server '{state.server_id}' is not connected"
+            raise MCPConnectionError(state.server_id, msg)
+        included = set(include_tools or ())
+        excluded = set(exclude_tools or ())
+        available_tools = tuple(
+            sorted(
+                tool.remote_name
+                for tool in catalog.tools
+                if (not included or tool.remote_name in included) and (not excluded or tool.remote_name not in excluded)
+            ),
+        )
+        if remote_tool_name not in available_tools:
+            raise MCPToolUnavailableError(state.server_id, remote_tool_name, available_tools)
 
     @staticmethod
-    def _require_desired_oauth_lease(state: MCPServerState, expected_token_hash: str | None) -> None:
-        if state.config.auth is not None and expected_token_hash is None:
+    def _require_desired_oauth_lease(
+        state: MCPServerState,
+        authorization_lease: _MCPAuthorizationLease | None,
+    ) -> None:
+        if state.config.auth is not None and authorization_lease is None:
             raise _MCPAuthorizationChangedError
-        if expected_token_hash is not None and state.oauth_access_token_hash != expected_token_hash:
+        if authorization_lease is not None and (
+            state.oauth_access_token_hash != authorization_lease.token_hash
+            or state.oauth_credential_generation != authorization_lease.credential_generation
+        ):
             raise _MCPAuthorizationChangedError
 
-    @classmethod
-    def _require_oauth_lease(cls, state: MCPServerState, expected_token_hash: str | None) -> None:
-        cls._require_desired_oauth_lease(state, expected_token_hash)
-        if expected_token_hash is not None and state.oauth_session_access_token_hash != expected_token_hash:
+    @staticmethod
+    def _require_session_oauth_lease(
+        state: MCPServerState,
+        authorization_lease: _MCPAuthorizationLease | None,
+    ) -> None:
+        if authorization_lease is not None and (
+            state.oauth_session_access_token_hash != authorization_lease.token_hash
+            or state.oauth_session_credential_generation != authorization_lease.credential_generation
+        ):
+            raise _MCPAuthorizationChangedError
+
+    async def _validate_authoritative_oauth_lease(
+        self,
+        authorization_lease: _MCPAuthorizationLease | None,
+    ) -> None:
+        """Revalidate durable authorization immediately before publication or remote use."""
+        if authorization_lease is None:
+            return
+        try:
+            snapshot = await load_oauth_credentials_snapshot(authorization_lease.credential_context)
+        except OAuthProviderError as exc:
+            raise _MCPAuthorizationChangedError from exc
+        credentials = snapshot.credentials or {}
+        access_token = credentials.get("token") or credentials.get("access_token")
+        if (
+            snapshot.generation != authorization_lease.credential_generation
+            or not isinstance(access_token, str)
+            or hashlib.sha256(access_token.encode("utf-8")).hexdigest() != authorization_lease.token_hash
+        ):
             raise _MCPAuthorizationChangedError
 
     @staticmethod
@@ -1065,24 +1301,33 @@ class MCPServerManager:
         self,
         server_id: str,
         tool_config: EffectiveToolConfig,
+        *,
+        candidate_state: MCPServerState | None = None,
+        candidate_catalog: MCPServerCatalog | None = None,
     ) -> tuple[set[str], set[str]]:
         """Return visible function names and real same-server collisions for one MCP server."""
         state = self._states.get(server_id)
-        if state is None or state.last_error is not None:
+        if state is None or (state.last_error is not None and state is not candidate_state):
             return set(), set()
         base_function_names: set[str] = set()
         duplicate_function_names: set[str] = set()
         if state.config.auth is not None:
             base_function_names.update(mcp_oauth_bridge_function_names(server_id, state.config))
-        if state.catalog is not None:
-            catalog_function_names = self._catalog_function_names_for_tool_config(state.catalog, tool_config)
+        state_catalog = candidate_catalog if state is candidate_state else state.catalog
+        if state_catalog is not None:
+            catalog_function_names = self._catalog_function_names_for_tool_config(state_catalog, tool_config)
             duplicate_function_names.update(base_function_names & catalog_function_names)
             base_function_names.update(catalog_function_names)
         scoped_function_names: set[str] = set()
         for key, scoped_state in self._scoped_states.items():
-            if key.server_id != server_id or scoped_state.catalog is None or scoped_state.last_error is not None:
+            scoped_catalog = candidate_catalog if scoped_state is candidate_state else scoped_state.catalog
+            if (
+                key.server_id != server_id
+                or scoped_catalog is None
+                or (scoped_state.last_error is not None and scoped_state is not candidate_state)
+            ):
                 continue
-            catalog_function_names = self._catalog_function_names_for_tool_config(scoped_state.catalog, tool_config)
+            catalog_function_names = self._catalog_function_names_for_tool_config(scoped_catalog, tool_config)
             duplicate_function_names.update(base_function_names & catalog_function_names)
             scoped_function_names.update(catalog_function_names)
         return base_function_names | scoped_function_names, duplicate_function_names
@@ -1093,6 +1338,8 @@ class MCPServerManager:
         visible_function_server_ids: set[str],
         *,
         loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
+        candidate_state: MCPServerState | None = None,
+        candidate_catalog: MCPServerCatalog | None = None,
     ) -> dict[str, list[str]]:
         """Return one agent's MCP function-name collisions against its visible surface."""
         configured_local_function_names, configured_mcp_tool_configs = self._configured_function_surface(
@@ -1110,6 +1357,8 @@ class MCPServerManager:
                 visible_function_names, duplicate_function_names = self._server_visible_function_surface(
                     server_id,
                     tool_config,
+                    candidate_state=candidate_state,
+                    candidate_catalog=candidate_catalog,
                 )
                 for function_name in sorted(visible_function_names):
                     server_ids_by_function_name.setdefault(function_name, set()).add(server_id)
@@ -1126,28 +1375,54 @@ class MCPServerManager:
             errors_by_server.setdefault(server_id, []).extend(messages)
         return errors_by_server
 
-    async def _apply_function_name_collision_errors(self, errors_by_server: dict[str, set[str]]) -> None:
-        """Disconnect and mark servers that failed provider-visible name validation."""
-        for server_id, messages in errors_by_server.items():
-            state = self._require_state(server_id)
-            error_message = "\n".join(sorted(messages))
-            async with state.lock:
-                await self._disconnect_state_when_idle(state)
-                await self._mark_scoped_states_failed(server_id, error_message)
-                state.catalog = None
-                state.last_error = MCPProtocolError(server_id, error_message)
-                state.stale = False
+    def _candidate_function_validation_error(
+        self,
+        state: MCPServerState,
+        catalog: MCPServerCatalog,
+    ) -> _MCPFunctionValidationError | None:
+        """Validate a discovered catalog before publishing it to concurrent callers."""
+        visible_server_ids = self._visible_function_server_ids() | {state.server_id}
+        messages: set[str] = set()
+        for agent_name in sorted(self._config.agents) if self._config is not None else ():
+            errors = self._agent_collision_messages(
+                agent_name,
+                visible_server_ids,
+                loaded_tools=[],
+                candidate_state=state,
+                candidate_catalog=catalog,
+            )
+            messages.update(errors.get(state.server_id, ()))
+        if not messages:
+            return None
+        return _MCPFunctionValidationError(state.server_id, "\n".join(sorted(messages)))
 
-    async def _mark_scoped_states_failed(self, server_id: str, error_message: str) -> None:
-        """Disconnect worker-scoped states after server-level function-name validation fails."""
-        for key, state in list(self._scoped_states.items()):
-            if key.server_id != server_id:
-                continue
-            async with state.lock:
-                await self._disconnect_state_when_idle(state)
+    def _mark_function_name_collision_errors(
+        self,
+        errors_by_server: dict[str, set[str]],
+    ) -> tuple[MCPServerState, ...]:
+        """Hide invalid catalogs atomically before their sessions drain."""
+        marked_states: list[MCPServerState] = []
+        for server_id, messages in errors_by_server.items():
+            error_message = "\n".join(sorted(messages))
+            states = [state for key, state in self._scoped_states.items() if key.server_id == server_id]
+            base_state = self._states.get(server_id)
+            if base_state is not None:
+                states.append(base_state)
+            for state in states:
                 state.catalog = None
                 state.last_error = MCPProtocolError(server_id, error_message)
+                state.function_validation_error = True
                 state.stale = False
+                marked_states.append(state)
+        return tuple(marked_states)
+
+    async def _disconnect_function_validation_states(self, states: tuple[MCPServerState, ...]) -> None:
+        """Drain sessions whose catalogs were already hidden by validation."""
+        for state in states:
+            async with state.lock:
+                if not state.function_validation_error:
+                    continue
+                await self._disconnect_state_when_idle(state)
 
     async def _validate_global_function_names(self) -> set[str]:
         async with self._catalog_validation_lock:
@@ -1165,9 +1440,9 @@ class MCPServerManager:
                     errors_by_server.setdefault(server_id, set()).update(messages)
             if not errors_by_server:
                 return set()
-
-            await self._apply_function_name_collision_errors(errors_by_server)
-            return set(errors_by_server)
+            marked_states = self._mark_function_name_collision_errors(errors_by_server)
+        await self._disconnect_function_validation_states(marked_states)
+        return set(errors_by_server)
 
     def _configured_tool_configs(
         self,
@@ -1189,10 +1464,11 @@ class MCPServerManager:
         """Return the MCP server id for a tool name visible in this manager's active config."""
         config = self._config
         if config is not None:
-            for server_id in config.mcp_servers:
-                if tool_name == mcp_tool_name(server_id):
+            for server_id, server_config in config.mcp_servers.items():
+                if server_config.enabled and tool_name == mcp_tool_name(server_id):
                     return server_id
-        return mcp_server_id_from_tool_name(tool_name)
+        registered_server_id = mcp_server_id_from_tool_name(tool_name)
+        return registered_server_id if registered_server_id in self._states else None
 
     def _partition_tool_configs(
         self,

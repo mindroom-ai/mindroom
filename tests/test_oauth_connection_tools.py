@@ -205,6 +205,56 @@ def test_oauth_reset_approval_binding_rejects_worker_scope_drift(tmp_path: Path)
         )
 
 
+@pytest.mark.asyncio
+async def test_oauth_reset_approval_binding_rejects_credential_generation_drift(tmp_path: Path) -> None:
+    """A waiting reset approval must not delete credentials connected after card creation."""
+    _tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
+    provider = google_drive_oauth_provider()
+    save_scoped_credentials(
+        provider.credential_service,
+        {"refresh_token": "first-refresh-token"},
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool_call = ToolExecution(
+        tool_call_id="reset-call",
+        tool_name="reset_oauth_connection",
+        tool_args={"provider_id": provider.id},
+        requires_confirmation=True,
+    )
+    execution_identity = build_execution_identity_from_runtime_context(context)
+    bindings = build_oauth_reset_approval_bindings(
+        ((tool_call, "reset-call", "reset_oauth_connection", "research"),),
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        execution_identity=execution_identity,
+    )
+    reset_target = oauth_reset_module.resolve_oauth_reset_target(
+        provider.id,
+        agent_name="research",
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        execution_identity=execution_identity,
+    )
+    assert await credential_lifecycle.reset_oauth_credentials(reset_target.credential_context) is True
+    save_scoped_credentials(
+        provider.credential_service,
+        {"refresh_token": "replacement-refresh-token"},
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    with pytest.raises(RuntimeError, match="credential target changed"):
+        validate_oauth_reset_approval_bindings(
+            calls=(("reset-call", "reset_oauth_connection", "research", True),),
+            bindings=bindings,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            execution_identity=execution_identity,
+        )
+
+
 def test_oauth_reset_must_be_only_call_in_approval_generation(tmp_path: Path) -> None:
     """A reset cannot share one approval generation with another side effect."""
     _tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
@@ -246,6 +296,7 @@ async def test_reset_uses_stable_approval_operation_id(
             approval_id="approval-1",
             generation=4,
             tool_call_id="reset-call",
+            credential_generation="credential-generation-1",
         ),
     )
     execute_reset = AsyncMock(return_value="receipt")
@@ -259,6 +310,69 @@ async def test_reset_uses_stable_approval_operation_id(
 
     assert result == "receipt"
     assert execute_reset.await_args.kwargs["operation_id"] == "approval-1:4:reset-call"
+    assert execute_reset.await_args.kwargs["expected_generation"] == "credential-generation-1"
+
+
+@pytest.mark.asyncio
+async def test_completed_reset_replay_skips_retirement_and_preserves_reconnected_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Receipt replay must not retire or delete a session connected after reset completion."""
+    _tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    provider = google_drive_oauth_provider()
+    credentials_manager, worker_target, _credentials = _save_test_credentials(
+        context,
+        worker_target,
+        provider,
+        "first-refresh-token",
+    )
+    reset_target = oauth_reset_module.resolve_oauth_reset_target(
+        provider.id,
+        agent_name="research",
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        execution_identity=build_execution_identity_from_runtime_context(context),
+        worker_target=worker_target,
+    )
+    approved_generation = credential_lifecycle.oauth_credential_generation(reset_target.credential_context)
+    operation_id = "approval-1:4:reset-call"
+    assert await credential_lifecycle.reset_oauth_credentials(
+        reset_target.credential_context,
+        operation_id=operation_id,
+        expected_generation=approved_generation,
+    )
+    replacement = {"refresh_token": "replacement-refresh-token"}
+    save_scoped_credentials(
+        provider.credential_service,
+        replacement,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    retire = MagicMock(side_effect=AssertionError("completed replay retired new session"))
+    monkeypatch.setattr(oauth_reset_execution_module, "retire_mcp_oauth_request_session", retire)
+
+    result = await oauth_reset_execution_module.execute_oauth_connection_reset(
+        provider.id,
+        agent_name="research",
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        execution_identity=build_execution_identity_from_runtime_context(context),
+        worker_target=worker_target,
+        operation_id=operation_id,
+        expected_generation=approved_generation,
+    )
+
+    assert "Error:" not in result
+    assert (
+        load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        == replacement
+    )
+    retire.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -518,6 +632,42 @@ async def test_reset_oauth_connection_builds_link_before_deleting_credentials(
         )
         == credentials
     )
+
+
+@pytest.mark.asyncio
+async def test_reset_oauth_connection_mints_link_after_mcp_retirement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconnect-token TTL must begin only after old MCP calls finish draining."""
+    tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    provider = google_drive_oauth_provider()
+    _save_test_credentials(context, worker_target, provider, "ordered-refresh-token")
+    order: list[str] = []
+
+    @asynccontextmanager
+    async def retirement(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
+        order.append("retirement_started")
+        yield
+        order.append("retirement_finished")
+
+    def connect_url(*_args: object, **_kwargs: object) -> str:
+        order.append("link_minted")
+        return "https://example.test/connect"
+
+    async def reset(*_args: object, **_kwargs: object) -> bool:
+        order.append("credential_reset")
+        return True
+
+    monkeypatch.setattr(oauth_reset_execution_module, "retire_mcp_oauth_request_session", retirement)
+    monkeypatch.setattr(oauth_reset_execution_module, "oauth_connect_url", connect_url)
+    monkeypatch.setattr(oauth_reset_execution_module, "reset_oauth_credentials", reset)
+
+    with tool_runtime_context(context):
+        result = await tool.reset_oauth_connection(provider.id)
+
+    assert "Error:" not in result
+    assert order == ["retirement_started", "link_minted", "credential_reset", "retirement_finished"]
 
 
 @pytest.mark.asyncio

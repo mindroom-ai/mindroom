@@ -11,6 +11,7 @@ from agno.tools.function import ToolResult
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.mcp.config import MCPServerConfig
+from mindroom.mcp.errors import MCPToolUnavailableError
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.oauth.providers import OAuthConnectionRequired
@@ -47,14 +48,25 @@ class _DummyManager:
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
         authorization: AuthorizationConfig | None = None,
+        include_tools: list[str] | None = None,
+        exclude_tools: list[str] | None = None,
     ) -> ToolResult:
         """Record the call and return a fixed tool result."""
-        del authorization
+        del authorization, include_tools, exclude_tools
         self.calls.append((server_id, remote_tool_name, arguments, credentials_manager, worker_target, timeout_seconds))
         return ToolResult(content="ok")
 
 
 class _OAuthRequiredManager:
+    @staticmethod
+    def _connection_required() -> OAuthConnectionRequired:
+        message = "Example MCP is not connected for this agent."
+        return OAuthConnectionRequired(
+            message,
+            provider_id="mcp_demo",
+            connect_url="http://localhost:8765/api/oauth/mcp_demo/authorize?connect_token=opaque",
+        )
+
     def cached_request_catalog(
         self,
         _server_id: str,
@@ -76,12 +88,11 @@ class _OAuthRequiredManager:
     ) -> MCPServerCatalog:
         """Force the bridge path to emit the existing OAuth-required payload."""
         del credentials_manager, worker_target, authorization
-        message = "Example MCP is not connected for this agent."
-        raise OAuthConnectionRequired(
-            message,
-            provider_id="mcp_demo",
-            connect_url="http://localhost:8765/api/oauth/mcp_demo/authorize?connect_token=opaque",
-        )
+        raise self._connection_required()
+
+    async def call_tool(self, *_args: object, **_kwargs: object) -> ToolResult:
+        """Force bridge calls to emit the same OAuth-required payload as discovery."""
+        raise self._connection_required()
 
 
 class _RequesterAwareManager:
@@ -89,6 +100,7 @@ class _RequesterAwareManager:
         self.catalog = catalog
         self.cached_catalog_requests: list[tuple[str, ResolvedWorkerTarget | None]] = []
         self.catalog_requests: list[tuple[str, CredentialsManager | None, ResolvedWorkerTarget | None]] = []
+        self.call_filters: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
         self.calls: list[
             tuple[
                 str,
@@ -123,9 +135,23 @@ class _RequesterAwareManager:
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
         authorization: AuthorizationConfig | None = None,
+        include_tools: list[str] | None = None,
+        exclude_tools: list[str] | None = None,
     ) -> ToolResult:
         """Record the requester-scoped MCP call and return a fixed result."""
         del authorization
+        included = tuple(include_tools or ())
+        excluded = tuple(exclude_tools or ())
+        self.call_filters.append((included, excluded))
+        available_tools = tuple(
+            sorted(
+                tool.remote_name
+                for tool in self.catalog.tools
+                if (not included or tool.remote_name in included) and (not excluded or tool.remote_name not in excluded)
+            ),
+        )
+        if remote_tool_name not in available_tools:
+            raise MCPToolUnavailableError(server_id, remote_tool_name, available_tools)
         self.calls.append((server_id, remote_tool_name, arguments, credentials_manager, worker_target, timeout_seconds))
         return ToolResult(content="ok")
 
@@ -311,7 +337,6 @@ async def test_oauth_mcp_toolkit_bridge_passes_requester_scope_to_manager(tmp_pa
     assert result.content == "ok"
     assert manager.catalog_requests == [
         ("demo", credentials_manager, worker_target),
-        ("demo", credentials_manager, worker_target),
     ]
     assert manager.calls == [("demo", "echo", {"text": "hello"}, credentials_manager, worker_target, 30.0)]
 
@@ -407,6 +432,7 @@ async def test_oauth_mcp_toolkit_bridge_respects_tool_filters(tmp_path: Path) ->
     }
     assert result.content == "ok"
     assert manager.calls == [("demo", "ping", {}, credentials_manager, worker_target, None)]
+    assert manager.call_filters == [(("ping",), ()), (("ping",), ())]
 
 
 def test_mcp_toolkit_filters_remote_tools() -> None:

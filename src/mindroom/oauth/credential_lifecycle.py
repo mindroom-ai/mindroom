@@ -50,6 +50,7 @@ _LOGGABLE_OAUTH_ERROR_CODES = frozenset(
     {
         "access_denied",
         "authorization_pending",
+        "bad_refresh_token",
         "expired_token",
         "invalid_client",
         "invalid_grant",
@@ -288,6 +289,7 @@ class _OAuthResetOperation:
 
     status: Literal["pending", "completed"]
     credential_existed: bool
+    replayable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,11 +376,15 @@ def load_oauth_credentials(context: OAuthCredentialContext) -> dict[str, Any] | 
 
 def oauth_credential_generation(context: OAuthCredentialContext) -> str:
     """Return the durable revision fencing callbacks and materialized clients."""
-    state = _load_oauth_credential_state(context)
-    if _pending_reset_operations(state):
-        msg = "OAuth credential reset is incomplete"
-        raise OAuthProviderError(msg)
-    return state.generation
+    return _load_oauth_credential_state(context).generation
+
+
+def oauth_reset_operation_result(context: OAuthCredentialContext, operation_id: str) -> bool | None:
+    """Return one completed replayable reset result without starting or finishing work."""
+    operation = _load_oauth_credential_state(context).reset_operations.get(operation_id)
+    if operation is None or operation.status != "completed" or not operation.replayable:
+        return None
+    return operation.credential_existed
 
 
 def _load_oauth_credential_state(context: OAuthCredentialContext) -> _OAuthCredentialState:
@@ -406,12 +412,18 @@ def _load_oauth_credential_state(context: OAuthCredentialContext) -> _OAuthCrede
             raise OAuthProviderError(msg)
         status = stored_operation.get("status")
         credential_existed = stored_operation.get("credential_existed")
-        if status not in {"pending", "completed"} or not isinstance(credential_existed, bool):
+        replayable = stored_operation.get("replayable", not operation_id.startswith(("direct:", "refresh-rejected:")))
+        if (
+            status not in {"pending", "completed"}
+            or not isinstance(credential_existed, bool)
+            or not isinstance(replayable, bool)
+        ):
             msg = "OAuth credential generation state is invalid"
             raise OAuthProviderError(msg)
         reset_operations[operation_id] = _OAuthResetOperation(
             status=cast("Literal['pending', 'completed']", status),
             credential_existed=credential_existed,
+            replayable=replayable,
         )
     return _OAuthCredentialState(generation=generation, reset_operations=reset_operations)
 
@@ -426,6 +438,7 @@ def _write_oauth_credential_state(context: OAuthCredentialContext, state: _OAuth
                 operation_id: {
                     "status": operation.status,
                     "credential_existed": operation.credential_existed,
+                    "replayable": operation.replayable,
                 }
                 for operation_id, operation in state.reset_operations.items()
             },
@@ -460,10 +473,14 @@ def _finish_pending_resets_locked(
             worker_target=context.worker_target,
         )
         previous = reset_operations[operation_id]
-        reset_operations[operation_id] = _OAuthResetOperation(
-            status="completed",
-            credential_existed=previous.credential_existed,
-        )
+        if previous.replayable:
+            reset_operations[operation_id] = _OAuthResetOperation(
+                status="completed",
+                credential_existed=previous.credential_existed,
+                replayable=True,
+            )
+        else:
+            reset_operations.pop(operation_id)
     completed = replace(current, reset_operations=reset_operations)
     _write_oauth_credential_state(context, completed)
     return completed
@@ -472,6 +489,11 @@ def _finish_pending_resets_locked(
 def load_oauth_credentials_snapshot_sync(context: OAuthCredentialContext) -> _OAuthCredentialsSnapshot:
     """Load credentials and their durable revision under one operation lock."""
     return _run_oauth_transaction_sync(_load_oauth_credentials_snapshot_transaction(context))
+
+
+async def load_oauth_credentials_snapshot(context: OAuthCredentialContext) -> _OAuthCredentialsSnapshot:
+    """Load credentials and revision through the shared async transaction owner."""
+    return await _run_oauth_transaction(_load_oauth_credentials_snapshot_transaction(context))
 
 
 async def _load_oauth_credentials_snapshot_transaction(
@@ -620,15 +642,20 @@ async def reset_oauth_credentials(
     context: OAuthCredentialContext,
     *,
     operation_id: str | None = None,
+    expected_generation: str | None = None,
 ) -> bool:
     """Delete one credential, cancelling before its lock or returning after its commit."""
     outcome = _OAuthCredentialResetOutcome()
+    replayable = operation_id is not None
+    resolved_operation_id = operation_id or f"direct:{secrets.token_hex(32)}"
     try:
         return await _run_cancellable_oauth_transaction(
             lambda: _reset_oauth_credentials_transaction(
                 context,
                 outcome,
-                operation_id=operation_id or f"direct:{secrets.token_hex(32)}",
+                operation_id=resolved_operation_id,
+                expected_generation=expected_generation,
+                replayable=replayable,
             ),
         )
     except asyncio.CancelledError:
@@ -642,17 +669,25 @@ async def _reset_oauth_credentials_transaction(
     outcome: _OAuthCredentialResetOutcome,
     *,
     operation_id: str,
+    expected_generation: str | None,
+    replayable: bool,
 ) -> bool:
     async with async_exclusive_file_lock(_operation_lock_path(context)):
-        state = _finish_pending_resets_locked(context)
+        state = _load_oauth_credential_state(context)
         existing = state.reset_operations.get(operation_id)
-        if existing is not None:
-            if existing.status != "completed":
-                msg = "OAuth credential reset is incomplete"
-                raise OAuthProviderError(msg)
+        if existing is not None and existing.status == "completed":
             outcome.deleted = existing.credential_existed
             outcome.committed = True
             return outcome.deleted
+        state = _finish_pending_resets_locked(context, state)
+        existing = state.reset_operations.get(operation_id)
+        if existing is not None and existing.status == "completed":
+            outcome.deleted = existing.credential_existed
+            outcome.committed = True
+            return outcome.deleted
+        if expected_generation is not None and state.generation != expected_generation:
+            msg = "OAuth connection state is stale because this credential changed"
+            raise OAuthProviderError(msg)
         credentials_path = scoped_credentials_path(
             context.provider.credential_service,
             credentials_manager=context.credentials_manager,
@@ -664,6 +699,7 @@ async def _reset_oauth_credentials_transaction(
             operation_id: _OAuthResetOperation(
                 status="pending",
                 credential_existed=credential_existed,
+                replayable=replayable,
             ),
         }
         pending = _OAuthCredentialState(
@@ -671,9 +707,8 @@ async def _reset_oauth_credentials_transaction(
             reset_operations=reset_operations,
         )
         _write_oauth_credential_state(context, pending)
-        completed = _finish_pending_resets_locked(context, pending)
-        operation = completed.reset_operations[operation_id]
-        outcome.deleted = operation.credential_existed
+        _finish_pending_resets_locked(context, pending)
+        outcome.deleted = credential_existed
         outcome.committed = True
         return outcome.deleted
 
@@ -696,12 +731,15 @@ def _credential_generation_path(context: OAuthCredentialContext) -> Path:
     return credentials_path.with_name(f"{credentials_path.name}.oauth-generation.json")
 
 
-def _advance_oauth_credential_generation(context: OAuthCredentialContext) -> None:
+def _advance_oauth_credential_generation(context: OAuthCredentialContext) -> str:
+    """Durably advance one credential revision and return its new value."""
     state = _load_oauth_credential_state(context)
+    generation = secrets.token_hex(32)
     _write_oauth_credential_state(
         context,
-        replace(state, generation=secrets.token_hex(32)),
+        replace(state, generation=generation),
     )
+    return generation
 
 
 def _publish_refresh_result(
@@ -714,6 +752,7 @@ def _publish_refresh_result(
     if refreshed_credentials is None:
         _log_oauth_refresh_skipped(context, credentials, reason="not_needed")
         return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False, generation=generation)
+    refreshed_generation = _advance_oauth_credential_generation(context)
     save_scoped_credentials(
         context.provider.credential_service,
         refreshed_credentials,
@@ -725,7 +764,11 @@ def _publish_refresh_result(
         **_oauth_refresh_log_context(context, refreshed_credentials),
         reason="refreshed",
     )
-    return OAuthCredentialsRefreshResult(credentials=refreshed_credentials, refreshed=True, generation=generation)
+    return OAuthCredentialsRefreshResult(
+        credentials=refreshed_credentials,
+        refreshed=True,
+        generation=refreshed_generation,
+    )
 
 
 def _invalidate_rejected_credentials(
@@ -738,7 +781,7 @@ def _invalidate_rejected_credentials(
     operation_id = f"refresh-rejected:{secrets.token_hex(32)}"
     reset_operations = {
         **state.reset_operations,
-        operation_id: _OAuthResetOperation(status="pending", credential_existed=True),
+        operation_id: _OAuthResetOperation(status="pending", credential_existed=True, replayable=False),
     }
     pending = _OAuthCredentialState(
         generation=secrets.token_hex(32),

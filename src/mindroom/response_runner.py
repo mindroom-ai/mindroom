@@ -24,7 +24,10 @@ from mindroom.approval_response import (
     continuation_target,
     identify_approval_tools,
 )
-from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
+from mindroom.authorization import (
+    is_sender_allowed_for_agent_credential_management,
+    is_sender_allowed_for_entity_replies_in_room,
+)
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -62,7 +65,8 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
-from mindroom.oauth.reset import validate_oauth_reset_approval_bindings
+from mindroom.oauth.credential_lifecycle import oauth_reset_operation_result
+from mindroom.oauth.reset import resolve_oauth_reset_target, validate_oauth_reset_approval_bindings
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     classify_cancel_source,
@@ -158,6 +162,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
+    from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.stop import StopManager
@@ -411,6 +416,21 @@ class PostLockRequestPreparationError(RuntimeError):
     ) -> None:
         super().__init__(message)
         self.placeholder_event_id = placeholder_event_id
+
+
+class _CommittedOAuthResetRecoveryError(RuntimeError):
+    """Receipt recovery failed after durable reset completion was confirmed."""
+
+
+@dataclass(frozen=True, slots=True)
+class _OAuthResetRecovery:
+    """Validated stable identity and target for one approved reset recovery."""
+
+    provider_id: str
+    invoking_agent: str
+    execution_identity: ToolExecutionIdentity
+    operation: ApprovalToolOperation
+    credential_context: OAuthCredentialContext
 
 
 @dataclass
@@ -1042,22 +1062,13 @@ class ResponseRunner:
                     target=target,
                 )
             except (asyncio.CancelledError, Exception):
-                delivery = await run_coroutine_until_complete(
-                    self._approval_responses.final_delivery(claimed, recover=True),
+                recovered_outcome = await self._recover_interrupted_claimed_approval_outcome(
+                    claimed,
+                    target=target,
                 )
-                if delivery is None:
+                if recovered_outcome is None:
                     raise
-                if delivery.acknowledged_event_id is None:
-                    progress.settle(
-                        FinalDeliveryOutcome(
-                            terminal_status="suspended",
-                            event_id=claimed.response_event_id,
-                            is_visible_response=True,
-                            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
-                        ),
-                    )
-                    return
-                progress.settle(self._approval_outcome_from_delivery(delivery))
+                progress.settle(recovered_outcome)
                 return
             if (
                 outcome.terminal_status not in {"completed", "suspended"}
@@ -1102,6 +1113,40 @@ class ResponseRunner:
             reason = outcome.failure_reason or "Tool approval continuation failed safely."
             await self._approval_responses.settle_failure(post_effect_continuation, reason)
         return outcome
+
+    async def _recover_interrupted_claimed_approval_outcome(
+        self,
+        claimed: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> FinalDeliveryOutcome | None:
+        """Recover success debt before a live interruption can become terminal failure."""
+        delivery = await run_coroutine_until_complete(
+            self._approval_responses.final_delivery(claimed, recover=True),
+        )
+        if delivery is not None:
+            if delivery.acknowledged_event_id is not None:
+                return self._approval_outcome_from_delivery(delivery)
+            return FinalDeliveryOutcome(
+                terminal_status="suspended",
+                event_id=claimed.response_event_id,
+                is_visible_response=True,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
+            )
+        try:
+            return await run_coroutine_until_complete(
+                self._recover_completed_oauth_reset_outcome(
+                    claimed,
+                    target=target,
+                ),
+            )
+        except _CommittedOAuthResetRecoveryError:
+            return FinalDeliveryOutcome(
+                terminal_status="suspended",
+                event_id=claimed.response_event_id,
+                is_visible_response=True,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
+            )
 
     @staticmethod
     def _approval_outcome_from_delivery(delivery: MatrixDelivery) -> FinalDeliveryOutcome:
@@ -1158,8 +1203,95 @@ class ResponseRunner:
         target: MessageTarget,
     ) -> str | None:
         """Replay one approved reset by stable operation ID and deliver its receipt directly."""
+        outcome = await self._recover_completed_oauth_reset_outcome(claimed, target=target)
+        if outcome is None:
+            return None
+        try:
+            return await self._finalize_recovered_oauth_reset_receipt(
+                claimed,
+                target=target,
+                outcome=outcome,
+            )
+        except Exception as exc:
+            msg = "Completed OAuth reset receipt recovery remains pending"
+            raise _CommittedOAuthResetRecoveryError(msg) from exc
+
+    async def _recover_completed_oauth_reset_outcome(
+        self,
+        claimed: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> FinalDeliveryOutcome | None:
+        """Deliver a proved reset receipt for the active lifecycle to finalize exactly once."""
         from mindroom.oauth.reset_execution import execute_oauth_connection_reset  # noqa: PLC0415
 
+        recovery = self._oauth_reset_recovery(claimed)
+        if recovery is None:
+            return None
+        completed = oauth_reset_operation_result(
+            recovery.credential_context,
+            recovery.operation.operation_id,
+        )
+        if completed is None:
+            return None
+        try:
+            response_text = await execute_oauth_connection_reset(
+                recovery.provider_id,
+                agent_name=recovery.invoking_agent,
+                config=self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
+                execution_identity=recovery.execution_identity,
+                operation_id=recovery.operation.operation_id,
+                expected_generation=recovery.operation.credential_generation,
+            )
+        except Exception as exc:
+            msg = "Completed OAuth reset receipt recovery remains pending"
+            raise _CommittedOAuthResetRecoveryError(msg) from exc
+        try:
+            outcome = await self._deliver_recovered_oauth_reset_outcome(
+                claimed,
+                target=target,
+                response_text=response_text,
+            )
+        except Exception as exc:
+            msg = "Completed OAuth reset receipt recovery remains pending"
+            raise _CommittedOAuthResetRecoveryError(msg) from exc
+        if outcome.terminal_status != "completed":
+            msg = "Completed OAuth reset receipt recovery remains pending"
+            raise _CommittedOAuthResetRecoveryError(msg)
+        return outcome
+
+    async def _deliver_recovered_oauth_reset_outcome(
+        self,
+        claimed: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+        response_text: str,
+    ) -> FinalDeliveryOutcome:
+        """Publish one already-committed reset receipt without finalizing its lifecycle."""
+        request = self._approval_response_request(claimed, target=target)
+        identity = self._response_identity(
+            request,
+            response_kind="team" if claimed.entity_kind == "team" else "ai",
+        )
+        return await self.deps.delivery_gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=target,
+                existing_event_id=claimed.response_event_id,
+                existing_event_is_placeholder=False,
+                response_text=response_text,
+                identity=identity,
+                tool_trace=None,
+                extra_content=_merge_response_extra_content(
+                    {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
+                    claimed.attachment_ids,
+                ),
+                defer_source_handoff=True,
+            ),
+        )
+
+    def _oauth_reset_recovery(self, claimed: ApprovalContinuation) -> _OAuthResetRecovery | None:
+        """Validate exact approved call identity and resolve its current credential slot."""
         if len(claimed.calls) != 1:
             return None
         call = claimed.calls[0]
@@ -1172,8 +1304,12 @@ class ResponseRunner:
         reset_binding = binding.get("oauth_reset") if binding is not None else None
         reset_target = cast("dict[str, object]", reset_binding) if isinstance(reset_binding, dict) else None
         provider_id = reset_target.get("provider_id") if reset_target is not None else None
+        credential_generation = reset_target.get("credential_generation") if reset_target is not None else None
         if not isinstance(provider_id, str) or not provider_id:
             msg = "Approved OAuth credential target is missing; run the reset again."
+            raise RuntimeError(msg)
+        if not isinstance(credential_generation, str) or not credential_generation:
+            msg = "Approved OAuth credential generation is missing; run the reset again."
             raise RuntimeError(msg)
         if (
             binding.get("tool_name") != call.tool_name
@@ -1183,55 +1319,59 @@ class ResponseRunner:
             msg = "Approved OAuth reset call changed; run the reset again."
             raise RuntimeError(msg)
         execution_identity = self._approval_continuation_execution_identity(claimed)
-        validate_oauth_reset_approval_bindings(
-            calls=((call.tool_call_id, call.tool_name, call.invoking_agent, True),),
-            bindings=claimed.tool_bindings,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-            execution_identity=execution_identity,
-        )
+        self._validate_oauth_reset_recovery(claimed, allow_credential_generation_drift=True)
         operation = ApprovalToolOperation(
             approval_id=claimed.approval_id,
             generation=claimed.generation,
             tool_call_id=call.tool_call_id,
+            credential_generation=credential_generation,
         )
-        response_text = await execute_oauth_connection_reset(
+        resolved_target = resolve_oauth_reset_target(
             provider_id,
             agent_name=call.invoking_agent,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             execution_identity=execution_identity,
-            operation_id=operation.operation_id,
         )
+        return _OAuthResetRecovery(
+            provider_id=provider_id,
+            invoking_agent=call.invoking_agent,
+            execution_identity=execution_identity,
+            operation=operation,
+            credential_context=resolved_target.credential_context,
+        )
+
+    def _validate_oauth_reset_recovery(
+        self,
+        claimed: ApprovalContinuation,
+        *,
+        allow_credential_generation_drift: bool,
+    ) -> None:
+        """Validate stored target binding against current config and canonical identity."""
+        call = claimed.calls[0]
+        validate_oauth_reset_approval_bindings(
+            calls=((call.tool_call_id, call.tool_name, call.invoking_agent, True),),
+            bindings=claimed.tool_bindings,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            execution_identity=self._approval_continuation_execution_identity(claimed),
+            allow_credential_generation_drift=allow_credential_generation_drift,
+        )
+
+    async def _finalize_recovered_oauth_reset_receipt(
+        self,
+        claimed: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+        outcome: FinalDeliveryOutcome,
+    ) -> str:
+        """Finalize one already-published reset receipt outside a live response lifecycle."""
         request = self._approval_response_request(claimed, target=target)
-        outcome = await self.deps.delivery_gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=target,
-                existing_event_id=claimed.response_event_id,
-                existing_event_is_placeholder=False,
-                response_text=response_text,
-                identity=self._response_identity(
-                    request,
-                    response_kind="team" if claimed.entity_kind == "team" else "ai",
-                ),
-                tool_trace=None,
-                extra_content=_merge_response_extra_content(
-                    {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
-                    claimed.attachment_ids,
-                ),
-                defer_source_handoff=True,
-            ),
+        identity = self._response_identity(
+            request,
+            response_kind="team" if claimed.entity_kind == "team" else "ai",
         )
-        if outcome.terminal_status != "completed":
-            msg = "Recovered OAuth reset receipt did not reach durable final delivery"
-            raise RuntimeError(msg)
-        lifecycle = self._build_lifecycle(
-            identity=self._response_identity(
-                request,
-                response_kind="team" if claimed.entity_kind == "team" else "ai",
-            ),
-            request=request,
-        )
+        lifecycle = self._build_lifecycle(identity=identity, request=request)
         await lifecycle.finalize(
             outcome,
             build_post_response_outcome=lambda _final: self._approval_post_response_outcome(
@@ -1243,6 +1383,9 @@ class ResponseRunner:
         )
         if not await self.deps.approval_store.finish_approval_continuation(claimed.approval_id):
             msg = "Recovered OAuth reset receipt lost its journal ownership"
+            raise RuntimeError(msg)
+        if outcome.event_id is None:
+            msg = "Recovered OAuth reset receipt has no event ID"
             raise RuntimeError(msg)
         return outcome.event_id
 
@@ -1297,6 +1440,26 @@ class ResponseRunner:
                 approval_id=claimed.approval_id,
             )
             owns_final, event_id = False, None
+        if not owns_final:
+            try:
+                recovered_reset = await self._recover_completed_oauth_reset(
+                    claimed,
+                    target=target,
+                )
+            except _CommittedOAuthResetRecoveryError:
+                self.deps.logger.exception(
+                    "oauth_reset_receipt_recovery_failed_before_failure_fence",
+                    approval_id=claimed.approval_id,
+                )
+                return True, None, None
+            except Exception:
+                self.deps.logger.exception(
+                    "oauth_reset_status_check_failed_before_failure_fence",
+                    approval_id=claimed.approval_id,
+                )
+            else:
+                if recovered_reset is not None:
+                    return True, recovered_reset, None
         failing = None if owns_final else await self._approval_responses.request_failure(claimed, reason)
         return owns_final, event_id, failing
 
@@ -1582,10 +1745,18 @@ class ResponseRunner:
         call = continuation.calls[0]
         if call.tool_name != "reset_oauth_connection" or call.decision is not ContinuationDecision.APPROVED:
             return tool_dispatch
+        binding = continuation.tool_bindings.get(call.tool_call_id)
+        reset_binding = binding.get("oauth_reset") if binding is not None else None
+        reset_target = cast("Mapping[str, object]", reset_binding) if isinstance(reset_binding, dict) else None
+        credential_generation = reset_target.get("credential_generation") if reset_target is not None else None
+        if not isinstance(credential_generation, str) or not credential_generation:
+            msg = "Approved OAuth credential generation is missing; run the reset again."
+            raise RuntimeError(msg)
         operation = ApprovalToolOperation(
             approval_id=continuation.approval_id,
             generation=continuation.generation,
             tool_call_id=call.tool_call_id,
+            credential_generation=credential_generation,
         )
         return replace(
             tool_dispatch,
@@ -1887,6 +2058,21 @@ class ResponseRunner:
             )
             if owns_final:
                 return True if event_id is not None else None
+            recovered_reset = None
+            try:
+                recovered_reset = await self._recover_completed_oauth_reset(
+                    continuation,
+                    target=target,
+                )
+            except _CommittedOAuthResetRecoveryError:
+                return None
+            except Exception:
+                self.deps.logger.exception(
+                    "oauth_reset_status_check_failed_during_user_stop",
+                    approval_id=continuation.approval_id,
+                )
+            if recovered_reset is not None:
+                return True
         failing = await self._approval_responses.request_failure(
             continuation,
             "cancelled_by_user",
@@ -2087,29 +2273,65 @@ class ResponseRunner:
             approval_id=owned.approval_id,
             approval_state=owned.state,
         )
-        recovered, event_id = await self._recover_nonready_approval(owned, target=target)
+        recovered, event_id = await self._recover_preclaim_approval_owner(owned, target=target)
         if recovered:
             return event_id
-        if not is_sender_allowed_for_entity_replies_in_room(
-            owned.requester_id,
-            _reply_authorization_entity_names(
-                self.deps.runtime.config,
-                owned.entity_name,
-                owned.team_member_names,
-            ),
-            self.deps.runtime.config,
-            owned.room_id,
-            self.deps.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-        ):
-            return await self._settle_unauthorized_approval_continuation(owned)
         claimed = await self.deps.approval_store.claim_approval_continuation(
             owned.approval_id,
             runtime_generation=self.deps.approval_runtime_generation,
         )
         if claimed is None:
             return None
+        if not self._approval_continuation_is_authorized(claimed):
+            return await self._settle_unauthorized_approval_continuation(claimed)
         return await self._run_owned_approval_continuation(claimed, target=target)
+
+    async def _recover_preclaim_approval_owner(
+        self,
+        owned: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> tuple[bool, str | None]:
+        """Recover frozen debt, then authorize non-ready replay before any side effect."""
+        if owned.state == "failing":
+            recovered, event_id = await self._recover_nonready_approval(owned, target=target)
+            if recovered:
+                return True, event_id
+        if owned.state == "claimed":
+            owns_final, event_id = await self._recover_frozen_approval_final(owned, target=target)
+            if owns_final:
+                return True, event_id
+        if owned.state != "ready" and not self._approval_continuation_is_authorized(owned):
+            return True, await self._settle_unauthorized_approval_continuation(owned)
+        recovered, event_id = await self._recover_nonready_approval(owned, target=target)
+        return recovered, event_id
+
+    def _approval_continuation_is_authorized(self, continuation: ApprovalContinuation) -> bool:
+        """Recheck current reply and credential-management authority before any replay."""
+        config = self.deps.runtime.config
+        if not is_sender_allowed_for_entity_replies_in_room(
+            continuation.requester_id,
+            _reply_authorization_entity_names(
+                config,
+                continuation.entity_name,
+                continuation.team_member_names,
+            ),
+            config,
+            continuation.room_id,
+            self.deps.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
+        ):
+            return False
+        return all(
+            call.tool_name != "reset_oauth_connection"
+            or call.decision is not ContinuationDecision.APPROVED
+            or is_sender_allowed_for_agent_credential_management(
+                continuation.requester_id,
+                agent_name=call.invoking_agent,
+                config=config,
+            )
+            for call in continuation.calls
+        )
 
     async def _settle_unauthorized_approval_continuation(
         self,
@@ -2250,7 +2472,7 @@ class ResponseRunner:
                     return True, owned.response_event_id if settled else None
             return True, None
         if owned.state == "claimed":
-            return True, await self._recover_claimed_approval_lifecycle(owned, target=target)
+            return True, await self._recover_claimed_nonready_approval(owned, target=target)
         if owned.state == "failing":
             if await self._approval_responses.successful_final_delivery(owned, recover=True) is not None:
                 owns_final, event_id = await self._recover_frozen_approval_final(owned, target=target)
@@ -2259,6 +2481,29 @@ class ResponseRunner:
             settled = await self._approval_responses.settle_failure(owned, reason)
             return True, owned.response_event_id if settled else None
         return False, None
+
+    async def _recover_claimed_nonready_approval(
+        self,
+        owned: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> str | None:
+        """Recover or terminally fence one restart-owned claimed continuation."""
+        try:
+            return await self._recover_claimed_approval_lifecycle(owned, target=target)
+        except Exception as error:
+            reason = str(error) or "Tool approval continuation recovery failed safely."
+            owns_final, event_id, failing = await self._recover_or_request_claimed_failure(
+                owned,
+                target=target,
+                reason=reason,
+            )
+            if owns_final:
+                return event_id
+            if failing is None:
+                return None
+            settled = await self._approval_responses.settle_failure(failing, reason)
+            return owned.response_event_id if settled else None
 
     async def _finalize_early_placeholder_cancellation(
         self,

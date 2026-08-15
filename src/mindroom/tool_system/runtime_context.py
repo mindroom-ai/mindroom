@@ -69,6 +69,7 @@ class ApprovalToolOperation:
     approval_id: str
     generation: int
     tool_call_id: str
+    credential_generation: str
 
     @property
     def operation_id(self) -> str:

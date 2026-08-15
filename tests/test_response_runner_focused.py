@@ -1494,6 +1494,80 @@ async def test_ready_approval_replay_rechecks_current_authorization(
 
 
 @pytest.mark.asyncio
+async def test_claimed_oauth_reset_rechecks_current_authorization_before_recovery(tmp_path: Path) -> None:
+    """Joined-room reply authority must not substitute for static credential authority."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    await _admit_approval_source(runner.deps.approval_store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-reset-revoked",
+        run_id="run-paused",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id=request.room_id,
+        thread_id=request.thread_id,
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(
+            ApprovalCall(
+                tool_call_id="reset-call",
+                tool_name="reset_oauth_connection",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        ),
+        state="ready",
+    )
+    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    claimed = await runner.deps.approval_store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    failing = replace(
+        claimed,
+        state="failing",
+        failure_reason="Current authorization no longer permits this tool approval continuation.",
+    )
+
+    with (
+        patch(
+            "mindroom.response_runner.is_sender_allowed_for_entity_replies_in_room",
+            return_value=True,
+        ) as reply_authorized,
+        patch(
+            "mindroom.response_runner.is_sender_allowed_for_agent_credential_management",
+            return_value=False,
+        ) as credential_authorized,
+        patch.object(runner._approval_responses, "request_failure", new=AsyncMock(return_value=failing)),
+        patch.object(runner._approval_responses, "settle_failure", new=AsyncMock(return_value=True)),
+        patch.object(
+            runner,
+            "_recover_claimed_approval_lifecycle",
+            new=AsyncMock(side_effect=AssertionError("revoked reset recovered")),
+        ) as recover,
+    ):
+        event_id = await runner._run_owned_or_locked_response(
+            request,
+            target=request.response_envelope.target,
+            early_placeholder=response_runner._EarlyPlaceholderState(),
+            locked_operation=AsyncMock(return_value="$duplicate"),
+        )
+
+    assert event_id == "$waiting"
+    reply_authorized.assert_called_once()
+    credential_authorized.assert_called_once_with(
+        continuation.requester_id,
+        agent_name="general",
+        config=runner.deps.runtime.config,
+    )
+    recover.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Path) -> None:
     """A ready team continuation must not resume after one member loses access."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -2728,7 +2802,10 @@ async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agn
                 "tool_name": "reset_oauth_connection",
                 "arguments_json": '{"provider_id":"google"}',
                 "invoking_agent": "general",
-                "oauth_reset": {"provider_id": "google"},
+                "oauth_reset": {
+                    "provider_id": "google",
+                    "credential_generation": "credential-generation-1",
+                },
             },
         },
     )
@@ -2745,6 +2822,8 @@ async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agn
         patch.object(runner, "_recover_frozen_approval_final", new=AsyncMock(return_value=(False, None))),
         patch.object(runner, "_approval_continuation_execution_identity", return_value=identity),
         patch("mindroom.response_runner.validate_oauth_reset_approval_bindings"),
+        patch("mindroom.response_runner.resolve_oauth_reset_target") as resolve_reset_target,
+        patch("mindroom.response_runner.oauth_reset_operation_result", return_value=True),
         patch(
             "mindroom.oauth.reset_execution.execute_oauth_connection_reset",
             new=AsyncMock(return_value="reset receipt"),
@@ -2759,6 +2838,7 @@ async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agn
         patch.object(runner._approval_responses, "settle_failure", new=AsyncMock()) as settle_failure,
         patch.object(runner, "_continue_entity_call", new=AsyncMock()) as continue_entity,
     ):
+        resolve_reset_target.return_value.credential_context = MagicMock()
         event_id = await runner._recover_claimed_approval_lifecycle(
             claimed,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
@@ -2766,9 +2846,48 @@ async def test_recovered_claim_replays_approved_oauth_reset_without_resuming_agn
 
     assert event_id == "$waiting"
     assert execute_reset.await_args.kwargs["operation_id"] == "approval-reset-recovery:3:reset-call"
+    assert execute_reset.await_args.kwargs["expected_generation"] == "credential-generation-1"
     continue_entity.assert_not_awaited()
     settle_failure.assert_not_awaited()
     lifecycle.finalize.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_claimed_failure_recovers_completed_reset_before_failure_fence(tmp_path: Path) -> None:
+    """Cancellation after reset commit must publish its receipt instead of reporting failure."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    claimed = ApprovalContinuation(
+        approval_id="approval-reset-committed",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="claimed",
+    )
+
+    with (
+        patch.object(runner, "_recover_frozen_approval_final", new=AsyncMock(return_value=(False, None))),
+        patch.object(
+            runner,
+            "_recover_completed_oauth_reset",
+            new=AsyncMock(return_value="$waiting"),
+        ),
+        patch.object(runner._approval_responses, "request_failure", new=AsyncMock()) as request_failure,
+    ):
+        owns_final, event_id, failing = await runner._recover_or_request_claimed_failure(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+            reason="cancelled",
+        )
+
+    assert (owns_final, event_id, failing) == (True, "$waiting", None)
+    request_failure.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2953,6 +3072,95 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
     assert await store.approval_continuation(continuation.approval_id) is None
     finalized = [call.args[0] for call in lifecycle.finalize.await_args_list]
     assert [item.terminal_status for item in finalized] == ["completed"]
+
+
+@pytest.mark.asyncio
+async def test_completed_oauth_reset_receipt_wins_live_continuation_cancellation(tmp_path: Path) -> None:
+    """Live cancellation after reset commit must recover before cancellation becomes terminal."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    claimed = ApprovalContinuation(
+        approval_id="approval-reset-live-cancel",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(
+            ApprovalCall(
+                tool_call_id="reset-call",
+                tool_name="reset_oauth_connection",
+                invoking_agent="general",
+                expires_at_ns=9_000_000_000_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        ),
+        state="claimed",
+        generation=3,
+        tool_bindings={
+            "reset-call": {
+                "tool_name": "reset_oauth_connection",
+                "arguments_json": '{"provider_id":"google"}',
+                "invoking_agent": "general",
+                "oauth_reset": {
+                    "provider_id": "google",
+                    "credential_generation": "credential-generation-1",
+                },
+            },
+        },
+    )
+    delivery = FinalDeliveryOutcome(
+        terminal_status="completed",
+        event_id="$waiting",
+        is_visible_response=True,
+        final_visible_body="reset receipt",
+        delivery_kind="edited",
+    )
+    lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
+
+    with (
+        patch.object(runner, "_execute_claimed_approval", side_effect=asyncio.CancelledError),
+        patch.object(runner._approval_responses, "final_delivery", new=AsyncMock(return_value=None)),
+        patch.object(runner, "_approval_continuation_execution_identity", return_value=identity),
+        patch("mindroom.response_runner.validate_oauth_reset_approval_bindings"),
+        patch("mindroom.response_runner.resolve_oauth_reset_target") as resolve_reset_target,
+        patch("mindroom.response_runner.oauth_reset_operation_result", return_value=True),
+        patch(
+            "mindroom.oauth.reset_execution.execute_oauth_connection_reset",
+            new=AsyncMock(return_value="reset receipt"),
+        ),
+        patch.object(runner.deps.delivery_gateway, "deliver_final", new=AsyncMock(return_value=delivery)),
+        patch.object(runner, "_build_lifecycle", return_value=lifecycle),
+        patch.object(
+            runner.deps.approval_store,
+            "finish_approval_continuation",
+            new=AsyncMock(return_value=True),
+        ) as finish_continuation,
+        patch.object(runner._approval_responses, "settle_failure", new=AsyncMock()) as settle_failure,
+    ):
+        resolve_reset_target.return_value.credential_context = MagicMock()
+        outcome = await runner._run_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert outcome.terminal_status == "completed"
+    assert outcome.event_id == "$waiting"
+    lifecycle.finalize.assert_awaited_once()
+    finish_continuation.assert_awaited_once_with(claimed.approval_id)
+    settle_failure.assert_not_awaited()
 
 
 @pytest.mark.asyncio

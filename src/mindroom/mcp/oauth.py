@@ -47,7 +47,7 @@ def _mcp_oauth_server_id_for_provider_id(
 ) -> str | None:
     """Return the MCP server id that generated one OAuth provider id."""
     for server_id, server_config in mcp_servers.items():
-        if server_config.auth is None:
+        if not server_config.enabled or server_config.auth is None:
             continue
         if mcp_oauth_provider_id(server_id, server_config.auth) == provider_id:
             return server_id
@@ -60,6 +60,7 @@ async def retire_mcp_oauth_request_session(
     provider_id: str,
     *,
     worker_target: ResolvedWorkerTarget | None,
+    expected_credential_generation: str | None = None,
 ) -> AsyncIterator[None]:
     """Fence a generated provider's requester session for an OAuth reset transaction."""
     server_id = _mcp_oauth_server_id_for_provider_id(mcp_servers, provider_id)
@@ -67,7 +68,11 @@ async def retire_mcp_oauth_request_session(
     if manager is None or server_id is None:
         yield
         return
-    async with manager.retire_request_session(server_id, worker_target=worker_target):
+    async with manager.retire_request_session(
+        server_id,
+        worker_target=worker_target,
+        expected_credential_generation=expected_credential_generation,
+    ):
         yield
 
 

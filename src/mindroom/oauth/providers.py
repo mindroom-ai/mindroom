@@ -85,7 +85,7 @@ class _OAuthProviderNotConfiguredError(OAuthProviderError):
     """Raised when a provider has no usable OAuth client configuration."""
 
 
-_TERMINAL_REFRESH_ERROR_CODES = frozenset({"invalid_grant", "invalid_refresh_token"})
+_TERMINAL_REFRESH_ERROR_CODES = frozenset({"bad_refresh_token", "invalid_grant", "invalid_refresh_token"})
 
 
 def is_terminal_oauth_refresh_error_code(value: object) -> bool:

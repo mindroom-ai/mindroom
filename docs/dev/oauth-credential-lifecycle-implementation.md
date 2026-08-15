@@ -22,17 +22,17 @@ One lifecycle module submits asynchronous callers and synchronous provider adapt
 - Complete remote-token-producing operations locally before propagating cancellation.
 - Perform fallible MCP teardown before destructive credential deletion.
 - Fence retired MCP requester-session generations until credential deletion commits.
-- Bind browser callbacks to a durable credential revision advanced by callback success, reset, and terminal invalidation.
+- Bind browser callbacks and managed consumers to a durable credential revision advanced by callback success, refresh publication, reset, and terminal invalidation.
 - Pass authorization explicitly into OAuth-backed toolkit construction and revalidate the full canonical context plus durable revision before every managed call.
 - Keep managed Google credentials and services together in worker-thread-local state.
 - Copy supported supplied Google credentials into private blocking state and serialize their complete provider calls with one reentrant toolkit lock.
 - Keep GitHub tokens and PyGithub clients together in worker-thread-local state.
-- Bind every authenticated MCP connection and call to an authoritative token-hash lease.
+- Revalidate every authenticated MCP connection and call against authoritative cross-process credential generation and token hash immediately before publication or remote use.
 - Use structured provider error codes and never log provider-controlled descriptions or token values.
-- Keep reset approval bound to the exact provider, service, scope, worker key, and routing agent.
+- Keep reset approval bound to the exact provider, service, scope, worker key, routing agent, and credential generation.
 - Freeze every approved call's exact ID, name, canonical arguments, and invoking agent.
 - Require reset to be the sole call in its approval generation.
-- Key approved reset commits by `approval_id:generation:tool_call_id` and retain completed tombstones permanently.
+- Key approved reset commits by `approval_id:generation:tool_call_id`, retain those completed tombstones permanently, and prune non-replayable direct or provider-driven completion state.
 - Finish pending reset deletion before every credential read, refresh, callback publication, or later reset.
 - Recover a claimed reset receipt directly without resuming Agno.
 - Require every provider token credential service to end with `_oauth` so storage policy cannot misclassify plugin tokens.
@@ -157,11 +157,11 @@ Apply the same missing, unusable, no-refresh-needed, success, terminal rejection
 `exchange_and_store_oauth_credentials()` must acquire the operation lock, verify the pending callback generation, and retain the lock through exchange, claim validation, refresh-token preservation, and save.
 The API route will wrap the complete lock-wait-through-save coroutine in `run_coroutine_until_complete()` after consuming state.
 
-`reset_oauth_credentials()` must wait cancellably for the operation lock, durably record a stable pending operation with the advanced generation, delete the exact scoped file, and durably mark the operation completed without owning MCP transport cleanup.
-The completed operation stores the original file-existed result and remains as a permanent tombstone so a stale retry cannot delete credentials from a later callback.
+`reset_oauth_credentials()` must wait cancellably for the operation lock, reject an uncompleted operation whose approved credential generation changed, durably record its pending intent with an advanced generation, delete the exact scoped file, and durably complete or prune the operation without owning MCP transport cleanup.
+A completed replayable operation stores the original file-existed result and remains as a permanent tombstone so a stale retry cannot delete credentials from a later callback.
 Every locked credential transaction must finish a pending reset delete before it reads or publishes credentials.
 Cancellation before lock ownership must abort reset, while cancellation after commit must return the deletion result so the caller can publish its receipt.
-MCP reset callers must enter requester-session retirement before invoking the credential transaction and release only the in-memory fence afterward.
+MCP reset callers must enter requester-session retirement, mint the reconnect link after teardown, invoke the credential transaction, and release only the in-memory fence afterward.
 
 - [ ] **Step 6: Reduce `oauth.service` to connection-flow ownership**
 
@@ -284,14 +284,14 @@ Return the dashboard disconnect receipt only after successful cleanup and deleti
 
 Resolve provider-specific requester credential identity once.
 Construct the context with the primary runtime credential manager.
-Persist provider ID, credential service, worker scope, worker key, routing agent, and invoking agent in approval bindings.
+Persist provider ID, credential service, worker scope, worker key, routing agent, invoking agent, and credential generation in approval bindings.
 Re-resolve and compare every field before approved execution.
 Pass authorization into agent reconstruction and install persisted tool runtime and execution-identity contexts before reconstruction and resumed execution.
 
 - [ ] **Step 6: Make agent reset cancellation-safe by ordering**
 
-Issue the requester-bound reconnect link first.
-Enter MCP requester-session retirement around the lifecycle reset transaction.
+Return completed stable operations before retirement, and skip retirement when a cached session already belongs to a later credential generation.
+Enter MCP requester-session retirement for the approved generation, then issue the requester-bound reconnect link immediately before the lifecycle reset transaction.
 If teardown or lifecycle reset raises an ordinary exception, log one bounded lifecycle-wide failure event and tell the caller to verify status before retrying.
 If teardown is cancelled, propagate cancellation while credentials remain intact.
 After deletion, release only the in-memory retirement fence before building the receipt.

@@ -59,6 +59,7 @@ GOOGLE_NARROW_EXTRA_AUTH_PARAMS = {
     [
         ("invalid_grant", True),
         (" Invalid_Refresh_Token ", True),
+        ("bad_refresh_token", True),
         ("temporarily_unavailable", False),
         (None, False),
     ],

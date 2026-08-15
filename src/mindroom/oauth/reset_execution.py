@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.mcp.oauth import retire_mcp_oauth_request_session
-from mindroom.oauth.credential_lifecycle import reset_oauth_credentials
+from mindroom.oauth.credential_lifecycle import oauth_reset_operation_result, reset_oauth_credentials
 from mindroom.oauth.reset import resolve_oauth_reset_target
 from mindroom.oauth.service import OAUTH_CONNECT_TOKEN_TTL_MINUTES, oauth_connect_url
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -27,14 +27,23 @@ async def retire_and_reset_oauth_credentials(
     *,
     mcp_servers: Mapping[str, MCPServerConfig],
     operation_id: str | None,
+    expected_generation: str | None = None,
+    before_reset: Callable[[], None] | None = None,
 ) -> bool:
     """Fence the exact MCP session and commit its credential reset once."""
     async with retire_mcp_oauth_request_session(
         dict(mcp_servers),
         context.provider.id,
         worker_target=context.worker_target,
+        expected_credential_generation=expected_generation,
     ):
-        return await reset_oauth_credentials(context, operation_id=operation_id)
+        if before_reset is not None:
+            before_reset()
+        return await reset_oauth_credentials(
+            context,
+            operation_id=operation_id,
+            expected_generation=expected_generation,
+        )
 
 
 async def execute_oauth_connection_reset(
@@ -45,6 +54,7 @@ async def execute_oauth_connection_reset(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
     operation_id: str | None,
+    expected_generation: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> str:
     """Resolve, retire, durably reset, and render one idempotent receipt."""
@@ -58,13 +68,29 @@ async def execute_oauth_connection_reset(
     )
     provider = reset_target.provider
     resolved_worker_target = reset_target.worker_target
-    connect_url = oauth_connect_url(provider, runtime_paths, worker_target=resolved_worker_target)
+    connect_url: str | None = None
+
+    def mint_connect_url() -> None:
+        nonlocal connect_url
+        connect_url = oauth_connect_url(provider, runtime_paths, worker_target=resolved_worker_target)
+
     try:
-        deleted = await retire_and_reset_oauth_credentials(
-            reset_target.credential_context,
-            mcp_servers=config.mcp_servers,
-            operation_id=operation_id,
+        completed_result = (
+            oauth_reset_operation_result(reset_target.credential_context, operation_id)
+            if operation_id is not None
+            else None
         )
+        if completed_result is None:
+            deleted = await retire_and_reset_oauth_credentials(
+                reset_target.credential_context,
+                mcp_servers=config.mcp_servers,
+                operation_id=operation_id,
+                expected_generation=expected_generation,
+                before_reset=mint_connect_url,
+            )
+        else:
+            mint_connect_url()
+            deleted = completed_result
     except Exception as exc:
         logger.warning(
             "oauth_connection_reset_failed",
@@ -73,6 +99,7 @@ async def execute_oauth_connection_reset(
             error_type=type(exc).__name__,
         )
         raise
+    assert connect_url is not None
     scope_receipt = (
         "for this requester across agents"
         if resolved_worker_target.worker_scope == "user"
