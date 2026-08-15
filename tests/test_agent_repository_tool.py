@@ -305,6 +305,37 @@ async def test_symlinked_git_metadata_fails_without_mutating_target(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_symlinked_workspace_root_fails_without_mutating_target(tmp_path: Path) -> None:
+    """An agent-controlled workspace link must not redirect trusted Git writes."""
+    external = tmp_path / "external"
+    external.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.symlink_to(external, target_is_directory=True)
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert payload["status"] == "error"
+    assert "workspace path" in payload["error"]
+    assert not (external / ".git").exists()
+
+
+@pytest.mark.asyncio
+async def test_symlinked_workspace_parent_fails_without_mutating_target(tmp_path: Path) -> None:
+    """Workspace parent links must not redirect trusted directory creation."""
+    external = tmp_path / "external"
+    external.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(external, target_is_directory=True)
+    workspace = linked_parent / "workspace"
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert payload["status"] == "error"
+    assert "workspace path" in payload["error"]
+    assert not (external / "workspace").exists()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "origin",
     [
