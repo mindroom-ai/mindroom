@@ -346,6 +346,49 @@ async def test_scoped_oauth_refresh_runs_provider_on_callers_event_loop(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_scoped_oauth_refresh_publishes_rotation_before_propagating_cancellation(tmp_path: Path) -> None:
+    """Cancellation after provider rotation must wait for local credential publication."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target()
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    _save_credentials(runtime_paths, worker_target, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    provider_rotated = asyncio.Event()
+    release_provider_result = asyncio.Event()
+
+    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
+        assert credentials["refresh_token"] == CHAIN_0
+        provider_rotated.set()
+        await release_provider_result.wait()
+        return _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
+
+    refresh_task = asyncio.create_task(
+        refresh_scoped_oauth_credentials_with_result(
+            _FakeOAuthProvider(refresh),
+            runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        ),
+    )
+    await provider_rotated.wait()
+
+    refresh_task.cancel()
+    await asyncio.sleep(0)
+    assert not refresh_task.done()
+    refresh_task.cancel()
+    release_provider_result.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await refresh_task
+    stored = load_scoped_credentials(
+        "demo_oauth",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    assert stored is not None
+    assert stored["refresh_token"] == CHAIN_1
+
+
+@pytest.mark.asyncio
 async def test_scoped_oauth_refresh_logs_success_without_tokens(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlencode, urlparse
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.credentials import (
     delete_scoped_credentials,
     load_scoped_credentials,
@@ -306,12 +307,14 @@ async def refresh_scoped_oauth_credentials_with_result(
         worker_target=worker_target,
     )
     async with async_exclusive_file_lock(singleflight_lock_path):
-        return await _refresh_scoped_oauth_credentials_with_result_unserialized(
-            provider,
-            runtime_paths,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-            allowed_shared_services=allowed_shared_services,
+        return await run_coroutine_until_complete(
+            _refresh_scoped_oauth_credentials_with_result_unserialized(
+                provider,
+                runtime_paths,
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+                allowed_shared_services=allowed_shared_services,
+            ),
         )
 
 

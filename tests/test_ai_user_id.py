@@ -81,6 +81,7 @@ from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
+    build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
     tool_runtime_context,
 )
@@ -297,8 +298,8 @@ def test_compose_current_turn_prompt_keeps_model_only_tail_without_timestamp() -
 class TestUserIdPassthrough:
     """Test that user_id reaches agent.arun() in both streaming and non-streaming paths."""
 
-    def test_tool_runtime_context_canonicalizes_bridge_alias(self, tmp_path: Path) -> None:
-        """Tool ownership must use one canonical requester principal across bridge aliases."""
+    def test_tool_runtime_context_separates_bridge_actor_from_canonical_identity(self, tmp_path: Path) -> None:
+        """Live Matrix actor stays raw while worker ownership uses the canonical principal."""
         runtime_paths = _runtime_paths(tmp_path)
         config = bind_runtime_paths(_config(), runtime_paths)
         alias = "@telegram_alice:localhost"
@@ -326,7 +327,8 @@ class TestUserIdPassthrough:
         context = coordinator.deps.tool_runtime.build_context(target, user_id=alias)
 
         assert context is not None
-        assert context.requester_id == "@alice:localhost"
+        assert context.requester_id == alias
+        assert build_execution_identity_from_runtime_context(context).requester_id == "@alice:localhost"
 
     def test_prepare_memory_and_model_context_keeps_raw_prompt_when_model_prompt_only_contains_substring(
         self,
