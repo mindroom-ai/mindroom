@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = [
+    "TodoPokeDeliveryUnavailableError",
     "TodoPokeDeps",
     "TodoPokePolicy",
     "TodoPokeWorker",
@@ -42,8 +43,8 @@ __all__ = [
     "todo_poke_policy",
 ]
 
-type _TodoScheduleQuery = Callable[[str], Awaitable[frozenset[str | None] | None]]
-type _TodoPokeSender = Callable[[str, str, str | None], Awaitable[str | None]]
+type _TodoScheduleQuery = Callable[[str, tuple[str, ...]], Awaitable[frozenset[str | None] | None]]
+type _TodoPokeSender = Callable[[str, str, str, str | None], Awaitable[str | None]]
 type _StateWarningKey = tuple[str, str]
 
 _VALID_STATUSES = {"open", *TERMINAL_STATUSES}
@@ -53,6 +54,10 @@ _POKE_STATE_FILENAME = "poke_state.json"
 _VISIBLE_ITEM_LIMIT = 5
 _RETRY_BACKSTOP_SECONDS = 60 * 60
 _MAX_UNCHANGED_REPOKES = 3
+
+
+class TodoPokeDeliveryUnavailableError(RuntimeError):
+    """Signal that the runtime could not attempt a todo poke delivery."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,11 +541,11 @@ def _period_elapsed(now_timestamp: float, previous_timestamp: float, period_seco
 async def _pending_schedules_by_room(
     scopes: list[_TodoPokeScope],
     schedule_query: _TodoScheduleQuery,
-) -> dict[str, frozenset[str | None]] | None:
+) -> dict[str, frozenset[str | None]]:
     pending_by_room: dict[str, frozenset[str | None]] = {}
-    for room_id in sorted({scope.room_id for scope in scopes}):
+    for room_id, agent_names in sorted(_agent_names_by_room(scopes).items()):
         try:
-            pending_threads = await schedule_query(room_id)
+            pending_threads = await schedule_query(room_id, agent_names)
         except Exception as exc:
             logger.warning(
                 "todo_poke_schedule_query_failed",
@@ -551,9 +556,16 @@ async def _pending_schedules_by_room(
             pending_threads = frozenset()
         if pending_threads is None:
             logger.debug("todo_poke_scan_skipped_runtime_unavailable", room_id=room_id)
-            return None
+            continue
         pending_by_room[room_id] = pending_threads
     return pending_by_room
+
+
+def _agent_names_by_room(scopes: list[_TodoPokeScope]) -> dict[str, tuple[str, ...]]:
+    names_by_room: dict[str, set[str]] = {}
+    for scope in scopes:
+        names_by_room.setdefault(scope.room_id, set()).add(scope.assigned_agent)
+    return {room_id: tuple(sorted(agent_names)) for room_id, agent_names in names_by_room.items()}
 
 
 def _dedup_allows_poke(
@@ -621,17 +633,27 @@ async def _deliver_pokes(
             break
         if scope.assigned_agent in poked_agents:
             continue
-        if scope.thread_id in pending_by_room[scope.room_id]:
+        pending_threads = pending_by_room.get(scope.room_id)
+        if pending_threads is None or scope.thread_id in pending_threads:
             continue
 
-        attempts += 1
         scope_key = _scope_key(scope)
         previous = session_poke_records.get(scope_key) or _poke_record(poke_state, scope)
-        event_id = await deps.sender(
-            scope.room_id,
-            _format_poke_message(scope),
-            scope.thread_id,
-        )
+        try:
+            event_id = await deps.sender(
+                scope.assigned_agent,
+                scope.room_id,
+                _format_poke_message(scope),
+                scope.thread_id,
+            )
+        except TodoPokeDeliveryUnavailableError:
+            logger.debug(
+                "todo_poke_delivery_skipped_runtime_unavailable",
+                assigned_agent=scope.assigned_agent,
+                room_id=scope.room_id,
+            )
+            continue
+        attempts += 1
         outcome_timestamp = deps.clock().astimezone(UTC).timestamp()
         record = _record_after_attempt(scope, previous, outcome_timestamp, delivered=event_id is not None)
         session_poke_records[scope_key] = record
@@ -682,8 +704,6 @@ async def scan_todo_pokes(
         return 0
 
     pending_by_room = await _pending_schedules_by_room(scopes, deps.schedule_query)
-    if pending_by_room is None:
-        return 0
 
     return await _deliver_pokes(
         scopes,

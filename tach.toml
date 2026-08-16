@@ -1576,6 +1576,8 @@ depends_on = [
     "mindroom.custom_tools.todo_poke",
     "mindroom.custom_tools.todo_state",
     "mindroom.entity_resolution",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_room_admin",
     "mindroom.scheduling",
 ]
 
@@ -2214,6 +2216,7 @@ visibility = [
     "mindroom.matrix.rooms",
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.orchestration.external_trigger_runtime",
+    "mindroom.orchestration.todo_poke_runtime",
     "mindroom.orchestrator",
 ]
 
