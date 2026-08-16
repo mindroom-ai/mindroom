@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
     from mcp import ClientSession
 
+    from mindroom.config.auth import AuthorizationConfig
     from mindroom.mcp.config import MCPServerConfig
     from mindroom.mcp.errors import MCPError
 
@@ -94,6 +95,7 @@ class MCPServerState:
     config: MCPServerConfig
     config_generation: int = 0
     oauth_provider_id: str | None = None
+    oauth_authorization: AuthorizationConfig | None = None
     oauth_request_scope: tuple[str, str] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     call_lock: _AsyncReadWriteLock = field(default_factory=_AsyncReadWriteLock)

@@ -170,8 +170,14 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
                             },
                         ],
                     )
-                except HttpError as exc:
-                    result["initialTextError"] = f"Google Docs API error: {exc}"
+                except HttpError:
+                    result.update(
+                        {
+                            "initialTextError": "Google Docs initial text update failed",
+                            "partial_success": True,
+                            "retry_safe": False,
+                        },
+                    )
             return json.dumps(result)
         except HttpError as exc:
             return json.dumps({"error": f"Google Docs API error: {exc}"})

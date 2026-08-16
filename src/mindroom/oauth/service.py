@@ -288,22 +288,38 @@ def build_oauth_connect_instruction(
 def build_oauth_reconnect_instruction(
     provider: OAuthProvider,
     connect_url: str,
+    *,
+    retry_safe: bool = True,
 ) -> str:
     """Return a concise instruction for an expired or invalid OAuth session."""
+    if retry_safe and not oauth_connect_url_requires_host_browser(connect_url):
+        return (
+            f"{provider.display_name} session for this agent expired or is no longer valid. "
+            "Reconnect it with this MindRoom link, then retry the request. "
+            f"This link is valid for {OAUTH_CONNECT_TOKEN_TTL_MINUTES} minutes; if it expires, "
+            f"rerun the original request for a fresh link: {connect_url}"
+        )
+    retry_guidance = "After reconnecting, retry the request."
+    expiry_guidance = "rerun the original request for a fresh link"
+    if not retry_safe:
+        retry_guidance = (
+            "The original operation may have partially succeeded; do not automatically retry it after reconnecting."
+        )
+        expiry_guidance = "request a fresh reconnect link without repeating the original operation"
     if oauth_connect_url_requires_host_browser(connect_url):
         return (
             f"{provider.display_name} session for this agent expired or is no longer valid. "
             "Open this MindRoom link in a browser on the computer where the MindRoom process is running, "
             "not on a phone or another computer. If needed, open this conversation there or copy the complete "
-            "link into that browser. After reconnecting, retry the request. "
+            f"link into that browser. {retry_guidance} "
             f"This link is valid for {OAUTH_CONNECT_TOKEN_TTL_MINUTES} minutes; if it expires, "
-            f"rerun the original request for a fresh link: {connect_url}"
+            f"{expiry_guidance}: {connect_url}"
         )
     return (
         f"{provider.display_name} session for this agent expired or is no longer valid. "
-        "Reconnect it with this MindRoom link, then retry the request. "
+        f"Reconnect it with this MindRoom link. {retry_guidance} "
         f"This link is valid for {OAUTH_CONNECT_TOKEN_TTL_MINUTES} minutes; if it expires, "
-        f"rerun the original request for a fresh link: {connect_url}"
+        f"{expiry_guidance}: {connect_url}"
     )
 
 
@@ -311,6 +327,7 @@ def oauth_connection_required(
     context: OAuthCredentialContext,
     *,
     reason: str | None = None,
+    retry_safe: bool = True,
 ) -> OAuthConnectionRequired:
     """Build one canonical connect or reconnect error for a credential scope."""
     connect_url = oauth_connect_url(
@@ -319,7 +336,7 @@ def oauth_connection_required(
         worker_target=context.worker_target,
     )
     if reason in {OAUTH_ACCESS_REJECTED_REASON, OAUTH_REFRESH_REJECTED_REASON}:
-        instruction = build_oauth_reconnect_instruction(context.provider, connect_url)
+        instruction = build_oauth_reconnect_instruction(context.provider, connect_url, retry_safe=retry_safe)
     elif reason == OAUTH_MISSING_WRITE_SCOPE_REASON:
         instruction = (
             f"{context.provider.display_name} reconnect required to grant write access. "

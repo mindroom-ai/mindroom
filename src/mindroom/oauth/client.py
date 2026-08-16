@@ -275,23 +275,50 @@ class ScopedOAuthClientMixin:
 
     def _outer_oauth_entrypoint_result(self, result: object) -> object:
         """Replace an outer tool result when nested auth state requires it."""
-        if rejected := self._google_access_rejection_result():
+        if rejected := self._google_access_rejection_result(result):
             return rejected
         required, reason = self._consume_oauth_connection_required()
         if not required:
             return result
         return self._structured_auth_failure(self._connection_required(reason=reason))
 
-    def _google_access_rejection_result(self) -> str | None:
+    def _google_access_rejection_result(self, result: object | None = None) -> str | None:
         """Translate a final managed resource 401 after provider refresh retries."""
         rejected = self._consume_google_authorization_rejected()
         if not rejected or self._provided_creds or self._defer_to_original_auth:
             return None
         self.creds = None
         self.service = None
-        return self._structured_auth_failure(
-            self._connection_required(reason=OAUTH_ACCESS_REJECTED_REASON),
+        partial_result = self._non_retryable_partial_result(result)
+        payload = oauth_connection_required_payload(
+            oauth_connection_required(
+                self._oauth_credential_context(),
+                reason=OAUTH_ACCESS_REJECTED_REASON,
+                retry_safe=partial_result is None,
+            ),
         )
+        if partial_result is not None:
+            payload.update(
+                {
+                    "partial_success": True,
+                    "retry_safe": False,
+                    "partial_result": partial_result,
+                },
+            )
+        return json.dumps(payload)
+
+    @staticmethod
+    def _non_retryable_partial_result(result: object | None) -> dict[str, object] | None:
+        """Return an explicitly marked partial JSON result safe to preserve publicly."""
+        if not isinstance(result, str):
+            return None
+        try:
+            payload = json.loads(result)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(payload, dict) and payload.get("partial_success") is True and payload.get("retry_safe") is False:
+            return payload
+        return None
 
     def _copy_supplied_google_credentials(self, credentials: Any) -> GoogleOAuthCredentials:  # noqa: ANN401
         """Copy supported caller credentials into private blocking credentials."""

@@ -765,6 +765,84 @@ def test_google_wrapper_maps_swallowed_final_resource_401_to_access_rejected(
     assert stored["token"] == "retained-access-token"  # noqa: S105
 
 
+def test_google_docs_partial_create_401_preserves_non_retryable_result(
+    runtime_paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected initial-text write must not hide or encourage duplicating the created document."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    provider = GoogleDocsTools._oauth_provider
+    save_scoped_credentials(
+        provider.credential_service,
+        {
+            "token": "retained-access-token",
+            "refresh_token": "retained-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+    tool = GoogleDocsTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+    tracked_http = tool._google_authorized_http(tool.creds)
+    sentinel = b'{"error":{"message":"provider-controlled-partial-write-secret"}}'
+    rejected_response = SimpleNamespace(status=401, reason="Unauthorized")
+
+    def rejected_request(*_args: object, **_kwargs: object) -> tuple[object, bytes]:
+        return rejected_response, sentinel
+
+    class Request:
+        def __init__(self, result: dict[str, object] | None = None) -> None:
+            self.result = result
+
+        def execute(self) -> dict[str, object]:
+            if self.result is not None:
+                return self.result
+            response, content = tracked_http.request("https://www.googleapis.com/docs/v1/documents/created-doc")
+            raise HttpError(response, content)
+
+    class Documents:
+        @staticmethod
+        def create(*, body: dict[str, object]) -> Request:
+            assert body == {"title": "Recovery notes"}
+            return Request({"documentId": "created-doc", "title": "Recovery notes"})
+
+        @staticmethod
+        def batchUpdate(*, documentId: str, body: dict[str, object]) -> Request:  # noqa: N802, N803
+            assert documentId == "created-doc"
+            assert body["requests"]
+            return Request()
+
+    class Service:
+        @staticmethod
+        def documents() -> Documents:
+            return Documents()
+
+    monkeypatch.setattr("google_auth_httplib2.AuthorizedHttp.request", rejected_request)
+    tool.service = Service()
+
+    result = tool.google_docs_create_document("Recovery notes", "Initial text")
+    payload = json.loads(result)
+
+    assert payload["oauth_connection_required"] is True
+    assert payload["reason"] == "access_rejected"
+    assert payload["partial_success"] is True
+    assert payload["retry_safe"] is False
+    assert payload["partial_result"]["document"]["documentId"] == "created-doc"
+    assert payload["partial_result"]["documentUrl"].endswith("/created-doc/edit")
+    assert "do not automatically retry" in payload["error"].lower()
+    assert "rerun the original request" not in payload["error"].lower()
+    assert "provider-controlled-partial-write-secret" not in result
+
+
 def test_nested_google_wrapper_preserves_final_resource_401_for_outer_owner(
     runtime_paths: RuntimePaths,
 ) -> None:

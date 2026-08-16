@@ -92,8 +92,14 @@ TEMPORARILY_UNAVAILABLE = "temporarily_unavailable"
 
 
 class _ConfigStub:
-    def __init__(self, mcp_servers: dict[str, MCPServerConfig]) -> None:
+    def __init__(
+        self,
+        mcp_servers: dict[str, MCPServerConfig],
+        *,
+        authorization: AuthorizationConfig | None = None,
+    ) -> None:
         self.mcp_servers = mcp_servers
+        self.authorization = authorization or AuthorizationConfig()
         self.plugins: list[object] = []
         self.agents: dict[str, object] = {}
         self.defaults = type("_DefaultsStub", (), {"allow_self_config": False})()
@@ -1555,12 +1561,14 @@ async def test_mcp_manager_resolves_oauth_alias_context_once(tmp_path: Path) -> 
     runtime_paths = _runtime_paths(tmp_path)
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
-    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
     authorization = AuthorizationConfig(
         aliases={
             "@canonical-a:example.test": ["@bridge:example.test"],
             "@canonical-b:example.test": ["@canonical-a:example.test"],
         },
+    )
+    await manager.sync_servers(
+        _ConfigStub({"demo": _oauth_mcp_config()}, authorization=authorization),
     )
     bridge_target = _worker_target("@bridge:example.test")
     canonical_a_target = _worker_target("@canonical-a:example.test")
@@ -1572,12 +1580,66 @@ async def test_mcp_manager_resolves_oauth_alias_context_once(tmp_path: Path) -> 
         "demo",
         credentials_manager=credentials_manager,
         worker_target=bridge_target,
-        authorization=authorization,
     )
 
     assert lease.headers == {"Authorization": "Bearer canonical-a-token"}
     assert next(iter(manager._scoped_states.values())) is state
     assert next(iter(manager._scoped_states)).worker_key == canonical_a_target.worker_key
+
+
+@pytest.mark.asyncio
+async def test_mcp_alias_reload_retires_sessions_and_uses_published_identity_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Alias-only reloads must retire sessions and publish the new identity policy."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    bridge_target = _worker_target("@bridge:example.test")
+    canonical_a_target = _worker_target("@canonical-a:example.test")
+    canonical_b_target = _worker_target("@canonical-b:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, canonical_a_target, "canonical-a-token")
+    _save_mcp_oauth_credentials(runtime_paths, canonical_b_target, "canonical-b-token")
+    initial_authorization = AuthorizationConfig(
+        aliases={"@canonical-a:example.test": ["@bridge:example.test"]},
+    )
+    replacement_authorization = AuthorizationConfig(
+        aliases={"@canonical-b:example.test": ["@bridge:example.test"]},
+    )
+    server_config = _oauth_mcp_config()
+    await manager.sync_servers(
+        _ConfigStub({"demo": server_config}, authorization=initial_authorization),
+    )
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=bridge_target,
+    )
+    initial_state = next(iter(manager._scoped_states.values()))
+    initial_session = initial_state.session
+    initial_generation = manager._states["demo"].config_generation
+
+    await manager.sync_servers(
+        _ConfigStub({"demo": server_config}, authorization=replacement_authorization),
+    )
+
+    assert initial_state.retired is True
+    assert initial_session is not None
+    assert initial_session.closed is True
+    assert manager._states["demo"].config_generation != initial_generation
+    assert manager._scoped_states == {}
+
+    _state, lease = await manager._request_state_and_headers(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=bridge_target,
+    )
+
+    assert lease.headers == {"Authorization": "Bearer canonical-b-token"}
+    assert lease.session_key.worker_key == canonical_b_target.worker_key
 
 
 @pytest.mark.asyncio

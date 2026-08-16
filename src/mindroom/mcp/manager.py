@@ -261,7 +261,17 @@ class MCPServerManager:
                 return None
             for server_id, state in tuple(self._states.items()):
                 server_config = desired_servers.get(server_id)
-                if server_config is not None and state.config == server_config:
+                if (
+                    server_config is not None
+                    and state.config == server_config
+                    and (
+                        state.config.auth is None
+                        or (
+                            state.oauth_authorization is not None
+                            and state.oauth_authorization.aliases == config.authorization.aliases
+                        )
+                    )
+                ):
                     continue
                 self._states.pop(server_id)
                 retire_state(state)
@@ -281,6 +291,9 @@ class MCPServerManager:
                     config=server_config,
                     config_generation=self._last_config_generation,
                     oauth_provider_id=provider_id,
+                    oauth_authorization=(
+                        config.authorization.model_copy(deep=True) if provider_id is not None else None
+                    ),
                 )
             self._config = config
         return retired_states
@@ -352,7 +365,6 @@ class MCPServerManager:
         timeout_seconds: float | None = None,
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
-        authorization: AuthorizationConfig | None = None,
         include_tools: Collection[str] | None = None,
         exclude_tools: Collection[str] | None = None,
     ) -> ToolResult:
@@ -364,7 +376,6 @@ class MCPServerManager:
                     server_id,
                     credentials_manager=credentials_manager,
                     worker_target=worker_target,
-                    authorization=authorization,
                 )
                 try:
                     if (
@@ -410,7 +421,6 @@ class MCPServerManager:
         *,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
-        authorization: AuthorizationConfig | None = None,
     ) -> MCPServerCatalog:
         """Return a requester-scoped catalog for one OAuth-backed MCP server."""
         while True:
@@ -418,7 +428,6 @@ class MCPServerManager:
                 server_id,
                 credentials_manager=credentials_manager,
                 worker_target=worker_target,
-                authorization=authorization,
             )
             try:
                 if state.catalog is None or state.stale or state.last_error is not None or not state.connected:
@@ -448,7 +457,6 @@ class MCPServerManager:
         server_id: str,
         *,
         worker_target: ResolvedWorkerTarget | None,
-        authorization: AuthorizationConfig | None = None,
     ) -> MCPServerCatalog | None:
         """Return an already-discovered worker-scoped catalog without network or credential I/O."""
         base_state = self._states.get(server_id)
@@ -458,7 +466,6 @@ class MCPServerManager:
             credential_context = self._oauth_credential_context(
                 base_state,
                 worker_target=worker_target,
-                authorization=authorization,
             )
             key = self._request_session_key(base_state, credential_context.worker_target)
         except OAuthConnectionRequired:
@@ -527,14 +534,13 @@ class MCPServerManager:
         *,
         worker_target: ResolvedWorkerTarget | None,
         credentials_manager: CredentialsManager | None = None,
-        authorization: AuthorizationConfig | None = None,
     ) -> OAuthCredentialContext:
         return resolve_oauth_credential_context(
             mcp_oauth_provider(state.server_id, state.config),
             self.runtime_paths,
             credentials_manager or get_runtime_credentials_manager(self.runtime_paths),
             worker_target,
-            authorization=authorization,
+            authorization=state.oauth_authorization,
         )
 
     def _request_session_key(
@@ -641,7 +647,6 @@ class MCPServerManager:
         *,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
-        authorization: AuthorizationConfig | None = None,
     ) -> tuple[MCPServerState, _MCPAuthorizationLease]:
         while True:
             try:
@@ -649,7 +654,6 @@ class MCPServerManager:
                     server_id,
                     credentials_manager=credentials_manager,
                     worker_target=worker_target,
-                    authorization=authorization,
                 )
             except _MCPConfigurationChangedError:
                 continue
@@ -660,7 +664,6 @@ class MCPServerManager:
         *,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
-        authorization: AuthorizationConfig | None,
     ) -> tuple[MCPServerState, _MCPAuthorizationLease]:
         """Resolve one requester session against an exact published config generation."""
         base_state = self._require_state(server_id)
@@ -673,7 +676,6 @@ class MCPServerManager:
             base_state,
             worker_target=worker_target,
             credentials_manager=credentials_manager,
-            authorization=authorization,
         )
         worker_target = credential_context.worker_target
         key = self._request_session_key(base_state, worker_target)
@@ -698,6 +700,7 @@ class MCPServerManager:
                     config=base_state.config,
                     config_generation=key.config_generation,
                     oauth_provider_id=key.provider_id,
+                    oauth_authorization=base_state.oauth_authorization,
                     oauth_request_scope=(key.worker_scope, key.worker_key),
                 )
                 self._scoped_states[key] = state
