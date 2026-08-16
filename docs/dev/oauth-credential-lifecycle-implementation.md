@@ -37,6 +37,9 @@ The implementation deliberately removes the former JSON generation journal, publ
 - MCP sessions bind to lifecycle revision plus token hash and revalidate before publication and use.
 - OAuth API status, callback, disconnect, and browser reset enter the same lifecycle owner.
 - OAuth API status exposes unreadable credentials as reset-required so the dashboard can invoke decode-free disconnect before reconnecting.
+- Lifecycle status reads return the public `OAuthCredentialsStatus` contract.
+- Successful legacy adoption logs only provider, credential-service, presence, and readability metadata after the SQLite commit.
+- Legacy cleanup failures log provider, credential-service, and exception-type metadata without the scoped filesystem path.
 - Generic credential APIs continue to own non-OAuth configuration and manual fallback credentials.
 
 ## Transaction rules

@@ -65,6 +65,15 @@ class _OAuthStoredCredentialSnapshot:
     connection_generation: str
 
 
+@dataclass(frozen=True, slots=True)
+class _LegacyCredentialPayload:
+    """One legacy credential prepared for atomic SQLite adoption."""
+
+    payload: bytes | None
+    present: bool
+    unreadable: bool
+
+
 class OAuthCredentialTransaction:
     """One open per-scope SQLite write transaction."""
 
@@ -308,8 +317,9 @@ async def _initialize_store(
     row = connection.execute(
         "SELECT * FROM oauth_credential_state WHERE singleton = 1",
     ).fetchone()
+    legacy_adoption: _LegacyCredentialPayload | None = None
     if row is None:
-        payload, credential_present, credential_unreadable = _legacy_credential_payload(context)
+        legacy = _legacy_credential_payload(context)
         connection.execute(
             """
             INSERT INTO oauth_credential_state(
@@ -326,17 +336,27 @@ async def _initialize_store(
                 expected_binding["routing_agent_name"],
                 _INITIAL_GENERATION,
                 _INITIAL_GENERATION,
-                payload,
-                int(credential_present),
-                int(credential_unreadable),
+                legacy.payload,
+                int(legacy.present),
+                int(legacy.unreadable),
             ),
         )
+        if legacy.present:
+            legacy_adoption = legacy
     else:
         actual_binding = {key: str(row[key]) for key in expected_binding}
         if actual_binding != expected_binding:
             msg = "OAuth credential store belongs to a different credential scope"
             raise OAuthProviderError(msg)
     await _commit_connection(connection)
+    if legacy_adoption is not None:
+        logger.info(
+            "oauth_legacy_credentials_adopted",
+            provider_id=context.provider.id,
+            credential_service=context.provider.credential_service,
+            credential_present=legacy_adoption.present,
+            credential_unreadable=legacy_adoption.unreadable,
+        )
 
 
 async def _commit_connection(connection: sqlite3.Connection) -> None:
@@ -429,20 +449,28 @@ def _validate_existing_database_path(database_path: Path) -> None:
     database_path.chmod(0o600)
 
 
-def _legacy_credential_payload(context: _OAuthCredentialStoreContext) -> tuple[bytes | None, bool, bool]:
+def _legacy_credential_payload(context: _OAuthCredentialStoreContext) -> _LegacyCredentialPayload:
     legacy_path = _legacy_credential_path(context)
     try:
         raw = legacy_path.read_bytes()
     except FileNotFoundError:
-        return None, False, False
+        return _LegacyCredentialPayload(payload=None, present=False, unreadable=False)
     manager = context.credentials_manager
     try:
         credentials = manager.decode_credentials(context.provider.credential_service, raw)
     except (OSError, TypeError, ValueError, InvalidTag):
         retain_payload = not manager.credentials_encryption_enabled or manager.payload_is_encrypted(raw)
-        return (raw if retain_payload else None), True, True
+        return _LegacyCredentialPayload(
+            payload=raw if retain_payload else None,
+            present=True,
+            unreadable=True,
+        )
     normalized = _without_legacy_publication(credentials)
-    return manager.encode_credentials(context.provider.credential_service, normalized), True, False
+    return _LegacyCredentialPayload(
+        payload=manager.encode_credentials(context.provider.credential_service, normalized),
+        present=True,
+        unreadable=False,
+    )
 
 
 def _legacy_credential_path(context: _OAuthCredentialStoreContext) -> Path:
@@ -469,7 +497,8 @@ def _cleanup_legacy_files(context: _OAuthCredentialStoreContext) -> None:
         except OSError as exc:
             logger.warning(
                 "oauth_legacy_credential_cleanup_failed",
-                path=str(path),
+                provider_id=context.provider.id,
+                credential_service=context.provider.credential_service,
                 error_type=type(exc).__name__,
             )
 

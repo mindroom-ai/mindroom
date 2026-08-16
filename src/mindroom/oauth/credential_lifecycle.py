@@ -278,7 +278,7 @@ class OAuthCredentialsSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class _OAuthCredentialsStatus:
+class OAuthCredentialsStatus:
     """Credential data plus whether recovery requires a decode-free reset."""
 
     credentials: dict[str, Any] | None
@@ -393,13 +393,13 @@ async def load_oauth_credentials_snapshot(context: OAuthCredentialContext) -> OA
     return await _run_cancellable_oauth_transaction(lambda: _load_oauth_credentials_snapshot_transaction(context))
 
 
-async def load_oauth_credentials_status(context: OAuthCredentialContext) -> _OAuthCredentialsStatus:
+async def load_oauth_credentials_status(context: OAuthCredentialContext) -> OAuthCredentialsStatus:
     """Load credentials or classify an unreadable payload as requiring reset."""
     try:
         snapshot = await load_oauth_credentials_snapshot(context)
     except OAuthCredentialUnreadableError:
-        return _OAuthCredentialsStatus(credentials=None, reset_required=True)
-    return _OAuthCredentialsStatus(credentials=snapshot.credentials, reset_required=False)
+        return OAuthCredentialsStatus(credentials=None, reset_required=True)
+    return OAuthCredentialsStatus(credentials=snapshot.credentials, reset_required=False)
 
 
 async def load_oauth_reset_connection_generation(context: OAuthCredentialContext) -> str:

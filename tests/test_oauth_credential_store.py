@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
+import mindroom.oauth.credential_store as credential_store_module
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
@@ -30,6 +31,18 @@ class _Provider:
     id = "demo_provider"
     credential_service = "demo_oauth"
     requester_scoped_credentials = True
+
+
+class _CapturingLogger:
+    def __init__(self) -> None:
+        self.info_calls: list[tuple[str, dict[str, object]]] = []
+        self.warning_calls: list[tuple[str, dict[str, object]]] = []
+
+    def info(self, event: str, **kwargs: object) -> None:
+        self.info_calls.append((event, kwargs))
+
+    def warning(self, event: str, **kwargs: object) -> None:
+        self.warning_calls.append((event, kwargs))
 
 
 def _hold_sqlite_transaction(
@@ -281,6 +294,93 @@ async def test_legacy_adoption_removes_every_obsolete_sidecar(tmp_path: Path) ->
 
     assert not legacy_path.exists()
     assert all(not sidecar.exists() for sidecar in sidecars)
+
+
+@pytest.mark.asyncio
+async def test_legacy_adoption_logs_only_safe_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A committed legacy adoption reports its outcome without scope paths or credential data."""
+    context = _context(tmp_path)
+    credential_value = "legacy-sensitive-value"
+    save_scoped_credentials(
+        context.provider.credential_service,
+        {"token": credential_value},
+        credentials_manager=context.credentials_manager,
+        worker_target=context.worker_target,
+    )
+    logger = _CapturingLogger()
+    monkeypatch.setattr(credential_store_module, "logger", logger)
+
+    async with oauth_credential_transaction(context) as transaction:
+        assert transaction.snapshot().credentials == {"token": credential_value}
+        await transaction.commit()
+
+    assert logger.info_calls == [
+        (
+            "oauth_legacy_credentials_adopted",
+            {
+                "provider_id": "demo_provider",
+                "credential_service": "demo_oauth",
+                "credential_present": True,
+                "credential_unreadable": False,
+            },
+        ),
+    ]
+    logged_payload = repr(logger.info_calls)
+    assert credential_value not in logged_payload
+    assert "@alice:example.test" not in logged_payload
+    assert str(tmp_path) not in logged_payload
+
+
+@pytest.mark.asyncio
+async def test_legacy_cleanup_failure_logs_only_safe_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A legacy cleanup failure reports its type without exposing the scoped path."""
+    context = _context(tmp_path)
+    credential_value = "legacy-cleanup-sensitive-value"
+    save_scoped_credentials(
+        context.provider.credential_service,
+        {"token": credential_value},
+        credentials_manager=context.credentials_manager,
+        worker_target=context.worker_target,
+    )
+    legacy_path = context.credentials_manager.for_primary_runtime_scope(
+        "@alice:example.test",
+        None,
+    ).get_credentials_path(context.provider.credential_service)
+    original_unlink = Path.unlink
+
+    def fail_credential_cleanup(path: Path, *, missing_ok: bool = False) -> None:
+        if path == legacy_path:
+            raise PermissionError
+        original_unlink(path, missing_ok=missing_ok)
+
+    logger = _CapturingLogger()
+    monkeypatch.setattr(Path, "unlink", fail_credential_cleanup)
+    monkeypatch.setattr(credential_store_module, "logger", logger)
+
+    async with oauth_credential_transaction(context) as transaction:
+        assert transaction.snapshot().credentials == {"token": credential_value}
+        await transaction.commit()
+
+    assert logger.warning_calls == [
+        (
+            "oauth_legacy_credential_cleanup_failed",
+            {
+                "provider_id": "demo_provider",
+                "credential_service": "demo_oauth",
+                "error_type": "PermissionError",
+            },
+        ),
+    ]
+    logged_payload = repr(logger.info_calls + logger.warning_calls)
+    assert credential_value not in logged_payload
+    assert "@alice:example.test" not in logged_payload
+    assert str(tmp_path) not in logged_payload
 
 
 @pytest.mark.asyncio

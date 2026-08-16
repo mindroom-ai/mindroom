@@ -597,7 +597,10 @@ export function Integrations() {
     }
   };
 
-  const handleDisconnect = async (integration: Integration) => {
+  const runDisconnectOperation = async (
+    integration: Integration,
+    disconnect: () => void | Promise<void>,
+  ) => {
     if (blocksScopedDashboardCredentials(integration)) {
       toast({
         title: "Shared-only dashboard configuration",
@@ -608,38 +611,9 @@ export function Integrations() {
       return;
     }
 
-    const provider = oauthProviderForIntegration(integration);
-    const scope = {
-      agentName: effectiveScopeAgentName,
-      executionScope: selectedExecutionScope,
-    };
-
     setLoading(true);
     try {
-      if (
-        (integration.oauth_reset_required === true ||
-          integration.manual_auth_configured !== true) &&
-        provider?.getConfig(scope).onDisconnect
-      ) {
-        // Use provider's disconnect method if available
-        await provider.getConfig(scope).onDisconnect!(integration.id);
-      } else {
-        // For generic tools, delete credentials via API
-        const response = await fetch(
-          withAgentExecutionScope(
-            `${API_BASE_URL}/api/credentials/${integration.config_service ?? integration.id}`,
-            effectiveScopeAgentName,
-            selectedExecutionScope,
-          ),
-          {
-            method: "DELETE",
-          },
-        );
-
-        if (!response.ok) {
-          throw new Error("Failed to disconnect");
-        }
-      }
+      await disconnect();
 
       // Refetch tools to update status
       await refetchTools();
@@ -659,6 +633,29 @@ export function Integrations() {
       setLoading(false);
     }
   };
+
+  const handleProviderDisconnect = (
+    integration: Integration,
+    disconnect: NonNullable<IntegrationConfig["onDisconnect"]>,
+  ) => runDisconnectOperation(integration, () => disconnect(integration.id));
+
+  const handleStoredCredentialDelete = (integration: Integration) =>
+    runDisconnectOperation(integration, async () => {
+      const response = await fetch(
+        withAgentExecutionScope(
+          `${API_BASE_URL}/api/credentials/${integration.config_service ?? integration.id}`,
+          effectiveScopeAgentName,
+          selectedExecutionScope,
+        ),
+        {
+          method: "DELETE",
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error("Failed to disconnect");
+      }
+    });
 
   const getActionButton = (integration: Integration) => {
     if (blocksScopedDashboardCredentials(integration)) {
@@ -686,6 +683,10 @@ export function Integrations() {
         />
       );
     }
+    const providerDisconnect = config?.onDisconnect;
+    const disconnectProvider = providerDisconnect
+      ? () => handleProviderDisconnect(integration, providerDisconnect)
+      : undefined;
 
     const canConfigureOAuthClient =
       integration.setup_type === "oauth" &&
@@ -812,7 +813,7 @@ export function Integrations() {
                 Settings
               </Button>
               <Button
-                onClick={() => handleDisconnect(integration)}
+                onClick={() => handleStoredCredentialDelete(integration)}
                 disabled={loading}
                 variant="ghost"
                 size="sm"
@@ -859,8 +860,8 @@ export function Integrations() {
       return (
         <div className="flex gap-2 items-center">
           <Button
-            onClick={() => handleDisconnect(integration)}
-            disabled={loading}
+            onClick={disconnectProvider}
+            disabled={loading || !disconnectProvider}
             variant="destructive"
             size="sm"
           >
@@ -916,7 +917,7 @@ export function Integrations() {
           </Button>
           {oauthClientConfigButton}
           <Button
-            onClick={() => handleDisconnect(integration)}
+            onClick={() => handleStoredCredentialDelete(integration)}
             disabled={loading}
             variant="destructive"
             size="sm"
@@ -1001,8 +1002,8 @@ export function Integrations() {
           {manualFallbackButton}
           {oauthClientConfigButton}
           <Button
-            onClick={() => handleDisconnect(integration)}
-            disabled={loading}
+            onClick={disconnectProvider}
+            disabled={loading || !disconnectProvider}
             variant="destructive"
             size="sm"
           >
@@ -1026,7 +1027,10 @@ export function Integrations() {
           </Button>
           {oauthClientConfigButton}
           <Button
-            onClick={() => handleDisconnect(integration)}
+            onClick={
+              disconnectProvider ??
+              (() => handleStoredCredentialDelete(integration))
+            }
             disabled={loading}
             variant="destructive"
             size="sm"

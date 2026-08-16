@@ -34,6 +34,7 @@ from mindroom.oauth import (
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
+    OAuthCredentialsStatus,
     exchange_and_store_oauth_credentials,
     load_oauth_credentials_snapshot,
     load_oauth_credentials_status,
@@ -647,7 +648,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         agent_name=agent_name,
     )
     context = _credential_context(provider, runtime_paths, target)
-    credential_status = await load_oauth_credentials_status(context)
+    credential_status: OAuthCredentialsStatus = await load_oauth_credentials_status(context)
     credentials = credential_status.credentials or {}
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
     client_config_resolution = (
