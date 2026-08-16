@@ -170,10 +170,14 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
                             },
                         ],
                     )
-                except HttpError:
+                except HttpError as exc:
+                    status = exc.resp.status
+                    initial_text_error = "Google Docs initial text update failed"
+                    if not isinstance(status, bool) and isinstance(status, int):
+                        initial_text_error = f"{initial_text_error} (HTTP {status})"
                     result.update(
                         {
-                            "initialTextError": "Google Docs initial text update failed",
+                            "initialTextError": initial_text_error,
                             "partial_success": True,
                             "retry_safe": False,
                         },
