@@ -745,9 +745,11 @@ def _origin_urls_from_config(
         key == "include.path"
         or key.startswith("includeif.")
         or (key.startswith("url.") and key.endswith((".insteadof", ".pushinsteadof")))
+        or key in {"remote.origin.proxy", "remote.origin.proxyauthmethod"}
+        or (key.startswith("http.") and key.endswith((".proxy", ".proxyauthmethod")))
         for key, _value in normalized_entries
     ):
-        msg = "Agent repository workspace has URL rewriting or included Git configuration"
+        msg = "Agent repository workspace has URL rewriting, proxy overrides, or included Git configuration"
         raise RepositoryOriginConflictError(msg)
 
     origin_entries = tuple((key, value) for key, value in entries if key.startswith("remote.origin."))
@@ -1034,6 +1036,12 @@ def _append_origin_to_git_config(git_fd: int, config_fd: int, clone_url: str) ->
 
 def _github_transport_and_path(url: str) -> tuple[str, str] | None:
     """Parse supported credential-free GitHub transports into a repository path."""
+    if (
+        "?" in url
+        or "#" in url
+        or any(character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F for character in url)
+    ):
+        return None
     if url.startswith("git@github.com:"):
         return "ssh", url.removeprefix("git@github.com:")
 
