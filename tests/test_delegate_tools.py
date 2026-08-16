@@ -23,6 +23,7 @@ from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
+from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
@@ -753,12 +754,18 @@ class TestDelegateKnowledge:
         assert result == "done"
 
     @pytest.mark.asyncio
-    async def test_delegation_rebinds_room_resolved_model_for_child_agent(
+    @pytest.mark.parametrize(
+        ("thread_model_name", "expected_model_name"),
+        [(None, "large"), ("default", "default")],
+    )
+    async def test_delegation_rebinds_resolved_model_for_child_agent(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        thread_model_name: str | None,
+        expected_model_name: str,
     ) -> None:
-        """Delegated child tools should see the child's room-resolved runtime model."""
+        """Delegated child and its tools must share thread-over-room model precedence."""
         config = Config(
             agents={
                 "leader": AgentConfig(
@@ -783,6 +790,14 @@ class TestDelegateKnowledge:
         config = _bind_runtime_paths(config, tmp_path)
         runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
         monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
+        if thread_model_name is not None:
+            set_thread_model_override(
+                runtime_paths,
+                thread_id="$thread",
+                model_name=thread_model_name,
+                room_id="!room:example.org",
+                set_by="@alice:example.org",
+            )
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="leader",
@@ -823,8 +838,10 @@ class TestDelegateKnowledge:
             assert context is not None
             assert context.agent_name == "worker"
             assert context.room_id == "!room:example.org"
-            assert context.active_model_name == "large"
+            assert context.active_model_name == expected_model_name
             assert ctx.room_id == "!room:example.org"
+            assert ctx.thread_id == "$thread"
+            assert ctx.active_model_name == expected_model_name
             return "done"
 
         with (

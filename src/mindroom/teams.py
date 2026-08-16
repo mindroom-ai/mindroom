@@ -117,7 +117,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 
     import nio
     from agno.db.base import BaseDb
@@ -1434,6 +1434,7 @@ async def _ensure_attempt_team_members(
             session_id=session_id,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
+            active_model_names=holder.member_model_names,
         )
         holder.team_members = members
     return members
@@ -1488,10 +1489,19 @@ class _TeamTurnHolder:
 
     team: Team | None = None
     team_members: ResolvedExactTeamMembers | None = None
+    member_model_names: dict[str, str] = field(default_factory=dict)
     attempt_started: bool = False
     attempt_run_id: str | None = None
     render_partial: Callable[[], str] = _empty_partial_text  # streaming turns only
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker)  # streaming turns only
+
+
+@dataclass(frozen=True)
+class TeamTurnModelSelection:
+    """Model aliases frozen together for one team turn."""
+
+    team_model_name: str
+    member_model_names: dict[str, str]
 
 
 def _build_team_runtime_db_callbacks(
@@ -1546,6 +1556,7 @@ def materialize_exact_team_members(
     reason_prefix: str = "Team request",
     dynamic_tool_continuation: bool = False,
     supports_native_tool_approval: bool = False,
+    active_model_names: Mapping[str, str] | None = None,
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact team-member set without silent fallback.
 
@@ -1557,6 +1568,8 @@ def materialize_exact_team_members(
     if not requested_agent_names:
         raise ValueError(_NO_AGENTS_RESPONSE)
 
+    selected_model_names: dict[str, str] = {}
+
     def _build_member(agent_name: str) -> Agent:
         knowledge_resolution = resolve_agent_knowledge_access(
             agent_name,
@@ -1567,6 +1580,17 @@ def materialize_exact_team_members(
         )
         if unavailable_bases is not None:
             unavailable_bases.update(knowledge_resolution.unavailable)
+        model_name = (
+            active_model_names[agent_name]
+            if active_model_names is not None
+            else config.resolve_runtime_model(
+                entity_name=agent_name,
+                room_id=execution_identity.room_id if execution_identity is not None else None,
+                thread_id=execution_identity.resolved_thread_id if execution_identity is not None else None,
+                runtime_paths=runtime_paths,
+            ).model_name
+        )
+        selected_model_names[agent_name] = model_name
         return create_agent(
             agent_name,
             config,
@@ -1577,6 +1601,7 @@ def materialize_exact_team_members(
             else execution_identity.session_id
             if execution_identity
             else None,
+            active_model_name=model_name,
             knowledge=knowledge_resolution.knowledge,
             include_interactive_questions=False,
             include_openai_compat_guidance=include_openai_compat_guidance,
@@ -1599,12 +1624,32 @@ def materialize_exact_team_members(
         raise ValueError(
             _not_materializable_team_agents_message(team_members.failed_agent_names, prefix=reason_prefix),
         )
-    return team_members
+    return replace(team_members, model_names=selected_model_names)
 
 
 def _requested_team_agent_names(agent_names: list[str]) -> list[str]:
     """Return the requested team members, excluding router placeholders."""
     return [name for name in agent_names if name != ROUTER_AGENT_NAME]
+
+
+def resolve_team_member_model_names(
+    agent_names: Sequence[str],
+    room_id: str | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    thread_id: str | None = None,
+) -> dict[str, str]:
+    """Resolve every exact team member's model alias without yielding control."""
+    return {
+        agent_name: config.resolve_runtime_model(
+            entity_name=agent_name,
+            room_id=room_id,
+            thread_id=thread_id,
+            runtime_paths=runtime_paths,
+        ).model_name
+        for agent_name in _requested_team_agent_names(list(agent_names))
+    }
 
 
 def _materialize_team_members(
@@ -1616,6 +1661,7 @@ def _materialize_team_members(
     configured_team_name: str | None = None,
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
     reason_prefix: str = "Team request",
+    active_model_names: Mapping[str, str] | None = None,
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact requested team-member set without silent fallback."""
     requested_agent_names = _requested_team_agent_names(agent_names)
@@ -1640,6 +1686,7 @@ def _materialize_team_members(
         refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
         dynamic_tool_continuation=True,
         supports_native_tool_approval=True,
+        active_model_names=active_model_names,
         reason_prefix=reason_prefix,
     )
 
@@ -1778,15 +1825,16 @@ def select_model_for_team(
 
     Priority:
     1. Thread-specific model override
-    2. Room-specific model from room_models
-    3. Team's configured model
-    4. Global default model
+    2. Persisted runtime room override
+    3. Room-specific model from room_models
+    4. Team's configured model
+    5. Global default model
 
     Args:
         team_name: Name of the team
         room_id: Matrix room ID
         config: Application configuration
-        runtime_paths: Explicit runtime context for room alias resolution
+        runtime_paths: Explicit runtime context for persisted overrides and room alias resolution
         thread_id: Optional resolved Matrix thread root for thread model overrides
 
     Returns:
@@ -1801,6 +1849,34 @@ def select_model_for_team(
     ).model_name
     logger.info("selected_team_model", team_name=team_name, model_name=model_name)
     return model_name
+
+
+def resolve_team_turn_models(
+    team_name: str,
+    member_names: Sequence[str],
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    thread_id: str | None = None,
+) -> TeamTurnModelSelection:
+    """Freeze the coordinator and member model aliases in one synchronous snapshot."""
+    return TeamTurnModelSelection(
+        team_model_name=select_model_for_team(
+            team_name,
+            room_id,
+            config,
+            runtime_paths,
+            thread_id=thread_id,
+        ),
+        member_model_names=resolve_team_member_model_names(
+            member_names,
+            room_id,
+            config,
+            runtime_paths,
+            thread_id=thread_id,
+        ),
+    )
 
 
 def build_materialized_team_instance(
@@ -1845,6 +1921,7 @@ async def continue_paused_team_run(
     decisions: dict[str, bool],
     denial_reasons: dict[str, str | None],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
+    member_model_names: Mapping[str, str] | None = None,
     history_scope: HistoryScope | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
@@ -1859,6 +1936,7 @@ async def continue_paused_team_run(
         refresh_scheduler=refresh_scheduler,
         dynamic_tool_continuation=True,
         supports_native_tool_approval=True,
+        active_model_names=member_model_names,
     )
     for member in members.agents:
         if member.model is not None:
@@ -2060,6 +2138,7 @@ async def team_response(  # noqa: C901, PLR0915
     *,
     turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
+    member_model_names: Mapping[str, str] | None = None,
 ) -> str:
     """Create a team and execute response.
 
@@ -2077,6 +2156,17 @@ async def team_response(  # noqa: C901, PLR0915
         requested_agent_names,
         allow_direct_private_agents=allow_direct_private_agents,
     )
+    active_member_model_names = (
+        dict(member_model_names)
+        if member_model_names is not None
+        else resolve_team_member_model_names(
+            requested_agent_names,
+            ctx.room_id,
+            orchestrator.config,
+            orchestrator.runtime_paths,
+            thread_id=ctx.thread_id,
+        )
+    )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
         # Member agent builds walk the filesystem (workspace scaffolding,
@@ -2090,6 +2180,7 @@ async def team_response(  # noqa: C901, PLR0915
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
+            active_model_names=active_member_model_names,
         )
     except ValueError as exc:
         return str(exc)
@@ -2107,7 +2198,10 @@ async def team_response(  # noqa: C901, PLR0915
     )
     base_media_inputs = media or MediaInputs()
     config = orchestrator.config
-    holder = _TeamTurnHolder(team_members=team_members)
+    holder = _TeamTurnHolder(
+        team_members=team_members,
+        member_model_names=team_members.model_names,
+    )
 
     async def _run_team_attempt(  # noqa: C901, PLR0912, PLR0915
         run: TurnRunState,
@@ -2319,7 +2413,11 @@ async def team_response(  # noqa: C901, PLR0915
                 fallback_run_id=attempt_run_id,
             )
             if paused_attempt is not None:
-                return replace(paused_attempt, runtime_model_name=prepared_execution.runtime_model_name)
+                return replace(
+                    paused_attempt,
+                    runtime_model_name=prepared_execution.runtime_model_name,
+                    team_member_model_names=tuple(sorted(holder.member_model_names.items())),
+                )
             original_status = response.status if isinstance(response.status, RunStatus) else RunStatus.error
             partial_text = _extract_interrupted_team_partial_text(response)
             completed_tools, interrupted_tools = _extract_cancelled_team_tool_trace(response)
@@ -2538,6 +2636,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
     *,
     turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
+    member_model_names: Mapping[str, str] | None = None,
 ) -> AsyncIterator[_TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
 
@@ -2560,6 +2659,17 @@ async def team_response_stream(  # noqa: C901, PLR0915
         requested_agent_names,
         allow_direct_private_agents=allow_direct_private_agents,
     )
+    active_member_model_names = (
+        dict(member_model_names)
+        if member_model_names is not None
+        else resolve_team_member_model_names(
+            requested_agent_names,
+            ctx.room_id,
+            orchestrator.config,
+            orchestrator.runtime_paths,
+            thread_id=ctx.thread_id,
+        )
+    )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
         # Member agent builds walk the filesystem (workspace scaffolding,
@@ -2573,6 +2683,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
+            active_model_names=active_member_model_names,
         )
     except ValueError as exc:
         yield str(exc)
@@ -2590,7 +2701,10 @@ async def team_response_stream(  # noqa: C901, PLR0915
     )
     base_media_inputs = media or MediaInputs()
     config = orchestrator.config
-    holder = _TeamTurnHolder(team_members=team_members)
+    holder = _TeamTurnHolder(
+        team_members=team_members,
+        member_model_names=team_members.model_names,
+    )
 
     async def _run_team_stream_attempt(  # noqa: C901, PLR0911, PLR0912, PLR0915
         run: TurnRunState,
@@ -3132,7 +3246,11 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     )
                     if paused_attempt is not None:
                         yield AttemptResolved(
-                            replace(paused_attempt, runtime_model_name=prepared_execution.runtime_model_name),
+                            replace(
+                                paused_attempt,
+                                runtime_model_name=prepared_execution.runtime_model_name,
+                                team_member_model_names=tuple(sorted(holder.member_model_names.items())),
+                            ),
                         )
                         return
                     yield AttemptResolved(
@@ -3350,6 +3468,7 @@ __all__ = [
     "TeamOutcome",
     "TeamResolution",
     "TeamResolutionMember",
+    "TeamTurnModelSelection",
     "build_materialized_team_instance",
     "continue_paused_team_run",
     "decide_team_formation",
@@ -3360,6 +3479,8 @@ __all__ = [
     "prepare_materialized_team_execution",
     "resolve_configured_team",
     "resolve_live_shared_agent_names",
+    "resolve_team_member_model_names",
+    "resolve_team_turn_models",
     "select_ad_hoc_team_mode",
     "select_model_for_team",
     "team_response",

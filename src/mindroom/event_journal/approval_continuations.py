@@ -146,6 +146,7 @@ class ApprovalContinuation:
     execution_identity: dict[str, object] = field(default_factory=dict)
     runtime_model_name: str | None = None
     team_member_names: tuple[str, ...] = ()
+    team_member_model_names: tuple[tuple[str, str], ...] = ()
     team_mode: str | None = None
     request_body: str = ""
     transport_sender_id: str | None = None
@@ -179,6 +180,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "execution_identity": continuation.execution_identity,
         "runtime_model_name": continuation.runtime_model_name,
         "team_member_names": list(continuation.team_member_names),
+        "team_member_model_names": [list(item) for item in continuation.team_member_model_names],
         "team_mode": continuation.team_mode,
         "request_body": continuation.request_body,
         "transport_sender_id": continuation.transport_sender_id,
@@ -283,6 +285,11 @@ def _from_rows(
         execution_identity=cast("dict[str, object]", stored.get("execution_identity", {})),
         runtime_model_name=cast("str | None", stored.get("runtime_model_name")),
         team_member_names=tuple(cast("list[str]", stored.get("team_member_names", []))),
+        team_member_model_names=tuple(
+            (str(item[0]), str(item[1]))
+            for item in cast("list[list[str]]", stored.get("team_member_model_names", []))
+            if len(item) == 2
+        ),
         team_mode=cast("str | None", stored.get("team_mode")),
         request_body=cast("str", stored.get("request_body", "")),
         transport_sender_id=cast("str | None", stored.get("transport_sender_id")),

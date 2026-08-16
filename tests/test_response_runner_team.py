@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.config.models import ModelConfig
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
 )
@@ -29,6 +30,7 @@ from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
 )
+from mindroom.room_model_overrides import set_room_model_override
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.turn_policy import _ResponderAvailability
@@ -81,6 +83,127 @@ def mock_agent_user() -> AgentMatrixUser:
 
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+
+    @pytest.mark.asyncio
+    async def test_team_model_snapshot_precedes_locked_turn_preparation(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A room-default change during locked preparation must wait for the next team turn."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        config.models["large"] = ModelConfig(provider="test", id="large-model")
+        runtime_paths = runtime_paths_for(config)
+        set_room_model_override(
+            runtime_paths,
+            room_id="!test:localhost",
+            model_name="large",
+            set_by="@admin:localhost",
+        )
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
+        coordinator = unwrap_extracted_collaborator(bot._response_runner)
+        original_begin_locked_turn = coordinator._begin_locked_turn
+        matrix_ids = entity_ids(config, runtime_paths)
+        mock_team_response = AsyncMock(return_value="Team reply")
+
+        async def change_room_default_during_preparation(*args: object, **kwargs: object) -> ResponseRequest | None:
+            set_room_model_override(
+                runtime_paths,
+                room_id="!test:localhost",
+                model_name="default",
+                set_by="@admin:localhost",
+            )
+            return await original_begin_locked_turn(*args, **kwargs)  # type: ignore[arg-type]
+
+        with (
+            patch.object(coordinator, "_begin_locked_turn", new=change_room_default_during_preparation),
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response=mock_team_response,
+            ),
+        ):
+            await coordinator.generate_team_response_helper(
+                ResponseRequest(
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="team prompt",
+                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                    correlation_id="corr-team",
+                ),
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+            )
+
+        response_kwargs = mock_team_response.await_args.kwargs
+        assert response_kwargs["model_name"] == "large"
+        assert response_kwargs["member_model_names"] == {"calculator": "large", "general": "large"}
+
+    @pytest.mark.asyncio
+    async def test_team_model_snapshot_is_complete_before_streaming_check_yields(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """One room-default change must not split a turn across model aliases."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        config.models["large"] = ModelConfig(provider="test", id="large-model")
+        runtime_paths = runtime_paths_for(config)
+        set_room_model_override(
+            runtime_paths,
+            room_id="!test:localhost",
+            model_name="large",
+            set_by="@admin:localhost",
+        )
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
+        matrix_ids = entity_ids(config, runtime_paths)
+        mock_team_response = AsyncMock(return_value="Team reply")
+
+        async def change_room_default(*_args: object, **_kwargs: object) -> bool:
+            set_room_model_override(
+                runtime_paths,
+                room_id="!test:localhost",
+                model_name="default",
+                set_by="@admin:localhost",
+            )
+            return False
+
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(side_effect=change_room_default),
+                team_response=mock_team_response,
+            ),
+        ):
+            await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="team prompt",
+                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                    correlation_id="corr-team",
+                ),
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+            )
+
+        response_kwargs = mock_team_response.await_args.kwargs
+        assert response_kwargs["model_name"] == "large"
+        assert response_kwargs["member_model_names"] == {"calculator": "large", "general": "large"}
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_applies_hooks_to_final_team_message(

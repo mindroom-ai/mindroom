@@ -290,6 +290,8 @@ async def execute_router_relay(
                 deps.runtime.config,
                 deps.runtime_paths,
                 thread_history,
+                room_id=room.room_id,
+                thread_id=thread_id,
             )
 
     target_resolution = _resolve_router_target(

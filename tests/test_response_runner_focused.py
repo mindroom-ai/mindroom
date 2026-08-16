@@ -34,6 +34,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
+from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
@@ -46,6 +47,7 @@ from mindroom.delivery_gateway import (
     EditTextRequest,
     FinalizeStreamedResponseRequest,
     SendTextRequest,
+    StreamingDeliveryRequest,
 )
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -83,7 +85,8 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     prepare_memory_and_model_context,
 )
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval, ResponseTurnContext
+from mindroom.room_model_overrides import set_room_model_override
 from mindroom.stop import StopManager
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
@@ -1648,6 +1651,52 @@ async def test_waiting_message_without_continuation_replays_the_safe_paused_turn
     assert [event.event_id for event in pending] == ["$source"]
 
 
+@pytest.mark.asyncio
+async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> None:
+    """Approval pause must retain the member aliases selected at turn start."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    await _admit_approval_source(runner.deps.approval_store)
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-paused",
+        tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+        runtime_model_name="large",
+        team_member_model_names=(("general", "large"),),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id=request.room_id,
+        thread_id=request.thread_id,
+        resolved_thread_id=request.response_envelope.target.resolved_thread_id,
+        session_id=paused.session_id,
+    )
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$waiting")),
+        patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-team-models")),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+    ):
+        await runner._suspend_for_approval(
+            paused,
+            request=request,
+            target=request.response_envelope.target,
+            progress=response_runner._DeliveryProgress(),
+            execution_identity=identity,
+            entity_kind="team",
+            history_scope=runner.deps.state_writer.history_scope(),
+            team_member_names=("general",),
+            team_mode="coordinate",
+        )
+
+    continuation = await runner.deps.approval_store.approval_continuation("approval-team-models")
+    assert continuation is not None
+    assert continuation.team_member_model_names == (("general", "large"),)
+
+
 @pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
 @pytest.mark.asyncio
 async def test_agent_continuation_executes_real_agno_confirmation(
@@ -2969,6 +3018,62 @@ async def test_continuation_rejects_missing_persisted_execution_identity(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Path) -> None:
+    """A resumed team must rebuild members from the turn's pinned aliases."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    target = _target(thread_id="$thread")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+        resolved_thread_id=target.resolved_thread_id,
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-team-model-resume",
+        run_id="run-paused",
+        session_id="session-1",
+        entity_kind="team",
+        entity_name="general",
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="claimed",
+        execution_identity={},
+        runtime_model_name="large",
+        team_member_names=("general",),
+        team_member_model_names=(("general", "large"),),
+        team_mode="coordinate",
+    )
+    continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
+
+    with (
+        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
+        patch.object(
+            runner.deps.tool_runtime,
+            "build_dispatch_context",
+            return_value=ToolDispatchContext(execution_identity=identity),
+        ),
+        patch("mindroom.response_runner.continue_paused_team_run", new=continued),
+        patch("mindroom.response_runner.typing_indicator", _noop_typing),
+    ):
+        result = await runner._continue_entity_call(
+            continuation,
+            request=_plain_request(target, source_event_id="$source"),
+            target=target,
+            tool_trace_collector=[],
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert continued.await_args.kwargs.get("member_model_names") == {"general": "large"}
+
+
+@pytest.mark.asyncio
 async def test_approval_request_restores_exact_hook_envelope_after_store_reload(tmp_path: Path) -> None:
     """Resume hooks must observe the same ingress identity and correlation as suspension."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -3396,6 +3501,97 @@ async def test_non_streaming_response_delivers_through_deliver_final(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_non_streaming_response_reuses_prepared_room_model_after_override_change(tmp_path: Path) -> None:
+    """A blocking agent turn must not re-read a changed room default during execution."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    config = coordinator.deps.runtime.config
+    config.models["large"] = ModelConfig(provider="test", id="large-model")
+    set_room_model_override(
+        coordinator.deps.runtime_paths,
+        room_id="!room:localhost",
+        model_name="large",
+        set_by="@admin:localhost",
+    )
+    request = _plain_request(_target())
+    runtime = await coordinator.prepare_response_runtime(request)
+    set_room_model_override(
+        coordinator.deps.runtime_paths,
+        room_id="!room:localhost",
+        model_name="default",
+        set_by="@admin:localhost",
+    )
+    active_models: list[str | None] = []
+
+    async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+        active_models.append(ctx.active_model_name)
+        return "final text"
+
+    with (
+        patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(return_value=_completed_outcome("$response", body="final text")),
+        ),
+        patch_response_runner_module(
+            ai_response=fake_ai_response,
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await coordinator._process_and_respond(request, runtime=runtime)
+
+    assert active_models == ["large"]
+
+
+@pytest.mark.asyncio
+async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: Path) -> None:
+    """A room-default change during locked preparation must wait for the next turn."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    config = coordinator.deps.runtime.config
+    config.models["large"] = ModelConfig(provider="test", id="large-model")
+    set_room_model_override(
+        coordinator.deps.runtime_paths,
+        room_id="!room:localhost",
+        model_name="large",
+        set_by="@admin:localhost",
+    )
+    original_begin_locked_turn = coordinator._begin_locked_turn
+    active_models: list[str | None] = []
+
+    async def change_room_default_during_preparation(*args: object, **kwargs: object) -> ResponseRequest | None:
+        set_room_model_override(
+            coordinator.deps.runtime_paths,
+            room_id="!room:localhost",
+            model_name="default",
+            set_by="@admin:localhost",
+        )
+        return await original_begin_locked_turn(*args, **kwargs)  # type: ignore[arg-type]
+
+    async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+        active_models.append(ctx.active_model_name)
+        return "final text"
+
+    with (
+        patch.object(coordinator, "_begin_locked_turn", new=change_room_default_during_preparation),
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
+        patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(return_value=_completed_outcome("$response", body="final text")),
+        ),
+        patch_response_runner_module(
+            ai_response=fake_ai_response,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await coordinator.generate_response(_plain_request(_target()))
+
+    assert active_models == ["large"]
+
+
+@pytest.mark.asyncio
 async def test_non_streaming_invisible_delivery_does_not_mark_substantive_reply(tmp_path: Path) -> None:
     """A failed final delivery must not turn a thinking placeholder into a substantive reply."""
     bot = _bot(tmp_path)
@@ -3493,6 +3689,61 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
     assert finalize_request.stream_transport_outcome is transport
     assert finalize_request.initial_delivery_kind == "sent"
     assert finalize_request.identity.response_kind == "ai"
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_reuses_prepared_room_model_after_override_change(tmp_path: Path) -> None:
+    """A streaming agent turn must not re-read a changed room default during execution."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    config = coordinator.deps.runtime.config
+    config.models["large"] = ModelConfig(provider="test", id="large-model")
+    set_room_model_override(
+        coordinator.deps.runtime_paths,
+        room_id="!room:localhost",
+        model_name="large",
+        set_by="@admin:localhost",
+    )
+    request = _plain_request(_target())
+    runtime = await coordinator.prepare_response_runtime(request)
+    set_room_model_override(
+        coordinator.deps.runtime_paths,
+        room_id="!room:localhost",
+        model_name="default",
+        set_by="@admin:localhost",
+    )
+    active_models: list[str | None] = []
+    transport = StreamTransportOutcome(
+        last_physical_stream_event_id="$stream",
+        terminal_status="completed",
+        rendered_body="streamed body",
+        visible_body_state="visible_body",
+    )
+
+    async def fake_stream(ctx: ResponseTurnContext, **_kwargs: object) -> AsyncIterator[str]:
+        active_models.append(ctx.active_model_name)
+        yield "chunk"
+
+    async def consume_stream(delivery_request: StreamingDeliveryRequest) -> StreamTransportOutcome:
+        async for _chunk in delivery_request.response_stream:
+            pass
+        return transport
+
+    with (
+        patch.object(DeliveryGateway, "deliver_stream", new=AsyncMock(side_effect=consume_stream)),
+        patch.object(
+            DeliveryGateway,
+            "finalize_streamed_response",
+            new=AsyncMock(return_value=_completed_outcome("$stream", body="streamed body")),
+        ),
+        patch_response_runner_module(
+            stream_agent_response=fake_stream,
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await coordinator._process_and_respond_streaming(request, runtime=runtime)
+
+    assert active_models == ["large"]
 
 
 @pytest.mark.asyncio

@@ -325,7 +325,7 @@ All three functions require an active thread context and return an error outside
 The override applies to all agents and teams in the thread, persists across restarts, and takes effect from the next message; the current response keeps the model it started with.
 `get_thread_model` returns the active override and the available model names.
 When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports `override: null` plus a `stale_override` field instead of an active override.
-`reset_thread_model` removes the override so agents use their configured models again.
+`reset_thread_model` removes the thread override so room-level model selection applies: an active runtime `!room_model` override, then configured `room_models`, then each entity's configured model.
 
 ### Configuration
 
@@ -350,7 +350,7 @@ reset_thread_model()
 
 - The override is stored per thread root in `mindroom_data/tracking/thread_models.json`.
 - Users can manage the same override with the `!model` chat command; see [Chat Commands](../chat-commands.md).
-- An explicit `active_model_name` (for example a delegated child run) still beats the thread override, and the thread override beats `room_models` and the authored entity model.
+- An explicit `active_model_name` (for example a delegated child run) still beats the thread override, and the thread override beats the runtime `!room_model` choice, configured `room_models`, and the authored entity model.
 
 ## [`matrix_api`]
 

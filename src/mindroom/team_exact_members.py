@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -29,6 +29,7 @@ class ResolvedExactTeamMembers:
     display_names: list[str]
     materialized_agent_names: set[str]
     failed_agent_names: list[str]
+    model_names: dict[str, str] = field(default_factory=dict)
 
 
 def resolve_live_shared_agent_names(
