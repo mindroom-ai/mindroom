@@ -75,7 +75,7 @@ agents:
 
 The tool asks the configured trusted broker to create or recover exactly one private repository, persists an immutable worker-to-repository-ID binding under the configured MindRoom storage root, and initializes the agent workspace with a credential-free HTTPS `origin`.
 An existing normalized HTTPS origin for the bound repository is accepted unchanged.
-Any SSH origin, different repository, push override, URL rewrite, included Git config, or indirect worktree/common config returns `origin_conflict` without rewriting Git configuration.
+Any SSH origin, different fetch or push URL, URL rewrite, transport override, included Git config, or indirect worktree/common config returns `origin_conflict` without rewriting Git configuration.
 The broker token remains in the control plane, and worker Git authentication uses the separately configured Agent Vault HTTPS proxy with repository-scoped Contents-write access.
 The capability does not expose repository deletion, rename, transfer, visibility changes, invitations, or arbitrary repository management.
 
