@@ -75,6 +75,7 @@ def parse_oauth_credential_binding_payload(
     if (
         not isinstance(agent_name, str)
         or (require_agent_name and not agent_name)
+        or not isinstance(worker_scope, str)
         or worker_scope not in allowed_worker_scopes
         or not isinstance(worker_key, str)
         or (require_worker_key and not worker_key)

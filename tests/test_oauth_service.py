@@ -272,6 +272,17 @@ def test_oauth_credential_binding_round_trips_scoped_target() -> None:
             },
             "invalid_target",
         ),
+        pytest.param(
+            {
+                "provider": "demo_provider",
+                "credential_service": "demo_oauth",
+                "agent_name": "code",
+                "worker_scope": [],
+                "worker_key": "worker-key",
+            },
+            "invalid_target",
+            id="unhashable-worker-scope",
+        ),
         (
             {
                 "provider": "demo_provider",

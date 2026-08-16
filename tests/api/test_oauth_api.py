@@ -3810,6 +3810,36 @@ def _connect_token_for_devagent(provider: OAuthProvider, runtime_paths: constant
     return connect_token
 
 
+def test_connect_token_binding_setup_error_is_not_remapped_to_503(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connect-token setup failure should keep its pre-refactor exception boundary."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload_with_extra_google_agents())
+    provider = _fake_provider()
+    connect_token = _connect_token_for_devagent(provider, runtime_paths)
+    setup_error = OAuthProviderError("connect-token binding setup failed")
+    monkeypatch.setattr(oauth_api, "_target_binding_payload", AsyncMock(side_effect=setup_error))
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            with pytest.raises(OAuthProviderError, match="connect-token binding setup failed"):
+                client.get(
+                    f"/api/oauth/{provider.id}/authorize?agent_name=devagent&execution_scope=user_agent"
+                    f"&connect_token={connect_token}",
+                    follow_redirects=False,
+                )
+
+
 def test_connect_token_rejects_tampered_agent_name(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,

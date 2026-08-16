@@ -215,6 +215,7 @@ async def _issue_authorization_url(
     target = _resolve_oauth_credentials_target(request, provider, agent_name=agent_name)
     if connect_target is not None:
         _verify_connect_target_binding(connect_target.binding, provider, worker_target_for_credentials_target(target))
+    provider_authorization_started = False
     try:
         code_verifier = provider.issue_pkce_code_verifier()
         state = issue_pending_oauth_state(
@@ -224,12 +225,15 @@ async def _issue_authorization_url(
             payload=await _target_binding_payload(provider, target),
             code_verifier=code_verifier,
         )
+        provider_authorization_started = True
         auth_url = await provider.authorization_uri_async(
             target.runtime_paths,
             state=state,
             code_verifier=code_verifier,
         )
     except OAuthProviderError as exc:
+        if connect_token and not provider_authorization_started:
+            raise
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if connect_token and connect_target is not None:
         try:
@@ -248,11 +252,7 @@ async def _target_binding_payload(provider: OAuthProvider, target: RequestCreden
     return payload
 
 
-def _verify_connect_target_authorized(
-    request: Request,
-    requester_id: str | None,
-    runtime_paths: RuntimePaths,
-) -> None:
+def _verify_connect_target_authorized(request: Request, requester_id: str | None, runtime_paths: RuntimePaths) -> None:
     dashboard_identity = build_dashboard_execution_identity(request, "oauth", runtime_paths=runtime_paths)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     if dashboard_identity.requester_id and snapshot.runtime_config is not None:
