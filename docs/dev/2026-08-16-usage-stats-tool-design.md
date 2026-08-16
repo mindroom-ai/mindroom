@@ -270,7 +270,8 @@ Missing runtime context returns a context-unavailable error.
 An unauthorized admin call returns an authorization error before source discovery.
 A busy or corrupt database contributes a bounded diagnostic and allows independent sources to continue.
 A self query returns a source-unavailable error when every existing expected source is unreadable, while an all-absent source set remains a valid empty retained-history result.
-Partial success is returned only when at least one source was read safely and another existing source could not be read.
+Unreadability produces partial success only when at least one source was read safely and another existing source could not be read.
+A proven retained-versus-cumulative compaction gap independently produces partial coverage even when every source is readable.
 Unexpected programming errors are logged by the runtime and are not converted into fabricated zero usage.
 
 ## Test Strategy
