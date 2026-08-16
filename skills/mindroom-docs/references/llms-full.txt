@@ -9628,7 +9628,7 @@ Use these tools and presets to coordinate other agents, save reusable Dynamic Wo
 ## What This Page Covers
 
 This page documents the built-in tools in the `agent-orchestration` group.
-Use these tools when you need multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
+Use these tools when you need multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, persistent Claude Agent SDK sessions, or retained usage statistics.
 
 ## Tools On This Page
 
@@ -9640,10 +9640,11 @@ Use these tools when you need multi-agent coordination, reusable workflow runs, 
 - [`self_config`] - Let an agent read and update only its own configuration.
 - [`openclaw_compat`] - Config-only preset that expands to native MindRoom tools.
 - [`claude_agent`] - Persistent Claude Agent SDK sessions with optional gateway support and per-session labels.
+- [`usage_stats`] - Local, read-only summaries of retained Agno run usage.
 
 ## Common Setup Notes
 
-All eight entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
+All nine entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
 Only [`claude_agent`] has tool-specific credential fields.
 [`delegate`] and [`self_config`] can be added automatically based on agent config, so they are not limited to explicit `tools:` entries.
 `agents.<name>.delegate_to` auto-enables [`delegate`] when the list is non-empty and the current delegation depth is below the hard limit of 3.
@@ -9655,6 +9656,47 @@ Only [`claude_agent`] has tool-specific credential fields.
 [`openclaw_compat`] is a config preset, not a runtime toolkit.
 `Config.expand_tool_names()` expands presets and implied tools while deduping and preserving order.
 For [`openclaw_compat`], that means `matrix_message` is added directly and `attachments` is added indirectly through `Config.IMPLIED_TOOLS`.
+
+## [`usage_stats`]
+
+`usage_stats` returns aggregate retained-run usage for the caller without modifying session storage.
+All operations are local and read-only.
+`get_my_usage()` always scopes the result to the current agent and the canonical current requester.
+For a private agent, `get_my_usage()` remains inside the current user's exact private instance.
+The result covers retained Agno runs only, excludes the in-flight tool call, and can be incomplete after compaction.
+Provider billing, embedding usage, and speech-to-text usage are outside version one.
+
+### Self-Service Configuration
+
+Configure a normal agent with `usage_stats` to make only `get_my_usage()` available.
+
+```yaml
+agents:
+  usage_assistant:
+    display_name: Usage Assistant
+    role: Report the caller's retained MindRoom usage
+    tools:
+      - usage_stats
+```
+
+### Admin Configuration
+
+Configure an admin agent with the per-agent `admin_scope` override to make `get_all_usage()` available.
+Admin access requires both `admin_scope: true` AND the canonical requester to be present in `authorization.global_users`.
+
+```yaml
+authorization:
+  global_users:
+    - "@usage-admin:example.com"
+
+agents:
+  usage_admin:
+    display_name: Usage Administrator
+    role: Report retained MindRoom usage across configured entities
+    tools:
+      - usage_stats:
+          admin_scope: true
+```
 
 ## [`subagents`]
 

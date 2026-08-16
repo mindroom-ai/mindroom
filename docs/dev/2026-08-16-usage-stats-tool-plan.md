@@ -56,7 +56,7 @@ Cover these behaviors:
 
 - A valid row is decoded into an immutable, field-selective storage row.
 - A missing database produces an `absent` diagnostic and does not create a file.
-- WAL and rollback-journal fixtures preserve every database-related directory entry, file byte sequence, size, and modification time across a read, including existing `-wal`, `-shm`, and `-journal` sidecars.
+- WAL and rollback-journal fixtures preserve every durable database, WAL, rollback-journal, and other durable artifact's bytes and modification time across a read, create or remove no directory entries, and reject deliberate writes, while SQLite may change a pre-existing `-shm` file's bytes and modification time for live WAL reader coordination.
 - A WAL database without the sidecars required for a non-mutating live read produces a bounded diagnostic and creates nothing.
 - An `INSERT` attempted through `_open_read_only_database()` raises `sqlite3.OperationalError`.
 - A corrupt database, missing session table, invalid JSON value, and locked database each produce bounded diagnostics instead of leaking content.

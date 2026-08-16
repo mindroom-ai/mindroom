@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -16,8 +16,9 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.usage_stats import UsageStatsTools
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import TOOL_METADATA, export_tools_metadata, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
+from mindroom.usage_stats import CostCoverage, TokenTotals, UsageBreakdownRow, UsageCoverage, UsageReport
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -81,6 +82,57 @@ class _Report:
 
     def to_dict(self) -> dict[str, object]:
         return self._payload
+
+
+def _public_report(
+    scope: Literal["self", "admin"],
+    dimension: Literal["model", "entity"],
+) -> UsageReport:
+    """Build a representative public report without persisted run data."""
+    totals = TokenTotals(input_tokens=1, output_tokens=2, total_tokens=3)
+    cost = CostCoverage(known_cost="0.01", runs_with_cost=1, runs_without_cost=0)
+    return UsageReport(
+        scope=scope,
+        start=None,
+        end="2026-08-16T00:00:00+00:00",
+        timezone="UTC",
+        as_of="2026-08-16T00:00:00+00:00",
+        totals=totals,
+        cost=cost,
+        turn_count=1,
+        run_count=1,
+        session_count=1,
+        first_observed_at="2026-08-15T00:00:00+00:00",
+        last_observed_at="2026-08-15T00:00:00+00:00",
+        status_counts={"completed": 1},
+        breakdown=(
+            UsageBreakdownRow(
+                dimension=dimension,
+                key="usage",
+                model_type="chat" if dimension == "model" else None,
+                provider="openai" if dimension == "model" else None,
+                model_id="gpt-5.6" if dimension == "model" else None,
+                totals=totals,
+                cost=cost,
+                run_count=1,
+            ),
+        ),
+        breakdown_truncated=False,
+        breakdown_omitted=0,
+        coverage=UsageCoverage(
+            status="complete_retained",
+            scanned_sources=1,
+            partial_sources=0,
+            scanned_sessions=1,
+            retained_runs=1,
+            skipped_runs=0,
+            malformed_runs=0,
+            missing_requester_runs=0,
+            missing_timestamp_runs=0,
+            compacted_sessions=0,
+            note="No retained-history gap was detected.",
+        ),
+    )
 
 
 @pytest.mark.asyncio
@@ -167,6 +219,84 @@ def test_usage_stats_registration_exposes_the_authored_primary_scope() -> None:
     assert metadata.default_execution_target.value == "primary"
     assert [field.name for field in metadata.config_fields or []] == ["admin_scope"]
     assert [field.name for field in metadata.agent_override_fields or []] == ["admin_scope"]
+
+
+def test_usage_stats_export_and_payloads_expose_only_the_documented_public_shape() -> None:
+    """Dashboard metadata and JSON payloads must retain the documented safe contract."""
+    metadata = next(tool for tool in export_tools_metadata() if tool["name"] == "usage_stats")
+
+    assert metadata["function_names"] == ("get_my_usage", "get_all_usage")
+    assert metadata["default_execution_target"] == "primary"
+    assert [field["name"] for field in metadata["config_fields"]] == ["admin_scope"]
+    assert [field["default"] for field in metadata["config_fields"]] == [False]
+    assert [field["name"] for field in metadata["agent_override_fields"]] == ["admin_scope"]
+    assert [field["default"] for field in metadata["agent_override_fields"]] == [False]
+    assert [field["authored_override"] for field in metadata["agent_override_fields"]] == [True]
+
+    expected_payload_keys = {
+        "status",
+        "tool",
+        "scope",
+        "window",
+        "as_of",
+        "totals",
+        "cost",
+        "turn_count",
+        "run_count",
+        "session_count",
+        "first_observed_at",
+        "last_observed_at",
+        "status_counts",
+        "breakdown",
+        "breakdown_truncated",
+        "breakdown_omitted",
+        "coverage",
+    }
+    expected_totals_keys = {
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "audio_input_tokens",
+        "audio_output_tokens",
+        "audio_total_tokens",
+    }
+    expected_cost_keys = {"known_cost", "runs_with_cost", "runs_without_cost"}
+    expected_coverage_keys = {
+        "status",
+        "scanned_sources",
+        "partial_sources",
+        "scanned_sessions",
+        "retained_runs",
+        "skipped_runs",
+        "malformed_runs",
+        "missing_requester_runs",
+        "missing_timestamp_runs",
+        "compacted_sessions",
+        "note",
+    }
+
+    for scope, dimension in (("self", "model"), ("admin", "entity")):
+        payload = json.loads(UsageStatsTools._payload("ok", **_public_report(scope, dimension).to_dict()))
+
+        assert set(payload) == expected_payload_keys
+        assert payload["scope"] == scope
+        assert set(payload["window"]) == {"start", "end", "timezone"}
+        assert set(payload["totals"]) == expected_totals_keys
+        assert set(payload["cost"]) == expected_cost_keys
+        assert set(payload["coverage"]) == expected_coverage_keys
+        assert set(payload["breakdown"][0]) <= {
+            "dimension",
+            "key",
+            "model",
+            "totals",
+            "cost",
+            "run_count",
+        }
+        assert set(payload["breakdown"][0]["totals"]) == expected_totals_keys
+        assert set(payload["breakdown"][0]["cost"]) == expected_cost_keys
 
 
 @pytest.mark.asyncio

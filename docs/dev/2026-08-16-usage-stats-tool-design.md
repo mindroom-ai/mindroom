@@ -208,26 +208,30 @@ A successful response has this conceptual shape:
     "end": "2026-08-16T18:00:00Z",
     "timezone": "America/Los_Angeles"
   },
-  "retained_usage": {
-    "turns": 42,
-    "metered_runs": 42,
-    "sessions": 7,
-    "first_observed_at": "2026-08-01T10:30:00Z",
-    "last_observed_at": "2026-08-16T17:45:00Z",
-    "status_counts": {
-      "completed": 40,
-      "error": 2
-    },
+  "totals": {
     "input_tokens": 120000,
     "output_tokens": 9000,
     "total_tokens": 129000,
     "cache_read_tokens": 70000,
+    "cache_write_tokens": 0,
     "reasoning_tokens": 1200,
-    "recorded_cost": {
-      "known": "1.42",
-      "runs_with_cost": 38,
-      "runs_without_cost": 4
-    }
+    "audio_input_tokens": 0,
+    "audio_output_tokens": 0,
+    "audio_total_tokens": 0
+  },
+  "cost": {
+    "known_cost": "1.42",
+    "runs_with_cost": 38,
+    "runs_without_cost": 4
+  },
+  "turn_count": 42,
+  "run_count": 42,
+  "session_count": 7,
+  "first_observed_at": "2026-08-01T10:30:00Z",
+  "last_observed_at": "2026-08-16T17:45:00Z",
+  "status_counts": {
+    "completed": 40,
+    "error": 2
   },
   "breakdown": [],
   "coverage": {
@@ -289,7 +293,7 @@ Unexpected programming errors are logged by the runtime and are not converted in
 - Assert that a shared-agent self query never returns cumulative totals or deltas from a multi-requester session.
 - Assert malformed JSON, missing tables, unsupported schemas, SQLite busy errors, and partial multi-source results.
 - Assert a busy or corrupt sole existing self source returns an error while an all-absent self source returns empty retained usage.
-- Assert WAL and rollback-journal reads create, remove, or modify no database-related directory entry or sidecar.
+- Assert WAL and rollback-journal reads leave durable database, WAL, rollback-journal, and other durable artifacts unchanged, create or remove no directory entries, and reject deliberate writes while allowing SQLite-owned bytes and modification time of a pre-existing `-shm` file to change for live WAL reader coordination.
 - Assert oversized, deeply nested, and high-node-count run payloads produce bounded diagnostics without retaining content.
 - Assert that symlinked or escaping private-instance candidates are skipped.
 - Assert that the database file bytes and modification timestamp do not change after every tool query.
