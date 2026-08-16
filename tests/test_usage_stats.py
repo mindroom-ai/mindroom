@@ -857,6 +857,44 @@ def test_top_level_stable_run_ids_deduplicate_without_collapsing_anonymous_locat
     assert report.run_count == 1
 
 
+def test_duplicate_stable_ids_across_session_rows_keep_per_session_coverage_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A global query dedup must not erase the second row's retained-history comparison total."""
+    source = _source()
+    _wire_admin(
+        monkeypatch,
+        (
+            _row(
+                _raw_run(run_id="same-run", metrics={"total_tokens": 10}),
+                source=source,
+                session_metrics={"total_tokens": 10},
+            ),
+            _row(
+                _raw_run(run_id="same-run", metrics={"total_tokens": 10}),
+                source=source,
+                session_metrics={"total_tokens": 10},
+            ),
+        ),
+    )
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="day",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 1
+    assert report.totals.total_tokens == 10
+    assert report.coverage.status == "complete_retained"
+
+
 def test_empty_readable_self_source_makes_mixed_unreadable_sources_partial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A clean empty source must prevent a mixed self scan from becoming source-unavailable."""
     readable = _source()

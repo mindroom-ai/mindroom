@@ -273,6 +273,7 @@ class _CollectionState:
     unreadable_source_labels: set[str]
     readable_source_labels: set[str]
     stable_run_ids: set[tuple[str, str, str]]
+    history_stable_run_ids: set[tuple[str, str, str, str, str]]
     structural_run_ids: set[tuple[str, str, str]]
     row_history_totals: dict[tuple[str, str], TokenTotals]
     row_session_metrics: dict[tuple[str, str], TokenTotals | None]
@@ -424,6 +425,7 @@ def _collect(
         unreadable_source_labels=set(),
         readable_source_labels=set(),
         stable_run_ids=set(),
+        history_stable_run_ids=set(),
         structural_run_ids=set(),
         row_history_totals={},
         row_session_metrics={},
@@ -593,12 +595,8 @@ def _collect_normalized_run(
 ) -> None:
     dedup_key = (entity.kind, entity.entity_id, run.run_id) if run.run_id else None
     structural_dedup = (row.source.path_label, row.row_key, structural_key)
-    if (dedup_key is not None and dedup_key in state.stable_run_ids) or (
-        run.run_id is None and structural_dedup in state.structural_run_ids
-    ):
+    if run.run_id is None and structural_dedup in state.structural_run_ids:
         return
-    if dedup_key is not None:
-        state.stable_run_ids.add(dedup_key)
     if run.run_id is None:
         state.structural_run_ids.add(structural_dedup)
     contributions = _run_contributions(run)
@@ -624,10 +622,23 @@ def _collect_normalized_run(
         for contribution in contributions
     )
     row_key = (row.source.path_label, row.row_key)
-    state.row_history_totals[row_key] = _add_totals(
-        state.row_history_totals[row_key],
-        _records_totals(records),
-    )
+    if run.run_id is None:
+        state.row_history_totals[row_key] = _add_totals(
+            state.row_history_totals[row_key],
+            _records_totals(records),
+        )
+    else:
+        history_key = (*row_key, entity.kind, entity.entity_id, run.run_id)
+        if history_key not in state.history_stable_run_ids:
+            state.history_stable_run_ids.add(history_key)
+            state.row_history_totals[row_key] = _add_totals(
+                state.row_history_totals[row_key],
+                _records_totals(records),
+            )
+    if dedup_key is not None and dedup_key in state.stable_run_ids:
+        return
+    if dedup_key is not None:
+        state.stable_run_ids.add(dedup_key)
     if requester is None:
         state.missing_requester_runs += 1
     if not _accept_run(
