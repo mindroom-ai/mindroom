@@ -34,6 +34,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
+from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
@@ -46,6 +47,7 @@ from mindroom.delivery_gateway import (
     EditTextRequest,
     FinalizeStreamedResponseRequest,
     SendTextRequest,
+    StreamingDeliveryRequest,
 )
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -83,7 +85,8 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     prepare_memory_and_model_context,
 )
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval, ResponseTurnContext
+from mindroom.room_model_overrides import set_room_model_override
 from mindroom.stop import StopManager
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
@@ -3498,6 +3501,49 @@ async def test_non_streaming_response_delivers_through_deliver_final(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_non_streaming_response_reuses_prepared_room_model_after_override_change(tmp_path: Path) -> None:
+    """A blocking agent turn must not re-read a changed room default during execution."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    config = coordinator.deps.runtime.config
+    config.models["large"] = ModelConfig(provider="test", id="large-model")
+    set_room_model_override(
+        coordinator.deps.runtime_paths,
+        room_id="!room:localhost",
+        model_name="large",
+        set_by="@admin:localhost",
+    )
+    request = _plain_request(_target())
+    runtime = await coordinator.prepare_response_runtime(request)
+    set_room_model_override(
+        coordinator.deps.runtime_paths,
+        room_id="!room:localhost",
+        model_name="default",
+        set_by="@admin:localhost",
+    )
+    active_models: list[str | None] = []
+
+    async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+        active_models.append(ctx.active_model_name)
+        return "final text"
+
+    with (
+        patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(return_value=_completed_outcome("$response", body="final text")),
+        ),
+        patch_response_runner_module(
+            ai_response=fake_ai_response,
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await coordinator._process_and_respond(request, runtime=runtime)
+
+    assert active_models == ["large"]
+
+
+@pytest.mark.asyncio
 async def test_non_streaming_invisible_delivery_does_not_mark_substantive_reply(tmp_path: Path) -> None:
     """A failed final delivery must not turn a thinking placeholder into a substantive reply."""
     bot = _bot(tmp_path)
@@ -3595,6 +3641,61 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
     assert finalize_request.stream_transport_outcome is transport
     assert finalize_request.initial_delivery_kind == "sent"
     assert finalize_request.identity.response_kind == "ai"
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_reuses_prepared_room_model_after_override_change(tmp_path: Path) -> None:
+    """A streaming agent turn must not re-read a changed room default during execution."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    config = coordinator.deps.runtime.config
+    config.models["large"] = ModelConfig(provider="test", id="large-model")
+    set_room_model_override(
+        coordinator.deps.runtime_paths,
+        room_id="!room:localhost",
+        model_name="large",
+        set_by="@admin:localhost",
+    )
+    request = _plain_request(_target())
+    runtime = await coordinator.prepare_response_runtime(request)
+    set_room_model_override(
+        coordinator.deps.runtime_paths,
+        room_id="!room:localhost",
+        model_name="default",
+        set_by="@admin:localhost",
+    )
+    active_models: list[str | None] = []
+    transport = StreamTransportOutcome(
+        last_physical_stream_event_id="$stream",
+        terminal_status="completed",
+        rendered_body="streamed body",
+        visible_body_state="visible_body",
+    )
+
+    async def fake_stream(ctx: ResponseTurnContext, **_kwargs: object) -> AsyncIterator[str]:
+        active_models.append(ctx.active_model_name)
+        yield "chunk"
+
+    async def consume_stream(delivery_request: StreamingDeliveryRequest) -> StreamTransportOutcome:
+        async for _chunk in delivery_request.response_stream:
+            pass
+        return transport
+
+    with (
+        patch.object(DeliveryGateway, "deliver_stream", new=AsyncMock(side_effect=consume_stream)),
+        patch.object(
+            DeliveryGateway,
+            "finalize_streamed_response",
+            new=AsyncMock(return_value=_completed_outcome("$stream", body="streamed body")),
+        ),
+        patch_response_runner_module(
+            stream_agent_response=fake_stream,
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await coordinator._process_and_respond_streaming(request, runtime=runtime)
+
+    assert active_models == ["large"]
 
 
 @pytest.mark.asyncio

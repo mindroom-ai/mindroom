@@ -517,6 +517,7 @@ class _PreparedResponseRuntime:
     media_inputs: MediaInputs
     session_id: str
     model_prompt: str
+    active_model_name: str
     tool_dispatch: ToolDispatchContext
 
 
@@ -2360,6 +2361,7 @@ class ResponseRunner:
             thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            active_model_name=runtime.active_model_name,
             active_event_ids=frozenset(active_event_ids),
             transient_enrichment_items=_with_matrix_message_target(
                 transient_enrichment_items,
@@ -3524,6 +3526,7 @@ class ResponseRunner:
             media_inputs=media_inputs,
             session_id=session_id,
             model_prompt=resolved_model_prompt,
+            active_model_name=runtime_model.model_name,
             tool_dispatch=tool_dispatch,
         )
 
@@ -3745,13 +3748,15 @@ class ResponseRunner:
         response_kind: str = "ai",
         on_delivery_started: Callable[[str | None], None] | None = None,
         attempt_run_id_collector: list[str] | None = None,
+        runtime: _PreparedResponseRuntime | None = None,
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a response without streaming."""
-        if request.pipeline_timing is not None:
-            request.pipeline_timing.mark("response_runtime_start")
-        runtime = await self.prepare_response_runtime(request)
-        if request.pipeline_timing is not None:
-            request.pipeline_timing.mark("response_runtime_ready")
+        if runtime is None:
+            if request.pipeline_timing is not None:
+                request.pipeline_timing.mark("response_runtime_start")
+            runtime = await self.prepare_response_runtime(request)
+            if request.pipeline_timing is not None:
+                request.pipeline_timing.mark("response_runtime_ready")
         request = self._request_with_locked_target(request, runtime.resolved_target)
         response_identity = self._response_identity(request, response_kind=response_kind)
         lifecycle = self._build_lifecycle(
@@ -3867,13 +3872,15 @@ class ResponseRunner:
         response_kind: str = "ai",
         on_delivery_started: Callable[[str | None], None] | None = None,
         attempt_run_id_collector: list[str] | None = None,
+        runtime: _PreparedResponseRuntime | None = None,
     ) -> _ResponseGenerationOutcome:
         """Process a message and send a streamed response."""
-        if request.pipeline_timing is not None:
-            request.pipeline_timing.mark("response_runtime_start")
-        runtime = await self.prepare_response_runtime(request)
-        if request.pipeline_timing is not None:
-            request.pipeline_timing.mark("response_runtime_ready")
+        if runtime is None:
+            if request.pipeline_timing is not None:
+                request.pipeline_timing.mark("response_runtime_start")
+            runtime = await self.prepare_response_runtime(request)
+            if request.pipeline_timing is not None:
+                request.pipeline_timing.mark("response_runtime_ready")
         request = self._request_with_locked_target(request, runtime.resolved_target)
         response_identity = self._response_identity(request, response_kind=response_kind)
         lifecycle = self._build_lifecycle(
@@ -4111,6 +4118,11 @@ class ResponseRunner:
             execution_identity=execution_identity,
         )
 
+        if request.pipeline_timing is not None:
+            request.pipeline_timing.mark("response_runtime_start")
+        runtime = await self.prepare_response_runtime(normalized_request)
+        if request.pipeline_timing is not None:
+            request.pipeline_timing.mark("response_runtime_ready")
         use_streaming = await should_use_streaming(
             self._client(),
             request.room_id,
@@ -4153,6 +4165,7 @@ class ResponseRunner:
                     run_id=response_run_id,
                     on_delivery_started=progress.note_delivery_started,
                     attempt_run_id_collector=attempt_run_ids,
+                    runtime=runtime,
                 )
             else:
                 generation = await self._process_and_respond(
@@ -4160,6 +4173,7 @@ class ResponseRunner:
                     run_id=response_run_id,
                     on_delivery_started=progress.note_delivery_started,
                     attempt_run_id_collector=attempt_run_ids,
+                    runtime=runtime,
                 )
             progress.settle(generation.delivery)
 
