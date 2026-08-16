@@ -16,7 +16,7 @@ from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved b
 from mindroom.logging_config import get_logger
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
-    load_oauth_credentials_snapshot_sync,
+    load_oauth_credentials_snapshot_if_readable_sync,
     oauth_credentials_usable,
     refresh_oauth_credentials_blocking,
     resolve_oauth_credential_context,
@@ -146,7 +146,10 @@ class GithubTools(AgnoGithubTools):
         context = self._oauth_credential_context()
         if self._oauth_provider.requester_scoped_credentials and context.worker_target is None:
             return None
-        credentials = load_oauth_credentials_snapshot_sync(context).credentials
+        snapshot = load_oauth_credentials_snapshot_if_readable_sync(context)
+        if snapshot is None:
+            return None
+        credentials = snapshot.credentials
         if credentials is None:
             return None
         token = credentials.get("token") or credentials.get("access_token")

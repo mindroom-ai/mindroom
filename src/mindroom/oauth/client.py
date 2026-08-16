@@ -19,6 +19,7 @@ from google.auth.transport import requests as google_requests
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
+    load_oauth_credentials_snapshot_if_readable_sync,
     load_oauth_credentials_snapshot_sync,
     oauth_credential_generation,
     oauth_credentials_have_required_scopes,
@@ -593,7 +594,10 @@ class ScopedOAuthClientMixin:
     def _load_stored_credentials(self) -> Any | None:  # noqa: ANN401
         """Load stored credentials for the current execution scope."""
         context = self._oauth_credential_context()
-        snapshot = load_oauth_credentials_snapshot_sync(context)
+        snapshot = load_oauth_credentials_snapshot_if_readable_sync(context)
+        if snapshot is None:
+            self._google_credential_key = None
+            return None
         self._google_credential_key = (context, snapshot.generation)
         token_data = snapshot.credentials
         if not token_data:

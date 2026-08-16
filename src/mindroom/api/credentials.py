@@ -34,7 +34,7 @@ from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     save_credentials_for_target,
 )
-from mindroom.credential_policy import credential_service_policy
+from mindroom.credential_policy import credential_service_policy, is_oauth_token_service
 from mindroom.credentials import list_worker_grantable_shared_services, validate_service_name
 from mindroom.embedder_health import handle_embedder_credential_change
 from mindroom.embedding_factory import embedder_client_signature
@@ -117,7 +117,7 @@ class _DashboardCredentialAccess:
         # Token services are rejected below, but they still need target resolution
         # first so agent-scoped requests run authorization before route-specific 400s.
         oauth_service_requires_target_resolution = any(
-            oauth_services.match(service) is not None for service in service_names
+            is_oauth_token_service(service) or oauth_services.match(service) is not None for service in service_names
         ) and request_may_target_scoped_credentials(request, agent_name)
         target = resolve_request_credentials_target(
             request,
@@ -134,7 +134,7 @@ class _DashboardCredentialAccess:
 
     def reject_token_service(self, service: str) -> None:
         """Reject direct dashboard access to OAuth token credentials."""
-        reject_oauth_token_service(self.match(service))
+        reject_oauth_token_service(service)
 
     def reject_stored_oauth_credentials(self, credentials: dict[str, Any]) -> None:
         """Reject stored OAuth token documents returned through generic routes."""
@@ -470,9 +470,12 @@ async def validate_credentials(
     """Test if credentials are valid for a service."""
     service = _validated_service(service)
     # This is a placeholder - actual testing would depend on the service
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
-    reject_oauth_token_service(oauth_service_match(request, service))
-    credentials = load_credentials_for_target(service, target)
+    access = _DashboardCredentialAccess.resolve(
+        request,
+        agent_name=agent_name,
+        service_names=(service,),
+    )
+    credentials = access.load(service)
 
     if not credentials:
         raise HTTPException(status_code=404, detail=f"No credentials found for {service}")
