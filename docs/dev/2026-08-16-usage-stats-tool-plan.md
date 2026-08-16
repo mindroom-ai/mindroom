@@ -56,7 +56,7 @@ Cover these behaviors:
 - The database size, modification time, and bytes are unchanged after a read.
 - An `INSERT` attempted through `_open_read_only_database()` raises `sqlite3.OperationalError`.
 - A corrupt database, missing session table, invalid JSON value, and locked database each produce bounded diagnostics instead of leaking content.
-- Only table names matching the current source's allowed entity IDs are accepted.
+- Only `source.expected_session_table` is accepted, and another table in the same database is rejected.
 
 Run:
 
@@ -113,7 +113,7 @@ class UsageStorageRead:
     diagnostics: tuple[UsageStorageDiagnostic, ...]
 ```
 
-Keep the diagnostic path label storage-root-relative for internal logging and never include it in a public report.
+Keep the diagnostic path label relative to the effective session storage root for internal logging and never include it in a public report.
 
 - [ ] **Step 3: Implement read-only connection and schema discovery.**
 
@@ -157,12 +157,12 @@ Expected: all storage-reader tests pass.
 
 - [ ] **Step 1: Write failing discovery tests.**
 
-Build a temporary `RuntimePaths.storage_root` containing these cases:
+Build a temporary primary storage root containing these cases:
 
 - One configured shared agent database at `agents/<agent>/sessions/<agent>.db`.
 - Two requester-private instances of the same configured agent.
 - One configured team database and one ad hoc team database containing nested member runs.
-- Equivalent sources redirected beneath a dedicated `MINDROOM_SESSION_STORAGE_PATH` root.
+- Equivalent sources redirected beneath an absolute dedicated `MINDROOM_SESSION_STORAGE_PATH` root outside the primary storage root.
 - One removed agent database that is no longer in the current config.
 - One symlinked database and one symlinked private-instance directory.
 - One expected but absent database.
@@ -237,7 +237,7 @@ Require a team directory, database basename, and exact `<storage-name>_sessions`
 
 Use `config.agents` and `config.teams` as the allowed attributed entity sets so removed agent or configured-team records are ignored, while valid nested runs for current agents remain visible inside ad hoc team databases.
 
-Sort sources by stable storage-root-relative labels to make output and tests deterministic.
+Sort sources by stable labels relative to the effective session storage root to make output and tests deterministic.
 
 - [ ] **Step 4: Verify discovery.**
 
