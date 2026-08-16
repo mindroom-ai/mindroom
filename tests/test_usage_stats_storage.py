@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom import usage_stats_storage
 from mindroom.usage_stats_storage import (
+    UsageRunNode,
     UsageSessionRow,
     UsageStorageDiagnostic,
     UsageStorageSource,
@@ -122,12 +124,29 @@ def _read(source: UsageStorageSource) -> list[UsageSessionRow | UsageStorageDiag
     return list(iter_usage_storage_rows(source))
 
 
-def _snapshot_database_entries(path: Path) -> dict[str, tuple[bytes, int, int]]:
+def _snapshot_database_entries(path: Path) -> dict[str, tuple[bytes, int, int, tuple[int, int] | None]]:
     return {
-        entry.name: (entry.read_bytes(), entry.stat().st_size, entry.stat().st_mtime_ns)
+        entry.name: (
+            entry.read_bytes(),
+            entry.stat().st_size,
+            entry.stat().st_mtime_ns,
+            _entry_identity(entry),
+        )
         for entry in sorted(path.parent.iterdir())
         if entry.name.startswith(path.name)
     }
+
+
+def _entry_identity(path: Path) -> tuple[int, int] | None:
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino) if stat.st_ino else None
+
+
+def _deep_ignored_json(*, column: str, depth: int) -> str:
+    nested = '{"ignored":' * depth + "0" + "}" * depth
+    if column == "runs":
+        return '[{"agent_id":"agent-code","metrics":{},"ignored":' + nested + "}]"
+    return '{"session_metrics":{},"ignored":' + nested + "}"
 
 
 def test_reader_extracts_a_field_selective_immutable_agno_session_row(tmp_path: Path) -> None:
@@ -201,6 +220,7 @@ def test_read_preserves_durable_entries_and_allows_existing_wal_shm_coordination
                 # SQLite owns the existing WAL-index mapping and may update its
                 # transient read marks; it must neither grow nor be replaced.
                 assert after[name][1] == snapshot[1]
+                assert after[name][3] == snapshot[3]
                 continue
             assert after[name] == snapshot
     finally:
@@ -345,6 +365,114 @@ def test_excessive_extracted_nodes_returns_resource_limit(tmp_path: Path, monkey
     assert result == [
         UsageStorageDiagnostic(path_label="code.db", status="resource_limit", detail="run node count exceeds limit"),
     ]
+
+
+@pytest.mark.parametrize("column", ["runs", "session_data"])
+def test_deep_ignored_json_returns_resource_limit(tmp_path: Path, column: str) -> None:
+    """Ignored structures cannot exceed the parser nesting budget."""
+    database = tmp_path / "code.db"
+    _create_database(database)
+    depth = 128
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            f"UPDATE code_sessions SET {column} = ?",  # noqa: S608 - parametrization is two literals.
+            (_deep_ignored_json(column=column, depth=depth),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = _read(_source(database))
+
+    assert result == [
+        UsageStorageDiagnostic(path_label="code.db", status="resource_limit", detail="JSON nesting exceeds limit"),
+    ]
+
+
+@pytest.mark.parametrize("column", ["runs", "session_data"])
+def test_json_parser_recursion_error_returns_resource_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, column: str) -> None:
+    """The decoder contains a recursion escape even if its preflight limit is raised."""
+    database = tmp_path / "code.db"
+    _create_database(database)
+    depth = 8
+    payload = _deep_ignored_json(column=column, depth=depth)
+    loads = usage_stats_storage.json.loads
+
+    def recursion_error_for_payload(value: str) -> object:
+        if value == payload:
+            raise RecursionError
+        return loads(value)
+
+    monkeypatch.setattr(usage_stats_storage.json, "loads", recursion_error_for_payload)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            f"UPDATE code_sessions SET {column} = ?",  # noqa: S608 - parametrization is two literals.
+            (payload,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = _read(_source(database))
+
+    assert result == [
+        UsageStorageDiagnostic(path_label="code.db", status="resource_limit", detail="JSON nesting exceeds limit"),
+    ]
+
+
+def test_excessive_model_metric_records_return_resource_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retained per-model usage records have their own bounded budget."""
+    database = tmp_path / "code.db"
+    run = _run()
+    metrics = run["metrics"]
+    assert isinstance(metrics, dict)
+    metrics["details"] = {
+        "model": [
+            {"id": "gpt-5.6", "provider": "openai"},
+            {"id": "gpt-5.6-mini", "provider": "openai"},
+        ],
+    }
+    _create_database(database, runs=[run])
+    monkeypatch.setattr("mindroom.usage_stats_storage.MAX_EXTRACTED_MODEL_METRICS", 1, raising=False)
+
+    result = _read(_source(database))
+
+    assert result == [
+        UsageStorageDiagnostic(path_label="code.db", status="resource_limit", detail="model metric count exceeds limit"),
+    ]
+
+
+def test_run_json_is_extracted_before_session_data_is_decoded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reader releases extracted run JSON before decoding session JSON."""
+    database = tmp_path / "code.db"
+    _create_database(database)
+    events: list[str] = []
+    decode = usage_stats_storage._decode_json_cell
+    extract_runs = usage_stats_storage._extract_runs
+    extract_session_metrics = usage_stats_storage._extract_session_metrics
+
+    def tracked_decode(value: object, *, default: object) -> object:
+        events.append("decode")
+        return decode(value, default=default)
+
+    def tracked_extract_runs(raw_runs: object) -> tuple[UsageRunNode, ...]:
+        events.append("extract-runs")
+        return extract_runs(raw_runs)
+
+    def tracked_extract_session_metrics(raw_session_data: object) -> object:
+        events.append("extract-session-data")
+        return extract_session_metrics(raw_session_data)
+
+    monkeypatch.setattr(usage_stats_storage, "_decode_json_cell", tracked_decode)
+    monkeypatch.setattr(usage_stats_storage, "_extract_runs", tracked_extract_runs)
+    monkeypatch.setattr(usage_stats_storage, "_extract_session_metrics", tracked_extract_session_metrics)
+
+    result = _read(_source(database))
+
+    assert isinstance(result[0], UsageSessionRow)
+    assert events == ["decode", "extract-runs", "decode", "extract-session-data"]
 
 
 def test_large_run_discards_messages_prompts_and_tool_payloads_while_streaming_rows(tmp_path: Path) -> None:

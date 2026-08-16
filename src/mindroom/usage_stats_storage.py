@@ -19,10 +19,14 @@ UsageStorageScope = Literal["shared_agent", "private_agent", "team"]
 UsageMetricValue = int | float | str | None
 
 MAX_JSON_BYTES = 1_000_000
+MAX_JSON_NESTING_DEPTH = 64
 MAX_NESTED_RESPONSE_DEPTH = 16
 MAX_EXTRACTED_RUN_NODES = 1_000
+MAX_EXTRACTED_MODEL_METRICS = 1_000
+_JSON_NESTING_LIMIT = "JSON nesting exceeds limit"
 _NESTED_RESPONSE_DEPTH_LIMIT = "nested response depth exceeds limit"
 _RUN_NODE_COUNT_LIMIT = "run node count exceeds limit"
+_MODEL_METRIC_COUNT_LIMIT = "model metric count exceeds limit"
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _REQUIRED_SESSION_COLUMNS = frozenset(
@@ -155,7 +159,7 @@ def iter_usage_storage_rows(source: UsageStorageSource) -> Iterator[UsageSession
             table_name = _quote_identifier(source.expected_session_table)
             query = """
                 SELECT
-                    session_id, session_type, agent_id, team_id, user_id, created_at,
+                    session_id, session_type, agent_id, team_id, user_id,
                     CASE WHEN runs IS NULL OR length(CAST(runs AS BLOB)) <= ? THEN runs END AS runs,
                     CASE WHEN session_data IS NULL OR length(CAST(session_data AS BLOB)) <= ?
                         THEN session_data
@@ -244,9 +248,15 @@ def _extract_session_row(source: UsageStorageSource, row: sqlite3.Row) -> UsageS
         raise ValueError
 
     raw_runs = _decode_json_cell(row["runs"], default=[])
+    try:
+        runs = _extract_runs(raw_runs)
+    finally:
+        del raw_runs
     raw_session_data = _decode_json_cell(row["session_data"], default=None)
-    runs = _extract_runs(raw_runs)
-    session_metrics = _extract_session_metrics(raw_session_data)
+    try:
+        session_metrics = _extract_session_metrics(raw_session_data)
+    finally:
+        del raw_session_data
     return UsageSessionRow(
         source=source,
         entity_id=entity_id,
@@ -263,7 +273,36 @@ def _decode_json_cell(value: object, *, default: object) -> object:
         return default
     if not isinstance(value, str):
         raise TypeError
-    return json.loads(value)
+    if _json_nesting_exceeds_limit(value):
+        raise _ResourceLimitError(_JSON_NESTING_LIMIT)
+    try:
+        return json.loads(value)
+    except RecursionError as error:
+        raise _ResourceLimitError(_JSON_NESTING_LIMIT) from error
+
+
+def _json_nesting_exceeds_limit(value: str) -> bool:
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in value:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > MAX_JSON_NESTING_DEPTH:
+                return True
+        elif character in "]}":
+            depth -= 1
+    return False
 
 
 def _extract_session_metrics(session_data: object) -> Mapping[str, UsageMetricValue] | None:
@@ -281,10 +320,25 @@ def _extract_runs(raw_runs: object) -> tuple[UsageRunNode, ...]:
     if not isinstance(raw_runs, list):
         raise TypeError
     extracted_nodes = [0]
-    return tuple(_extract_run_node(run, depth=0, extracted_nodes=extracted_nodes) for run in raw_runs)
+    extracted_model_metrics = [0]
+    return tuple(
+        _extract_run_node(
+            run,
+            depth=0,
+            extracted_nodes=extracted_nodes,
+            extracted_model_metrics=extracted_model_metrics,
+        )
+        for run in raw_runs
+    )
 
 
-def _extract_run_node(raw_run: object, *, depth: int, extracted_nodes: list[int]) -> UsageRunNode:
+def _extract_run_node(
+    raw_run: object,
+    *,
+    depth: int,
+    extracted_nodes: list[int],
+    extracted_model_metrics: list[int],
+) -> UsageRunNode:
     if depth > MAX_NESTED_RESPONSE_DEPTH:
         raise _ResourceLimitError(_NESTED_RESPONSE_DEPTH_LIMIT)
     if not isinstance(raw_run, dict):
@@ -310,9 +364,15 @@ def _extract_run_node(raw_run: object, *, depth: int, extracted_nodes: list[int]
         run_id=_optional_string(raw_run.get("run_id")),
         status=_optional_string(raw_run.get("status")) or "unknown",
         metrics=_extract_metric_values(raw_run.get("metrics", {})),
-        model_metrics=_extract_model_metrics(raw_run.get("metrics", {})),
+        model_metrics=_extract_model_metrics(raw_run.get("metrics", {}), extracted_model_metrics),
         member_responses=tuple(
-            _extract_run_node(response, depth=depth + 1, extracted_nodes=extracted_nodes) for response in nested
+            _extract_run_node(
+                response,
+                depth=depth + 1,
+                extracted_nodes=extracted_nodes,
+                extracted_model_metrics=extracted_model_metrics,
+            )
+            for response in nested
         ),
     )
 
@@ -333,7 +393,7 @@ def _extract_metric_values(raw_metrics: object) -> Mapping[str, UsageMetricValue
     return MappingProxyType(metrics)
 
 
-def _extract_model_metrics(raw_metrics: object) -> tuple[UsageModelMetric, ...]:
+def _extract_model_metrics(raw_metrics: object, extracted_model_metrics: list[int]) -> tuple[UsageModelMetric, ...]:
     if not isinstance(raw_metrics, dict):
         raise TypeError
     details = raw_metrics.get("details")
@@ -348,6 +408,9 @@ def _extract_model_metrics(raw_metrics: object) -> tuple[UsageModelMetric, ...]:
         for entry in model_entries:
             if not isinstance(entry, dict):
                 raise TypeError
+            extracted_model_metrics[0] += 1
+            if extracted_model_metrics[0] > MAX_EXTRACTED_MODEL_METRICS:
+                raise _ResourceLimitError(_MODEL_METRIC_COUNT_LIMIT)
             model_id = entry.get("id", "")
             provider = entry.get("provider", "")
             if not isinstance(model_id, str) or not isinstance(provider, str):
