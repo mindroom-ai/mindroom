@@ -203,7 +203,7 @@ Show or switch the model that every agent, team, and the router uses in the curr
 `!model` and `!model list` show the current override and the available model names.
 Model names come from the `models:` section of `config.yaml`.
 The override applies from the next message in the thread and survives restarts.
-Other threads and rooms keep their configured models.
+Other threads keep their own thread override when present and otherwise use their room's effective default; other rooms remain independent.
 Use `!room_model` for a durable runtime room default or `room_models` in `config.yaml` for an authored room default.
 Agents can also switch the thread model themselves when they have the `thread_model` tool.
 
