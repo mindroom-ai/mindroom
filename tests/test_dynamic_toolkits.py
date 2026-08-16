@@ -234,7 +234,7 @@ def test_config_rejects_lazy_flags_inside_named_tool_overrides(tmp_path: Path, l
         _validated_config(tmp_path, raw)
 
 
-@pytest.mark.parametrize("tool_name", ["delegate", "dynamic_tools", "self_config"])
+@pytest.mark.parametrize("tool_name", ["delegate", "dynamic_tools", "invite_router", "self_config"])
 def test_config_rejects_deferred_control_plane_tools(tmp_path: Path, tool_name: str) -> None:
     """Control-plane tools are injected by runtime policy and cannot be lazy-loading units."""
     raw = _base_config_data()

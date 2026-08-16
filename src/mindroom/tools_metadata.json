@@ -126,6 +126,30 @@
       "dependencies": [
         "agno"
       ],
+      "description": "Invite the MindRoom router to the current Matrix room",
+      "display_name": "Invite Router",
+      "docs_url": null,
+      "function_names": [
+        "invite_router"
+      ],
+      "helper_text": null,
+      "icon": null,
+      "icon_color": null,
+      "name": "invite_router",
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
       "description": "Low-level Matrix event, state, and room search operations (send_event, get_state, put_state, redact, get_event, search)",
       "display_name": "Matrix API",
       "docs_url": "https://github.com/mindroom-ai/mindroom",

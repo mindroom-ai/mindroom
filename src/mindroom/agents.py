@@ -23,6 +23,7 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
 from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
+from mindroom.config.models import EffectiveToolConfig
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookRegistry
@@ -100,6 +101,7 @@ _PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
     "./.mindroom-worker-assets/",
     ".mindroom-worker-assets/",
 )
+_TOOL_ENVIRONMENT_PROMPT_HIDDEN_NAMES = frozenset({"invite_router"})
 
 
 @dataclass
@@ -1452,6 +1454,20 @@ def _assemble_agent_toolkits(
     )
     hidden_toolkits = _context_hidden_toolkits(execution_identity)
     resolved_tool_configs = {entry.name: entry for entry in dynamic_tool_selection.runtime_tool_configs}
+    if (
+        execution_identity is not None
+        and execution_identity.channel == "matrix"
+        and execution_identity.room_id is not None
+    ):
+        resolved_tool_configs.setdefault(
+            "invite_router",
+            EffectiveToolConfig(
+                name="invite_router",
+                tool_config_overrides={},
+                authored_order=len(resolved_tool_configs),
+                authored_name="invite_router",
+            ),
+        )
     if disable_runtime_capabilities:
         resolved_tool_configs = {}
     elif disabled_tool_names:
@@ -1619,12 +1635,16 @@ def _build_agent_role_context(
     full_context = identity_context + datetime_context + _get_mind_runtime_context(agent_name, runtime_paths)
 
     if not disable_runtime_capabilities:
-        full_context += "\n\n" + _render_tool_execution_environment(
-            runtime_paths=runtime_paths,
-            local_tool_names=local_tool_names,
-            worker_routed_tool_names=worker_routed_tool_names,
-            worker_scope=agent_runtime.execution.execution_scope,
+        prompt_local_tool_names = tuple(
+            name for name in local_tool_names if name not in _TOOL_ENVIRONMENT_PROMPT_HIDDEN_NAMES
         )
+        if prompt_local_tool_names or worker_routed_tool_names or not local_tool_names:
+            full_context += "\n\n" + _render_tool_execution_environment(
+                runtime_paths=runtime_paths,
+                local_tool_names=prompt_local_tool_names,
+                worker_routed_tool_names=worker_routed_tool_names,
+                worker_scope=agent_runtime.execution.execution_scope,
+            )
         workspace = agent_runtime.workspace
         full_context += _build_additional_context(
             agent_name,

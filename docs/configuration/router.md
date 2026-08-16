@@ -24,7 +24,7 @@ The router has two configuration options:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `model` | string | `"default"` | Model to use for routing decisions |
-| `accept_invites` | bool | `true` | When enabled, the router accepts authorized room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
+| `accept_invites` | bool | `true` | When enabled, the router accepts authorized human and internal-agent room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
 
 ## How Routing Works
 
@@ -96,6 +96,11 @@ The router creates and manages rooms:
 - Generates AI-powered room topics based on configured agents and teams
 - Has admin privileges to manage room membership
 - Cleans up orphaned bots on startup
+
+Every Matrix agent also receives a built-in zero-argument `invite_router` recovery tool.
+The tool can invite only the persisted router identity and only into the agent's current room.
+The router treats the configured agent identity as an authorized internal sender, auto-accepts the invite, and persists the room when `router.accept_invites` is enabled.
+This lets an agent recover router-backed approvals without adding persistent prompt instructions or exposing arbitrary invite targets.
 
 By default (`matrix_room_access.mode: single_user_private`), rooms remain invite-only and private in the room directory.
 In `multi_user` mode, the router can set join rules (`public`/`knock`) and optionally publish rooms to the server directory.
