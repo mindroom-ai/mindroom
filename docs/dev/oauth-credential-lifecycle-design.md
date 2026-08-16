@@ -9,7 +9,7 @@ MindRoom-managed OAuth credentials must remain correct when refresh grants rotat
 OAuth state used to be split across credential JSON, generation metadata, reset intents, provider wrappers, and MCP sessions.
 Each extra persistence boundary required recovery rules for partial commits.
 The lifecycle now stores each canonical OAuth scope in one private SQLite database.
-One SQLite transaction contains the encrypted credential payload, lease revision, connection generation, and completed browser-reset receipts.
+One SQLite transaction contains the credential payload encoded under the active `CredentialsManager` policy, lease revision, connection generation, and completed browser-reset receipts.
 This makes the local state transition atomic instead of reconstructing it after a partial multi-file write.
 
 ## Invariants
@@ -25,8 +25,8 @@ This makes the local state transition atomic instead of reconstructing it after 
 9. Callback publication, reset, and terminal refresh rejection also advance a connection generation used to reject stale callbacks and confirmed resets.
 10. A stable browser reset receipt is checked before generation comparison or deletion.
 11. Replaying a completed browser reset returns its original result and cannot delete a later connection.
-12. Resetting unreadable credentials never requires decoding their encrypted payload.
-13. Credential payloads use the existing `CredentialsManager` encryption codec before entering SQLite.
+12. Resetting unreadable credentials never requires decoding their stored payload.
+13. Credential payloads use the existing `CredentialsManager` codec and active encryption policy before entering SQLite.
 14. Encrypted legacy ciphertext remains recoverable when the correct key returns.
 15. Plaintext legacy bytes are never copied into SQLite while credential encryption is enabled.
 16. Request actor identity remains raw for room and membership checks.
@@ -80,7 +80,7 @@ Requester sessions are fenced during reset so captured stale state cannot reconn
 
 1. Resolve the canonical context.
 2. Wait cancellably for `BEGIN IMMEDIATE`.
-3. Read and validate the encrypted credential snapshot.
+3. Read and validate the credential snapshot.
 4. Return without provider I/O when the credential is missing, unusable, or already current.
 5. Call the provider while retaining the transaction.
 6. Publish a rotation or atomically clear a terminally rejected credential.
