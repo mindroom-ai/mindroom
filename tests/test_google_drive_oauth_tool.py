@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -131,7 +132,7 @@ def _valid_credentials() -> GoogleOAuthCredentials:
         client_id="client-id",
         client_secret="client-secret",  # noqa: S106
         scopes=("scope",),
-        expiry=datetime(2100, 1, 1, tzinfo=UTC),
+        expiry=datetime(2100, 1, 1),  # noqa: DTZ001
     )
 
 
@@ -584,6 +585,35 @@ def test_google_drive_readonly_grant_blocks_direct_async_write_methods(tmp_path:
     assert all(json.loads(result)["reason"] == "missing_write_scope" for result in results)
     assert service.files_resource.create_kwargs is None
     assert service.files_resource.update_kwargs is None
+
+
+def test_google_drive_async_write_scope_check_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=None,
+    )
+    event_loop_thread = threading.get_ident()
+    scope_check_threads: list[int] = []
+    expected_result = json.dumps({"reason": "missing_write_scope"})
+
+    def scope_upgrade_result() -> str:
+        scope_check_threads.append(threading.get_ident())
+        return expected_result
+
+    monkeypatch.setattr(tool, "_write_scope_upgrade_result", scope_upgrade_result)
+    entrypoint = tool.async_functions["google_drive_upload_file"].entrypoint
+    assert entrypoint is not None
+
+    result = asyncio.run(entrypoint("unused"))
+
+    assert result == expected_result
+    assert scope_check_threads
+    assert event_loop_thread not in scope_check_threads
 
 
 def test_google_drive_rejects_stored_token_disallowed_by_new_identity_policy(tmp_path: Path) -> None:

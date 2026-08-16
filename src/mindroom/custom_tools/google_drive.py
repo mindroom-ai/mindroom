@@ -237,24 +237,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             function.entrypoint = write_scope_entrypoint
             setattr(self, function_name, write_scope_entrypoint)
 
-        for function_name in _WRITE_FUNCTION_NAMES:
-            function = self.async_functions.get(function_name)
-            if function is None or function.entrypoint is None:
-                continue
-            entrypoint = function.entrypoint
-
-            @wraps(entrypoint)
-            async def write_scope_async_entrypoint(
-                *args: object,
-                _entrypoint: Callable[..., Any] = entrypoint,
-                **kwargs: object,
-            ) -> object:
-                if result := self._write_scope_upgrade_result():
-                    return result
-                return await _entrypoint(*args, **kwargs)
-
-            function.entrypoint = write_scope_async_entrypoint
-
     def _coerce_max_read_size(self, value: object) -> int | float | None:
         try:
             return coerce_optional_finite_number(value)
@@ -343,8 +325,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         mime_type: str | None = None,
     ) -> str:
         """Upload one local file without blocking the async agent loop."""
-        if result := self._write_scope_upgrade_result():
-            return result
         return await asyncio.to_thread(
             self.upload_file,
             local_path,
