@@ -291,7 +291,11 @@ class _ProviderControlledFailureGithub:
         self.sentinel = sentinel
 
     def _raise_provider_error(self) -> Never:
-        raise GithubException(self.status_code, {"message": self.sentinel})
+        raise GithubException(
+            self.status_code,
+            {"message": self.sentinel},
+            message=self.sentinel,
+        )
 
     def get_user(self) -> _FakeUser:
         self._raise_provider_error()
@@ -1111,6 +1115,26 @@ def test_github_provider_failures_do_not_expose_provider_controlled_text(
     assert all(sentinel not in output for output in captured_logs)
     assert sentinel not in result
     assert any(kwargs.get("status_code") == status_code for _event, kwargs in mindroom_logger.warning_calls)
+
+
+def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("managed-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    sentinel = "provider-controlled-secret: 401 null"
+    tool.g = _ProviderControlledFailureGithub(500, sentinel)
+
+    result = tool.list_repositories()
+
+    assert json.loads(result) == {"error": "GitHub request failed"}
+    assert sentinel not in result
 
 
 def test_wrapper_preserves_all_registered_github_function_names(tmp_path: Path) -> None:

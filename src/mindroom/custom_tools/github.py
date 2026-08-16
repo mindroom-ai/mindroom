@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from functools import wraps
 from html import unescape
@@ -58,6 +59,7 @@ _AGNO_GITHUB_PROVIDER_DETAIL_LOG_PREFIXES = (
     "Error getting contributors:",
     "Error decoding file content:",
 )
+_PYGITHUB_ERROR_STATUS_PATTERN = re.compile(r"(?:^|: )([1-5]\d{2})(?= |$)")
 
 
 def _github_exception_status_code(exc: GithubException) -> int | None:
@@ -135,16 +137,25 @@ def _github_error_status_code(result: object) -> int | None:
         payload = json.loads(result)
     except json.JSONDecodeError:
         return None
-    if not isinstance(payload, dict):
-        return None
-    error = payload.get("error")
+    error = payload.get("error") if isinstance(payload, dict) else None
     if not isinstance(error, str):
         return None
-    status_text, separator, _detail = error.lstrip().partition(" ")
-    if not separator or not status_text.isascii() or not status_text.isdigit():
-        return None
-    status_code = int(status_text)
-    return status_code if 100 <= status_code <= 599 else None
+    status_code: int | None = None
+    for match in _PYGITHUB_ERROR_STATUS_PATTERN.finditer(error):
+        serialized_data = error[match.end() :]
+        if serialized_data == f" {_SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE}":
+            status_code = int(match.group(1))
+            break
+        if serialized_data:
+            if not serialized_data.startswith(" "):
+                continue
+            try:
+                json.loads(serialized_data[1:])
+            except json.JSONDecodeError:
+                continue
+        status_code = int(match.group(1))
+        break
+    return status_code
 
 
 def _sanitized_github_exception_result(exc: GithubException) -> str:
