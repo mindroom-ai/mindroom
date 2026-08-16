@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Never
 
 import pytest
 from agno.tools.function import Function
+from agno.utils import log as agno_log_module
 from google.auth.exceptions import RefreshError, TransportError
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 from google_auth_httplib2 import AuthorizedHttp
@@ -507,9 +510,98 @@ def test_google_http_tracker_records_only_final_401(
 
     monkeypatch.setattr("google_auth_httplib2.AuthorizedHttp.request", return_response)
 
-    tracked_http.request("https://www.googleapis.com/example")
+    _response, content = tracked_http.request("https://www.googleapis.com/example")
 
     assert tool._consume_google_authorization_rejected() is expected
+    if status == 401:
+        assert content != b"response"
+        assert b"response" not in content
+    else:
+        assert content == b"response"
+
+
+@pytest.mark.parametrize(
+    ("tool_class", "operation"),
+    [
+        (GoogleCalendarTools, "calendar"),
+        (GmailTools, "gmail"),
+    ],
+)
+def test_google_final_401_provider_text_is_redacted_before_toolkit_logging(
+    runtime_paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_class: type[Any],
+    operation: str,
+) -> None:
+    """Final managed 401 bodies cannot reach Google tool results or logs."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    provider = tool_class._oauth_provider
+    save_scoped_credentials(
+        provider.credential_service,
+        {
+            "token": "retained-access-token",
+            "refresh_token": "retained-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+    tool = tool_class(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+    tracked_http = tool._google_authorized_http(tool.creds)
+    sentinel = b'{"error":{"message":"provider-controlled-final-401-secret"}}'
+    response = SimpleNamespace(status=401, reason="Unauthorized")
+
+    def rejected_request(*_args: object, **_kwargs: object) -> tuple[object, bytes]:
+        return response, sentinel
+
+    class RejectedRequest:
+        def events(self) -> RejectedRequest:
+            return self
+
+        def users(self) -> RejectedRequest:
+            return self
+
+        def messages(self) -> RejectedRequest:
+            return self
+
+        def list(self, **_kwargs: object) -> RejectedRequest:
+            return self
+
+        def execute(self) -> Never:
+            rejected_response, content = tracked_http.request("https://www.googleapis.com/example")
+            raise HttpError(rejected_response, content)
+
+    monkeypatch.setattr("google_auth_httplib2.AuthorizedHttp.request", rejected_request)
+    tool.service = RejectedRequest()
+    agno_log_output = io.StringIO()
+    agno_logger = agno_log_module.team_logger
+    agno_handler = logging.StreamHandler(agno_log_output)
+    agno_logger.addHandler(agno_handler)
+    monkeypatch.setattr(agno_log_module, "logger", agno_logger)
+
+    try:
+        if operation == "calendar":
+            result = tool.list_events(limit=1, start_date="2026-01-01T00:00:00")
+        else:
+            result = tool.get_latest_emails(1)
+    finally:
+        agno_logger.removeHandler(agno_handler)
+        agno_handler.close()
+
+    payload = json.loads(result)
+    assert payload["oauth_connection_required"] is True
+    assert payload["reason"] == "access_rejected"
+    assert "provider-controlled-final-401-secret" not in result
+    assert "provider-controlled-final-401-secret" not in agno_log_output.getvalue()
 
 
 def test_google_sheets_secondary_drive_service_uses_tracked_http(

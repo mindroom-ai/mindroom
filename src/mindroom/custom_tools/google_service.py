@@ -10,6 +10,8 @@ from google_auth_httplib2 import AuthorizedHttp
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
+_SANITIZED_GOOGLE_AUTHORIZATION_REJECTION = b'{"error":{"code":401,"message":"Google authorization rejected"}}'
+
 
 class _GoogleServiceThreadState(threading.local):
     def __init__(self) -> None:
@@ -32,6 +34,7 @@ class _TrackedGoogleAuthorizedHttp(AuthorizedHttp):
         response, content = super().request(*args, **kwargs)
         if response.status == 401:
             self._mindroom_state.authorization_rejected = True
+            content = _SANITIZED_GOOGLE_AUTHORIZATION_REJECTION
         return response, content
 
 
