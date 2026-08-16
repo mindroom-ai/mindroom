@@ -1665,8 +1665,10 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - `agents.<name>.accept_invites` defaults to `true`; when enabled, authorized ad-hoc room invites are accepted and persisted across restarts without adding those rooms to the static `rooms` list
-- Approval-gated tools require the router to be joined to the Matrix room.
-- In ad-hoc invited rooms accepted through `accept_invites`, approval only works if the router is already joined to that room.
+- Approval-gated tools require the router to be joined to the Matrix room before the call executes.
+- Every concrete Matrix agent operating in a room has a zero-argument `invite_router` recovery tool that invites the router into its current room when `router.accept_invites` is enabled.
+- The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
+- When the router is absent, `invite_router` is the recovery path; after the router auto-accepts, the agent can retry the approval-gated call.
 - `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/))
 - `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](https://docs.mindroom.chat/configuration/agents/))
 - `memory.backend` sets the global memory default, and `agents.<name>.memory_backend` overrides it per agent
@@ -1826,7 +1828,7 @@ agents:
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
-| `accept_invites` | bool | `true` | Accept authorized inbound Matrix room invites for this agent. Invited room IDs are persisted so ad-hoc memberships survive restarts and room cleanup. Set to `false` to ignore new invites for this agent. Approval-gated tools still require the router to be joined to the room, so ad-hoc invited rooms only support approval if the router is already joined there |
+| `accept_invites` | bool | `true` | Accept authorized inbound Matrix room invites for this agent. Invited room IDs are persisted so ad-hoc memberships survive restarts and room cleanup. Set to `false` to ignore new invites for this agent. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when `router.accept_invites` is enabled |
 | `markdown` | bool | `null` | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`) |
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
@@ -1863,7 +1865,9 @@ Agents use `agents.<name>.accept_invites`, while the router uses its own `router
 Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted as durable desired membership.
 Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an entity to join and persist a room.
 Approval-gated tools are stricter than plain ad-hoc chat access.
-Approval-gated tools only work there while the router is already joined.
+When approval needs a missing router, the agent can call `invite_router` to invite it into the current room and then retry.
+The tool waits briefly for joined membership and, if the invite remains pending, tells the agent to retry only after the router joins.
+The router accepts and persists that authorized internal invite when `router.accept_invites` is enabled.
 
 MindRoom compacts in one visible lifecycle.
 Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, `fallback_model`, and `timeout_seconds`.
@@ -3053,7 +3057,7 @@ The router has two configuration options:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `model` | string | `"default"` | Model to use for routing decisions |
-| `accept_invites` | bool | `true` | When enabled, the router accepts authorized room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
+| `accept_invites` | bool | `true` | When enabled, the router accepts authorized human and internal-agent room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
 
 ## How Routing Works
 
@@ -3125,6 +3129,12 @@ The router creates and manages rooms:
 - Generates AI-powered room topics based on configured agents and teams
 - Has admin privileges to manage room membership
 - Cleans up orphaned bots on startup
+
+Every concrete Matrix agent operating in a room also receives a built-in zero-argument `invite_router` recovery tool.
+The tool can invite only the persisted router identity and only into the agent's current room.
+The router treats the configured agent identity as an authorized internal sender, auto-accepts the invite, and persists the room when `router.accept_invites` is enabled.
+The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
+This lets an agent recover router-backed approvals without adding persistent prompt instructions or exposing arbitrary invite targets.
 
 By default (`matrix_room_access.mode: single_user_private`), rooms remain invite-only and private in the room directory.
 In `multi_user` mode, the router can set join rules (`public`/`knock`) and optionally publish rooms to the server directory.

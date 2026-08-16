@@ -42,6 +42,10 @@ from mindroom.tool_system.catalog import (
     ensure_tool_registry_loaded,
     get_tool_by_name,
 )
+from mindroom.tool_system.declarations import (
+    MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
+    MATRIX_ROOM_RUNTIME_TOOL_NAMES,
+)
 from mindroom.tool_system.dynamic_toolkits import (
     VisibleToolSurface,
     deferred_tool_catalog_entries,
@@ -595,6 +599,23 @@ def _log_toolkits_without_unique_model_functions(
                     function_names=sorted(function_names),
                 )
             seen_function_names.update(function_names)
+
+
+class _MatrixRoomRuntimeToolCollisionError(ValueError):
+    """Raised when another registered tool claims a reserved runtime function."""
+
+
+def _reject_matrix_room_runtime_tool_function_collisions(
+    registered_tool_name: str,
+    toolkit: Toolkit,
+) -> None:
+    """Keep reserved room-runtime functions owned by their registered built-in tool."""
+    reserved_names = set(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
+    function_names = set(toolkit.get_functions()) | set(toolkit.get_async_functions())
+    collisions = sorted(name for name in function_names & reserved_names if registered_tool_name != name)
+    if collisions:
+        msg = f"Tool function name(s) {', '.join(collisions)} are reserved for Matrix room recovery tools."
+        raise _MatrixRoomRuntimeToolCollisionError(msg)
 
 
 def _agent_tool_output_file_policy(
@@ -1273,25 +1294,35 @@ def apply_tool_approval_capability(
     config: Config,
     *,
     supports_native_tool_approval: bool,
+    registered_tool_name: str | None = None,
 ) -> Toolkit | None:
     """Expose gated functions only where an Agno paused run can be resumed."""
     if toolkit is None:
         return None
+
+    def function_may_require_approval(function: Function) -> bool:
+        is_matrix_room_runtime_function = (
+            registered_tool_name == function.name
+            and function.name in MATRIX_ROOM_RUNTIME_TOOL_NAMES
+            and function.approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
+        )
+        return not is_matrix_room_runtime_function and tool_may_require_approval(config, function.name)
+
     if supports_native_tool_approval:
         for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
-            if tool_may_require_approval(config, function.name) and function.requires_confirmation is not True:
+            if function_may_require_approval(function) and function.requires_confirmation is not True:
                 function.requires_confirmation = True
                 function.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
         return toolkit
     toolkit.functions = {
         name: function
         for name, function in toolkit.functions.items()
-        if function.requires_confirmation is not True and not tool_may_require_approval(config, function.name)
+        if function.requires_confirmation is not True and not function_may_require_approval(function)
     }
     toolkit.async_functions = {
         name: function
         for name, function in toolkit.async_functions.items()
-        if function.requires_confirmation is not True and not tool_may_require_approval(config, function.name)
+        if function.requires_confirmation is not True and not function_may_require_approval(function)
     }
     return toolkit if toolkit.functions or toolkit.async_functions else None
 
@@ -1305,6 +1336,7 @@ def _resolve_agent_dynamic_tool_selection(
     delegation_depth: int,
     native_deferred_tools: bool,
     eager_deferred_tools: bool,
+    include_matrix_room_runtime_tools: bool,
 ) -> VisibleToolSurface:
     if native_deferred_tools or eager_deferred_tools:
         # Attach every authored deferred tool and skip the dynamic-tools
@@ -1315,12 +1347,14 @@ def _resolve_agent_dynamic_tool_selection(
             loaded_tools=_visible_deferred_tool_names(config, agent_name),
             delegation_depth=delegation_depth,
             enable_dynamic_tools_manager=False,
+            include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
         )
     return resolve_dynamic_tool_selection(
         agent_name=agent_name,
         config=config,
         session_id=session_id,
         delegation_depth=delegation_depth,
+        include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
     )
 
 
@@ -1442,6 +1476,11 @@ def _assemble_agent_toolkits(
     )
     # Dynamic tool state is keyed by agent and session scope, so team members
     # sharing one Matrix thread do not leak loaded tools across agents.
+    include_matrix_room_runtime_tools = (
+        execution_identity is not None
+        and execution_identity.channel == "matrix"
+        and execution_identity.room_id is not None
+    )
     dynamic_tool_selection = _resolve_agent_dynamic_tool_selection(
         agent_name=agent_name,
         config=config,
@@ -1449,6 +1488,7 @@ def _assemble_agent_toolkits(
         delegation_depth=delegation_depth,
         native_deferred_tools=native_deferred_tools,
         eager_deferred_tools=eager_deferred_tools,
+        include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
     )
     hidden_toolkits = _context_hidden_toolkits(execution_identity)
     resolved_tool_configs = {entry.name: entry for entry in dynamic_tool_selection.runtime_tool_configs}
@@ -1507,11 +1547,13 @@ def _assemble_agent_toolkits(
                     dynamic_tool_continuation=dynamic_tool_continuation,
                 )
             if toolkit:
+                _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
                 toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
             toolkit = apply_tool_approval_capability(
                 toolkit,
                 config,
                 supports_native_tool_approval=supports_native_tool_approval,
+                registered_tool_name=tool_name,
             )
             if toolkit:
                 toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
@@ -1533,6 +1575,8 @@ def _assemble_agent_toolkits(
                     deferred_tool_names.append(tool_entry.authored_name or tool_name)
                     deferred_wire_tool_names.update(toolkit.get_functions())
                     deferred_wire_tool_names.update(toolkit.get_async_functions())
+        except _MatrixRoomRuntimeToolCollisionError:
+            raise
         except (ValueError, ImportError) as exc:
             logger.warning(
                 "Could not load tool for agent construction",

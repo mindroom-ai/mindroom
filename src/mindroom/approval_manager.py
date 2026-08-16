@@ -45,9 +45,8 @@ _STARTUP_RECOVERY_SCAN_PAGE = 256
 _DEADLINE_SWEEP_SECONDS = 60.0
 _EVENT_TYPE = "io.mindroom.tool_approval"
 DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
-    "Tool approval requires the router to be joined to the Matrix room. "
-    "In ad-hoc invited rooms accepted via accept_invites, approval only works if the router "
-    "is already joined there; otherwise retry from a managed room."
+    "Tool approval needs the router in this room. If `router.accept_invites` is enabled, call `invite_router` "
+    "and wait for the router to join; otherwise enable it or add the router manually, then retry."
 )
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (

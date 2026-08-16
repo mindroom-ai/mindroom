@@ -1039,6 +1039,7 @@ class MCPServerManager:
             config=config,
             loaded_tools=loaded_tools,
             enable_dynamic_tools_manager=True,
+            include_matrix_room_runtime_tools=True,
         ).runtime_tool_configs
 
     def _mcp_server_id_from_tool_config_name(self, tool_name: str) -> str | None:

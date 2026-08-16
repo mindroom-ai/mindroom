@@ -7,7 +7,8 @@ workspace-aware base dirs, and worker routing) and wraps every agno function
 as a raw livekit function tool. Tool calls run inside the standard MindRoom
 tool runtime context for the call's room and sole Matrix requester. Tools
 needing confirmation, user input, external execution, or approval are omitted
-because voice has no approval UI.
+because voice has no approval UI. Exact built-in room-recovery functions remain
+available so an agent can restore the router needed by approval policy.
 
 The cascaded backend delegates each transcript to the normal ``ai_response``
 path instead. LiveKit receives no tools there; Agno remains the sole model and
@@ -47,6 +48,10 @@ from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.tool_approval import tool_may_require_approval
+from mindroom.tool_system.declarations import (
+    MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
+    MATRIX_ROOM_RUNTIME_TOOL_NAMES,
+)
 from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
@@ -713,13 +718,16 @@ def _function_requires_async_execution(function: Function) -> bool:
 
 def _function_requires_text_chat(function: Function, config: Config) -> bool:
     """Return whether voice must hide a function with no usable approval UI."""
+    is_matrix_room_runtime_function = (
+        function.name in MATRIX_ROOM_RUNTIME_TOOL_NAMES and function.approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
+    )
     return (
         function.requires_confirmation
         or function.requires_user_input
         or function.external_execution
         or function.approval_type == "required"
         or function.name in _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS
-        or tool_may_require_approval(config, function.name)
+        or (not is_matrix_room_runtime_function and tool_may_require_approval(config, function.name))
     )
 
 

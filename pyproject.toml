@@ -257,6 +257,7 @@ hackernews = [
 homeassistant = [
   "httpx>=0.27",
 ]
+invite_router = []
 jina = [
   "httpx>=0.27",
   "pydantic>=2",

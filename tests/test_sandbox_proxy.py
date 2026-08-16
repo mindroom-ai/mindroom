@@ -5762,6 +5762,7 @@ class TestWorkerToolsOverride:
             "google_drive",
             "google_sheets",
             "homeassistant",
+            "invite_router",
             "todo",
         ],
     )

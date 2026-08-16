@@ -34,7 +34,7 @@ _SHARED_ONLY_INTEGRATION_NAMES = frozenset(
         "homeassistant",
     },
 )
-_LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
+_LOCAL_ONLY_TOOL_NAMES = frozenset(
     {
         "approved_egress",
         "attachments",
@@ -48,6 +48,7 @@ _LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
         "google_drive",
         "google_sheets",
         "homeassistant",
+        "invite_router",
         "todo",
     },
 )
@@ -490,8 +491,8 @@ def unsupported_shared_only_integration_names(
 
 
 def tool_stays_local(name: str) -> bool:
-    """Return whether one integration tool always stays in the primary runtime."""
-    return name in _LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES
+    """Return whether one tool always stays in the primary runtime."""
+    return name in _LOCAL_ONLY_TOOL_NAMES
 
 
 def unsupported_shared_only_integration_message(

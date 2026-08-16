@@ -302,13 +302,16 @@ async def test_agent_rejoins_persisted_invited_rooms_on_startup(
 
 
 @pytest.mark.asyncio
-async def test_router_accepts_authorized_invite_persists_and_rejoins_on_startup(
+async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Accepted router invites should become durable desired membership."""
+    """Router should auto-accept an internal agent invite as durable desired membership."""
     config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1", role="Test agent")},
+            router=RouterConfig(model="default", accept_invites=True),
+        ),
         test_runtime_paths(tmp_path),
     )
     bot = make_test_agent_bot(
@@ -328,20 +331,19 @@ async def test_router_accepts_authorized_invite_persists_and_rejoins_on_startup(
         return RoomJoinOutcome.JOINED
 
     join_room = AsyncMock(side_effect=join_room_while_sync_is_live)
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
     welcome_message = AsyncMock()
     monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", welcome_message)
 
     room = MagicMock(room_id="!router-invited:localhost")
     room.canonical_alias = None
-    event = MagicMock(sender="@owner:localhost")
+    event = MagicMock(sender="@mindroom_agent1:localhost")
 
     await bot._on_invite(room, event)
 
     join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
     assert fenced_during_join == [True]
-    welcome_message.assert_awaited_once_with("!router-invited:localhost", "@owner:localhost")
+    welcome_message.assert_awaited_once_with("!router-invited:localhost", "@mindroom_agent1:localhost")
     assert bot._room_lifecycle.decrypt_notice_is_fenced("!router-invited:localhost")
     assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
     assert _invited_rooms_path(config, ROUTER_AGENT_NAME).read_text(encoding="utf-8") == (

@@ -84,6 +84,7 @@ from mindroom.tools.google_sheets import google_sheets_tools
 from mindroom.tools.googlesearch import googlesearch_tools
 from mindroom.tools.groq import groq_tools
 from mindroom.tools.hackernews import hackernews_tools
+from mindroom.tools.invite_router import invite_router_tools
 from mindroom.tools.jina import jina_tools
 from mindroom.tools.jira import jira_tools
 from mindroom.tools.linear import linear_tools
@@ -215,6 +216,7 @@ __all__ = [
     "googlesearch_tools",
     "groq_tools",
     "hackernews_tools",
+    "invite_router_tools",
     "jina_tools",
     "jira_tools",
     "linear_tools",

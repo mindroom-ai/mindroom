@@ -777,8 +777,10 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - `agents.<name>.accept_invites` defaults to `true`; when enabled, authorized ad-hoc room invites are accepted and persisted across restarts without adding those rooms to the static `rooms` list
-- Approval-gated tools require the router to be joined to the Matrix room.
-- In ad-hoc invited rooms accepted through `accept_invites`, approval only works if the router is already joined to that room.
+- Approval-gated tools require the router to be joined to the Matrix room before the call executes.
+- Every concrete Matrix agent operating in a room has a zero-argument `invite_router` recovery tool that invites the router into its current room when `router.accept_invites` is enabled.
+- The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
+- When the router is absent, `invite_router` is the recovery path; after the router auto-accepts, the agent can retry the approval-gated call.
 - `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/))
 - `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](https://docs.mindroom.chat/configuration/agents/))
 - `memory.backend` sets the global memory default, and `agents.<name>.memory_backend` overrides it per agent
