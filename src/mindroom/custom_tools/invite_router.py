@@ -21,8 +21,6 @@ class InviteRouterTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return "Error: Matrix room context unavailable."
-        if not context.current_config.router.accept_invites:
-            return "Error: Router auto-accept is disabled."
 
         router_id = (
             entity_identity_registry(
@@ -37,12 +35,17 @@ class InviteRouterTools(Toolkit):
             "m.room.member",
             router_id,
         )
-        if isinstance(membership_response, nio.RoomGetStateEventResponse):
-            membership = membership_response.content.get("membership")
-            if membership == "join":
-                return "Router already joined."
-            if membership == "invite":
-                return "Router already invited; it will auto-join."
+        membership = (
+            membership_response.content.get("membership")
+            if isinstance(membership_response, nio.RoomGetStateEventResponse)
+            else None
+        )
+        if membership == "join":
+            return "Router already joined."
+        if not context.current_config.router.accept_invites:
+            return "Error: Router auto-accept is disabled."
+        if membership == "invite":
+            return "Router invite pending; retry after it joins."
 
         response = await context.client.room_invite(context.room_id, router_id)
         if isinstance(response, nio.RoomInviteResponse):

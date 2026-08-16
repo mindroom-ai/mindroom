@@ -169,7 +169,7 @@ async def test_invite_router_reports_disabled_router_auto_accept(tmp_path: Path)
 @pytest.mark.parametrize(
     ("membership", "expected"),
     [
-        ("invite", "Router already invited; it will auto-join."),
+        ("invite", "Router invite pending; retry after it joins."),
         ("join", "Router already joined."),
     ],
 )
@@ -190,6 +190,24 @@ async def test_invite_router_is_idempotent_for_existing_membership(
         result = await InviteRouterTools().invite_router()
 
     assert result == expected
+    client.room_invite.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invite_router_reports_joined_before_disabled_auto_accept(tmp_path: Path) -> None:
+    """Disabling future invites must not hide that router recovery is already complete."""
+    context, client = _tool_context(tmp_path, accept_invites=False)
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"membership": "join"},
+        event_type="m.room.member",
+        state_key="@mindroom_router:localhost",
+        room_id="!project:localhost",
+    )
+
+    with tool_runtime_context(context):
+        result = await InviteRouterTools().invite_router()
+
+    assert result == "Router already joined."
     client.room_invite.assert_not_awaited()
 
 
