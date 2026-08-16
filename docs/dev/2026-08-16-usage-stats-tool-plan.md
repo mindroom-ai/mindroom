@@ -1,6 +1,7 @@
 # Read-Only Usage Statistics Tool Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use baspowers:subagent-driven-development (recommended) or baspowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use baspowers:subagent-driven-development (recommended) or baspowers:executing-plans to implement this plan task-by-task.
+> Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a local, read-only `usage_stats` tool that lets an agent inspect its own canonical requester's retained token usage and optionally lets an explicitly configured admin agent inspect retained usage across all configured agents and teams.
 
