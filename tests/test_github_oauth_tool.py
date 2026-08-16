@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 from agno.tools import github as agno_github_module
+from agno.utils import log as agno_log_module
 from github import BadCredentialsException, Github, GithubException
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -161,6 +162,24 @@ class _StatsGithub:
     def get_repo(self, repo_name: str) -> _FakeRepositoryStats:
         assert repo_name == "example/project"
         return _FakeRepositoryStats()
+
+
+class _NestedProviderFailureRepository(_FakeRepositoryStats):
+    def __init__(self, sentinel: str) -> None:
+        self.sentinel = sentinel
+
+    def get_issues(self, *, state: str) -> list[object]:
+        assert state == "open"
+        raise GithubException(500, {"message": self.sentinel})
+
+
+class _NestedProviderFailureGithub:
+    def __init__(self, sentinel: str) -> None:
+        self.sentinel = sentinel
+
+    def get_repo(self, repo_name: str) -> _NestedProviderFailureRepository:
+        assert repo_name == "example/project"
+        return _NestedProviderFailureRepository(self.sentinel)
 
 
 @dataclass(frozen=True)
@@ -671,6 +690,40 @@ def test_repository_stats_consumes_numeric_language_payload(tmp_path: Path) -> N
         "acceptance_rate": 0,
         "avg_time_to_merge": None,
     }
+
+
+def test_github_partial_results_do_not_log_nested_provider_details(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    sentinel = "provider-controlled-nested-secret"
+    tool.g = _NestedProviderFailureGithub(sentinel)
+    agno_log_output = io.StringIO()
+    agno_logger = agno_log_module.team_logger
+    original_log_level = agno_logger.level
+    agno_logger.setLevel(logging.DEBUG)
+    agno_handler = logging.StreamHandler(agno_log_output)
+    agno_logger.addHandler(agno_handler)
+
+    try:
+        with (
+            patch.object(agno_log_module, "logger", agno_logger),
+            patch.object(agno_log_module, "debug_on", True),
+        ):
+            result = tool.get_repository_with_stats("example/project")
+    finally:
+        agno_logger.removeHandler(agno_handler)
+        agno_logger.setLevel(original_log_level)
+        agno_handler.close()
+
+    assert json.loads(result)["actual_open_issues"] is None
+    assert sentinel not in result
+    assert sentinel not in agno_log_output.getvalue()
 
 
 def test_issue_search_decodes_html_escaped_comparison_operators(tmp_path: Path) -> None:

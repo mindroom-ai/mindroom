@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from agno.tools import github as agno_github_module
 from agno.tools.github import GithubTools as AgnoGithubTools
+from agno.utils import log as agno_log_module
 from github import Auth, Github, GithubException
 
 from mindroom.config.auth import AuthorizationConfig  # noqa: TC001  # resolved by tool contract introspection
@@ -48,6 +49,15 @@ logger = get_logger(__name__)
 _PENDING_ACCESS_TOKEN = "mindroom-oauth-connection-pending"  # noqa: S105
 _SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
 _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE = "GitHub request failed"
+_AGNO_GITHUB_PROVIDER_DETAIL_LOG_PREFIXES = (
+    "Error getting actual open issues:",
+    "Error getting open PRs count:",
+    "Error processing individual PR:",
+    "Error getting recent open PRs:",
+    "Error calculating PR metrics:",
+    "Error getting contributors:",
+    "Error decoding file content:",
+)
 
 
 def _github_exception_status_code(exc: GithubException) -> int | None:
@@ -57,32 +67,39 @@ def _github_exception_status_code(exc: GithubException) -> int | None:
     return None
 
 
-class _SanitizeAgnoGithubExceptionFilter(logging.Filter):
+class _SanitizeAgnoGithubLogFilter(logging.Filter):
     """Remove provider-controlled GitHub exception text before log rendering."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if record.exc_info is None:
-            return True
-        _exception_type, exception, _traceback = record.exc_info
-        if not isinstance(exception, GithubException):
-            return True
-        status_code = _github_exception_status_code(exception)
-        record.msg = "GitHub provider request failed (error_type=GithubException, status_code=%s)"
-        record.args = (status_code if status_code is not None else "unknown",)
-        record.exc_info = None
-        record.__dict__["exc_text"] = None
-        record.__dict__["stack_info"] = None
+        if record.exc_info is not None:
+            _exception_type, exception, _traceback = record.exc_info
+            if isinstance(exception, GithubException):
+                status_code = _github_exception_status_code(exception)
+                record.msg = "GitHub provider request failed (error_type=GithubException, status_code=%s)"
+                record.args = (status_code if status_code is not None else "unknown",)
+                record.exc_info = None
+                record.__dict__["exc_text"] = None
+                record.__dict__["stack_info"] = None
+        elif record.getMessage().startswith(_AGNO_GITHUB_PROVIDER_DETAIL_LOG_PREFIXES):
+            record.msg = "GitHub provider detail suppressed"
+            record.args = ()
         return True
 
 
-def _install_agno_github_exception_filter() -> None:
-    upstream_logger = agno_github_module.logger
-    if any(isinstance(log_filter, _SanitizeAgnoGithubExceptionFilter) for log_filter in upstream_logger.filters):
-        return
-    upstream_logger.addFilter(_SanitizeAgnoGithubExceptionFilter())
+def _install_agno_github_log_sanitizers() -> None:
+    upstream_loggers = {
+        agno_github_module.logger,
+        agno_log_module.logger,
+        agno_log_module.agent_logger,
+        agno_log_module.team_logger,
+        agno_log_module.workflow_logger,
+    }
+    for upstream_logger in upstream_loggers:
+        if not any(isinstance(log_filter, _SanitizeAgnoGithubLogFilter) for log_filter in upstream_logger.filters):
+            upstream_logger.addFilter(_SanitizeAgnoGithubLogFilter())
 
 
-_install_agno_github_exception_filter()
+_install_agno_github_log_sanitizers()
 
 
 class _GithubThreadState(threading.local):
