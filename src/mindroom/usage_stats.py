@@ -439,7 +439,7 @@ def _collect_row(
     state.scanned_sessions += 1
     for run in row.runs:
         entity = _direct_run_entity(run)
-        if entity is None:
+        if entity is None and (scope == "self" or group_by == "entity" or entity_filter is not None):
             state.malformed_runs += 1
             state.skipped_runs += 1
             continue
@@ -504,7 +504,7 @@ def _collect_row(
 
 def _accept_run(
     *,
-    entity: _DirectRunEntity,
+    entity: _DirectRunEntity | None,
     requester: str | None,
     timestamp: datetime,
     scope: Literal["self", "admin"],
@@ -520,8 +520,14 @@ def _accept_run(
     if timestamp >= window_end:
         return False
     if scope == "self":
-        return requester is not None and requester == expected_requester and entity.kind == "agent" and entity.entity_id == expected_agent
-    if entity_filter is not None and entity.entity_id not in entity_filter:
+        return (
+            requester is not None
+            and requester == expected_requester
+            and entity is not None
+            and entity.kind == "agent"
+            and entity.entity_id == expected_agent
+        )
+    if entity_filter is not None and (entity is None or entity.entity_id not in entity_filter):
         return False
     return requester_filter is None or requester in requester_filter
 
@@ -612,7 +618,7 @@ def _cost_value(value: object) -> Decimal | None:
 def _breakdown_key(
     *,
     group_by: _UsageGroupBy,
-    entity: _DirectRunEntity,
+    entity: _DirectRunEntity | None,
     requester: str | None,
     timestamp: datetime,
     timezone: ZoneInfo,
@@ -621,6 +627,7 @@ def _breakdown_key(
     if group_by == "model":
         return ("model", contribution.model_id, contribution.model_type, contribution.provider, contribution.model_id)
     if group_by == "entity":
+        assert entity is not None
         return ("entity", entity.entity_id, None, None, None)
     if group_by == "requester":
         return ("requester", requester or "unknown", None, None, None)

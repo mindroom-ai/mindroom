@@ -250,6 +250,66 @@ def test_admin_entity_grouping_and_filters_use_direct_run_attribution(
     assert {(row.key, row.totals.total_tokens) for row in report.breakdown} == {("other", 7), ("engineering", 5)}
 
 
+@pytest.mark.parametrize(
+    ("group_by", "breakdown_key"),
+    [("day", "2026-01-02"), ("requester", "@alice:example.test"), ("model", "gpt-5.6")],
+)
+def test_unfiltered_admin_non_entity_grouping_retains_entityless_direct_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    group_by: str,
+    breakdown_key: str,
+) -> None:
+    """A changed entity requirement would discard valid admin usage outside entity semantics."""
+    _wire_admin(monkeypatch, (_row(_raw_run(agent_id=None, team_id=None, metrics={"total_tokens": 11})),))
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by=group_by,  # type: ignore[arg-type]
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 1
+    assert report.totals.total_tokens == 11
+    assert report.breakdown[0].key == breakdown_key
+    assert report.coverage.malformed_runs == 0
+
+
+@pytest.mark.parametrize(
+    ("group_by", "entity_names"),
+    [("entity", None), ("day", ("code",))],
+)
+def test_entityless_direct_runs_are_skipped_when_admin_entity_semantics_require_attribution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    group_by: str,
+    entity_names: tuple[str, ...] | None,
+) -> None:
+    """A changed missing-entity policy would admit an ungroupable or unfilterable direct run."""
+    _wire_admin(monkeypatch, (_row(_raw_run(agent_id=None, team_id=None, metrics={"total_tokens": 11})),))
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by=group_by,  # type: ignore[arg-type]
+        entity_names=entity_names,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 0
+    assert report.breakdown == ()
+    assert report.coverage.malformed_runs == 1
+    assert report.coverage.skipped_runs == 1
+
+
 def test_usage_window_uses_configured_timezone_and_exclusive_date_end() -> None:
     """A changed timezone conversion or end boundary would include the following local midnight."""
     start, end = parse_usage_window(
