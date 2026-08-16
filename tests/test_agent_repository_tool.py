@@ -335,8 +335,7 @@ async def test_concurrent_ensure_calls_are_idempotent(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "origin",
     [
-        "https://GITHUB.com/EXAMPLE-ORG/MindRoom-redwood",
-        "https://github.com:443/example-org/MindRoom-redwood.git/",
+        _lease().clone_url.replace("https://github.com/", "https://GITHUB.com:443/") + "/",
     ],
 )
 async def test_normalized_https_origin_is_idempotent(tmp_path: Path, origin: str) -> None:
@@ -351,6 +350,31 @@ async def test_normalized_https_origin_is_idempotent(tmp_path: Path, origin: str
     payload = json.loads(await tool.ensure_my_repository())
 
     assert payload["status"] == "ok"
+    assert _git(workspace, "remote", "get-url", "origin") == origin
+    assert (workspace / ".git" / "config").read_bytes() == config_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "origin",
+    [
+        _lease().clone_url.removesuffix(".git"),
+        _lease().clone_url.replace("/example-org/", "/EXAMPLE-ORG/"),
+        _lease().clone_url.replace("/MindRoom-", "/mindroom-"),
+    ],
+)
+async def test_uncredentialed_https_origin_is_an_origin_conflict(tmp_path: Path, origin: str) -> None:
+    """Origins outside Agent Vault's exact Git path must fail unchanged."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    _git(workspace, "remote", "add", "origin", origin)
+    config_before = (workspace / ".git" / "config").read_bytes()
+    tool = _tool(tmp_path, broker=_FakeBroker(), workspace=workspace)
+
+    payload = json.loads(await tool.ensure_my_repository())
+
+    assert payload["status"] == "origin_conflict"
     assert _git(workspace, "remote", "get-url", "origin") == origin
     assert (workspace / ".git" / "config").read_bytes() == config_before
 
@@ -850,6 +874,61 @@ repositories.configure_repository_workspace(
 
     assert crashed.returncode == exit_code
     assert any(path.name.startswith(".config.mindroom-") for path in (workspace / ".git").iterdir())
+
+    configure_repository_workspace(
+        workspace=workspace,
+        clone_url=_lease().clone_url,
+        lock_path=lock_path,
+    )
+
+    assert _git(workspace, "remote", "get-url", "origin") == _lease().clone_url
+    assert not any(path.name.startswith(".config.mindroom-") for path in (workspace / ".git").iterdir())
+
+
+def test_partial_interrupted_git_config_stage_is_discarded_on_retry(tmp_path: Path) -> None:
+    """Process death while writing the stage must not permanently wedge the workspace."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    lock_path = tmp_path / "workspace.lock"
+    crash_script = """
+import os
+import sys
+from pathlib import Path
+
+import mindroom.agent_repositories as repositories
+
+real_write_all = repositories._write_all
+
+def crash_during_stage_write(file_fd, payload):
+    if sys.argv[3].encode() in payload:
+        os.write(file_fd, payload[: max(1, len(payload) // 2)])
+        os._exit(24)
+    real_write_all(file_fd, payload)
+
+repositories._write_all = crash_during_stage_write
+repositories.configure_repository_workspace(
+    workspace=Path(sys.argv[1]),
+    clone_url=sys.argv[3],
+    lock_path=Path(sys.argv[2]),
+)
+"""
+
+    crashed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            crash_script,
+            str(workspace),
+            str(lock_path),
+            _lease().clone_url,
+        ],
+        check=False,
+    )
+
+    assert crashed.returncode == 24
+    assert (workspace / ".git" / "config").exists()
+    assert any(path.name.startswith(".config.mindroom-stage") for path in (workspace / ".git").iterdir())
 
     configure_repository_workspace(
         workspace=workspace,
