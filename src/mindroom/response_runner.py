@@ -91,6 +91,7 @@ from mindroom.sync_restart_retry import interrupted_source_needs_retry
 from mindroom.teams import (
     TeamMode,
     continue_paused_team_run,
+    resolve_team_turn_models,
     select_model_for_team,
     team_response,
     team_response_stream,
@@ -3016,13 +3017,16 @@ class ResponseRunner:
                 model_prompt=request.model_prompt,
             )
         )
-        model_name = select_model_for_team(
+        turn_models = resolve_team_turn_models(
             self.deps.agent_name,
+            agent_names,
             request.room_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
             thread_id=resolved_target.resolved_thread_id,
         )
+        model_name = turn_models.team_model_name
+        member_model_names = turn_models.member_model_names
         use_streaming = await should_use_streaming(
             self._client(),
             request.room_id,
@@ -3180,6 +3184,7 @@ class ResponseRunner:
                             mode=mode,
                             thread_history=model_thread_history,
                             model_name=model_name,
+                            member_model_names=member_model_names,
                             media=resolved_request.media,
                             show_tool_calls=show_tool_calls,
                             run_id_callback=_note_attempt_run_id,
@@ -3275,6 +3280,7 @@ class ResponseRunner:
                                     ctx=team_turn_ctx,
                                     thread_history=model_thread_history,
                                     model_name=model_name,
+                                    member_model_names=member_model_names,
                                     media=resolved_request.media,
                                     run_id_callback=_note_attempt_run_id,
                                     user_id=requester_user_id,

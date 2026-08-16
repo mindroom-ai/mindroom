@@ -10,7 +10,7 @@ from mindroom.constants import tracking_dir
 from mindroom.durable_write import (
     OverrideRecord,
     load_cached_override_records,
-    write_bounded_override_records,
+    write_override_records,
 )
 
 if TYPE_CHECKING:
@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _ROOM_MODEL_OVERRIDES_FILENAME = "room_model_overrides.json"
-_MAX_TRACKED_ROOMS = 1000
 
 
 def _store_path(runtime_paths: RuntimePaths) -> Path:
@@ -38,7 +37,7 @@ def _load_overrides(path: Path) -> dict[str, OverrideRecord]:
 
 
 def _save_overrides(path: Path, overrides: dict[str, OverrideRecord]) -> None:
-    write_bounded_override_records(path, overrides, max_records=_MAX_TRACKED_ROOMS)
+    write_override_records(path, overrides)
 
 
 @dataclass(frozen=True)

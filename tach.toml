@@ -3941,6 +3941,7 @@ expose = [
     "format_team_response",
     "is_cancelled_run_output",
     "is_errored_run_output",
+    "resolve_team_turn_models",
     "select_model_for_team",
     "team_response",
     "team_response_stream",

@@ -232,6 +232,26 @@ def test_room_model_store_scopes_records_by_room_and_preserves_audit_metadata(tm
     assert clear_room_model_override(runtime_paths, ROOM_ID) is False
 
 
+def test_room_model_overrides_do_not_silently_evict_active_rooms(tmp_path: Path) -> None:
+    """A durable room default must remain until reset, even after many other rooms are set."""
+    context = _room_model_context(tmp_path, AsyncMock())
+    for index in range(1001):
+        set_room_model_override(
+            context.runtime_paths,
+            room_id=f"!room-{index}:localhost",
+            model_name="large",
+            set_by="@admin:localhost",
+        )
+
+    oldest = resolve_room_model_override(
+        context.runtime_paths,
+        "!room-0:localhost",
+        configured_models=context.config.models,
+    )
+
+    assert oldest.active == "large"
+
+
 def test_room_model_store_ignores_corrupt_records_and_classifies_removed_models(tmp_path: Path) -> None:
     """Malformed or removed model names must never become active runtime choices."""
     runtime_paths = test_runtime_paths(tmp_path)

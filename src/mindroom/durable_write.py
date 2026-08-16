@@ -100,6 +100,11 @@ def write_bounded_override_records(
     if len(records) > max_records:
         newest = sorted(records.items(), key=lambda item: item[1].get("set_at", ""), reverse=True)
         records = dict(newest[:max_records])
+    write_override_records(path, records)
+
+
+def write_override_records(path: Path, records: dict[str, OverrideRecord]) -> None:
+    """Durably replace one override record file without evicting active records."""
     write_json_file_durable(path, records, indent=2, sort_keys=True)
     _override_load_cache.pop(path, None)
 
