@@ -30,7 +30,7 @@ from mindroom.oauth.providers import (
 from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Coroutine, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping
 
     from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
@@ -285,6 +285,12 @@ class OAuthCredentialsStatus:
     reset_required: bool
 
 
+type _OAuthRefreshAdapter = Callable[
+    [Mapping[str, Any]],
+    Awaitable[dict[str, Any] | None],
+]
+
+
 class OAuthCredentialConflictError(OAuthProviderError):
     """Signal that an OAuth mutation lost its connection-lineage compare-and-swap."""
 
@@ -454,45 +460,55 @@ async def refresh_oauth_credentials_with_result(
 async def _refresh_oauth_credentials_transaction(
     context: OAuthCredentialContext,
 ) -> OAuthCredentialsRefreshResult:
+    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any] | None:
+        return await context.provider.refresh_token_data(credentials, context.runtime_paths)
+
     async with oauth_credential_transaction(context) as transaction:
-        return await run_coroutine_until_complete(_refresh_oauth_credentials_locked(context, transaction))
+        operation = _refresh_oauth_credentials_locked(context, transaction, refresh=refresh)
+        return await run_coroutine_until_complete(operation)
 
 
 async def _refresh_oauth_credentials_locked(
     context: OAuthCredentialContext,
     transaction: OAuthCredentialTransaction,
+    *,
+    refresh: _OAuthRefreshAdapter,
+    scope_validator: Callable[[dict[str, Any]], bool] | None = None,
+    expected_connection_generation: str | None = None,
 ) -> OAuthCredentialsRefreshResult:
     snapshot = transaction.snapshot()
+    if expected_connection_generation is not None and snapshot.connection_generation != expected_connection_generation:
+        msg = "OAuth connection state is stale because this credential changed"
+        raise OAuthCredentialConflictError(msg)
     credentials = snapshot.credentials
     if credentials is None:
-        _log_oauth_refresh_skipped(context, None, reason="missing_credentials")
-        result = OAuthCredentialsRefreshResult(
-            credentials=None,
-            refreshed=False,
-            generation=snapshot.generation,
-            connection_generation=snapshot.connection_generation,
-        )
-        await transaction.commit()
-        return result
-    if not oauth_credentials_usable(context.provider, context.runtime_paths, credentials):
-        _log_oauth_refresh_skipped(context, credentials, reason="unusable_credentials")
-        result = OAuthCredentialsRefreshResult(
-            credentials=credentials,
-            refreshed=False,
-            generation=snapshot.generation,
-            connection_generation=snapshot.connection_generation,
-        )
-        await transaction.commit()
-        return result
-    try:
-        refreshed_credentials = await context.provider.refresh_token_data(credentials, context.runtime_paths)
-    except OAuthProviderError as exc:
-        await _raise_normalized_refresh_error(context, credentials, exc, transaction=transaction)
-    result = _publish_refresh_result(
-        context,
+        skipped_reason = "missing_credentials"
+    elif not oauth_credentials_usable(
+        context.provider,
+        context.runtime_paths,
         credentials,
-        refreshed_credentials,
-        transaction=transaction,
+        scope_validator=scope_validator,
+    ):
+        skipped_reason = "unusable_credentials"
+    else:
+        try:
+            refreshed_credentials = await refresh(credentials)
+        except OAuthProviderError as exc:
+            await _raise_normalized_refresh_error(context, credentials, exc, transaction=transaction)
+        result = _publish_refresh_result(
+            context,
+            credentials,
+            refreshed_credentials,
+            transaction=transaction,
+        )
+        await transaction.commit()
+        return result
+    _log_oauth_refresh_skipped(context, credentials, reason=skipped_reason)
+    result = OAuthCredentialsRefreshResult(
+        credentials=credentials,
+        refreshed=False,
+        generation=snapshot.generation,
+        connection_generation=snapshot.connection_generation,
     )
     await transaction.commit()
     return result
@@ -506,69 +522,21 @@ def refresh_oauth_credentials_sync(
     expected_connection_generation: str | None = None,
 ) -> OAuthCredentialsRefreshResult:
     """Run one synchronous provider adapter on the OAuth transaction owner."""
-    return _run_oauth_transaction_sync(
-        _refresh_oauth_credentials_sync_transaction(
-            context,
-            refresh,
-            scope_validator=scope_validator,
-            expected_connection_generation=expected_connection_generation,
-        ),
-    )
 
+    async def refresh_transaction() -> OAuthCredentialsRefreshResult:
+        async def refresh_adapter(credentials: Mapping[str, Any]) -> dict[str, Any] | None:
+            return await asyncio.to_thread(refresh, credentials)
 
-async def _refresh_oauth_credentials_sync_transaction(
-    context: OAuthCredentialContext,
-    refresh: Callable[[Mapping[str, Any]], dict[str, Any] | None],
-    *,
-    scope_validator: Callable[[dict[str, Any]], bool] | None,
-    expected_connection_generation: str | None,
-) -> OAuthCredentialsRefreshResult:
-    async with oauth_credential_transaction(context) as transaction:
-        snapshot = transaction.snapshot()
-        if (
-            expected_connection_generation is not None
-            and snapshot.connection_generation != expected_connection_generation
-        ):
-            msg = "OAuth connection state is stale because this credential changed"
-            raise OAuthCredentialConflictError(msg)
-        credentials = snapshot.credentials
-        if credentials is None:
-            _log_oauth_refresh_skipped(context, None, reason="missing_credentials")
-            result = OAuthCredentialsRefreshResult(
-                credentials=None,
-                refreshed=False,
-                generation=snapshot.generation,
-                connection_generation=snapshot.connection_generation,
+        async with oauth_credential_transaction(context) as transaction:
+            return await _refresh_oauth_credentials_locked(
+                context,
+                transaction,
+                refresh=refresh_adapter,
+                scope_validator=scope_validator,
+                expected_connection_generation=expected_connection_generation,
             )
-            await transaction.commit()
-            return result
-        if not oauth_credentials_usable(
-            context.provider,
-            context.runtime_paths,
-            credentials,
-            scope_validator=scope_validator,
-        ):
-            _log_oauth_refresh_skipped(context, credentials, reason="unusable_credentials")
-            result = OAuthCredentialsRefreshResult(
-                credentials=credentials,
-                refreshed=False,
-                generation=snapshot.generation,
-                connection_generation=snapshot.connection_generation,
-            )
-            await transaction.commit()
-            return result
-        try:
-            refreshed_credentials = await asyncio.to_thread(refresh, credentials)
-        except OAuthProviderError as exc:
-            await _raise_normalized_refresh_error(context, credentials, exc, transaction=transaction)
-        result = _publish_refresh_result(
-            context,
-            credentials,
-            refreshed_credentials,
-            transaction=transaction,
-        )
-        await transaction.commit()
-        return result
+
+    return _run_oauth_transaction_sync(refresh_transaction())
 
 
 def refresh_oauth_credentials_blocking(context: OAuthCredentialContext) -> dict[str, Any] | None:
