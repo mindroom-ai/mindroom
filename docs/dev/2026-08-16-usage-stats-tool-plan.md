@@ -13,7 +13,8 @@
 
 ## Global Constraints
 
-- Every database connection must use a `file:` URI with `mode=ro`, `PRAGMA query_only = ON`, and a bounded busy timeout.
+- Every database connection must use a `file:` URI with `mode=ro`, a private page cache, `PRAGMA query_only = ON`, and a bounded busy timeout.
+- A WAL source must pass the read-only header and existing-sidecar preflight before SQLite opens it, and `immutable=1` must not be used for a live Agno database.
 - The implementation must never instantiate Agno `SqliteDb`, call Agno `calculate_metrics()`, create a missing file, write a cache, or create an aggregate table.
 - Self-service queries must derive the agent and requester from `ToolRuntimeContext` and must not accept either identity as a function argument.
 - Self-service requester filtering must happen per persisted run, must canonicalize authorization aliases, and must fail closed when the requester cannot be established.
@@ -28,6 +29,7 @@
 - The tool must execute locally because worker sandboxes do not own or mount the host's complete Agno storage tree.
 - Do not add a dependency for functionality available in the Python standard library.
 - Keep production behavior out of `bot.py` and `orchestrator.py`.
+- Process persisted usage one session row at a time, retain only field-selective usage records, and enforce explicit encoded-size, nesting-depth, and extracted-node limits.
 - Keep Markdown at one sentence per line.
 - Do not broaden this task to provider billing APIs, embeddings, speech-to-text accounting, or a new durable usage ledger.
 
@@ -52,11 +54,14 @@ Create an Agno-compatible SQLite fixture with one `<entity>_sessions` table cont
 
 Cover these behaviors:
 
-- A valid row is decoded into an immutable storage row.
+- A valid row is decoded into an immutable, field-selective storage row.
 - A missing database produces an `absent` diagnostic and does not create a file.
-- The database size, modification time, and bytes are unchanged after a read.
+- WAL and rollback-journal fixtures preserve every database-related directory entry, file byte sequence, size, and modification time across a read, including existing `-wal`, `-shm`, and `-journal` sidecars.
+- A WAL database without the sidecars required for a non-mutating live read produces a bounded diagnostic and creates nothing.
 - An `INSERT` attempted through `_open_read_only_database()` raises `sqlite3.OperationalError`.
 - A corrupt database, missing session table, invalid JSON value, and locked database each produce bounded diagnostics instead of leaking content.
+- Oversized `runs` or `session_data` JSON, excessive nested-response depth, and excessive extracted node count each produce a bounded resource-limit diagnostic.
+- A large run containing messages, prompts, and tool payloads retains only the allowed usage fields and never accumulates more than one bounded session row at a time.
 - Only `source.expected_session_table` is accepted, and another table in the same database is rejected.
 
 Run:
@@ -91,30 +96,56 @@ class UsageStorageSource:
 
 
 @dataclass(frozen=True, slots=True)
+class UsageModelMetric:
+    model_type: str
+    provider: str
+    model_id: str
+    metrics: Mapping[str, int | str | None]
+
+
+@dataclass(frozen=True, slots=True)
+class UsageRunNode:
+    agent_id: str | None
+    team_id: str | None
+    requester_id: str | None
+    created_at: str | None
+    model_provider: str | None
+    model_id: str | None
+    run_id: str | None
+    status: str
+    metrics: Mapping[str, int | str | None]
+    model_metrics: tuple[UsageModelMetric, ...]
+    member_responses: tuple["UsageRunNode", ...]
+
+
+@dataclass(frozen=True, slots=True)
 class UsageSessionRow:
     source: UsageStorageSource
     entity_id: str
     entity_kind: Literal["agent", "team"]
     row_key: str
     session_user_id: str | None
-    session_data: Mapping[str, object]
-    runs: tuple[Mapping[str, object], ...]
+    session_metrics: Mapping[str, int | str | None] | None
+    runs: tuple[UsageRunNode, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class UsageStorageDiagnostic:
     path_label: str
-    status: Literal["absent", "busy", "corrupt", "unsupported_schema", "partial"]
+    status: Literal[
+        "absent",
+        "busy",
+        "corrupt",
+        "unsupported_schema",
+        "resource_limit",
+        "partial",
+    ]
     detail: str
-
-
-@dataclass(frozen=True, slots=True)
-class UsageStorageRead:
-    rows: tuple[UsageSessionRow, ...]
-    diagnostics: tuple[UsageStorageDiagnostic, ...]
 ```
 
 Keep the diagnostic path label relative to the effective session storage root for internal logging and never include it in a public report.
+
+Expose the reader as an iterator of `UsageSessionRow | UsageStorageDiagnostic` values so callers aggregate or discard each bounded session before advancing the SQLite cursor.
 
 - [ ] **Step 3: Implement read-only connection and schema discovery.**
 
@@ -123,7 +154,11 @@ Use a context manager equivalent to:
 ```python
 @contextmanager
 def _open_read_only_database(path: Path) -> Iterator[sqlite3.Connection]:
-    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+    connection = sqlite3.connect(
+        f"{path.resolve().as_uri()}?mode=ro&cache=private",
+        uri=True,
+        timeout=1.0,
+    )
     try:
         connection.execute("PRAGMA query_only = ON")
         connection.execute("PRAGMA busy_timeout = 1000")
@@ -133,9 +168,21 @@ def _open_read_only_database(path: Path) -> Iterator[sqlite3.Connection]:
         connection.close()
 ```
 
+Inspect the database header through a binary read-only file handle before opening SQLite.
+
+When the header identifies WAL mode, require existing readable non-symlink `-wal` and `-shm` siblings so SQLite never relies on directory write access to create them.
+
+Do not use `immutable=1` because the live Agno database can change concurrently.
+
 Read `sqlite_master` first, validate each table name in Python, quote accepted identifiers with doubled double quotes, and select only the columns needed for usage analysis.
 
-Decode JSON with explicit type checks so malformed rows are skipped and recorded as `partial` without aborting other rows or databases.
+Advance the SQLite cursor one row at a time and use SQL length guards so oversized JSON cells are not returned to Python for decoding.
+
+Decode one bounded cell at a time with explicit type checks, copy only the fields declared by `UsageRunNode`, and discard the raw mapping before advancing the cursor.
+
+Apply named encoded-byte, nested-response-depth, and extracted-node-count limits so hostile or accidentally huge history produces `resource_limit` diagnostics without unbounded memory use.
+
+Malformed rows are skipped and recorded as `partial` without aborting other rows or databases.
 
 - [ ] **Step 4: Verify the reader.**
 
@@ -272,6 +319,7 @@ Cover:
 - An admin query includes missing requesters in an `unknown` bucket and increments a diagnostic count.
 - `start` is inclusive and `end` is exclusive.
 - Date-only inputs use `config.timezone` and timestamp inputs require `Z` or an explicit offset.
+- Serialized windows retain `config.timezone` for both date-only and explicit-offset inputs.
 - A run at the exact end boundary is excluded.
 - Raw input, output, total, cache-read, cache-write, reasoning, and audio token fields aggregate independently.
 - Per-model metric details are preferred when present, with top-level metrics as the fallback.
@@ -317,7 +365,11 @@ class CostCoverage:
 
 @dataclass(frozen=True, slots=True)
 class UsageBreakdownRow:
+    dimension: Literal["day", "model", "entity", "requester"]
     key: str
+    model_type: str | None
+    provider: str | None
+    model_id: str | None
     totals: TokenTotals
     cost: CostCoverage
     run_count: int
@@ -343,6 +395,7 @@ class UsageReport:
     scope: Literal["self", "admin"]
     start: str | None
     end: str
+    timezone: str
     as_of: str
     totals: TokenTotals
     cost: CostCoverage
@@ -363,6 +416,8 @@ class UsageReport:
 
 Use `Decimal` internally for cost and render the result without binary floating-point conversion.
 
+Set the explicit model fields only for a model breakdown row and serialize them separately so distinct model type, provider, and model-ID tuples cannot merge behind an opaque key.
+
 - [ ] **Step 3: Implement strict time-window parsing.**
 
 Add:
@@ -381,6 +436,8 @@ def parse_usage_window(
 Treat a date-only start as local midnight and a date-only end as the following local midnight so an end date remains naturally exclusive.
 
 Reject naive timestamps, unknown timezones, invalid values, and windows where `start >= end` with concise user-facing errors.
+
+Carry `timezone_name` into `UsageReport.timezone` independently of the normalized UTC boundaries so `to_dict()` can reproduce the configured IANA timezone under `window.timezone`.
 
 - [ ] **Step 4: Implement direct-run normalization and public query functions.**
 
@@ -422,7 +479,7 @@ For self scope, accept only records whose canonical requester equals the canonic
 
 For admin scope, validate entity filters against configured agent and team names before scanning, and canonicalize requester filters before matching.
 
-Sort breakdowns by descending total tokens and then ascending key, retain at most 200 rows, and return both a truncation boolean and the number of omitted rows.
+Sort breakdowns by descending total tokens and then a stable tuple of dimension and explicit dimension values, retain at most 200 rows, and return both a truncation boolean and the number of omitted rows.
 
 - [ ] **Step 5: Verify direct aggregation.**
 
@@ -475,8 +532,9 @@ class _UsageMetricRecord:
     entity_id: str
     requester_id: str | None
     created_at: datetime
+    model_type: str | None
     provider: str | None
-    model: str | None
+    model_id: str | None
     run_id: str | None
     structural_key: str
     status: str
@@ -484,7 +542,7 @@ class _UsageMetricRecord:
     cost: Decimal | None
 ```
 
-Recursively walk Agno's persisted `member_responses` and nested team responses without deserializing prompts or message content.
+Recursively walk the field-selective bounded `UsageRunNode.member_responses` tree without retaining prompts, message content, tool payloads, or other raw run mappings.
 
 Use `source_agent_id` for a top-level direct agent run.
 
@@ -507,6 +565,8 @@ Cover:
 - A corrupt or busy source producing `partial` coverage while other sources still contribute.
 - A query with more than 200 breakdown keys producing deterministic truncation.
 - Exact public counts for scanned and partial sources, scanned sessions, retained and skipped runs, malformed runs, missing requester and timestamp attribution, and compacted sessions.
+- A busy or corrupt sole existing self source producing a source-unavailable error instead of a successful partial or zero report.
+- An all-absent self source producing a valid empty retained-history report.
 
 - [ ] **Step 4: Implement privacy-safe coverage classification.**
 
@@ -516,7 +576,11 @@ Permit cumulative-versus-retained comparison only when the query is admin scope 
 
 Never add cumulative metrics to the query totals because they cannot satisfy arbitrary date windows or per-run attribution.
 
-Return `partial` when a source is unreadable or cumulative metrics prove retained runs are lower, `complete_retained` when all inspected eligible sources are readable and the retained comparison is equal, and `unknown` when privacy or missing cumulative evidence prevents a conclusion.
+Return a source-unavailable error when every existing expected self source is unreadable.
+
+Return `partial` only when at least one source was read safely and another existing source is unreadable or cumulative metrics prove retained runs are lower.
+
+Return `complete_retained` when all inspected eligible sources are readable and the retained comparison is equal, and return `unknown` when privacy or missing cumulative evidence prevents a conclusion.
 
 - [ ] **Step 5: Verify recursion and coverage.**
 

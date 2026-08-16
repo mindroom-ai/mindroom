@@ -133,10 +133,13 @@ No requester-provided string is interpolated into a filesystem path or SQL ident
 
 The reader uses the standard-library `sqlite3` module so importing the tool does not expand the slim import surface with an Agno or SQLAlchemy dependency.
 Each database is opened through a URI containing `mode=ro`.
-The connection also enables `PRAGMA query_only=ON` and uses a bounded busy timeout.
+The connection also enables `PRAGMA query_only=ON`, uses a private page cache, and uses a bounded busy timeout.
 The reader does not use Agno's `SqliteDb` constructor or metrics APIs because those APIs are not an enforceable read-only boundary.
 The reader queries `sqlite_master` to confirm the expected table and validates the required session columns before selecting data.
-WAL-backed databases remain readable while the runtime is writing, and each database query observes its own SQLite snapshot.
+SQLite may create WAL sidecars even for a `mode=ro` connection when the containing directory is writable.
+The reader therefore inspects the database header without mutation and opens a WAL database only when its existing non-symlink `-wal` and `-shm` files are readable; otherwise that source is unavailable.
+The reader does not use `immutable=1` because Agno can still be writing the database.
+WAL-backed databases that satisfy this preflight remain readable while the runtime is writing, and each database query observes its own SQLite snapshot.
 The response includes one `as_of` timestamp and does not claim a globally atomic snapshot across files.
 
 Missing databases produce empty sources rather than creating files.
@@ -146,8 +149,10 @@ The self query returns a partial result when safe retained records remain and an
 
 ## Run Extraction And Attribution
 
-The reader streams session rows and parses only the `runs`, `session_data`, and minimal identity columns.
-It never deserializes messages, media, summaries, prompts, or tool payloads into the response model.
+The reader processes one session row at a time and never retains a complete source result set in memory.
+It rejects oversized encoded JSON before decoding, applies explicit nesting-depth and extracted-node limits, and converts accepted rows into field-selective immutable records.
+Those records contain only metrics, attribution, time, model, status, cost, deduplication, and nested-member fields.
+Messages, media, summaries, prompts, tool payloads, and other run metadata are discarded during extraction and never enter the response model.
 
 Each top-level agent run contributes its own metrics to that agent.
 Each top-level team run contributes its leader metrics only when its persisted `team_id` names a currently configured team.
@@ -264,6 +269,8 @@ Invalid time bounds, an end before a start, an unsupported breakdown, or an unkn
 Missing runtime context returns a context-unavailable error.
 An unauthorized admin call returns an authorization error before source discovery.
 A busy or corrupt database contributes a bounded diagnostic and allows independent sources to continue.
+A self query returns a source-unavailable error when every existing expected source is unreadable, while an all-absent source set remains a valid empty retained-history result.
+Partial success is returned only when at least one source was read safely and another existing source could not be read.
 Unexpected programming errors are logged by the runtime and are not converted into fabricated zero usage.
 
 ## Test Strategy
@@ -276,9 +283,13 @@ Unexpected programming errors are logged by the runtime and are not converted in
 - Assert that an authorized admin sees configured shared agents, private instances, and team-member usage without receiving message or session identifiers.
 - Assert recursive team attribution and stable-run deduplication.
 - Assert time-window boundary behavior, timezone handling, model breakdown, cost coverage, sorting, and truncation.
+- Assert model breakdown rows preserve model type, provider, and model ID as separate fields.
 - Assert compaction diagnostics when cumulative session metrics exceed retained metrics.
 - Assert that a shared-agent self query never returns cumulative totals or deltas from a multi-requester session.
 - Assert malformed JSON, missing tables, unsupported schemas, SQLite busy errors, and partial multi-source results.
+- Assert a busy or corrupt sole existing self source returns an error while an all-absent self source returns empty retained usage.
+- Assert WAL and rollback-journal reads create, remove, or modify no database-related directory entry or sidecar.
+- Assert oversized, deeply nested, and high-node-count run payloads produce bounded diagnostics without retaining content.
 - Assert that symlinked or escaping private-instance candidates are skipped.
 - Assert that the database file bytes and modification timestamp do not change after every tool query.
 - Assert that missing database paths remain absent after a query.
