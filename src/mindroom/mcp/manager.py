@@ -32,6 +32,7 @@ from mindroom.mcp.errors import (
     MCPToolCallError,
     MCPToolUnavailableError,
 )
+from mindroom.mcp.function_surface import MCPFunctionSurfaceSnapshot, analyze_mcp_function_collisions
 from mindroom.mcp.oauth import mcp_oauth_provider, mcp_oauth_provider_id
 from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
 from mindroom.mcp.results import tool_result_from_call_result
@@ -1559,39 +1560,6 @@ class MCPServerManager:
             raise MCPConnectionError(state.server_id, msg)
 
     @staticmethod
-    def _function_name_collision_messages(
-        server_ids_by_function_name: dict[str, set[str]],
-        configured_local_function_names: set[str],
-    ) -> dict[str, list[str]]:
-        """Build validation errors for conflicting provider-visible function names."""
-        errors_by_server: dict[str, list[str]] = {}
-        for function_name, server_ids in server_ids_by_function_name.items():
-            if function_name in configured_local_function_names:
-                message = f"MCP function name '{function_name}' collides with an existing MindRoom tool function"
-                for server_id in server_ids:
-                    errors_by_server.setdefault(server_id, []).append(message)
-            if len(server_ids) < 2:
-                continue
-            server_list = ", ".join(sorted(server_ids))
-            message = f"MCP function name '{function_name}' collides across servers: {server_list}"
-            for server_id in server_ids:
-                errors_by_server.setdefault(server_id, []).append(message)
-        return errors_by_server
-
-    def _visible_function_server_ids(self) -> set[str]:
-        """Return MCP servers that currently expose provider-visible function names."""
-        server_ids: set[str] = set()
-        for state in self._states.values():
-            if state.last_error is not None:
-                continue
-            if state.config.auth is not None or state.catalog is not None:
-                server_ids.add(state.server_id)
-        for key, state in self._scoped_states.items():
-            if state.catalog is not None and state.last_error is None:
-                server_ids.add(key.server_id)
-        return server_ids
-
-    @staticmethod
     def _normalized_tool_filter(value: object) -> set[str]:
         """Normalize MCP per-assignment remote tool filters."""
         if value is None:
@@ -1617,88 +1585,51 @@ class MCPServerManager:
             and (not include_tools or tool.remote_name in include_tools)
         }
 
-    def _server_visible_function_surface(
-        self,
-        server_id: str,
-        tool_config: EffectiveToolConfig,
-        *,
-        requester_surface: tuple[str, str] | None,
-        candidate_state: MCPServerState | None = None,
-        candidate_catalog: MCPServerCatalog | None = None,
-    ) -> tuple[set[str], set[str]]:
-        """Return visible function names and real same-server collisions for one MCP server."""
-        state = self._states.get(server_id)
-        if state is None or (state.last_error is not None and state is not candidate_state):
-            return set(), set()
-        base_function_names: set[str] = set()
-        duplicate_function_names: set[str] = set()
-        if state.config.auth is not None:
-            base_function_names.update(mcp_oauth_bridge_function_names(server_id, state.config))
-        state_catalog = candidate_catalog if state is candidate_state else state.catalog
-        if state_catalog is not None:
-            catalog_function_names = self._catalog_function_names_for_tool_config(state_catalog, tool_config)
-            duplicate_function_names.update(base_function_names & catalog_function_names)
-            base_function_names.update(catalog_function_names)
-        scoped_function_names: set[str] = set()
-        for key, scoped_state in self._scoped_states.items():
-            scoped_catalog = candidate_catalog if scoped_state is candidate_state else scoped_state.catalog
-            if (
-                key.server_id != server_id
-                or requester_surface is None
-                or (key.worker_scope, key.worker_key) != requester_surface
-                or scoped_catalog is None
-                or (scoped_state.last_error is not None and scoped_state is not candidate_state)
-            ):
-                continue
-            catalog_function_names = self._catalog_function_names_for_tool_config(scoped_catalog, tool_config)
-            duplicate_function_names.update(base_function_names & catalog_function_names)
-            scoped_function_names.update(catalog_function_names)
-        return base_function_names | scoped_function_names, duplicate_function_names
-
-    def _agent_collision_messages(
+    def _agent_function_surface_snapshot(
         self,
         agent_name: str,
-        visible_function_server_ids: set[str],
         *,
         loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
         requester_surface: tuple[str, str] | None = None,
         candidate_state: MCPServerState | None = None,
         candidate_catalog: MCPServerCatalog | None = None,
-    ) -> dict[str, list[str]]:
-        """Return one agent's MCP function-name collisions against its visible surface."""
-        configured_local_function_names, configured_mcp_tool_configs = self._configured_function_surface(
-            agent_name,
-            loaded_tools=loaded_tools,
-        )
-        visible_server_ids = set(configured_mcp_tool_configs) & visible_function_server_ids
-        if not visible_server_ids:
-            return {}
-
-        server_ids_by_function_name: dict[str, set[str]] = {}
-        errors_by_server: dict[str, list[str]] = {}
-        for server_id in visible_server_ids:
-            for tool_config in configured_mcp_tool_configs[server_id]:
-                visible_function_names, duplicate_function_names = self._server_visible_function_surface(
-                    server_id,
-                    tool_config,
-                    requester_surface=requester_surface,
-                    candidate_state=candidate_state,
-                    candidate_catalog=candidate_catalog,
+    ) -> MCPFunctionSurfaceSnapshot:
+        """Snapshot one agent and requester function surface from live manager state."""
+        configured_surface = self._configured_function_surface(agent_name, loaded_tools=loaded_tools)
+        local_function_names, configured_mcp_tool_configs = configured_surface
+        server_function_sources: list[tuple[str, tuple[frozenset[str], ...]]] = []
+        for server_id in sorted(configured_mcp_tool_configs):
+            state = self._states.get(server_id)
+            if state is None or (state.last_error is not None and state is not candidate_state):
+                continue
+            function_sources: list[frozenset[str]] = []
+            if state.config.auth is not None:
+                function_sources.append(frozenset(mcp_oauth_bridge_function_names(server_id, state.config)))
+            catalogs = [candidate_catalog if state is candidate_state else state.catalog]
+            catalogs.extend(
+                candidate_catalog if scoped_state is candidate_state else scoped_state.catalog
+                for key, scoped_state in self._scoped_states.items()
+                if key.server_id == server_id
+                and requester_surface is not None
+                and (key.worker_scope, key.worker_key) == requester_surface
+                and (scoped_state.last_error is None or scoped_state is candidate_state)
+            )
+            function_sources.extend(
+                frozenset(
+                    function_name
+                    for tool_config in configured_mcp_tool_configs[server_id]
+                    for function_name in self._catalog_function_names_for_tool_config(catalog, tool_config)
                 )
-                for function_name in sorted(visible_function_names):
-                    server_ids_by_function_name.setdefault(function_name, set()).add(server_id)
-                for function_name in duplicate_function_names:
-                    errors_by_server.setdefault(server_id, []).append(
-                        f"MCP function name '{function_name}' collides within server '{server_id}'",
-                    )
-        if not server_ids_by_function_name:
-            return errors_by_server
-        for server_id, messages in self._function_name_collision_messages(
-            server_ids_by_function_name,
-            configured_local_function_names,
-        ).items():
-            errors_by_server.setdefault(server_id, []).extend(messages)
-        return errors_by_server
+                for catalog in catalogs
+                if catalog is not None
+            )
+            server_function_sources.append((server_id, tuple(function_sources)))
+        return MCPFunctionSurfaceSnapshot(
+            agent_name=agent_name,
+            requester_surface=requester_surface,
+            local_function_names=frozenset(local_function_names),
+            server_function_sources=tuple(server_function_sources),
+        )
 
     def _function_name_collision_errors_by_state(
         self,
@@ -1707,38 +1638,31 @@ class MCPServerManager:
         candidate_catalog: MCPServerCatalog | None = None,
     ) -> dict[int, tuple[MCPServerState, set[str]]]:
         """Collect every state whose provider-visible function surface conflicts."""
-        visible_server_ids = self._visible_function_server_ids()
-        if candidate_state is not None:
-            visible_server_ids.add(candidate_state.server_id)
-        requester_surface = next(
-            (
-                (key.worker_scope, key.worker_key)
-                for key, scoped_state in self._scoped_states.items()
-                if scoped_state is candidate_state
-            ),
-            None,
-        )
+        requester_surface = candidate_state.oauth_request_scope if candidate_state is not None else None
         requester_surfaces = {
             (key.worker_scope, key.worker_key)
             for key, state in self._scoped_states.items()
             if state.catalog is not None and state.last_error is None
-        }
-        if requester_surface is not None:
-            requester_surfaces.add(requester_surface)
+        } | ({requester_surface} if requester_surface is not None else set())
+        snapshots = tuple(
+            self._agent_function_surface_snapshot(
+                agent_name,
+                loaded_tools=[],
+                requester_surface=surface,
+                candidate_state=candidate_state,
+                candidate_catalog=candidate_catalog,
+            )
+            for surface in (None, *sorted(requester_surfaces))
+            for agent_name in (sorted(self._config.agents) if self._config is not None else ())
+        )
         errors_by_state: dict[int, tuple[MCPServerState, set[str]]] = {}
-        for surface in (None, *sorted(requester_surfaces)):
-            for agent_name in sorted(self._config.agents) if self._config is not None else ():
-                for server_id, messages in self._agent_collision_messages(
-                    agent_name,
-                    visible_server_ids,
-                    loaded_tools=[],
-                    requester_surface=surface,
-                    candidate_state=candidate_state,
-                    candidate_catalog=candidate_catalog,
-                ).items():
-                    for state in self._function_validation_states_for_surface(server_id, surface):
-                        entry = errors_by_state.setdefault(id(state), (state, set()))
-                        entry[1].update(messages)
+        for report in analyze_mcp_function_collisions(snapshots):
+            for state in self._function_validation_states_for_surface(
+                report.server_id,
+                report.requester_surface,
+            ):
+                entry = errors_by_state.setdefault(id(state), (state, set()))
+                entry[1].update(message for _function_name, message in report.function_name_collisions)
         return errors_by_state
 
     def _candidate_function_validation_error(
@@ -1977,15 +1901,17 @@ class MCPServerManager:
         loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str],
     ) -> list[str]:
         """Return collision messages for a candidate loaded dynamic-tool state."""
-        visible_function_server_ids = self._visible_function_server_ids()
-        if not visible_function_server_ids:
+        if not any(
+            state.last_error is None
+            and (state.catalog is not None or (state.oauth_request_scope is None and state.config.auth is not None))
+            for state in (*self._states.values(), *self._scoped_states.values())
+        ):
             return []
-        errors_by_server = self._agent_collision_messages(
-            agent_name,
-            visible_function_server_ids,
-            loaded_tools=loaded_tools,
+        snapshot = self._agent_function_surface_snapshot(agent_name, loaded_tools=loaded_tools)
+        reports = analyze_mcp_function_collisions((snapshot,))
+        return sorted(
+            {message for report in reports for _function_name, message in report.function_name_collisions},
         )
-        return sorted({message for messages in errors_by_server.values() for message in messages})
 
     @staticmethod
     def _toolkit_function_names(toolkit: object) -> set[str]:
