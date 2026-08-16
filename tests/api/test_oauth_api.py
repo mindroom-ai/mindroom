@@ -30,7 +30,9 @@ from mindroom.api import oauth as oauth_api
 from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
+from mindroom.mcp.manager import MCPServerManager
+from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import reset as oauth_reset
@@ -2059,6 +2061,49 @@ def test_disconnect_invalidates_oauth_state_issued_before_reset(tmp_path: Path) 
         )
         is None
     )
+
+
+def test_disconnect_deletes_mcp_credentials_encrypted_with_unreadable_key(tmp_path: Path) -> None:
+    """Dashboard disconnect must recover an MCP credential that the active key cannot decrypt."""
+    correct_key = base64.urlsafe_b64encode(b"a" * 32).decode()
+    wrong_key = base64.urlsafe_b64encode(b"b" * 32).decode()
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "MINDROOM_CREDENTIALS_ENCRYPTION_KEY": correct_key,
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _mcp_oauth_config_payload())
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    scoped_manager = credentials_manager.for_primary_runtime_scope("@alice:example.org", None)
+    wrong_key_manager = CredentialsManager(
+        scoped_manager.base_path,
+        shared_base_path=scoped_manager.shared_base_path,
+        encryption_key=wrong_key,
+    )
+    wrong_key_manager.save_credentials(
+        "mcp_demo_oauth",
+        {
+            "access_token": "unreadable-access-token",
+            "refresh_token": "unreadable-refresh-token",
+            "_source": "oauth",
+            "_oauth_provider": "mcp_demo",
+        },
+    )
+    credentials_path = scoped_manager.get_credentials_path("mcp_demo_oauth")
+    assert scoped_manager.load_credentials("mcp_demo_oauth") is None
+    mcp_manager = MCPServerManager(runtime_paths)
+    bind_mcp_server_manager(mcp_manager)
+    try:
+        with TestClient(api_app) as client:
+            _login(client)
+            response = client.post("/api/oauth/mcp_demo/disconnect?agent_name=general")
+    finally:
+        bind_mcp_server_manager(None)
+
+    assert response.status_code == 200
+    assert not credentials_path.exists()
 
 
 @pytest.mark.asyncio

@@ -40,6 +40,7 @@ from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog, MCPServerSta
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     load_oauth_credentials_snapshot,
+    load_oauth_reset_connection_generation,
     oauth_credentials_usable,
     refresh_oauth_credentials_with_result,
     resolve_oauth_credential_context,
@@ -472,10 +473,10 @@ class MCPServerManager:
             async with self._state_lifecycle_lock:
                 self._retired_request_keys.add(request_key)
             try:
-                snapshot = await load_oauth_credentials_snapshot(credential_context)
+                connection_generation = await load_oauth_reset_connection_generation(credential_context)
                 if (
                     expected_connection_generation is not None
-                    and snapshot.connection_generation != expected_connection_generation
+                    and connection_generation != expected_connection_generation
                 ):
                     yield
                     return

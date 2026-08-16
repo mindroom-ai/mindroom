@@ -12,7 +12,12 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
+from mindroom.credentials import (
+    get_runtime_credentials_manager,
+    load_scoped_credentials,
+    save_scoped_credentials,
+    scoped_credentials_path,
+)
 from mindroom.custom_tools.oauth_connections import OAuthConnectionTools
 from mindroom.message_target import MessageTarget
 from mindroom.oauth import reset as oauth_reset
@@ -155,6 +160,30 @@ async def test_reset_oauth_connection_issues_browser_confirmation_without_mutati
     assert intent.agent_name == "research"
     assert intent.requester_id == "@alice:example.org"
     assert intent.worker_scope == "user_agent"
+
+
+@pytest.mark.asyncio
+async def test_reset_oauth_connection_issues_browser_confirmation_for_unreadable_credentials(
+    tmp_path: Path,
+) -> None:
+    """A corrupt credential must still be recoverable through the public browser-reset action."""
+    tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    provider = google_drive_oauth_provider()
+    credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
+    credentials_path = scoped_credentials_path(
+        provider.credential_service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    corrupt_payload = b"not-a-readable-credential"
+    credentials_path.write_bytes(corrupt_payload)
+
+    with tool_runtime_context(context):
+        result = await tool.reset_oauth_connection(provider.id)
+
+    intent = _reset_intent(result, provider=provider, context=context)
+    assert intent.connection_generation == "initial"
+    assert credentials_path.read_bytes() == corrupt_payload
 
 
 @pytest.mark.asyncio

@@ -777,12 +777,18 @@ def _reconcile_missing_oauth_credential_locked(
 def _prepare_oauth_credential_state_locked(
     context: OAuthCredentialContext,
     state: _OAuthCredentialState | None = None,
+    *,
+    allow_unreadable_credentials: bool = False,
 ) -> _OAuthCredentialState:
     """Finish reset recovery before reconciling any credential publication."""
     current = state or _load_oauth_credential_state(context)
     if _pending_reset_operations(current):
         current = _finish_pending_resets_locked(context, current)
-    return _reconcile_oauth_credential_publication_locked(context, current)
+    return _reconcile_oauth_credential_publication_locked(
+        context,
+        current,
+        allow_unreadable_credentials=allow_unreadable_credentials,
+    )
 
 
 def load_oauth_credentials_snapshot_sync(context: OAuthCredentialContext) -> OAuthCredentialsSnapshot:
@@ -793,6 +799,22 @@ def load_oauth_credentials_snapshot_sync(context: OAuthCredentialContext) -> OAu
 async def load_oauth_credentials_snapshot(context: OAuthCredentialContext) -> OAuthCredentialsSnapshot:
     """Load credentials and revision through the shared async transaction owner."""
     return await _run_cancellable_oauth_transaction(lambda: _load_oauth_credentials_snapshot_transaction(context))
+
+
+async def load_oauth_reset_connection_generation(context: OAuthCredentialContext) -> str:
+    """Load the reset CAS generation without requiring readable credentials."""
+    return await _run_cancellable_oauth_transaction(
+        lambda: _load_oauth_reset_connection_generation_transaction(context),
+    )
+
+
+async def _load_oauth_reset_connection_generation_transaction(context: OAuthCredentialContext) -> str:
+    async with async_exclusive_file_lock(_operation_lock_path(context)):
+        state = _prepare_oauth_credential_state_locked(
+            context,
+            allow_unreadable_credentials=True,
+        )
+        return state.connection_generation
 
 
 async def _load_oauth_credentials_snapshot_transaction(

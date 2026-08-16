@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
-    load_oauth_credentials_snapshot,
+    load_oauth_reset_connection_generation,
     resolve_oauth_credential_context,
 )
 from mindroom.oauth.registry import load_oauth_providers
@@ -192,12 +192,12 @@ async def issue_browser_oauth_reset_url(target: _ResolvedOAuthResetTarget) -> st
     if execution_identity is None or not execution_identity.requester_id:
         msg = "OAuth reset requires a requester identity"
         raise OAuthResetTargetError(msg)
-    snapshot = await load_oauth_credentials_snapshot(target.credential_context)
+    connection_generation = await load_oauth_reset_connection_generation(target.credential_context)
     provider = target.provider
     payload: dict[str, str] = {
         **oauth_credential_target_payload(provider, worker_target),
         "requester_id": execution_identity.requester_id,
-        "connection_generation": snapshot.connection_generation,
+        "connection_generation": connection_generation,
         "operation_id": f"browser:{secrets.token_hex(32)}",
     }
     reset_token = issue_opaque_oauth_state(
